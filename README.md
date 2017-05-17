@@ -16,8 +16,9 @@ git clone https://github.com/davisking/dlib
 cd dlib
 mkdir build-release
 cd build-release
-cmake -DCMAKE_INSTALL_PREFIX=$PWD/dlib-binaries -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOM/build/cmake/android.toolchain.cmake ../
-make -j8 && make install
+cmake -G Ninja -DCMAKE_INSTALL_PREFIX=$PWD/dlib-binaries -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake ../
+cmake --build .
+cmake --build . --target install
 ```
 *Note: DLib's build doesn't handle Android specifically and notably doesn't place libraries into a per-abi directory so once we start building for multiple ABIs we'll need to change this*
 
