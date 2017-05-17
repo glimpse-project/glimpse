@@ -32,3 +32,16 @@ cmake -DCMAKE_INSTALL_PREFIX=$PWD/opencv-binaries -DWITH_TBB=ON -DANDROID_ABI=ar
 make -j8 && make install
 ```
 *Note: see platforms/android/build_sdk.py and platforms/scripts/cmake_android_arm.sh to see how to match builds of official sdks*
+
+
+=== Misc notes / reminders ===
+
+To run the glimpse demo via adb:
+`adb shell am start com.impossible.glimpse.demo/com.impossible.glimpse.demo.MainActivity`
+
+
+Attach JDB using the helper script `./glimpse-jdb.sh` - this will break on the static TangoJNINative class initializer before native shared libraries are loaded so it's possible to also attach gdb before any of our native code has had a chance to blow up.
+
+Run gdbserver on the device, attached to our process, using the helper script `./glimpse-gdbserver.sh` - this will forward tcp:5039 to localhost
+
+Connect gdb to the device with `./glimpse-gdb.sh`
