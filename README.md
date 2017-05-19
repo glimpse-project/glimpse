@@ -1,6 +1,6 @@
 Early playground for Glimpse Project
 
-== Status ==
+# Status
 
 The early direction to get started with this project is to look at technically
 implementing some of the capabilities demoed in this teaser video:
@@ -38,6 +38,7 @@ Internally Dlib will also do it's own downsampling to build a pyramid of
 images during face detection (each level is 5/6ths the size of the previous)
 Given a 960x540 image it will downsample 10 times with these timings:
 
+```
  1)  1.202s
  2)  829.238ms
  3)  577.865ms
@@ -48,6 +49,7 @@ Given a 960x540 image it will downsample 10 times with these timings:
  8)  90.234ms
  9)  61.334ms
  10) 42.011ms
+```
 
 (taking ~8 seconds)
 
@@ -61,7 +63,7 @@ finally a front looking but rotated right one.
 So TL;DR we need to look into what opportunities we have to optimize this :)
 
 
-=== Current Optimization Plan ===
+## Current Optimization Plan
 
 1. The first low-hanging optimization is to drop all but the front facing HOG
 filter and accept the limitation. We can potentially be more adaptive later,
@@ -99,7 +101,7 @@ implicitly be offscreen.
 at these levels can mask out large regions to ignore in the larger levels.
 
 
-== Building Dependencies ==
+# Building Dependencies
 
 So far this has two third_party build dependencies on DLib and OpenCV.
 
@@ -109,7 +111,7 @@ will quickly skyrocket.
 (Currently assuming building on Linux...)
 
 
-=== DLib ===
+## DLib
 ```
 git clone https://github.com/davisking/dlib
 cd dlib
@@ -127,7 +129,7 @@ ABIs we'll need to change this*
 branch*
 
 
-=== OpenCV ===
+## OpenCV
 ```
 git clone https://github.com/opencv/opencv
 cd opencv
@@ -141,7 +143,7 @@ platforms/scripts/cmake_android_arm.sh to see how to match builds of official
 sdks*
 
 
-== Misc Android development notes / reminders ==
+# Misc Android development notes / reminders
 
 To install a built debug apk explicitly either do `adb install -r
 ./app/build/outputs/apk/app-debug.apk` or `./gradlew installDebug` (the latter
@@ -167,11 +169,11 @@ Run gdbserver on the device, attached to our process, using the helper script
 Connect gdb to the device with `./glimpse-gdb.sh`
 
 
-== References ==
+# References
 
 https://github.com/betars/Face-Resources
 
-=== Papers ===
+## Papers
 
 [Histograms of Oriented Gradients for Human Detection by Navneet Dalal and Bill Triggs, CVPR 2005](http://vc.cs.nthu.edu.tw/home/paper/codfiles/hkchiu/201205170946/Histograms%20of%20Oriented%20Gradients%20for%20Human%20Detection.pdf)
 
