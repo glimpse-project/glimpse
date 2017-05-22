@@ -82,9 +82,9 @@ of the pyramid can also be done on the GPU. I (possibly naively) assume it
 boils down to a heirachy of convoltion filters that could be computed reasonly
 efficiently on the GPU.
 
-4. Experiement with fewer pyramid levels, by downsampling at a faster rate.
+4. Experiment with fewer pyramid levels, by downsampling at a faster rate.
 
-5. Experiement with fewer pyramid levels, by skipping the last few levels if we
+5. Experiment with fewer pyramid levels, by skipping the last few levels if we
 maybe don't expect faces to fill close to 100% of the frame. (I guess there's
 not much benefit skipping the smaller levels though)
 
