@@ -36,19 +36,39 @@ without using NEON) to 960x540 on the cpu (single threaded).
 
 Internally Dlib will also do it's own downsampling to build a pyramid of
 images during face detection (each level is 5/6ths the size of the previous)
-Given a 960x540 image it will downsample 10 times with these timings:
+
+Given a 960x540 image it will downsample 11 times, for a total of 12 levels.
+
+While downsampling DLib will also perform 'feature extraction' which will derive
+gradient images based on the originals - and is more time consuming than the
+downsampling.
+
+Here's a log of timing results on a Lenovo Phab 2:
 
 ```
- 1)  1.202s
- 2)  829.238ms
- 3)  577.865ms
- 4)  397.632ms
- 5)  275.419ms
- 6)  188.941ms
- 7)  131.361ms
- 8)  90.234ms
- 9)  61.334ms
- 10) 42.011ms
+feature extract level zero took 2.235s
+pyramid downsample took 192.853ms
+feature extract took 1.552s
+pyramid downsample took 96.724ms
+feature extract took 1.076s
+pyramid downsample took 66.948ms
+feature extract took 742.554ms
+pyramid downsample took 46.561ms
+feature extract took 519.247ms
+pyramid downsample took 32.375ms
+feature extract took 357.205ms
+pyramid downsample took 22.574ms
+feature extract took 247.562ms
+pyramid downsample took 15.478ms
+feature extract took 168.950ms
+pyramid downsample took 10.676ms
+feature extract took 117.292ms
+pyramid downsample took 7.352ms
+feature extract took 80.836ms
+pyramid downsample took 5.132ms
+feature extract took 54.707ms
+pyramid downsample took 3.493ms
+feature extract took 37.484ms
 ```
 
 (taking ~8 seconds)
