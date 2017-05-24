@@ -88,14 +88,22 @@ So TL;DR we need to look into what opportunities we have to optimize this :)
 1. The first low-hanging optimization is to drop all but the front facing HOG
 filter and accept the limitation. We can potentially be more adaptive later,
 enabling more filters if we have smaller regions to focus on. This cuts the
-time in half to ~10 seconds.
+time in half to ~10 seconds. - DONE (requires
+[https://gitlab.com/impossible/dlib](impossible/dlib) fork)
 
-2. Use the GPU to do all the bilinear downsampling. No numbers yet for the
-benefit but depending on how lucky we can get with avoiding copies getting
-the data in and out of the GPU (not 100% sure how awkward that'll be on
-Android) then I'd expect it'll be more effective than going for a NEON optimized
-path. Of course this contends for the GPU resources but I don't currently see
-us getting too fancy on the rendering side of things.
+2. Use the GPU to do all the bilinear downsampling. This is expected to be
+more effective than going for a NEON optimized path. Of course this contends
+for the GPU resources but I don't currently see us getting too fancy on the
+rendering side of things.
+
+Adding up just the cost of downsampling on the CPU it comes to about 740ms
+
+Initial code to downsample on the GPU takes ~250ms.
+
+We should be able to improve this further by not having to make a copy of the
+luminance data for level zero via glTexImage2D. Instead we can access the frame
+as an OES external image combined with using the GL_EXT_YUV_target extension to
+avoid any redundant YUV->RGB conversion.
 
 3. Understand if the next steps of evaluating the filter across all levels
 of the pyramid can also be done on the GPU. I (possibly naively) assume it
