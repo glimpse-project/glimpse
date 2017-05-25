@@ -201,6 +201,13 @@ Connect gdb to the device with `./glimpse-gdb.sh`
 
 https://github.com/betars/Face-Resources
 
+
+This repo has a scalar implementation of the same feature extraction algorithm used
+in DLib that's a bit simpler to review for understanding what it's doing:
+https://github.com/rbgirshick/voc-dpm (see features/features.cc) (though also
+note there's the scalar code in fhog.h that has to handle the border pixels that
+don't neatly fit into simd registers)
+
 ## Papers
 
 [Histograms of Oriented Gradients for Human Detection by Navneet Dalal and Bill Triggs, CVPR 2005](http://vc.cs.nthu.edu.tw/home/paper/codfiles/hkchiu/201205170946/Histograms%20of%20Oriented%20Gradients%20for%20Human%20Detection.pdf)
