@@ -7,127 +7,15 @@ implementing some of the capabilities demoed in this teaser video:
 
 https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2e656ff6
 
-For now the focus is on bootstrapping frontal face detection that can run at
-a decent rate on a Lenovo Phab 2 phone based on the YUV camera frames we can
-access via the Tango C SDK.
+The first aspect looked at was supporting real-time (frontal) face detection
+which we now have working - taking about 50 milliseconds on a Lenovo Phab 2.
+From this an number of opportunities to accelerate detection by performing
+most detection steps on the GPU were identified but
 
-There are some well researched methods for handling face detection so we don't
-need to invent a new wheel here but the tricky bit is getting something running
-at a decent rate on a phone.
-
-We're starting with DLib's HOG (Histogram Of Gradients) detection
-implementation. HOG filters have some known limiations when it comes to
-detection of rotated objects, but aren't too computationally expensive so it
-should be possible run in real time on the Phab 2 device we're currently
-targetting. It generally seems like HOG detection works better than the older
-Haar/Viola-Jones method implemented by OpenCV.
-
-Unfortunately even though DLib's HOG filter is considered to be
-'fast'/'efficient' that's based on running with a fairly high-end PC hardware,
-e.g. with AVX/SSE4 instructions. The implementation doesn't have ARM/NEON or GPU
-optimizations. On a Phab 2 the out-of-the-box face detector is liable to take
-around a minute on a 1920x1080 greyscale (just the luminance from a yuv buffer)
-camera frame. Downscaling to 960x540 first it still takes ~20 seconds to run.
-
-After adding some instrumentation to DLib this is how I found the time is spent:
-
-Firstly before we hand anything to DLib it takes ~230ms to downsample (bilinear,
-without using NEON) to 960x540 on the cpu (single threaded).
-
-Internally Dlib will also do it's own downsampling to build a pyramid of
-images during face detection (each level is 5/6ths the size of the previous)
-
-Given a 960x540 image it will downsample 11 times, for a total of 12 levels.
-
-While downsampling DLib will also perform 'feature extraction' which will derive
-gradient images based on the originals - and is more time consuming than the
-downsampling.
-
-Here's a log of timing results on a Lenovo Phab 2:
-
-```
-feature extract level zero took 2.235s
-pyramid downsample took 192.853ms
-feature extract took 1.552s
-pyramid downsample took 96.724ms
-feature extract took 1.076s
-pyramid downsample took 66.948ms
-feature extract took 742.554ms
-pyramid downsample took 46.561ms
-feature extract took 519.247ms
-pyramid downsample took 32.375ms
-feature extract took 357.205ms
-pyramid downsample took 22.574ms
-feature extract took 247.562ms
-pyramid downsample took 15.478ms
-feature extract took 168.950ms
-pyramid downsample took 10.676ms
-feature extract took 117.292ms
-pyramid downsample took 7.352ms
-feature extract took 80.836ms
-pyramid downsample took 5.132ms
-feature extract took 54.707ms
-pyramid downsample took 3.493ms
-feature extract took 37.484ms
-```
-
-(taking ~8 seconds)
-
-After downsampling it then takes about 2.5 seconds per HOG filter and Dlib's
-out-of-the-box face detector is based on five separately trained filters: A
-front looking, left looking, right looking, front looking but rotated left, and
-finally a front looking but rotated right one.
-
-(taking ~12.5 seconds)
-
-So TL;DR we need to look into what opportunities we have to optimize this :)
-
-
-## Current Optimization Plan
-
-1. The first low-hanging optimization is to drop all but the front facing HOG
-filter and accept the limitation. We can potentially be more adaptive later,
-enabling more filters if we have smaller regions to focus on. This cuts the
-time in half to ~10 seconds. - DONE (requires
-[https://gitlab.com/impossible/dlib](impossible/dlib) fork)
-
-2. Use the GPU to do all the bilinear downsampling. This is expected to be
-more effective than going for a NEON optimized path. Of course this contends
-for the GPU resources but I don't currently see us getting too fancy on the
-rendering side of things.
-
-Adding up just the cost of downsampling on the CPU it comes to about 740ms
-
-Initial code to downsample on the GPU takes ~250ms.
-
-We should be able to improve this further by not having to make a copy of the
-luminance data for level zero via glTexImage2D. Instead we can access the frame
-as an OES external image combined with using the GL_EXT_YUV_target extension to
-avoid any redundant YUV->RGB conversion.
-
-3. Understand if the next steps of evaluating the filter across all levels
-of the pyramid can also be done on the GPU. I (possibly naively) assume it
-boils down to a heirachy of convoltion filters that could be computed reasonly
-efficiently on the GPU.
-
-4. Experiment with fewer pyramid levels, by downsampling at a faster rate.
-
-5. Experiment with fewer pyramid levels, by skipping the last few levels if we
-maybe don't expect faces to fill close to 100% of the frame. (I guess there's
-not much benefit skipping the smaller levels though)
-
-6. Experiment with training a smaller HOG filter (say 60x60) instead of the
-pre-trained 80x80 filter which would in turn let us downsample the first level
-of the pyramid even further.
-
-7. Experiment with masking where we scan in the larger levels, making some
-assumptions that we aren't looking for small faces near the bottom of the
-screen if our use case is also expecting to track someones body which would
-implicitly be offscreen.
-
-8. Make sure we scan the smallest pyramid levels first so that faces detected
-at these levels can mask out large regions to ignore in the larger levels.
-
+The current focus is supporting face features detection, locating the eyes and
+mouth.  In itself this will allow us to visually augment faces, but note that
+it doesn't give us a 3D pose estimation (though the feature locations should
+help us estimate a pose later).
 
 # Building Dependencies
 
@@ -155,6 +43,13 @@ cmake --build . --target install
 place libraries into a per-abi directory so once we start building for multiple
 ABIs we'll need to change this*
 
+For face feature detection we're currently using this shape predictor data
+which needs to be placed under the assets/ directory:
+```
+cd $GLIMPSE_ROOT/glimpse_android_demo/app/src/main/assets
+wget http://dlib.net/files/shape_predictor_68_face_landmarks.dat.bz2
+bunzip shape_predictor_68_face_landmarks.dat.bz2
+```
 
 ## OpenCV
 ```
