@@ -140,21 +140,20 @@ will quickly skyrocket.
 
 
 ## DLib
+Assuming $GLIMPSE_ROOT points to the top of the glimpse-sdk repo checkout...
+
 ```
-git clone https://github.com/davisking/dlib
+git clone https://gitlab.com/impossible/dlib
 cd dlib
 mkdir build-release
 cd build-release
-cmake -G Ninja -DCMAKE_INSTALL_PREFIX=$PWD/dlib-binaries -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake ../
+cmake -G Ninja -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/dlib -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake ../
 cmake --build .
 cmake --build . --target install
 ```
 *Note: DLib's build doesn't handle Android specifically and notably doesn't
 place libraries into a per-abi directory so once we start building for multiple
 ABIs we'll need to change this*
-
-*FIXME: actually we're using a modified branch of Dlib, not the upstream master
-branch*
 
 
 ## OpenCV
@@ -163,7 +162,7 @@ git clone https://github.com/opencv/opencv
 cd opencv
 mkdir build-release
 cd build-release
-cmake -DCMAKE_INSTALL_PREFIX=$PWD/opencv-binaries -DWITH_TBB=ON -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake $@ ../
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/opencv -DWITH_TBB=ON -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake $@ ../
 make -j8 && make install
 ```
 *Note: see platforms/android/build_sdk.py and
