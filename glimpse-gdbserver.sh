@@ -27,9 +27,9 @@ adb -d forward tcp:5039 tcp:5039
 adb push $ANDROID_NDK_HOME/prebuilt/$ARCH/gdbserver/gdbserver /data/local/tmp/gdbserver
 
 # selinux will block us from running the gdbserver while under /data/local/
-adb shell "run-as $PROCESS cp /data/local/tmp/gdbserver /data/data/$PROCESS/lib/gdbserver &"
+adb shell "run-as $PROCESS cp /data/local/tmp/gdbserver /data/data/$PROCESS/gdbserver &"
 
-adb shell run-as $PROCESS /data/data/$PROCESS/lib/gdbserver :5039 --attach $device_pid
+adb shell run-as $PROCESS /data/data/$PROCESS/gdbserver :5039 --attach $device_pid
 
 
 
