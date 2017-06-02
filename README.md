@@ -31,7 +31,7 @@ will quickly skyrocket.
 Assuming $GLIMPSE_ROOT points to the top of the glimpse-sdk repo checkout...
 
 ```
-git clone https://gitlab.com/impossible/dlib
+git clone https://gitlab.com/impossible/dlib --branch=glimpse
 cd dlib
 mkdir build-release
 cd build-release
