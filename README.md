@@ -9,8 +9,8 @@ https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2
 
 The first aspect looked at was supporting real-time (frontal) face detection
 which we now have working - taking about 50 milliseconds on a Lenovo Phab 2.
-From this an number of opportunities to accelerate detection by performing
-most detection steps on the GPU were identified but
+From this a number of opportunities to accelerate detection on the GPU were
+identified but for now these are being left for follow up later.
 
 The current focus is supporting face features detection, locating the eyes and
 mouth.  In itself this will allow us to visually augment faces, but note that
