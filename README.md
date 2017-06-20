@@ -8,14 +8,29 @@ implementing some of the capabilities demoed in this teaser video:
 https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2e656ff6
 
 The first aspect looked at was supporting real-time (frontal) face detection
-which we now have working - taking about 50 milliseconds on a Lenovo Phab 2.
-From this a number of opportunities to accelerate detection on the GPU were
-identified but for now these are being left for follow up later.
+which we now have working well enough to move on:
 
-The current focus is supporting face features detection, locating the eyes and
-mouth.  In itself this will allow us to visually augment faces, but note that
-it doesn't give us a 3D pose estimation (though the feature locations should
-help us estimate a pose later).
+https://medium.com/impossible/building-make-believe-tech-glimpse-in-progress-ecb9bbc113a1
+
+There are still lots of opportunities to improve what we do for face tracking
+but it's good enough to work with for now so we can start looking at the more
+tricky problem of skeletal tracking.
+
+The current focus is on skeletal tracking. The current aim is to reproduce the
+R&D done by Microsoft for skeleton tracking with their Kinect cameras, which
+provide similar data to Google Tango phones. Their research was published as a paper titled: [Real-Time Human Pose Recognition in Parts from Single Depth Images](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/BodyPartRecognition.pdf)
+
+In terms of understanding that paper then:
+
+* Some reminders about set theory notation: http://byjus.com/maths/set-theory-symbols/
+    * Also a reminder on set-builder notation: http://www.mathsisfun.com/sets/set-builder-notation.html
+* How to calculate Shannon Entropy: http://www.bearcave.com/misl/misl_tech/wavelets/compression/shannon.html
+* A key referenced paper on randomized trees for keypoint recognition: https://pdfs.semanticscholar.org/f637/a3357444112d0d2c21765949409848a5cba3.pdf
+    * A related technical report (more implementation details): http://cvlabwww.epfl.ch/~lepetit/papers/lepetit_tr04.pdf
+* Referenced paper on using meanshift: https://courses.csail.mit.edu/6.869/handouts/PAMIMeanshift.pdf
+    * Simple intuitive description of meanshift: http://docs.opencv.org/trunk/db/df8/tutorial_py_meanshift.html
+    * Comparison of mean shift tracking methods (inc. camshift): http://old.cescg.org/CESCG-2008/papers/Hagenberg-Artner -Nicole.pdf
+
 
 # Building Dependencies
 
