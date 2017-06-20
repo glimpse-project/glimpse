@@ -29,7 +29,7 @@ In terms of understanding that paper then:
     * A related technical report (more implementation details): http://cvlabwww.epfl.ch/~lepetit/papers/lepetit_tr04.pdf
 * Referenced paper on using meanshift: https://courses.csail.mit.edu/6.869/handouts/PAMIMeanshift.pdf
     * Simple intuitive description of meanshift: http://docs.opencv.org/trunk/db/df8/tutorial_py_meanshift.html
-    * Comparison of mean shift tracking methods (inc. camshift): http://old.cescg.org/CESCG-2008/papers/Hagenberg-Artner -Nicole.pdf
+    * Comparison of mean shift tracking methods (inc. camshift): http://old.cescg.org/CESCG-2008/papers/Hagenberg-Artner-Nicole.pdf
 
 
 # Building Dependencies
