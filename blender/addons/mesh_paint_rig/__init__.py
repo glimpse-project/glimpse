@@ -250,20 +250,35 @@ class PaintRigOperator(bpy.types.Operator):
                     bonehead_world_pos = pose_obj.matrix_world * bonehead_obj_pos
 
                     for poly in mesh_obj.data.polygons:
+
+                        n_poly_verts = 0
+                        x_tot = 0;
+                        y_tot = 0;
+                        z_tot = 0;
+
                         for loop_index in poly.loop_indices:
+                            n_poly_verts = n_poly_verts + 1
                             vert_index = mesh_obj.data.loops[loop_index].vertex_index
 
                             vert_obj_pos = mesh_obj.data.vertices[vert_index].co
                             vert_world_pos = mesh_obj.matrix_world * vert_obj_pos
+                            x_tot = x_tot + vert_world_pos[0]
+                            y_tot = y_tot + vert_world_pos[1]
+                            z_tot = z_tot + vert_world_pos[2]
 
-                            dx = vert_world_pos[0] - bonehead_world_pos[0]
-                            dy = vert_world_pos[1] - bonehead_world_pos[1]
-                            dz = vert_world_pos[2] - bonehead_world_pos[2]
-                            dist = math.sqrt(dx**2 + dy**2 + dz**2)
+                        x_avg = x_tot / n_poly_verts
+                        y_avg = y_tot / n_poly_verts
+                        z_avg = z_tot / n_poly_verts
 
-                            current_col = vcol_layer.data[loop_index].color
-                            bone_col = bone_data['color']
-                            if dist < thresh and current_col[0] == 1.0 and current_col[1] == 1.0 and current_col[2] == 1.0:
+                        dx = x_avg - bonehead_world_pos[0]
+                        dy = y_avg - bonehead_world_pos[1]
+                        dz = z_avg - bonehead_world_pos[2]
+                        dist = math.sqrt(dx**2 + dy**2 + dz**2)
+
+                        current_col = vcol_layer.data[loop_index].color
+                        bone_col = bone_data['color']
+                        if dist < thresh and current_col[0] == 1.0 and current_col[1] == 1.0 and current_col[2] == 1.0:
+                            for loop_index in poly.loop_indices:
                                 vcol_layer.data[loop_index].color = bone_col
 
 
