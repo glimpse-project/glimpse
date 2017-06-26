@@ -237,6 +237,40 @@ class PaintRigOperator(bpy.types.Operator):
             },
         }
 
+        G = {}
+
+        # Build up graph that's useable with the Dijkstra's algorithm
+        # implementation above
+        #
+        for poly in mesh_obj.data.polygons:
+
+            prev_vert_index = mesh_obj.data.loops[poly.loop_start + poly.loop_total - 1].vertex_index
+            prev_vert_obj_pos = mesh_obj.data.vertices[prev_vert_index].co
+            prev_vert_world_pos = mesh_obj.matrix_world * prev_vert_obj_pos
+
+            for loop_index in poly.loop_indices:
+                vert_index = mesh_obj.data.loops[loop_index].vertex_index
+                vert_obj_pos = mesh_obj.data.vertices[vert_index].co
+                vert_world_pos = mesh_obj.matrix_world * vert_obj_pos
+
+                dx = vert_world_pos[0] - prev_vert_world_pos[0]
+                dy = vert_world_pos[1] - prev_vert_world_pos[1]
+                dz = vert_world_pos[2] - prev_vert_world_pos[2]
+
+                dist = math.sqrt(dx**2 + dy**2 + dz**2)
+
+                # NB: need something immutable to use as a dictionary key
+                vert0_key = (prev_vert_world_pos[0], prev_vert_world_pos[1], prev_vert_world_pos[1])
+                vert1_key = (vert_world_pos[0], vert_world_pos[1], vert_world_pos[1])
+
+                if vert0_key not in G:
+                    G[vert0_key] = {}
+
+                G[vert0_key][vert1_key] = dist
+
+                prev_vert_world_pos = vert_world_pos
+
+
         for t in range(0, 500, 5):
             thresh = (1/1000.0) * t
 
