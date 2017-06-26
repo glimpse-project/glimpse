@@ -50,6 +50,14 @@ from bpy_extras.io_utils import (
         axis_conversion,
         )
 
+def hex_to_rgb(hex):
+    red = ((hex & 0xff0000)>>16) / 255
+    green = ((hex & 0xff00)>>8) / 255
+    blue = (hex & 0xff) / 255
+
+    return (red, green, blue)
+
+
 # TODO: factor out into separate module...
 #
 # Dijkstra's algorithm for shortest paths
@@ -186,23 +194,47 @@ class PaintRigOperator(bpy.types.Operator):
 
         boneheads = {
             'head': {
-                'color': (1.0, 0.0, 0.0),
+                'color': hex_to_rgb(0xff0000),
             },
             'neck_01': {
-                'color': (0.0, 1.0, 0.0),
+                'color': hex_to_rgb(0xff9100),
             },
             'upperarm_l': {
-                'color': (0.3, 0.7, 0.0),
+                'color': hex_to_rgb(0xffea00),
             },
             'upperarm_r': { 
-                'color': (0.0, 0.7, 0.5),
+                'color': hex_to_rgb(0xaaff00),
+            },
+            'lowerarm_l': {
+                'color': hex_to_rgb(0x00ff9d),
+            },
+            'lowerarm_r': {
+                'color': hex_to_rgb(0x00fffb),
+            },
+            'hand_l': {
+                'color': hex_to_rgb(0x00a6ff),
+            },
+            'hand_r': {
+                'color': hex_to_rgb(0x0026ff),
             }, 
             'thigh_l': {
-                'color': (0.1, 0.2, 0.9),
+                'color': hex_to_rgb(0x8c00ff),
             },
             'thigh_r': {
-                'color': (0.7, 0.1, 0.5),
-            }
+                'color': hex_to_rgb(0xfb00ff),
+            },
+            'calf_l': {
+                'color': hex_to_rgb(0x4d3d28),
+            },
+            'calf_r': {
+                'color': hex_to_rgb(0x4d323b),
+            },
+            'foot_l': {
+                'color': hex_to_rgb(0xe193ad),
+            },
+            'foot_r': {
+                'color': hex_to_rgb(0x0e560e),
+            },
         }
 
         for t in range(0, 500, 5):
