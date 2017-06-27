@@ -33,6 +33,7 @@ bl_info = {
 # Copyright (C) 2017: Robert Bragg <robert@impossible.com>
 
 import math
+import mathutils
 import os
 
 import bpy
@@ -208,15 +209,19 @@ class PaintRigOperator(bpy.types.Operator):
             },
             'lowerarm_l': {
                 'color': hex_to_rgb(0x00ff9d),
+                'rel_threshold_limit': 0.33,
             },
             'lowerarm_r': {
                 'color': hex_to_rgb(0x00fffb),
+                'rel_threshold_limit': 0.33,
             },
             'hand_l': {
                 'color': hex_to_rgb(0x00a6ff),
+                'obj_y+only': True,
             },
             'hand_r': {
                 'color': hex_to_rgb(0x0026ff),
+                'obj_y+only': True,
             }, 
             'thigh_l': {
                 'color': hex_to_rgb(0x8c00ff),
@@ -225,16 +230,22 @@ class PaintRigOperator(bpy.types.Operator):
                 'color': hex_to_rgb(0xfb00ff),
             },
             'calf_l': {
-                'color': hex_to_rgb(0x4d3d28),
+                'color': hex_to_rgb(0x7d3d28),
+                'rel_threshold_limit': 0.33,
             },
             'calf_r': {
-                'color': hex_to_rgb(0x4d323b),
+                'color': hex_to_rgb(0x6d723b),
+                'rel_threshold_limit': 0.33,
             },
             'foot_l': {
                 'color': hex_to_rgb(0xe193ad),
             },
             'foot_r': {
                 'color': hex_to_rgb(0x0e560e),
+            },
+            'spine_03': {
+                'color_left': hex_to_rgb(0xb28ee9),
+                'color_right': hex_to_rgb(0xe9706d),
             },
         }
 
@@ -294,11 +305,21 @@ class PaintRigOperator(bpy.types.Operator):
         #bm2_col_layer = bm.loops.layers.color.verify()
 
         for t in range(0, 500, 5):
-            thresh = (1/1000.0) * t
+            base_thresh = (1/1000.0) * t
 
             for bone in pose_obj.pose.bones:
                 if bone.name in boneheads:
                     bone_data = boneheads[bone.name]
+
+                    if 'rel_threshold_limit' in bone_data:
+                        limit = bone.length * bone_data['rel_threshold_limit']
+
+                        if base_thresh > limit:
+                            thresh = limit
+                        else:
+                            thresh = base_thresh
+                    else:
+                        thresh = base_thresh
 
                     self.report({'INFO'}, "joint " + bone.name)
 
@@ -329,13 +350,33 @@ class PaintRigOperator(bpy.types.Operator):
                         y_avg = y_tot / n_poly_verts
                         z_avg = z_tot / n_poly_verts
 
-                        dx = x_avg - bonehead_world_pos[0]
-                        dy = y_avg - bonehead_world_pos[1]
-                        dz = z_avg - bonehead_world_pos[2]
-                        dist = math.sqrt(dx**2 + dy**2 + dz**2)
+                        in_bounds = False
+                        if 'obj_y+only' in bone_data and False: # disable for now
+                            bone_world_mat = mesh_obj.matrix_world * bone.matrix
+                            inv = bone_world_mat
+                            inv.invert()
 
-                        bone_col = bone_data['color']
-                        if dist < thresh:
+                            bone_space_pos = inv * mathutils.Vector((x_avg, y_avg, z_avg))
+
+                            if bone_space_pos[1] > 0:
+                                in_bounds = True
+                        else:
+                            dx = x_avg - bonehead_world_pos[0]
+                            dy = y_avg - bonehead_world_pos[1]
+                            dz = z_avg - bonehead_world_pos[2]
+
+                            dist = math.sqrt(dx**2 + dy**2 + dz**2)
+                            if dist < thresh:
+                                in_bounds = True
+
+                        if in_bounds:
+                            if 'color' in bone_data:
+                                bone_col = bone_data['color']
+                            elif 'color_left' in bone_data and x_avg >= 0:
+                                bone_col = bone_data['color_left']
+                            elif 'color_right' in bone_data and x_avg < 0:
+                                bone_col = bone_data['color_right']
+
                             for loop in face.loops:
                                 loop[bm_col_layer] = bone_col
 
