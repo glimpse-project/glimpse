@@ -340,6 +340,7 @@ class PaintRigOperator(bpy.types.Operator):
                                 loop[bm_col_layer] = bone_col
 
         bm.to_mesh(mesh_obj.data)
+        bm.free()
 
         return {'FINISHED'}
 
