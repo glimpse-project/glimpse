@@ -194,58 +194,177 @@ class PaintRigOperator(bpy.types.Operator):
                 vert_index = mesh_obj.data.loops[loop_index].vertex_index
                 vcol_layer.data[loop_index].color = (1.0, 1.0, 1.0)
 
+
+        # Each bone can have a sequence of paints that are tested in
+        # order for whether they should be applied to the current face
+        #
+        # 'color' is the rgb color of the paint
+        #
+        # Alternatively 'color_left' and 'color_right' can be used to
+        #   define separate colors for the left and right side of the
+        #   mesh
+        #
+        # 'rel_threshold_limit' determines (relative to the length of
+        #   the bone) the distance from the bone head that the paint
+        #   should be applied
+        #
+        # 'speed' affects the relative fluidity of the paint, or how
+        #   quickly it flows/spreads compared to the pain for other
+        #   bones.
+        #
+        # 'obj_y+only': True means that the paint should only flow
+        #   along the positive 'y' direction of the bone (i.e. the
+        #   direction from the head->tail)
+        #
+        # 'global_z-only': True means that the paint should only flow
+        #   down (in global, world-space coordinates)
+        #
         boneheads = {
             'head': {
-                'color': hex_to_rgb(0xff0000),
+                'paints': [{
+                    'color_left': hex_to_rgb(0xc3b2ff),
+                    'color_right': hex_to_rgb(0xffa9ca),
+                    'rel_threshold_limit': 0.8,
+                },{
+                    'color_left': hex_to_rgb(0x68c0d1),
+                    'color_right': hex_to_rgb(0x70d19f),
+                    'obj_y+only': True,
+                }],
             },
             'neck_01': {
-                'color': hex_to_rgb(0xff9100),
+                'paints': [{
+                    'color': hex_to_rgb(0xff9100),
+                }],
+            },
+            'clavicle_l': {
+                'paints': [{
+                    'color': hex_to_rgb(0xd73ce0),
+                    'speed': 1.2
+                }],
+            },
+            'clavicle_r': {
+                'paints': [{
+                    'color': hex_to_rgb(0x291773),
+                    'speed': 1.2
+                }],
             },
             'upperarm_l': {
-                'color': hex_to_rgb(0xffea00),
+                'paints': [{
+                    'color': hex_to_rgb(0xffea00),
+                    'rel_threshold_limit': 0.5,
+                },{
+                    'color': hex_to_rgb(0xd19795),
+                    'obj_y+only': True,
+                    'speed': 0.75
+                }],
             },
             'upperarm_r': { 
-                'color': hex_to_rgb(0xaaff00),
+                'paints': [{
+                    'color': hex_to_rgb(0xaaff00),
+                    'rel_threshold_limit': 0.5,
+                },{
+                    'color': hex_to_rgb(0xb3d166),
+                    'obj_y+only': True,
+                    'speed': 0.75
+                }],
             },
             'lowerarm_l': {
-                'color': hex_to_rgb(0x00ff9d),
-                'rel_threshold_limit': 0.33,
+                'paints': [{
+                    'color': hex_to_rgb(0x00ff9d),
+                    'rel_threshold_limit': 0.33,
+                },{
+                    'color': hex_to_rgb(0xa1d6ae),
+                    'obj_y+only': True,
+                }],
             },
             'lowerarm_r': {
-                'color': hex_to_rgb(0x00fffb),
-                'rel_threshold_limit': 0.33,
+                'paints': [{
+                    'color': hex_to_rgb(0x00fffb),
+                    'rel_threshold_limit': 0.33,
+                },{
+                    'color': hex_to_rgb(0xd6d6d6),
+                    'obj_y+only': True,
+                }],
             },
             'hand_l': {
-                'color': hex_to_rgb(0x00a6ff),
-                'obj_y+only': True,
+                'paints': [{
+                    'color': hex_to_rgb(0xd6c56f),
+                    'rel_threshold_limit': 0.6,
+                },{
+                    'color': hex_to_rgb(0x00a6ff),
+                    'obj_y+only': True,
+                }],
             },
             'hand_r': {
-                'color': hex_to_rgb(0x0026ff),
-                'obj_y+only': True,
+                'paints': [{
+                    'color': hex_to_rgb(0x35a29b),
+                    'rel_threshold_limit': 0.6,
+                },{
+                    'color': hex_to_rgb(0x0026ff),
+                    'obj_y+only': True,
+                }],
             }, 
             'thigh_l': {
-                'color': hex_to_rgb(0x8c00ff),
+                'paints': [{
+                    'color': hex_to_rgb(0x8c00ff),
+                    'rel_threshold_limit': 0.45,
+                },{
+                    'color': hex_to_rgb(0x4d274c),
+                    'obj_y+only': True,
+                }],
             },
             'thigh_r': {
-                'color': hex_to_rgb(0xfb00ff),
+                'paints': [{
+                    'color': hex_to_rgb(0xfb00ff),
+                    'rel_threshold_limit': 0.45,
+                },{
+                    'color': hex_to_rgb(0xd78469),
+                    'obj_y+only': True,
+                }],
             },
             'calf_l': {
-                'color': hex_to_rgb(0x7d3d28),
-                'rel_threshold_limit': 0.33,
+                'paints': [{
+                    'color': hex_to_rgb(0x7d3d28),
+                    'rel_threshold_limit': 0.33,
+                },{
+                    'color': hex_to_rgb(0xf28eea),
+                    'obj_y+only': True,
+                }],
             },
             'calf_r': {
-                'color': hex_to_rgb(0x6d723b),
-                'rel_threshold_limit': 0.33,
+                'paints': [{
+                    'color': hex_to_rgb(0x6d723b),
+                    'rel_threshold_limit': 0.33,
+                },{
+                    'color': hex_to_rgb(0xffbb19),
+                    'obj_y+only': True,
+                }],
             },
             'foot_l': {
-                'color': hex_to_rgb(0xe193ad),
+                'paints': [{
+                    'color': hex_to_rgb(0x0e560e),
+                    'rel_threshold_limit': 0.65,
+                },{
+                    'color': hex_to_rgb(0xffe394),
+                    'obj_y+only': True,
+                    'global_z-only': True,
+                }],
             },
             'foot_r': {
-                'color': hex_to_rgb(0x0e560e),
+                'paints': [{
+                    'color': hex_to_rgb(0xe193ad),
+                    'rel_threshold_limit': 0.65,
+                },{
+                    'color': hex_to_rgb(0x0a821d),
+                    'obj_y+only': True,
+                    'global_z-only': True,
+                }],
             },
             'spine_03': {
-                'color_left': hex_to_rgb(0xb28ee9),
-                'color_right': hex_to_rgb(0xe9706d),
+                'paints': [{
+                    'color_left': hex_to_rgb(0xb28ee9),
+                    'color_right': hex_to_rgb(0xe9706d),
+                }],
             },
         }
 
@@ -286,13 +405,6 @@ class PaintRigOperator(bpy.types.Operator):
 
                 prev_vert_world_pos = vert_world_pos
 
-        # TODO
-        # we want to avoid traversing the entire mesh for each bone in the
-        # skeleton, for each threshold increment.
-        #
-        # After a face is painted it should be removed from the mesh being
-        # traversed
-        #
 
         bm = bmesh.new()
         bm.from_mesh(mesh_obj.data)
@@ -308,77 +420,94 @@ class PaintRigOperator(bpy.types.Operator):
             base_thresh = (1/1000.0) * t
 
             for bone in pose_obj.pose.bones:
-                if bone.name in boneheads:
-                    bone_data = boneheads[bone.name]
+                if bone.name not in boneheads:
+                    continue
 
-                    if 'rel_threshold_limit' in bone_data:
-                        limit = bone.length * bone_data['rel_threshold_limit']
+                bone_data = boneheads[bone.name]
 
-                        if base_thresh > limit:
-                            thresh = limit
-                        else:
-                            thresh = base_thresh
+                for paint in bone_data['paints']:
+                    if 'speed' in paint:
+                        paint_thresh = base_thresh * paint['speed']
                     else:
-                        thresh = base_thresh
+                        paint_thresh = base_thresh
 
-                    self.report({'INFO'}, "joint " + bone.name)
+                    if 'rel_threshold_limit' in paint:
+                        limit = bone.length * paint['rel_threshold_limit']
 
-                    bonehead_obj_pos = bone.head.xyz
-                    bonehead_world_pos = pose_obj.matrix_world * bonehead_obj_pos
+                        if paint_thresh > limit:
+                            paint['threshold'] = limit
+                        else:
+                            paint['threshold'] = paint_thresh
+                    else:
+                        paint['threshold'] = paint_thresh
 
-                    for face in bm.faces:
+                self.report({'INFO'}, "joint " + bone.name)
 
-                        current_col = face.loops[0][bm_col_layer]
-                        if current_col[0] != 1.0 or current_col[1] != 1.0 or current_col[2] != 1.0:
-                            continue
+                bonehead_obj_pos = bone.head.xyz
+                bonehead_world_pos = pose_obj.matrix_world * bonehead_obj_pos
 
-                        n_poly_verts = 0
-                        x_tot = 0;
-                        y_tot = 0;
-                        z_tot = 0;
+                bone_world_mat_inv = mesh_obj.matrix_world * bone.matrix
+                bone_world_mat_inv.invert()
 
-                        for v in face.verts:
-                            n_poly_verts = n_poly_verts + 1
+                for face in bm.faces:
 
-                            vert_obj_pos = v.co
-                            vert_world_pos = mesh_obj.matrix_world * vert_obj_pos
-                            x_tot = x_tot + vert_world_pos[0]
-                            y_tot = y_tot + vert_world_pos[1]
-                            z_tot = z_tot + vert_world_pos[2]
+                    current_col = face.loops[0][bm_col_layer]
+                    if current_col[0] != 1.0 or current_col[1] != 1.0 or current_col[2] != 1.0:
+                        continue
 
-                        x_avg = x_tot / n_poly_verts
-                        y_avg = y_tot / n_poly_verts
-                        z_avg = z_tot / n_poly_verts
+                    n_poly_verts = 0
+                    x_tot = 0;
+                    y_tot = 0;
+                    z_tot = 0;
+
+                    for v in face.verts:
+                        n_poly_verts = n_poly_verts + 1
+
+                        vert_obj_pos = v.co
+                        vert_world_pos = mesh_obj.matrix_world * vert_obj_pos
+                        x_tot = x_tot + vert_world_pos[0]
+                        y_tot = y_tot + vert_world_pos[1]
+                        z_tot = z_tot + vert_world_pos[2]
+
+                    x_avg = x_tot / n_poly_verts
+                    y_avg = y_tot / n_poly_verts
+                    z_avg = z_tot / n_poly_verts
+
+                    dx = x_avg - bonehead_world_pos[0]
+                    dy = y_avg - bonehead_world_pos[1]
+                    dz = z_avg - bonehead_world_pos[2]
+
+                    dist = math.sqrt(dx**2 + dy**2 + dz**2)
+
+                    for paint in bone_data['paints']:
 
                         in_bounds = False
-                        if 'obj_y+only' in bone_data and False: # disable for now
-                            bone_world_mat = mesh_obj.matrix_world * bone.matrix
-                            inv = bone_world_mat
-                            inv.invert()
+                        if dist < paint['threshold']:
+                            in_bounds = True
 
-                            bone_space_pos = inv * mathutils.Vector((x_avg, y_avg, z_avg))
+                            if 'obj_y+only' in paint:
+                                bone_space_pos = bone_world_mat_inv * mathutils.Vector((x_avg, y_avg, z_avg))
 
-                            if bone_space_pos[1] > 0:
-                                in_bounds = True
-                        else:
-                            dx = x_avg - bonehead_world_pos[0]
-                            dy = y_avg - bonehead_world_pos[1]
-                            dz = z_avg - bonehead_world_pos[2]
+                                if bone_space_pos[1] < 0:
+                                    in_bounds = False
 
-                            dist = math.sqrt(dx**2 + dy**2 + dz**2)
-                            if dist < thresh:
-                                in_bounds = True
+                            if 'global_z-only' in paint:
+                                if dz > 0:
+                                    in_bounds = False
+
 
                         if in_bounds:
-                            if 'color' in bone_data:
-                                bone_col = bone_data['color']
-                            elif 'color_left' in bone_data and x_avg >= 0:
-                                bone_col = bone_data['color_left']
-                            elif 'color_right' in bone_data and x_avg < 0:
-                                bone_col = bone_data['color_right']
+                            if 'color' in paint:
+                                bone_col = paint['color']
+                            elif 'color_left' in paint and x_avg >= 0:
+                                bone_col = paint['color_left']
+                            elif 'color_right' in paint and x_avg < 0:
+                                bone_col = paint['color_right']
 
                             for loop in face.loops:
                                 loop[bm_col_layer] = bone_col
+
+                            break
 
         bm.to_mesh(mesh_obj.data)
         bm.free()
