@@ -1,0 +1,46 @@
+
+Basic steps to creating the synthetic data:
+
+- Open makehuman
+- Choose body type - e.g. use Modelling->Random as a starting point
+- Under Pose/Animate->Skeleton select the 'Game engine' rig
+- Under Pose/Animate->Pose select Tpose
+- Under Geometries->Clothes add some clothes
+- Under Files->Export, select 'Mesh Format' = mh2 (need to install plugin for
+    this first)
+- Choose export filename and export
+
+
+Open Blender
+(assuming you've added the mh2 import and the MakeWalk addon and the Glimpse
+ paint rig addon)
+- New Scene, delete the default cube
+- Import .mh2, select the file exported from makehuman
+- Select the body, eye and clothing meshes, Ctrl-J to join into a single mesh
+- Select the mesh and the pose/rig and scale down to a more human height -
+  treating blender units as meters
+- Apply the scale for the mesh and the pose, by selecting each one in turn and
+  pressing Ctrl-A -> Scale
+- Select the rig and go into Edit Mode
+- Zoom into one of the hands
+- From the left 't'ool menu->Options, select 'X-axis Mirror' before modifying
+- Press 'c' and select all the finger bones
+- Press 'x' and delete the bones
+- Extend the wrist bone to the first knuckle in the middle of the hand
+- Select the rig in Object Mode and select the MakeWalk tab from the left
+  't'ools menu
+- Use the 'Load And Retarget' button to load a CMU mocap file (I've been using
+  the 14_14.bvh star jump file)
+- Scrub the animation to move the hands so you can see how the vertex weights
+  around the hand need fixing
+- Go into Pose Mode for the rig and then additionally select the mesh and go
+  into Weight Paint mode
+- Right click the hand bone
+- Weight paint all the hand and fingers red. I think it might be possible to
+  use the Options tab to enable mirroring of edits (I didn't try) but otherwise
+  repeat the weight painting for both hands.
+- Select just the rig in object mode and then under the pose object data tab
+  click 'Reset Position' to leave the mesh in the untransformed Tpose position
+- Shift click to select the mesh in addition to the pose
+- Press Space -> 'Rig Paint Operator' (Note it will be unresponsive for a while)
+
