@@ -43,6 +43,7 @@ from bpy.props import (
         CollectionProperty,
         StringProperty,
         BoolProperty,
+        IntProperty,
         EnumProperty,
         FloatProperty,
         )
@@ -113,19 +114,42 @@ bvh_file_index = {}
 bvh_index_pos = 0
 
 
-def updateCurrentBvhState(op):
-    if bvh_index_pos < len(bvh_index):
-        bvh_index[bvh_index_pos]['start'] = bpy.context.scene.frame_start
-        bvh_index[bvh_index_pos]['end'] = bpy.context.scene.frame_end
-        cam_pos = bpy.data.objects['Camera'].location.xyz
-        cam_rot = bpy.data.objects['Camera'].rotation_quaternion
-        bvh_index[bvh_index_pos]['camera'] = {'location': [cam_pos[0], cam_pos[1], cam_pos[2]],
-                                              'rotation': [cam_rot[0], cam_rot[1], cam_rot[2], cam_rot[3]] }
+def get_bvh_index_pos(self):
+    return bvh_index_pos
 
 
-def loadCurrentBvhFile(op):
+def set_bvh_index_pos(self, value):
+    global bvh_index_pos
+
+    if value >= 0 and value < len(bvh_index) and value != bvh_index_pos:
+        updateCurrentBvhState(None)
+        bvh_index_pos = value
+        loadCurrentBvhFile(None)
+
+
+# NB: sometimes called with no op
+def updateCurrentBvhState(ignore_op):
     if bvh_index_pos >= len(bvh_index):
-        op.report({'ERROR'}, "Invalid Mo-cap index")
+        if ignore_op != None:
+            op.report({'ERROR'}, "Invalid Mo-cap index")
+        return
+
+    bvh_state = bvh_index[bvh_index_pos]
+
+    bvh_state['start'] = bpy.context.scene.frame_start
+    bvh_state['end'] = bpy.context.scene.frame_end
+
+    cam_pos = bpy.data.objects['Camera'].location.xyz
+    cam_rot = bpy.data.objects['Camera'].rotation_quaternion
+    bvh_state['camera'] = { 'location': [cam_pos[0], cam_pos[1], cam_pos[2]],
+                            'rotation': [cam_rot[0], cam_rot[1], cam_rot[2], cam_rot[3]] }
+
+
+# NB: sometimes called with no op
+def loadCurrentBvhFile(ignore_op):
+    if bvh_index_pos >= len(bvh_index):
+        if ignore_op != None:
+            op.report({'ERROR'}, "Invalid Mo-cap index")
         return
 
     bvh_state = bvh_index[bvh_index_pos]
@@ -174,6 +198,8 @@ class VIEW3D_MoCap_OpenBvhIndexButton(bpy.types.Operator):
             # early version might have indexed non-bvh files...
             keep = [bvh for bvh in bvh_index if bvh['file'][-4:] == '.bvh']
             bvh_index = keep
+
+            bpy.types.Scene.GlimpseBvhIndexPos[1]['max'] = max(0, len(bvh_index) - 1)
 
             for bvh in bvh_index:
                 bvh_file_index[bvh['file']] = bvh
@@ -311,6 +337,10 @@ class MoCapPanel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "TOOLS"
 
+    @classmethod
+    def poll(self, context):
+        return (context.object and context.object.type == 'ARMATURE')
+
     def draw(self, context):
         layout = self.layout
         ob = context.object
@@ -324,7 +354,8 @@ class MoCapPanel(bpy.types.Panel):
         row = layout.row()
         row.operator("glimpse.open_bvh_prev")
         row.operator("glimpse.open_bvh_next")
-        row.label(str(bvh_index_pos) + " of " + str(len(bvh_index)))
+        row.prop(scn, "GlimpseBvhIndexPos", text="")
+        row.label("/ " + str(len(bvh_index)))
         layout.separator()
         layout.operator("glimpse.save_bvh_index")
 
@@ -337,7 +368,7 @@ class MoCapFilePanel(bpy.types.Panel):
 
     @classmethod
     def poll(self, context):
-        return len(bvh_index) > 0
+        return (context.object and context.object.type == 'ARMATURE') and len(bvh_index) > 0
 
     def draw(self, context):
         layout = self.layout
@@ -351,6 +382,7 @@ class MoCapFilePanel(bpy.types.Panel):
 
         layout.separator()
         layout.prop(scn, "GlimpseMoCapBlacklist")
+
 
 
 def register():
@@ -374,7 +406,18 @@ def register():
             set=set_mocap_blacklist
             )
 
+    bpy.types.Scene.GlimpseBvhIndexPos = IntProperty(
+            name="Index",
+            description="Current BVH state index",
+            default=0,
+            min=0,
+            max=100,
+            get=get_bvh_index_pos,
+            set=set_bvh_index_pos
+            )
+
     bpy.utils.register_module(__name__)
+
 
 
 def unregister():
