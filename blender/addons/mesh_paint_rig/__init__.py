@@ -164,13 +164,13 @@ class PaintRigOperator(bpy.types.Operator):
             default=1.0,
             )
 
+    debug = True
+
     @classmethod
     def poll(cls, context):
         return context.active_object is not None
 
     def execute(self, context):
-        self.report({'INFO'}, "Debug 2")
-
         pose_obj = None
         mesh_obj = None
         for obj in bpy.context.selected_objects:
@@ -225,145 +225,178 @@ class PaintRigOperator(bpy.types.Operator):
                     'color_left': hex_to_rgb(0xc3b2ff),
                     'color_right': hex_to_rgb(0xffa9ca),
                     'rel_threshold_limit': 0.8,
+                    'id_left': 1,
+                    'id_left': 2
                 },{
                     'color_left': hex_to_rgb(0x68c0d1),
                     'color_right': hex_to_rgb(0x70d19f),
                     'obj_y+only': True,
+                    'id_left': 3,
+                    'id_right': 4,
                 }],
             },
             'neck_01': {
                 'paints': [{
                     'color': hex_to_rgb(0xff9100),
+                    'id': 5,
                 }],
             },
             'clavicle_l': {
                 'paints': [{
                     'color': hex_to_rgb(0xd73ce0),
-                    'speed': 1.2
+                    'speed': 1.2,
+                    'id': 6,
                 }],
             },
             'clavicle_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x291773),
-                    'speed': 1.2
+                    'speed': 1.2,
+                    'id': 7,
                 }],
             },
             'upperarm_l': {
                 'paints': [{
                     'color': hex_to_rgb(0xffea00),
                     'rel_threshold_limit': 0.5,
+                    'id': 8,
                 },{
                     'color': hex_to_rgb(0xd19795),
                     'obj_y+only': True,
-                    'speed': 0.75
+                    'speed': 0.75,
+                    'id': 9,
                 }],
             },
             'upperarm_r': { 
                 'paints': [{
                     'color': hex_to_rgb(0xaaff00),
                     'rel_threshold_limit': 0.5,
+                    'id': 10,
                 },{
                     'color': hex_to_rgb(0xb3d166),
                     'obj_y+only': True,
-                    'speed': 0.75
+                    'speed': 0.75,
+                    'id': 11,
                 }],
             },
             'lowerarm_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x00ff9d),
                     'rel_threshold_limit': 0.33,
+                    'id': 12,
                 },{
                     'color': hex_to_rgb(0xa1d6ae),
                     'obj_y+only': True,
+                    'id': 13,
                 }],
             },
             'lowerarm_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x00fffb),
                     'rel_threshold_limit': 0.33,
+                    'id': 14,
                 },{
                     'color': hex_to_rgb(0xd6d6d6),
                     'obj_y+only': True,
+                    'id': 15,
                 }],
             },
             'hand_l': {
                 'paints': [{
                     'color': hex_to_rgb(0xd6c56f),
                     'rel_threshold_limit': 0.6,
+                    'id': 16,
                 },{
                     'color': hex_to_rgb(0x00a6ff),
                     'obj_y+only': True,
+                    'id': 17,
                 }],
             },
             'hand_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x35a29b),
                     'rel_threshold_limit': 0.6,
+                    'id': 18,
                 },{
                     'color': hex_to_rgb(0x0026ff),
                     'obj_y+only': True,
+                    'id': 19,
                 }],
             }, 
             'thigh_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x8c00ff),
                     'rel_threshold_limit': 0.45,
+                    'id': 20,
                 },{
                     'color': hex_to_rgb(0x4d274c),
                     'obj_y+only': True,
+                    'id': 21,
                 }],
             },
             'thigh_r': {
                 'paints': [{
                     'color': hex_to_rgb(0xfb00ff),
                     'rel_threshold_limit': 0.45,
+                    'id': 22,
                 },{
                     'color': hex_to_rgb(0xd78469),
                     'obj_y+only': True,
+                    'id': 23,
                 }],
             },
             'calf_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x7d3d28),
                     'rel_threshold_limit': 0.33,
+                    'id': 24,
                 },{
                     'color': hex_to_rgb(0xf28eea),
                     'obj_y+only': True,
+                    'id': 25,
                 }],
             },
             'calf_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x6d723b),
                     'rel_threshold_limit': 0.33,
+                    'id': 26,
                 },{
                     'color': hex_to_rgb(0xffbb19),
                     'obj_y+only': True,
+                    'id': 27,
                 }],
             },
             'foot_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x0e560e),
                     'rel_threshold_limit': 0.65,
+                    'id': 28,
                 },{
                     'color': hex_to_rgb(0xffe394),
                     'obj_y+only': True,
                     'global_z-only': True,
+                    'id': 29,
                 }],
             },
             'foot_r': {
                 'paints': [{
                     'color': hex_to_rgb(0xe193ad),
                     'rel_threshold_limit': 0.65,
+                    'id': 30,
                 },{
                     'color': hex_to_rgb(0x0a821d),
                     'obj_y+only': True,
                     'global_z-only': True,
+                    'id': 31,
                 }],
             },
             'spine_03': {
                 'paints': [{
                     'color_left': hex_to_rgb(0xb28ee9),
                     'color_right': hex_to_rgb(0xe9706d),
+                    'id_left': 32,
+                    'id_right': 33,
                 }],
             },
         }
@@ -497,12 +530,21 @@ class PaintRigOperator(bpy.types.Operator):
 
 
                         if in_bounds:
-                            if 'color' in paint:
-                                bone_col = paint['color']
-                            elif 'color_left' in paint and x_avg >= 0:
-                                bone_col = paint['color_left']
-                            elif 'color_right' in paint and x_avg < 0:
-                                bone_col = paint['color_right']
+                            if self.debug == True:
+                                if 'color' in paint:
+                                    bone_col = paint['color']
+                                elif 'color_left' in paint and x_avg >= 0:
+                                    bone_col = paint['color_left']
+                                elif 'color_right' in paint and x_avg < 0:
+                                    bone_col = paint['color_right']
+                            else:
+                                if 'id' in paint:
+                                    grey_id = paint['id']
+                                elif 'id_left' in paint and x_avg >= 0:
+                                    grey_id = paint['id_left']
+                                elif 'id_right' in paint and x_avg < 0:
+                                    grey_id = paint['id_right']
+                                bone_col = (grey_id * (1/255), grey_id * (1/255), grey_id * (1/255))
 
                             for loop in face.loops:
                                 loop[bm_col_layer] = bone_col
