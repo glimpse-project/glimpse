@@ -282,7 +282,7 @@ class PaintRigOperator(bpy.types.Operator):
             'lowerarm_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x00ff9d),
-                    'rel_threshold_limit': 0.33,
+                    'rel_threshold_limit': 0.30,
                     'id': 12,
                 },{
                     'color': hex_to_rgb(0xa1d6ae),
@@ -293,7 +293,7 @@ class PaintRigOperator(bpy.types.Operator):
             'lowerarm_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x00fffb),
-                    'rel_threshold_limit': 0.33,
+                    'rel_threshold_limit': 0.30,
                     'id': 14,
                 },{
                     'color': hex_to_rgb(0xd6d6d6),
@@ -304,7 +304,7 @@ class PaintRigOperator(bpy.types.Operator):
             'hand_l': {
                 'paints': [{
                     'color': hex_to_rgb(0xd6c56f),
-                    'rel_threshold_limit': 0.6,
+                    'rel_threshold_limit': 1.25,
                     'id': 16,
                 },{
                     'color': hex_to_rgb(0x00a6ff),
@@ -315,7 +315,7 @@ class PaintRigOperator(bpy.types.Operator):
             'hand_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x35a29b),
-                    'rel_threshold_limit': 0.6,
+                    'rel_threshold_limit': 1.25,
                     'id': 18,
                 },{
                     'color': hex_to_rgb(0x0026ff),
@@ -326,7 +326,7 @@ class PaintRigOperator(bpy.types.Operator):
             'thigh_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x8c00ff),
-                    'rel_threshold_limit': 0.45,
+                    'rel_threshold_limit': 0.40,
                     'id': 20,
                 },{
                     'color': hex_to_rgb(0x4d274c),
@@ -337,7 +337,7 @@ class PaintRigOperator(bpy.types.Operator):
             'thigh_r': {
                 'paints': [{
                     'color': hex_to_rgb(0xfb00ff),
-                    'rel_threshold_limit': 0.45,
+                    'rel_threshold_limit': 0.40,
                     'id': 22,
                 },{
                     'color': hex_to_rgb(0xd78469),
@@ -348,7 +348,7 @@ class PaintRigOperator(bpy.types.Operator):
             'calf_l': {
                 'paints': [{
                     'color': hex_to_rgb(0x7d3d28),
-                    'rel_threshold_limit': 0.33,
+                    'rel_threshold_limit': 0.2,
                     'id': 24,
                 },{
                     'color': hex_to_rgb(0xf28eea),
@@ -359,7 +359,7 @@ class PaintRigOperator(bpy.types.Operator):
             'calf_r': {
                 'paints': [{
                     'color': hex_to_rgb(0x6d723b),
-                    'rel_threshold_limit': 0.33,
+                    'rel_threshold_limit': 0.2,
                     'id': 26,
                 },{
                     'color': hex_to_rgb(0xffbb19),
