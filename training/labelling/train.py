@@ -1,9 +1,12 @@
 #!/usr/bin/env python
 
 # Points for optimisation
-# - Asynchronous image decoding in queue, rather than in graph
+# - [DONE] Asynchronous image decoding in queue, rather than in graph
+# - Remove, or reduce usage of feed_dict
+# - Pre-process images before starting (decode, decolorize, resize?)
 # - Carry over shannon entropy calculations from parent node
-# - Process multiple images (or nodes?) at once
+# - Process multiple images (or nodes?) at once (NB: Use of unique_with_count
+#   may make this impossible with the current method)
 
 import os
 import Imath
@@ -16,14 +19,18 @@ import tensorflow as tf
 # Image dimensions
 WIDTH=1080
 HEIGHT=1920
+# Number of images to pre-load in the queue
+QUEUE_BUFFER=50
+# Number of threads to use when pre-loading queue
+QUEUE_THREADS=1
 # Number of epochs to train per node
 N_EPOCHS=100
 # Depth to train tree to
 MAX_DEPTH=20
-# Maximum value to set initial random u/v values at
-MAX_UV = 100
+# Maximum probe offset for random u/v values, in pixel meters
+MAX_UV = 129
 # Maximum value to set initial random t value at
-MAX_T = 0.2
+MAX_T = 0.5
 # Number of pixel samples
 N_SAMP = 2000
 
@@ -84,17 +91,33 @@ for imagefile in find_files('training/color', ['png']):
 for imagefile in find_files('training/depth', ['exr']):
     depth_images.append(imagefile)
 
-# Setup file reader
-label_queue = tf.train.string_input_producer(label_images, shuffle=False)
-depth_queue = tf.train.string_input_producer(depth_images, shuffle=False)
-reader = tf.WholeFileReader()
+n_images = len(label_images)
+assert(n_images == len(depth_images))
 
-# Read in depth and label image
-depth_key, depth_value = reader.read(depth_queue)
-label_key, label_value = reader.read(label_queue)
+# Setup file readers
+label_files = tf.train.string_input_producer(label_images, shuffle=False)
+depth_files = tf.train.string_input_producer(depth_images, shuffle=False)
+label_reader = tf.WholeFileReader()
+depth_reader = tf.WholeFileReader()
+
+# Setup image loaders
+depth_key, depth_value = depth_reader.read(depth_files)
+label_key, label_value = label_reader.read(label_files)
 
 depth_image = tf.py_func(read_depth, [depth_value], tf.float32, stateful=False)
 label_image = tf.image.decode_png(label_value, channels=3)
+
+image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, \
+                           dtypes=(tf.float32, tf.uint8))
+enqueue = image_queue.enqueue((depth_image, label_image))
+
+qr = tf.train.QueueRunner(image_queue, [enqueue] * QUEUE_THREADS)
+tf.train.add_queue_runner(qr)
+
+# Read in depth and label image
+depth_image, label_image = image_queue.dequeue()
+depth_image.set_shape([HEIGHT, WIDTH, 1])
+label_image.set_shape([HEIGHT, WIDTH, 3])
 
 # Pick splitting candidates (1)
 u = tf.placeholder(tf.float32, shape=[2], name='u')
@@ -132,10 +155,10 @@ init = tf.global_variables_initializer()
 session = tf.Session()
 
 with session.as_default():
-    tf.train.start_queue_runners()
-    session.run(init)
+    coord = tf.train.Coordinator()
+    threads = tf.train.start_queue_runners(coord=coord)
 
-    n_images = len(depth_images)
+    session.run(init)
 
     initial_coords = np.stack((np.random.random_integers(0, HEIGHT-1, N_SAMP * n_images), \
                                np.random.random_integers(0, WIDTH-1, N_SAMP * n_images)), \
@@ -236,7 +259,11 @@ with session.as_default():
         del current['name']
         del current['x']
 
+    coord.request_stop()
+
     # Save tree
     print 'Writing tree to \'tree.pkl\''
     with open('tree.pkl', 'w') as f:
         pickle.dump(tree, f)
+
+    coord.join(threads)
