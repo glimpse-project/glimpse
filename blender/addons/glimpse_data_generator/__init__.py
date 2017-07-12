@@ -56,6 +56,60 @@ from bpy_extras.io_utils import (
 import bmesh
 
 
+def add_clothing(op, context, mhclo_relpath, ref_clothing_obj):
+    human_mesh_name = context.active_object.name[:-len("BodyHelperMesh")]
+    helper_mesh = context.active_object
+
+    mhclo_file = bpy.path.abspath(bpy.context.scene.GlimpseClothesRoot + mhclo_relpath)
+    bpy.ops.mhclo.test_clothes(filepath = mhclo_file)
+
+    clothing = bpy.context.selected_objects[0]
+    bpy.context.scene.objects.active = clothing
+
+    clothing.data.materials.append(bpy.data.materials.get("JointLabelsMaterial"))
+
+    bpy.ops.object.modifier_add(type='DATA_TRANSFER')
+    clothing.modifiers['DataTransfer'].object = ref_clothing_obj
+
+    clothing.modifiers['DataTransfer'].use_vert_data = True
+    clothing.modifiers['DataTransfer'].data_types_verts = {'VGROUP_WEIGHTS'}
+    clothing.modifiers['DataTransfer'].vert_mapping = 'TOPOLOGY'
+
+    clothing.modifiers['DataTransfer'].use_loop_data = True
+    clothing.modifiers['DataTransfer'].data_types_loops = {'VCOL'}
+    clothing.modifiers['DataTransfer'].loop_mapping = 'TOPOLOGY'
+
+    bpy.context.scene.objects.active = clothing
+    bpy.ops.object.datalayout_transfer(modifier="DataTransfer")
+    bpy.ops.object.modifier_apply(modifier='DataTransfer')
+
+    bpy.ops.object.select_all(action='DESELECT')
+
+    clothing.select = True
+    bpy.data.objects[human_mesh_name + 'PoseObject'].select = True
+    bpy.context.scene.objects.active = bpy.data.objects[human_mesh_name + 'PoseObject']
+
+    bpy.ops.object.parent_set(type='ARMATURE_NAME')
+
+
+class AddHoodieOperator(bpy.types.Operator):
+    """Adds an item of clothing to the active object"""
+
+    bl_idname = "glimpse.add_hoodie"
+    bl_label = "Add Hoodie"
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and "BodyHelperMesh" in context.active_object.name
+
+    def execute(self, context):
+        mhclo_relpath = os.path.join("hoodie", "hooded_cardigan.mhclo")
+        ref_obj = bpy.data.objects['hooded_cardigan_reference']
+        add_clothing(self, context, mhclo_relpath, ref_obj)
+
+        return {'FINISHED'}
+
+
 class RigGeneratorOperator(bpy.types.Operator):
     """Generates Glimpse training data"""
 
@@ -102,6 +156,8 @@ class GeneratePanel(bpy.types.Panel):
         ob = context.object
         scn = context.scene
         
+        layout.separator()
+        layout.prop(scn, "GlimpseClothesRoot", text="Clothes")
         layout.separator()
         layout.prop(scn, "GlimpseDebug")
         layout.separator()
@@ -386,6 +442,12 @@ class MoCapFilePanel(bpy.types.Panel):
 
 
 def register():
+    bpy.types.Scene.GlimpseClothesRoot = StringProperty(
+            name="Clothes Directory",
+            description="Root directory for makehuman clothes",
+            subtype='DIR_PATH',
+            )
+
     bpy.types.Scene.GlimpseBvhRoot = StringProperty(
             name="BVH Directory",
             description="Root directory for .bvh motion capture files",
