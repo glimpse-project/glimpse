@@ -10,6 +10,7 @@
 #   we want (count_occurences or something)
 
 import os
+import math
 import Imath
 import pickle
 import StringIO
@@ -27,15 +28,17 @@ QUEUE_BUFFER=50
 # Number of threads to use when pre-loading queue
 QUEUE_THREADS=1
 # Number of epochs to train per node (paper specifies 2000)
-N_EPOCHS=2000
+N_EPOCHS=100
+# How frequently to display epoch progress
+DISPLAY_STEP=10
 # Depth to train tree to (paper specifies 20)
-MAX_DEPTH=1
+MAX_DEPTH=20
 # Maximum probe offset for random u/v values, in pixel meters (paper specifies 129)
-MAX_UV = 129
+MAX_UV = 129.0
 # Threshold range to test offset parameters with (paper specifies testing 50)
-# (nb: Perhaps they searched, rather than testing a range?)
-MIN_T = -0.5
-MAX_T = 0.5
+# (nb: Perhaps they searched, rather than testing a range? Or didn't distribute
+#      linearly over the range?)
+RANGE_T = 1.29
 N_T = 50
 # Number of pixel samples (paper specifies 2000)
 N_SAMP = 2000
@@ -145,7 +148,7 @@ def testImage(depth_image, label_image, u, v, x):
     hq, q, x_labels, x_label_prob = \
             computeLabelHistogramAndEntropy(label_pixels)
 
-    t_inc = (MAX_T - MIN_T) / (float(N_T) - 1.0)
+    t_inc = RANGE_T / (float(N_T) - 0.5)
     def testThreshold(t, meta, meta_indices, lindices, rindices):
         lindex, rindex, G = computeGainAndLRIndices(fdepth_pixels, label_pixels, t, hq, q)
 
@@ -173,9 +176,9 @@ def testImage(depth_image, label_image, u, v, x):
         return tf.add(t, t_inc), meta, meta_indices, lindices, rindices
 
     _, meta, meta_indices, lindices, rindices = tf.while_loop(\
-        lambda t, meta, meta_indices, lindices, rindices: t <= MAX_T, \
+        lambda t, meta, meta_indices, lindices, rindices: t <= RANGE_T/2.0, \
         testThreshold, \
-        [tf.constant(MIN_T), tf.zeros([0, 2], dtype=tf.float32), \
+        [tf.constant(-RANGE_T/2.0), tf.zeros([0, 2], dtype=tf.float32), \
          tf.zeros([0, 2, 2], dtype=tf.int32), \
          tf.zeros([0], dtype=tf.int32), tf.zeros([0], dtype=tf.int32)], \
         shape_invariants=[tf.TensorShape([]), \
@@ -252,7 +255,7 @@ def collect_results(i, all_meta, all_meta_indices, all_lindices, \
     all_x_labels = tf.concat([all_x_labels, x_labels], axis=0)
     all_x_label_probs = tf.concat([all_x_label_probs, x_label_prob], axis=0)
 
-    return tf.subtract(i, 1), all_meta, all_meta_indices, all_lindices, \
+    return tf.add(i, 1), all_meta, all_meta_indices, all_lindices, \
         all_rindices, all_n_labels, all_x_labels, all_x_label_probs
 
 # meta is [N_T, 2], float32
@@ -281,9 +284,9 @@ all_x_label_probs = tf.zeros([0], dtype=tf.float32)
 # Run batch_size iterations
 _i, all_meta, all_meta_indices, all_lindices, all_rindices, all_n_labels, \
     all_x_labels, all_x_label_probs = tf.while_loop( \
-        lambda i, a, b, c, d, e, f, g: i >= 0, \
+        lambda i, a, b, c, d, e, f, g: i < batch_size, \
         collect_results, \
-        [batch_size - 1, all_meta, all_meta_indices, all_lindices, \
+        [0, all_meta, all_meta_indices, all_lindices, \
          all_rindices, all_n_labels, all_x_labels, all_x_label_probs], \
         shape_invariants=[tf.TensorShape([]), \
                           tf.TensorShape([None, N_T, 2]), \
@@ -330,14 +333,17 @@ with session.as_default():
         print 'Training node (%s) (Average %d pixels)' % \
             (current['name'], n_pixels)
 
-        for epoch in range(N_EPOCHS):
-            #print '\t(%s) Epoch %d' % (current['name'], epoch)
+        for epoch in range(1, N_EPOCHS + 1):
+            if epoch == 1 or \
+               epoch % DISPLAY_STEP == 0 or \
+               epoch == N_EPOCHS:
+                print '\t(%s) Epoch %d' % (current['name'], epoch)
 
             # Initialise trial splitting candidates
-            c_u = [np.random.randint(-MAX_UV, MAX_UV), \
-                   np.random.randint(-MAX_UV, MAX_UV)]
-            c_v = [np.random.randint(-MAX_UV, MAX_UV), \
-                   np.random.randint(-MAX_UV, MAX_UV)]
+            c_u = [np.random.uniform(-MAX_UV, MAX_UV), \
+                   np.random.uniform(-MAX_UV, MAX_UV)]
+            c_v = [np.random.uniform(-MAX_UV, MAX_UV), \
+                   np.random.uniform(-MAX_UV, MAX_UV)]
 
             labels = []
             gains = {}
@@ -368,16 +374,28 @@ with session.as_default():
                         t = meta[k][0]
                         t_g = meta[k][1]
 
+                        # TODO - Figure out how to bail out early in the graph
+                        #        when there are zero pixels
+                        if math.isnan(t_g) or t_g < 0.0:
+                            t_g = 0.0
+
                         lstart = lindex_base + meta_indices[k][0][0]
                         lend = lindex_base + meta_indices[k][0][1]
-                        rstart = lindex_base + meta_indices[k][1][0]
-                        rend = lindex_base + meta_indices[k][1][1]
+                        rstart = rindex_base + meta_indices[k][1][0]
+                        rend = rindex_base + meta_indices[k][1][1]
 
                         tt_lindices = t_lindices[lstart:lend]
                         tt_rindices = t_rindices[rstart:rend]
 
                         t_lcoords = current['x'][j][tt_lindices]
                         t_rcoords = current['x'][j][tt_rindices]
+
+                        assert(len(t_lcoords) == lend - lstart), \
+                            't_lcoords malformed (%d != %d)' % \
+                            (len(t_lcoords), (lend - lstart))
+                        assert(len(t_rcoords) == rend - rstart), \
+                            't_rcoords malformed (%d != %d)' % \
+                            (len(t_rcoords), (rend - rstart))
 
                         if t not in gains:
                             gains[t] = []
@@ -389,8 +407,9 @@ with session.as_default():
                     rindex_base += meta_indices[-1][1][1]
 
                     label_end = label_base + t_n_labels[j]
-                    labels.append(zip(t_labels[label_base:label_end], \
-                                      t_label_probs[label_base:label_end]))
+                    if len(current['x'][j]) > 0:
+                        labels.append(zip(t_labels[label_base:label_end], \
+                                          t_label_probs[label_base:label_end]))
                     label_base = label_end
 
             # Accumulate threshold gains to find the most effective 't' for
@@ -467,17 +486,24 @@ with session.as_default():
                 print '\t\tv = ' + str(best_v)
                 print '\t\tt = ' + str(best_t)
 
-        # Add the next nodes to train to the queue
-        # TODO: Is the logic here correct?
-        if nextNodes[0]['x'] is not None and \
-           nextNodes[1]['x'] is not None and \
+        # If gain hasn't increased for any images, there's no use in going
+        # down this branch further.
+        # TODO: Maybe this should be a threshold rather than just zero.
+        sum_gain = 0
+        for gain in gains[best_t]:
+            sum_gain += gain['g']
+
+        if sum_gain > 0.0 and \
            len(current['name']) < MAX_DEPTH:
+            # Store the trained u,v,t parameters
             current['u'] = best_u
             current['v'] = best_v
             current['t'] = best_t
+
+            # Add the next nodes to train to the queue
             queue.extend(nextNodes)
         else:
-            # This is a leaf node, store the probabilities
+            # This is a leaf node, store the label probabilities
             print '\tLeaf node:'
             label_probs = {}
             for probs in best_label_probs:
@@ -495,8 +521,11 @@ with session.as_default():
 
         # Save finished node to tree
         tree[current['name']] = current
+
+        # Remove unneeded data from the node
         del current['name']
         del current['x']
+        del current['xl']
 
     coord.request_stop()
 
