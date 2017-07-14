@@ -17,24 +17,29 @@ import StringIO
 import numpy as np
 import OpenEXR as exr
 import tensorflow as tf
+from datetime import datetime
 
 # Image dimensions
 WIDTH=1080
 HEIGHT=1920
+# Pixels per meter
+PPM=1158.0
 # Maximum number of images to process at once
-BATCH_SIZE=50
+BATCH_SIZE=25
 # Number of images to pre-load in the queue
 QUEUE_BUFFER=50
 # Number of threads to use when pre-loading queue
 QUEUE_THREADS=1
-# Number of epochs to train per node (paper specifies 2000)
-N_EPOCHS=500
+# Number of epochs to train per node
+N_EPOCHS=10
+# Maximum number of u,v pairs to test per epoch (paper specifies 2000)
+COMBO_SIZE=50
 # How frequently to display epoch progress
-DISPLAY_STEP=25
+DISPLAY_STEP=1
 # Depth to train tree to (paper specifies 20)
 MAX_DEPTH=20
-# Maximum probe offset for random u/v values (paper specifies 129 pixel meters)
-MAX_UV = 2000.0
+# The range to probe for generated u/v pairs (paper specifies 129 pixel meters)
+RANGE_UV = 1.29 * PPM
 # Threshold range to test offset parameters with (paper specifies testing 50)
 # (nb: Perhaps they searched, rather than testing a range? Or didn't distribute
 #      linearly over the range?)
@@ -139,14 +144,9 @@ def computeGainAndLRIndices(fdepth_pixels, label_pixels, t, hq, q):
     # candidate u,v pair produce the best accumulated gain over all images.
     return lindex, rindex, G
 
-def testImage(depth_image, label_image, u, v, x):
+def testImage(depth_image, label_image, u, v, x, label_pixels, hq, q):
     # Compute the set of pixels that will be used for partitioning
     fdepth_pixels = computeDepthPixels(depth_image, u, v, x)
-
-    # Compute label histogram and shannon entropy
-    label_pixels = getLabelPixels(label_image, x)
-    hq, q, x_labels, x_label_prob = \
-            computeLabelHistogramAndEntropy(label_pixels)
 
     t_inc = RANGE_T / (float(N_T) - 0.5)
     def testThreshold(t, meta, meta_indices, lindices, rindices):
@@ -187,7 +187,7 @@ def testImage(depth_image, label_image, u, v, x):
                           tf.TensorShape([None]), \
                           tf.TensorShape([None])])
 
-    return meta, meta_indices, lindices, rindices, x_labels, x_label_prob
+    return meta, meta_indices, lindices, rindices
 
 # Collect training data
 label_images = []
@@ -222,21 +222,19 @@ tf.train.add_queue_runner(qr)
 
 ##############################
 
-# Read in depth and label image
-depth_image, label_image = image_queue.dequeue()
-depth_image.set_shape([HEIGHT, WIDTH, 1])
-label_image.set_shape([HEIGHT, WIDTH, 3])
-
 # Number of iterations to run (number of images to test)
 batch_size = tf.placeholder(tf.int32, shape=[], name='batch_size')
 
+# Number of u,v pairs to test
+combo_size = tf.placeholder(tf.int32, shape=[], name='combo_size')
+
 # Pick splitting candidates (1)
-u = tf.placeholder(tf.float32, shape=[2], name='u')
-v = tf.placeholder(tf.float32, shape=[2], name='v')
+all_u = tf.placeholder(tf.float32, shape=[None, 2], name='all_u')
+all_v = tf.placeholder(tf.float32, shape=[None, 2], name='all_v')
 
 # Pixel coordinates to test
-all_x = tf.placeholder(tf.int32, shape=[None, None, 2], name='xs')
-len_x = tf.placeholder(tf.int32, shape=[None], name='xl')
+all_x = tf.placeholder(tf.int32, shape=[None, None, 2], name='pixels')
+len_x = tf.placeholder(tf.int32, shape=[None], name='dim_pixels')
 
 def collect_results(i, all_meta, all_meta_indices, all_lindices, \
                     all_rindices, all_n_labels, \
@@ -246,37 +244,65 @@ def collect_results(i, all_meta, all_meta_indices, all_lindices, \
     depth_image.set_shape([HEIGHT, WIDTH, 1])
     label_image.set_shape([HEIGHT, WIDTH, 3])
 
-    # Run an iteration
+    # Slice out the appropriate x values for the image
     x = tf.slice(all_x, [i, 0, 0], [1, len_x[i], 2])[0]
-    meta, meta_indices, lindices, rindices, x_labels, x_label_prob = \
-        testImage(depth_image, label_image, u, v, x)
 
-    # Collect the run metadata
-    all_meta = tf.concat([all_meta, [meta]], axis=0)
-    all_meta_indices = tf.concat([all_meta_indices, [meta_indices]], axis=0)
-    all_lindices = tf.concat([all_lindices, lindices], axis=0)
-    all_rindices = tf.concat([all_rindices, rindices], axis=0)
-    all_n_labels = tf.concat([all_n_labels, [tf.size(x_labels)]], axis=0)
+    # Compute label pixels, histogram shannon entropy
+    label_pixels = getLabelPixels(label_image, x)
+    hq, q, x_labels, x_label_prob = computeLabelHistogramAndEntropy(label_pixels)
+
+    # Test u,v pairs against a range of thresholds
+    def test_uv(i, all_meta, all_meta_indices, all_lindices, all_rindices):
+        # Slice out the appropriate u and v
+        u = tf.slice(all_u, [i, 0], [1, 2])[0]
+        v = tf.slice(all_v, [i, 0], [1, 2])[0]
+
+        # Run an iteration
+        meta, meta_indices, lindices, rindices = \
+            testImage(depth_image, label_image, u, v, x, label_pixels, hq, q)
+
+        # Collect the run metadata
+        # meta is [N_T, 2], float32
+        #   (threshold, gain)
+        all_meta = tf.concat([all_meta, [meta]], axis=0)
+
+        # meta_indices is [N_T,2,2], int32
+        #   (pairs of indices into lindices and rindices per threshold)
+        all_meta_indices = tf.concat([all_meta_indices, [meta_indices]], axis=0)
+
+        # lindices and rindices are [?], int32
+        #   (indices into x for left and right branches, per threshold)
+        all_lindices = tf.concat([all_lindices, lindices], axis=0)
+        all_rindices = tf.concat([all_rindices, rindices], axis=0)
+
+        return tf.add(i, 1), all_meta, all_meta_indices, all_lindices, \
+            all_rindices
+
+    _i, all_meta, all_meta_indices, all_lindices, all_rindices = \
+        tf.while_loop( \
+            lambda i, a, b, c, d: i < combo_size, \
+            test_uv, \
+            [0, all_meta, all_meta_indices, all_lindices, all_rindices], \
+            shape_invariants=[tf.TensorShape([]), \
+                              tf.TensorShape([None, N_T, 2]), \
+                              tf.TensorShape([None, N_T, 2, 2]), \
+                              tf.TensorShape([None]), \
+                              tf.TensorShape([None])])
+
+    # Collect label histogram data
+    # xlabels is [?], int32
+    #   (Unique labels for pixels in x)
     all_x_labels = tf.concat([all_x_labels, x_labels], axis=0)
+
+    # x_label_prob is [len(xlabels)], float32
+    #   (Distribution of each label in xlabels)
     all_x_label_probs = tf.concat([all_x_label_probs, x_label_prob], axis=0)
+
+    # Store the size of the label histogram for later indexing
+    all_n_labels = tf.concat([all_n_labels, [tf.size(x_labels)]], axis=0)
 
     return tf.add(i, 1), all_meta, all_meta_indices, all_lindices, \
         all_rindices, all_n_labels, all_x_labels, all_x_label_probs
-
-# meta is [N_T, 2], float32
-#   (threshold, gain)
-
-# meta_indices is [N_T,2,2], int32
-#   (pairs of indices into lindices and rindices per threshold)
-
-# lindices and rindices are [?], int32
-#   (indices into x for left and right branches per threshold)
-
-# xlabels is [?], int32
-#   (Unique labels for pixels in x)
-
-# x_label_prob is [len(xlabels)], float32
-#   (Distribution of each label in xlabels)
 
 all_meta = tf.zeros([0, N_T, 2], dtype=tf.float32)
 all_meta_indices = tf.zeros([0, N_T, 2, 2], dtype=tf.int32)
@@ -286,7 +312,7 @@ all_n_labels = tf.zeros([0], dtype=tf.int32)
 all_x_labels = tf.zeros([0], dtype=tf.int32)
 all_x_label_probs = tf.zeros([0], dtype=tf.float32)
 
-# Run batch_size iterations
+# Run batch_size iterations over combo_size u,v pairs
 _i, all_meta, all_meta_indices, all_lindices, all_rindices, all_n_labels, \
     all_x_labels, all_x_label_probs = tf.while_loop( \
         lambda i, a, b, c, d, e, f, g: i < batch_size, \
@@ -324,6 +350,7 @@ with session.as_default():
     while len(queue) > 0:
         current = queue.pop(0)
         best_G = None
+        best_c = None
         best_u = None
         best_v = None
         best_t = None
@@ -331,10 +358,17 @@ with session.as_default():
         best_isNotLeaf = False
         nextNodes = []
 
+        # If this is the deepest node in the tree, don't waste time calculating
+        # u,v pairs and their results.
+        c_combo_size = COMBO_SIZE
+        if len(current['name']) >= MAX_DEPTH:
+            c_combo_size = 0
+
         n_pixels = 0
         for coords in current['x']:
             n_pixels += len(coords)
         n_pixels /= len(current['x'])
+        begin = datetime.utcnow()
         print 'Training node (%s) (Average %d pixels)' % \
             (current['name'], n_pixels)
 
@@ -342,13 +376,19 @@ with session.as_default():
             if epoch == 1 or \
                epoch % DISPLAY_STEP == 0 or \
                epoch == N_EPOCHS:
-                print '\t(%s) Epoch %d' % (current['name'], epoch)
+                now = datetime.utcnow()
+                seconds = (now - begin).total_seconds()
+                minutes = seconds / 60
+                hours = minutes / 60
+                seconds = seconds % 60
+                minutes = minutes % 60
+                print '\t(%s) Epoch %dx%d (%d) (%02d:%02d:%02d elapsed)' % \
+                    (current['name'], epoch, COMBO_SIZE, epoch * COMBO_SIZE, \
+                     hours, minutes, seconds)
 
             # Initialise trial splitting candidates
-            c_u = [np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0), \
-                   np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0)]
-            c_v = [np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0), \
-                   np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0)]
+            c_u = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (c_combo_size, 2))
+            c_v = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (c_combo_size, 2))
 
             labels = []
             gains = {}
@@ -356,63 +396,70 @@ with session.as_default():
             batch = 0
             while batch < n_images:
                 c_batch_size = min(n_images - batch, BATCH_SIZE)
+
                 t_meta, t_meta_indices, t_lindices, t_rindices, t_n_labels, \
                     t_labels, t_label_probs = \
                         session.run((all_meta, all_meta_indices, all_lindices, \
                                      all_rindices, all_n_labels, all_x_labels, \
                                      all_x_label_probs), \
-                                    feed_dict={u: c_u, v: c_v, \
-                                               all_x: current['x'], \
-                                               len_x: current['xl'], \
-                                               batch_size: c_batch_size})
-                batch += BATCH_SIZE
+                                    feed_dict={all_u: c_u, \
+                                               all_v: c_v, \
+                                               all_x: current['x'][batch:(batch+c_batch_size)], \
+                                               len_x: current['xl'][batch:(batch+c_batch_size)], \
+                                               batch_size: c_batch_size, \
+                                               combo_size: c_combo_size})
+                batch += c_batch_size
 
                 lindex_base = 0
                 rindex_base = 0
                 label_base = 0
 
-                for j in range(len(t_meta)):
-                    meta = t_meta[j]
-                    meta_indices = t_meta_indices[j]
+                for i in range(c_batch_size):
+                    for j in range(c_combo_size):
+                        idx = (i * c_combo_size) + j
+                        meta = t_meta[idx]
+                        meta_indices = t_meta_indices[idx]
 
-                    for k in range(len(meta)) :
-                        t = meta[k][0]
-                        t_g = meta[k][1]
+                        for k in range(len(meta)) :
+                            t = meta[k][0]
+                            t_g = meta[k][1]
 
-                        # TODO - Figure out how to bail out early in the graph
-                        #        when there are zero pixels
-                        if math.isnan(t_g) or t_g < 0.0:
-                            t_g = 0.0
+                            # TODO - Figure out how to bail out early in the graph
+                            #        when there are zero pixels
+                            if math.isnan(t_g) or t_g < 0.0:
+                                t_g = 0.0
 
-                        lstart = lindex_base + meta_indices[k][0][0]
-                        lend = lindex_base + meta_indices[k][0][1]
-                        rstart = rindex_base + meta_indices[k][1][0]
-                        rend = rindex_base + meta_indices[k][1][1]
+                            lstart = lindex_base + meta_indices[k][0][0]
+                            lend = lindex_base + meta_indices[k][0][1]
+                            rstart = rindex_base + meta_indices[k][1][0]
+                            rend = rindex_base + meta_indices[k][1][1]
 
-                        tt_lindices = t_lindices[lstart:lend]
-                        tt_rindices = t_rindices[rstart:rend]
+                            tt_lindices = t_lindices[lstart:lend]
+                            tt_rindices = t_rindices[rstart:rend]
 
-                        t_lcoords = current['x'][j][tt_lindices]
-                        t_rcoords = current['x'][j][tt_rindices]
+                            t_lcoords = current['x'][i][tt_lindices]
+                            t_rcoords = current['x'][i][tt_rindices]
 
-                        assert(len(t_lcoords) == lend - lstart), \
-                            't_lcoords malformed (%d != %d)' % \
-                            (len(t_lcoords), (lend - lstart))
-                        assert(len(t_rcoords) == rend - rstart), \
-                            't_rcoords malformed (%d != %d)' % \
-                            (len(t_rcoords), (rend - rstart))
+                            assert(len(t_lcoords) == lend - lstart), \
+                                't_lcoords malformed (%d != %d)' % \
+                                (len(t_lcoords), (lend - lstart))
+                            assert(len(t_rcoords) == rend - rstart), \
+                                't_rcoords malformed (%d != %d)' % \
+                                (len(t_rcoords), (rend - rstart))
 
-                        if t not in gains:
-                            gains[t] = []
+                            key = (t, j)
+                            if key not in gains:
+                                gains[key] = []
 
-                        gains[t].append({ 'g': t_g, 'lcoords': t_lcoords, \
-                                          'rcoords': t_rcoords })
+                            gains[key].append({ 'g': t_g, \
+                                                'lcoords': t_lcoords, \
+                                                'rcoords': t_rcoords })
 
-                    lindex_base += meta_indices[-1][0][1]
-                    rindex_base += meta_indices[-1][1][1]
+                        lindex_base += meta_indices[-1][0][1]
+                        rindex_base += meta_indices[-1][1][1]
 
-                    label_end = label_base + t_n_labels[j]
-                    if len(current['x'][j]) > 0:
+                    label_end = label_base + t_n_labels[i]
+                    if len(current['x'][i]) > 0:
                         labels.append(zip(t_labels[label_base:label_end], \
                                           t_label_probs[label_base:label_end]))
                     label_base = label_end
@@ -421,13 +468,14 @@ with session.as_default():
             # this u,v pair.
             gain = -1
             threshold = -1
+            combo = -1
             lcoords = None
             nlcoords = None
             maxlcoords = -1
             rcoords = None
             nrcoords = None
             maxrcoords = -1
-            for t, gain_data in gains.items():
+            for key, gain_data in gains.items():
                 cum_gain = 0
                 cum_lcoords = []
                 cum_rcoords = []
@@ -451,7 +499,8 @@ with session.as_default():
                         cum_maxrcoords = rcoordlen
                 if cum_gain > gain:
                     gain = cum_gain
-                    threshold = t
+                    threshold = key[0]
+                    combo = key[1]
                     lcoords = cum_lcoords
                     rcoords = cum_rcoords
                     nlcoords = cum_nlcoords
@@ -462,40 +511,45 @@ with session.as_default():
             gain /= n_images
 
             if best_G is None or gain > best_G:
-                best_G = gain
-                best_u = c_u
-                best_v = c_v
-                best_t = threshold
                 best_label_probs = labels
 
-                # Pad out (lr)coords
-                if lcoords is not None:
-                    for i in range(len(lcoords)):
-                        lcoords[i] = \
-                            np.resize(np.array(lcoords[i], dtype=np.int32), \
-                                      (maxlcoords, 2))
-                if rcoords is not None:
-                    for i in range(len(rcoords)):
-                        rcoords[i] = \
-                            np.resize(np.array(rcoords[i], dtype=np.int32), \
-                                      (maxrcoords, 2))
+                # Because we short-circuit everything except label calculation
+                # on the last node of the tree, these values can be unset
+                if gain != -1:
+                    best_G = gain
+                    best_u = c_u[combo]
+                    best_v = c_v[combo]
+                    best_t = threshold
 
-                nextNodes = [{ 'name': current['name'] + 'l', \
-                               'x': lcoords, \
-                               'xl': nlcoords }, \
-                             { 'name': current['name'] + 'r', \
-                               'x': rcoords, \
-                               'xl': nrcoords }]
-                print '\t\tG = ' + str(best_G)
-                print '\t\tu = ' + str(best_u)
-                print '\t\tv = ' + str(best_v)
-                print '\t\tt = ' + str(best_t)
-                print '\t\tl,r = %d, %d' % (maxlcoords, maxrcoords)
+                    # Pad out (lr)coords
+                    if lcoords is not None:
+                        for i in range(len(lcoords)):
+                            lcoords[i] = \
+                                np.resize(np.array(lcoords[i], dtype=np.int32), \
+                                          (maxlcoords, 2))
+                    if rcoords is not None:
+                        for i in range(len(rcoords)):
+                            rcoords[i] = \
+                                np.resize(np.array(rcoords[i], dtype=np.int32), \
+                                          (maxrcoords, 2))
+
+                    nextNodes = [{ 'name': current['name'] + 'l', \
+                                   'x': lcoords, \
+                                   'xl': nlcoords }, \
+                                 { 'name': current['name'] + 'r', \
+                                   'x': rcoords, \
+                                   'xl': nrcoords }]
+                    print '\t\tG = ' + str(best_G)
+                    print '\t\tu = ' + str(best_u)
+                    print '\t\tv = ' + str(best_v)
+                    print '\t\tt = ' + str(best_t)
+                    print '\t\tl,r = %d, %d' % (maxlcoords, maxrcoords)
 
         # If gain hasn't increased for any images, there's no use in going
         # down this branch further.
         # TODO: Maybe this should be a threshold rather than just zero.
-        if best_G > 0.0 and \
+        if best_G is not None and \
+           best_G > 0.0 and \
            len(current['name']) < MAX_DEPTH:
             # Store the trained u,v,t parameters
             current['u'] = best_u
@@ -507,10 +561,10 @@ with session.as_default():
         else:
             # This is a leaf node, store the label probabilities
             excuse = None
-            if best_G <= 0.0:
-                excuse = 'No gain increase'
-            elif len(current['name']) >= MAX_DEPTH:
+            if len(current['name']) >= MAX_DEPTH:
                 excuse = 'Maximum depth (%d) reached' % (MAX_DEPTH)
+            elif best_G <= 0.0:
+                excuse = 'No gain increase'
 
             print '\tLeaf node (%s):' % (excuse)
             label_probs = {}
@@ -522,7 +576,7 @@ with session.as_default():
                     else:
                         label_probs[key] += prob[1]
             for key, value in label_probs.items():
-                label_probs[key] = value / len(best_label_probs)
+                label_probs[key] = value / float(len(best_label_probs))
                 print '\t\t%8d - %0.3f' % (key, label_probs[key])
 
             current['label_probs'] = label_probs
