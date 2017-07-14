@@ -241,6 +241,11 @@ len_x = tf.placeholder(tf.int32, shape=[None], name='xl')
 def collect_results(i, all_meta, all_meta_indices, all_lindices, \
                     all_rindices, all_n_labels, \
                     all_x_labels, all_x_label_probs):
+    # Read in depth and label image
+    depth_image, label_image = image_queue.dequeue()
+    depth_image.set_shape([HEIGHT, WIDTH, 1])
+    label_image.set_shape([HEIGHT, WIDTH, 3])
+
     # Run an iteration
     x = tf.slice(all_x, [i, 0, 0], [1, len_x[i], 2])[0]
     meta, meta_indices, lindices, rindices, x_labels, x_label_prob = \
@@ -340,10 +345,10 @@ with session.as_default():
                 print '\t(%s) Epoch %d' % (current['name'], epoch)
 
             # Initialise trial splitting candidates
-            c_u = [np.random.uniform(-MAX_UV, MAX_UV), \
-                   np.random.uniform(-MAX_UV, MAX_UV)]
-            c_v = [np.random.uniform(-MAX_UV, MAX_UV), \
-                   np.random.uniform(-MAX_UV, MAX_UV)]
+            c_u = [np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0), \
+                   np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0)]
+            c_v = [np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0), \
+                   np.random.uniform(-MAX_UV/2.0, MAX_UV/2.0)]
 
             labels = []
             gains = {}
