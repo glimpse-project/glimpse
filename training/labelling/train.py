@@ -28,13 +28,13 @@ QUEUE_BUFFER=50
 # Number of threads to use when pre-loading queue
 QUEUE_THREADS=1
 # Number of epochs to train per node (paper specifies 2000)
-N_EPOCHS=100
+N_EPOCHS=500
 # How frequently to display epoch progress
-DISPLAY_STEP=10
+DISPLAY_STEP=25
 # Depth to train tree to (paper specifies 20)
 MAX_DEPTH=20
-# Maximum probe offset for random u/v values, in pixel meters (paper specifies 129)
-MAX_UV = 129.0
+# Maximum probe offset for random u/v values (paper specifies 129 pixel meters)
+MAX_UV = 2000.0
 # Threshold range to test offset parameters with (paper specifies testing 50)
 # (nb: Perhaps they searched, rather than testing a range? Or didn't distribute
 #      linearly over the range?)
@@ -485,15 +485,12 @@ with session.as_default():
                 print '\t\tu = ' + str(best_u)
                 print '\t\tv = ' + str(best_v)
                 print '\t\tt = ' + str(best_t)
+                print '\t\tl,r = %d, %d' % (maxlcoords, maxrcoords)
 
         # If gain hasn't increased for any images, there's no use in going
         # down this branch further.
         # TODO: Maybe this should be a threshold rather than just zero.
-        sum_gain = 0
-        for gain in gains[best_t]:
-            sum_gain += gain['g']
-
-        if sum_gain > 0.0 and \
+        if best_G > 0.0 and \
            len(current['name']) < MAX_DEPTH:
             # Store the trained u,v,t parameters
             current['u'] = best_u
@@ -504,7 +501,13 @@ with session.as_default():
             queue.extend(nextNodes)
         else:
             # This is a leaf node, store the label probabilities
-            print '\tLeaf node:'
+            excuse = None
+            if best_G <= 0.0:
+                excuse = 'No gain increase'
+            elif len(current['name']) >= MAX_DEPTH:
+                excuse = 'Maximum depth (%d) reached' % (MAX_DEPTH)
+
+            print '\tLeaf node (%s):' % (excuse)
             label_probs = {}
             for probs in best_label_probs:
                 for prob in probs:
