@@ -31,7 +31,7 @@ QUEUE_BUFFER=50
 # Number of threads to use when pre-loading queue
 QUEUE_THREADS=1
 # Number of epochs to train per node
-N_EPOCHS=10
+N_EPOCHS=40
 # Maximum number of u,v pairs to test per epoch (paper specifies 2000)
 COMBO_SIZE=50
 # How frequently to display epoch progress
@@ -45,6 +45,7 @@ RANGE_UV = 1.29 * PPM
 #      linearly over the range?)
 RANGE_T = 1.29
 N_T = 50
+T_INC = RANGE_T / (float(N_T) - 0.5)
 # Number of pixel samples (paper specifies 2000)
 N_SAMP = 2000
 
@@ -71,7 +72,7 @@ def read_depth(data):
 def get_offset_indices(image, pixels, x, u, v):
     # Calculate the two inner terms of equation (1) from 3.2 of the paper
     # for each candidate pixel.
-    extents = tf.subtract(tf.shape(image)[0:2], 1)
+    extents = tf.shape(image)[0:2] - 1
     n_pixels = tf.size(pixels)
     clip = tf.reshape(tf.tile(extents, [n_pixels]), [n_pixels, 2])
     pixels = tf.cast(tf.reshape(pixels, [n_pixels]), tf.float32)
@@ -88,8 +89,8 @@ def get_offset_indices(image, pixels, x, u, v):
     # that references outside of the image should essentially result in the
     # background depth - we can assure this by processing the input images.
     x = tf.cast(x, tf.float32)
-    uindices = tf.clip_by_value(tf.cast(tf.add(x, u), tf.int32), 0, clip)
-    vindices = tf.clip_by_value(tf.cast(tf.add(x, v), tf.int32), 0, clip)
+    uindices = tf.clip_by_value(tf.cast(x + u, tf.int32), 0, clip)
+    vindices = tf.clip_by_value(tf.cast(x + v, tf.int32), 0, clip)
 
     return uindices, vindices
 
@@ -148,7 +149,6 @@ def testImage(depth_image, label_image, u, v, x, label_pixels, hq, q):
     # Compute the set of pixels that will be used for partitioning
     fdepth_pixels = computeDepthPixels(depth_image, u, v, x)
 
-    t_inc = RANGE_T / (float(N_T) - 0.5)
     def testThreshold(t, meta, meta_indices, lindices, rindices):
         lindex, rindex, G = computeGainAndLRIndices(fdepth_pixels, label_pixels, t, hq, q)
 
@@ -173,7 +173,7 @@ def testImage(depth_image, label_image, u, v, x, label_pixels, hq, q):
         lindices = tf.concat([lindices, lindex], axis=0)
         rindices = tf.concat([rindices, rindex], axis=0)
 
-        return tf.add(t, t_inc), meta, meta_indices, lindices, rindices
+        return t + T_INC, meta, meta_indices, lindices, rindices
 
     _, meta, meta_indices, lindices, rindices = tf.while_loop(\
         lambda t, meta, meta_indices, lindices, rindices: t <= RANGE_T/2.0, \
@@ -203,12 +203,11 @@ assert(n_images == len(depth_images))
 # Setup file readers
 label_files = tf.train.string_input_producer(label_images, shuffle=False)
 depth_files = tf.train.string_input_producer(depth_images, shuffle=False)
-label_reader = tf.WholeFileReader()
-depth_reader = tf.WholeFileReader()
+reader = tf.WholeFileReader()
 
 # Setup image loaders
-depth_key, depth_value = depth_reader.read(depth_files)
-label_key, label_value = label_reader.read(label_files)
+depth_key, depth_value = reader.read(depth_files)
+label_key, label_value = reader.read(label_files)
 
 depth_image = tf.py_func(read_depth, [depth_value], tf.float32, stateful=False)
 label_image = tf.image.decode_png(label_value, channels=3)
@@ -275,7 +274,7 @@ def collect_results(i, all_meta, all_meta_indices, all_lindices, \
         all_lindices = tf.concat([all_lindices, lindices], axis=0)
         all_rindices = tf.concat([all_rindices, rindices], axis=0)
 
-        return tf.add(i, 1), all_meta, all_meta_indices, all_lindices, \
+        return i + 1, all_meta, all_meta_indices, all_lindices, \
             all_rindices
 
     _i, all_meta, all_meta_indices, all_lindices, all_rindices = \
@@ -301,7 +300,7 @@ def collect_results(i, all_meta, all_meta_indices, all_lindices, \
     # Store the size of the label histogram for later indexing
     all_n_labels = tf.concat([all_n_labels, [tf.size(x_labels)]], axis=0)
 
-    return tf.add(i, 1), all_meta, all_meta_indices, all_lindices, \
+    return i + 1, all_meta, all_meta_indices, all_lindices, \
         all_rindices, all_n_labels, all_x_labels, all_x_label_probs
 
 all_meta = tf.zeros([0, N_T, 2], dtype=tf.float32)
@@ -338,14 +337,22 @@ with session.as_default():
 
     session.run(init)
 
+    # Generate the coordinates for the pixel samples for the root node
     initial_coords = \
         np.stack((np.random.random_integers(0, HEIGHT-1, N_SAMP * n_images), \
                   np.random.random_integers(0, WIDTH-1, N_SAMP * n_images)), \
                  axis=1)
+
+    # Push the root node onto the training queue
     queue = [{ 'name': '', \
                'x': np.reshape(initial_coords, (n_images, N_SAMP, 2)),
                'xl': np.tile([N_SAMP], n_images)}]
+
+    # Initialise the output tree
     tree = {}
+
+    # Start timing
+    begin = datetime.utcnow()
 
     while len(queue) > 0:
         current = queue.pop(0)
@@ -368,11 +375,10 @@ with session.as_default():
         for coords in current['x']:
             n_pixels += len(coords)
         n_pixels /= len(current['x'])
-        begin = datetime.utcnow()
         print 'Training node (%s) (Average %d pixels)' % \
             (current['name'], n_pixels)
 
-        for epoch in range(1, N_EPOCHS + 1):
+        for epoch in xrange(1, N_EPOCHS + 1):
             if epoch == 1 or \
                epoch % DISPLAY_STEP == 0 or \
                epoch == N_EPOCHS:
@@ -408,19 +414,21 @@ with session.as_default():
                                                len_x: current['xl'][batch:(batch+c_batch_size)], \
                                                batch_size: c_batch_size, \
                                                combo_size: c_combo_size})
-                batch += c_batch_size
 
+                # Collect left/right pixels for each u,v,t combination in this
+                # batch.
                 lindex_base = 0
                 rindex_base = 0
                 label_base = 0
 
-                for i in range(c_batch_size):
-                    for j in range(c_combo_size):
+                for i in xrange(c_batch_size):
+                    for j in xrange(c_combo_size):
                         idx = (i * c_combo_size) + j
                         meta = t_meta[idx]
                         meta_indices = t_meta_indices[idx]
 
-                        for k in range(len(meta)) :
+                        assert(len(meta) == N_T)
+                        for k in xrange(N_T) :
                             t = meta[k][0]
                             t_g = meta[k][1]
 
@@ -437,8 +445,8 @@ with session.as_default():
                             tt_lindices = t_lindices[lstart:lend]
                             tt_rindices = t_rindices[rstart:rend]
 
-                            t_lcoords = current['x'][i][tt_lindices]
-                            t_rcoords = current['x'][i][tt_rindices]
+                            t_lcoords = current['x'][i + batch][tt_lindices]
+                            t_rcoords = current['x'][i + batch][tt_rindices]
 
                             assert(len(t_lcoords) == lend - lstart), \
                                 't_lcoords malformed (%d != %d)' % \
@@ -459,10 +467,13 @@ with session.as_default():
                         rindex_base += meta_indices[-1][1][1]
 
                     label_end = label_base + t_n_labels[i]
-                    if len(current['x'][i]) > 0:
+                    if len(current['x'][i + batch]) > 0:
                         labels.append(zip(t_labels[label_base:label_end], \
                                           t_label_probs[label_base:label_end]))
                     label_base = label_end
+
+                # Progress to the next batch
+                batch += c_batch_size
 
             # Accumulate threshold gains to find the most effective 't' for
             # this u,v pair.
@@ -523,22 +534,24 @@ with session.as_default():
 
                     # Pad out (lr)coords
                     if lcoords is not None:
-                        for i in range(len(lcoords)):
+                        for i in xrange(len(lcoords)):
                             lcoords[i] = \
                                 np.resize(np.array(lcoords[i], dtype=np.int32), \
                                           (maxlcoords, 2))
                     if rcoords is not None:
-                        for i in range(len(rcoords)):
+                        for i in xrange(len(rcoords)):
                             rcoords[i] = \
                                 np.resize(np.array(rcoords[i], dtype=np.int32), \
                                           (maxrcoords, 2))
 
+                    # Add left/right nodes to the queue
                     nextNodes = [{ 'name': current['name'] + 'l', \
                                    'x': lcoords, \
                                    'xl': nlcoords }, \
                                  { 'name': current['name'] + 'r', \
                                    'x': rcoords, \
                                    'xl': nrcoords }]
+
                     print '\t\tG = ' + str(best_G)
                     print '\t\tu = ' + str(best_u)
                     print '\t\tv = ' + str(best_v)
