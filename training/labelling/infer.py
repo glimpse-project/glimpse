@@ -18,19 +18,21 @@ def get_depth(path):
     return depth
 
 def eval_pixel(tree, depth, x, node_path = ''):
+    clip = np.array(np.shape(depth)) - 1
+    dx = depth[x[0]][x[1]]
     node = tree[node_path]
-    if 't' in node:
-        clip = np.array(np.shape(depth)) - 1
-        dx = depth[x[0]][x[1]]
-        u = np.clip(np.add(x, np.divide(node['u'], dx)), [0, 0], clip).astype(np.int32)
-        v = np.clip(np.add(x, np.divide(node['v'], dx)), [0, 0], clip).astype(np.int32)
+
+    while 't' in node:
+        u = np.around(np.clip(np.add(x, np.divide(node['u'], dx)), [0, 0], clip)).astype(np.int32)
+        v = np.around(np.clip(np.add(x, np.divide(node['v'], dx)), [0, 0], clip)).astype(np.int32)
         fx = depth[u[0]][u[1]] - depth[v[0]][v[1]]
         if fx < node['t']:
-            return eval_pixel(tree, depth, x, node_path + 'l')
+            node_path += 'l'
         else:
-            return eval_pixel(tree, depth, x, node_path + 'r')
-    else:
-        return node['label_probs']
+            node_path += 'r'
+        node = tree[node_path]
+
+    return node['label_probs']
 
 def eval_image(tree, depth):
     shape = np.shape(depth)
@@ -42,8 +44,9 @@ def eval_image(tree, depth):
     for x in coords:
         output[tuple(x)] = eval_pixel(tree, depth, x)
         n_pixels -= 1
-        sys.stdout.write('%d pixels left %s     \r' % (n_pixels, str(tuple(x))))
-        sys.stdout.flush()
+        if n_pixels % 100 == 0:
+            sys.stdout.write('%d pixels left %s     \r' % (n_pixels, str(tuple(x))))
+            sys.stdout.flush()
 
     return output
 
