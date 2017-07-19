@@ -164,7 +164,7 @@ class PaintRigOperator(bpy.types.Operator):
             default=1.0,
             )
 
-    debug = True
+    debug = False
 
     @classmethod
     def poll(cls, context):
@@ -226,7 +226,7 @@ class PaintRigOperator(bpy.types.Operator):
                     'color_right': hex_to_rgb(0xffa9ca),
                     'rel_threshold_limit': 0.8,
                     'id_left': 1,
-                    'id_left': 2
+                    'id_right': 2
                 },{
                     'color_left': hex_to_rgb(0x68c0d1),
                     'color_right': hex_to_rgb(0x70d19f),
@@ -544,7 +544,7 @@ class PaintRigOperator(bpy.types.Operator):
                                     grey_id = paint['id_left']
                                 elif 'id_right' in paint and x_avg < 0:
                                     grey_id = paint['id_right']
-                                bone_col = (grey_id * (1/255), grey_id * (1/255), grey_id * (1/255))
+                                bone_col = (grey_id * (1/35), grey_id * (1/35), grey_id * (1/35))
 
                             for loop in face.loops:
                                 loop[bm_col_layer] = bone_col
