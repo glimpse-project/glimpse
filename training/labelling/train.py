@@ -4,10 +4,16 @@
 # - [DONE] Asynchronous image decoding in queue, rather than in graph
 # - [DONE as much as possible?] Remove, or reduce usage of feed_dict
 # - Pre-process images before starting (decode, decolorize, resize?)
-# - Carry over shannon entropy calculations from parent node
 # - [DONE] Process multiple images (or nodes?) at once
-# - Stop using unique_with_count and craft a function that does exactly what
-#   we want (count_occurences or something)
+# - Use the calculated label histograms to short-circuit combination testing
+#   in graph (i.e. if n_labels < 2, skip testing)
+
+# Optimisation points considered
+# - All of these probably can't work because of IO constraints (not practical
+#   to marshal them to/from the graph and cost of recalculation is low)
+#   - Carry over shannon entropy calculations from parent node
+#   - Carry over label histogram calculations from parent node
+#   - Don't recalculate the label histogram for the current node on every epoch
 
 import os
 import math
@@ -365,18 +371,18 @@ with session.as_default():
         best_isNotLeaf = False
         nextNodes = []
 
-        # If this is the deepest node in the tree, don't waste time calculating
-        # u,v pairs and their results.
-        c_combo_size = COMBO_SIZE
-        if len(current['name']) >= MAX_DEPTH:
-            c_combo_size = 0
+        # Pixel coordinates are padded, so we can just look at the first entry
+        # to work out the largest amount of pixels in any image
+        max_pixels = len(current['x'][0])
 
-        n_pixels = 0
-        for coords in current['x']:
-            n_pixels += len(coords)
-        n_pixels /= len(current['x'])
-        print 'Training node (%s) (Average %d pixels)' % \
-            (current['name'], n_pixels)
+        # If this is the deepest node in the tree, or we don't have pixels
+        # to check, don't waste time calculating u,v pairs and their results.
+        force_leaf = False
+        if len(current['name']) >= MAX_DEPTH or max_pixels < 2:
+            force_leaf = True
+
+        print 'Training node (%s) (Max %d pixels)' % \
+            (current['name'], max_pixels)
 
         for epoch in xrange(1, N_EPOCHS + 1):
             if epoch == 1 or \
@@ -393,8 +399,8 @@ with session.as_default():
                      hours, minutes, seconds)
 
             # Initialise trial splitting candidates
-            c_u = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (c_combo_size, 2))
-            c_v = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (c_combo_size, 2))
+            c_u = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (COMBO_SIZE, 2))
+            c_v = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (COMBO_SIZE, 2))
 
             labels = []
             gains = {}
@@ -402,6 +408,19 @@ with session.as_default():
             batch = 0
             while batch < n_images:
                 c_batch_size = min(n_images - batch, BATCH_SIZE)
+
+                # Work out if we can skip gain calculation for this batch
+                c_combo_size = COMBO_SIZE
+                if force_leaf:
+                    c_combo_size = 0
+                else:
+                    can_skip = True
+                    for i in xrange(batch, batch + c_batch_size):
+                        if current['xl'][i] > 1:
+                            can_skip = False
+                            break
+                    if can_skip:
+                        c_combo_size = 0
 
                 t_meta, t_meta_indices, t_lindices, t_rindices, t_n_labels, \
                     t_labels, t_label_probs = \
@@ -415,13 +434,23 @@ with session.as_default():
                                                batch_size: c_batch_size, \
                                                combo_size: c_combo_size})
 
-                # Collect left/right pixels for each u,v,t combination in this
-                # batch.
+                # Collect left/right pixels for each u,v,t combination and
+                # label histograms for each image in this batch.
                 lindex_base = 0
                 rindex_base = 0
                 label_base = 0
 
                 for i in xrange(c_batch_size):
+                    # Skip processing if there are no pixels
+                    if current['xl'][i] == 0:
+                        continue
+
+                    # Store the label histogram for this image
+                    label_end = label_base + t_n_labels[i]
+                    labels.append(zip(t_labels[label_base:label_end], \
+                                      t_label_probs[label_base:label_end]))
+                    label_base = label_end
+
                     for j in xrange(c_combo_size):
                         idx = (i * c_combo_size) + j
                         meta = t_meta[idx]
@@ -432,8 +461,6 @@ with session.as_default():
                             t = meta[k][0]
                             t_g = meta[k][1]
 
-                            # TODO - Figure out how to bail out early in the graph
-                            #        when there are zero pixels
                             if math.isnan(t_g) or t_g < 0.0:
                                 t_g = 0.0
 
@@ -466,12 +493,6 @@ with session.as_default():
                         lindex_base += meta_indices[-1][0][1]
                         rindex_base += meta_indices[-1][1][1]
 
-                    label_end = label_base + t_n_labels[i]
-                    if len(current['x'][i + batch]) > 0:
-                        labels.append(zip(t_labels[label_base:label_end], \
-                                          t_label_probs[label_base:label_end]))
-                    label_base = label_end
-
                 # Progress to the next batch
                 batch += c_batch_size
 
@@ -480,44 +501,15 @@ with session.as_default():
             gain = -1
             threshold = -1
             combo = -1
-            lcoords = None
-            nlcoords = None
-            maxlcoords = -1
-            rcoords = None
-            nrcoords = None
-            maxrcoords = -1
+
             for key, gain_data in gains.items():
-                cum_gain = 0
-                cum_lcoords = []
-                cum_rcoords = []
-                cum_nlcoords = []
-                cum_nrcoords = []
-                cum_maxlcoords = 0
-                cum_maxrcoords = 0
+                acc_gain = 0
                 for datum in gain_data:
-                    cum_gain += datum['g']
-
-                    cum_lcoords.append(datum['lcoords'])
-                    lcoordlen = len(datum['lcoords'])
-                    cum_nlcoords.append(lcoordlen)
-                    if lcoordlen > cum_maxlcoords:
-                        cum_maxlcoords = lcoordlen
-
-                    cum_rcoords.append(datum['rcoords'])
-                    rcoordlen = len(datum['rcoords'])
-                    cum_nrcoords.append(rcoordlen)
-                    if rcoordlen > cum_maxrcoords:
-                        cum_maxrcoords = rcoordlen
-                if cum_gain > gain:
-                    gain = cum_gain
+                    acc_gain += datum['g']
+                if acc_gain > gain:
+                    gain = acc_gain
                     threshold = key[0]
                     combo = key[1]
-                    lcoords = cum_lcoords
-                    rcoords = cum_rcoords
-                    nlcoords = cum_nlcoords
-                    nrcoords = cum_nrcoords
-                    maxlcoords = cum_maxlcoords
-                    maxrcoords = cum_maxrcoords
 
             gain /= n_images
 
@@ -532,17 +524,33 @@ with session.as_default():
                     best_v = c_v[combo]
                     best_t = threshold
 
+                    # Collect l/r pixels for this u,v,t combination
+                    lcoords = []
+                    nlcoords = []
+                    maxlcoords = 0
+                    rcoords = []
+                    nrcoords = []
+                    maxrcoords = 0
+                    gain_data = gains[(threshold, combo)]
+                    for datum in gain_data:
+                        lcoords.append(datum['lcoords'])
+                        rcoords.append(datum['rcoords'])
+                        nlcoords.append(len(lcoords[-1]))
+                        nrcoords.append(len(rcoords[-1]))
+                        if nlcoords[-1] > maxlcoords:
+                            maxlcoords = nlcoords[-1]
+                        if nrcoords[-1] > maxrcoords:
+                            maxrcoords = nrcoords[-1]
+
                     # Pad out (lr)coords
-                    if lcoords is not None:
-                        for i in xrange(len(lcoords)):
-                            lcoords[i] = \
-                                np.resize(np.array(lcoords[i], dtype=np.int32), \
-                                          (maxlcoords, 2))
-                    if rcoords is not None:
-                        for i in xrange(len(rcoords)):
-                            rcoords[i] = \
-                                np.resize(np.array(rcoords[i], dtype=np.int32), \
-                                          (maxrcoords, 2))
+                    for i in xrange(len(lcoords)):
+                        lcoords[i] = \
+                            np.resize(np.array(lcoords[i], dtype=np.int32), \
+                                      (maxlcoords, 2))
+                    for i in xrange(len(rcoords)):
+                        rcoords[i] = \
+                            np.resize(np.array(rcoords[i], dtype=np.int32), \
+                                      (maxrcoords, 2))
 
                     # Add left/right nodes to the queue
                     nextNodes = [{ 'name': current['name'] + 'l', \
@@ -558,12 +566,16 @@ with session.as_default():
                     print '\t\tt = ' + str(best_t)
                     print '\t\tl,r = %d, %d' % (maxlcoords, maxrcoords)
 
+            # Don't process further epochs if this is a leaf node
+            if force_leaf:
+                break
+
         # If gain hasn't increased for any images, there's no use in going
         # down this branch further.
         # TODO: Maybe this should be a threshold rather than just zero.
         if best_G is not None and \
            best_G > 0.0 and \
-           len(current['name']) < MAX_DEPTH:
+           force_leaf is not True:
             # Store the trained u,v,t parameters
             current['u'] = best_u
             current['v'] = best_v
@@ -576,6 +588,8 @@ with session.as_default():
             excuse = None
             if len(current['name']) >= MAX_DEPTH:
                 excuse = 'Maximum depth (%d) reached' % (MAX_DEPTH)
+            elif max_pixels < 2:
+                excuse = 'No pixels left to separate'
             elif best_G <= 0.0:
                 excuse = 'No gain increase'
 
