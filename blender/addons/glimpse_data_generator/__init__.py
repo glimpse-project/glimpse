@@ -37,6 +37,7 @@ import mathutils
 import os
 import json
 import ntpath
+import numpy
 
 import bpy
 from bpy.props import (
@@ -56,15 +57,27 @@ from bpy_extras.io_utils import (
 import bmesh
 
 
-def add_clothing(op, context, mhclo_relpath, ref_clothing_obj):
-    human_mesh_name = context.active_object.name[:-len("BodyHelperMesh")]
-    helper_mesh = context.active_object
+def add_clothing(op, context, clothing_name):
 
-    mhclo_file = bpy.path.abspath(bpy.context.scene.GlimpseClothesRoot + mhclo_relpath)
+    if clothing_name + "_reference" not in bpy.data.objects:
+        return
+
+    mhclo_relpath = os.path.join(clothing_name, clothing_name + ".mhclo")
+    ref_clothing_obj = bpy.data.objects[clothing_name + "_reference"]
+
+    # XXX: we don't reference context.active_object because for some reason
+    # (bug or important misunderstanding about blender's state management)
+    # then changes to context.scene.objects.active aren't immediately
+    # reflected in context.active_object (and not a question of calling
+    # scene.update() either)
+    helper_mesh = context.scene.objects.active
+    human_mesh_name = helper_mesh.name[:-len("BodyHelperMeshObject")]
+
+    mhclo_file = bpy.path.abspath(context.scene.GlimpseClothesRoot + mhclo_relpath)
     bpy.ops.mhclo.test_clothes(filepath = mhclo_file)
 
-    clothing = bpy.context.selected_objects[0]
-    bpy.context.scene.objects.active = clothing
+    clothing = context.selected_objects[0]
+    context.scene.objects.active = clothing
 
     clothing.data.materials.append(bpy.data.materials.get("JointLabelsMaterial"))
 
@@ -79,7 +92,7 @@ def add_clothing(op, context, mhclo_relpath, ref_clothing_obj):
     clothing.modifiers['DataTransfer'].data_types_loops = {'VCOL'}
     clothing.modifiers['DataTransfer'].loop_mapping = 'TOPOLOGY'
 
-    bpy.context.scene.objects.active = clothing
+    context.scene.objects.active = clothing
     bpy.ops.object.datalayout_transfer(modifier="DataTransfer")
     bpy.ops.object.modifier_apply(modifier='DataTransfer')
 
@@ -87,25 +100,170 @@ def add_clothing(op, context, mhclo_relpath, ref_clothing_obj):
 
     clothing.select = True
     bpy.data.objects[human_mesh_name + 'PoseObject'].select = True
-    bpy.context.scene.objects.active = bpy.data.objects[human_mesh_name + 'PoseObject']
+    context.scene.objects.active = bpy.data.objects[human_mesh_name + 'PoseObject']
 
     bpy.ops.object.parent_set(type='ARMATURE_NAME')
 
 
+class AddClothingOperator(bpy.types.Operator):
+    """Adds clothing to the active body"""
+
+    bl_idname = "glimpse.add_clothing"
+    bl_label = "Add Clothing"
+
+    clothing_name = StringProperty(
+            name="Clothing Name",
+            description="Name of clothing register_module"
+            )
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
+
+    def execute(self, context):
+        if self.clothing_name + "_reference" not in bpy.data.objects:
+            return {'FINISHED'}
+        add_clothing(self, context, self.clothing_name)
+
+        return {'FINISHED'}
+
+
 class AddHoodieOperator(bpy.types.Operator):
-    """Adds an item of clothing to the active object"""
+    """Adds a hoodie to the active body"""
 
     bl_idname = "glimpse.add_hoodie"
     bl_label = "Add Hoodie"
 
     @classmethod
     def poll(cls, context):
-        return context.active_object is not None and "BodyHelperMesh" in context.active_object.name
+        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
 
     def execute(self, context):
-        mhclo_relpath = os.path.join("hoodie", "hooded_cardigan.mhclo")
-        ref_obj = bpy.data.objects['hooded_cardigan_reference']
-        add_clothing(self, context, mhclo_relpath, ref_obj)
+        add_clothing(self, context, "hooded_cardigan")
+        return {'FINISHED'}
+
+class AddMTrousers01Operator(bpy.types.Operator):
+    """Adds m_trousers_01 clothing to the active body"""
+
+    bl_idname = "glimpse.add_m_trousers_01"
+    bl_label = "Add M Trousers 01"
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
+
+    def execute(self, context):
+        add_clothing(self, context, "m_trousers_01")
+        return {'FINISHED'}
+
+
+class AddPatrolCapOperator(bpy.types.Operator):
+    """Adds a patrol cap to the active body"""
+
+    bl_idname = "glimpse.add_patrol_cap"
+    bl_label = "Add Patrol Cap"
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
+
+    def execute(self, context):
+        add_clothing(self, context, "patrol_cap")
+        return {'FINISHED'}
+
+
+class AddGlassesOperator(bpy.types.Operator):
+    """Adds a glasses to the active body"""
+
+    bl_idname = "glimpse.add_glasses"
+    bl_label = "Add Glasses"
+
+    @classmethod
+    def poll(cls, context):
+        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
+
+    def execute(self, context):
+        add_clothing(self, context, "glasses")
+        return {'FINISHED'}
+
+
+all_bodies = [ 'Man0', 'Woman0', 'Man1', 'Woman1' ]
+
+hat_choices = [ 'none', 'knitted_hat_01', 'newsboy_cap', 'patrol_cap' ]
+hat_probabilities = [ 0.4, 0.2, 0.2, 0.2 ]
+
+glasses_choices = [ 'none', 'glasses' ]
+glasses_probabilities = [ 0.7, 0.3 ]
+
+top_choices = [ 'none', 'hooded_cardigan' ]
+top_probabilities = [ 0.8, 0.2 ]
+
+trouser_choices = [ 'none', 'm_trousers_01' ]
+trouser_probabilities = [ 0.5, 0.5 ]
+
+shoe_choices = []
+shoe_probabilities = []
+
+
+# The data generator operator expects that each body has previously had all
+# possible clothing items added to the body. This avoids the cost of loading
+# the clothing at runtime and also clothing that's not applicable to a
+# particular body can be excluded and the generator will handle that gracefully
+class AddClothingLibraryOperator(bpy.types.Operator):
+    """Adds the full library of known clothing items to active body"""
+
+    bl_idname = "glimpse.add_clothes_library"
+    bl_label = "Add Clothes Library To Body"
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def execute(self, context):
+
+        bpy.ops.object.select_all(action='DESELECT')
+
+        all_clothes = []
+        all_clothes.extend(hat_choices)
+        all_clothes.extend(glasses_choices)
+        all_clothes.extend(top_choices)
+        all_clothes.extend(trouser_choices)
+        all_clothes.extend(shoe_choices)
+
+        # The clothing sub-lists have 'none' entries we want to ignore here
+        all_clothes = [ clothing for clothing in all_clothes if clothing != 'none' ]
+
+
+        for body in all_bodies:
+            pose_obj = bpy.data.objects[body + 'PoseObject']
+            if pose_obj == None:
+                self.report({'ERROR'}, "didn't find pose mesh for " + body)
+                continue
+            helper_obj = bpy.data.objects[body + 'BodyHelperMeshObject']
+            if helper_obj == None:
+                self.report({'ERROR'}, "didn't find helper mesh for " + body)
+                continue
+
+            for child in pose_obj.children:
+                self.report({'INFO'}, body + " child:" + child.name)
+
+                if body + "Clothes:" in child.name:
+                    self.report({'INFO'}, "removing " + child.name + " from " + body)
+                    context.scene.objects.active = bpy.data.objects[child.name]
+                    bpy.data.objects[child.name].select = True
+                    bpy.ops.object.delete()
+
+            for clothing in all_clothes:
+                bpy.ops.object.select_all(action='DESELECT')
+                context.scene.objects.active = helper_obj
+                add_clothing(self, context, clothing)
+
+                for child in pose_obj.children:
+                    if child.name == clothing:
+                        child.name = body + "Clothes:" + clothing
+                        child.layers = helper_obj.layers
+                        child.hide = True
+                        break
 
         return {'FINISHED'}
 
@@ -130,12 +288,139 @@ class RigGeneratorOperator(bpy.types.Operator):
 
     @classmethod
     def poll(cls, context):
-        return context.active_object is not None
+        return len(bvh_index) > 0
 
     def execute(self, context):
-        self.report({'INFO'}, "TODO: Generate Data")
+
+        bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
+        bpy.ops.object.select_all(action='DESELECT')
+        bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
+
+        render_layers = []
+        for i in range(0, 20):
+            render_layers.append(False)
+        render_layers[0] = True
+
+        # Do all our rendering from layer zero, pulling in other objects
+        # as needed
+        context.scene.layers = render_layers
+
+        for body in all_bodies:
+            pose_obj = bpy.data.objects[body + 'PoseObject']
+            for child in pose_obj.children:
+                child.layers = pose_obj.layers
+
+        render_objects = []
+
+        #for bvh in bvh_index:
+        for idx in range(15, 100):
+            bvh = bvh_index[idx]
+
+            if bvh['blacklist']:
+                self.report({'INFO'}, "skipping blacklisted")
+                continue
+
+            # Note we always load the mocap animations with the base the base
+            # mesh, and then associate the animation_data.action with all the
+            # other armatures we have
+            bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
+            self.report({'INFO'}, "loading")
+            load_bvh_file(bvh)
+
+            # It's a nasty gotcha but the MalkWalk addon will set the fake user
+            # reference on the imported action which makes the .blend file
+            # eventually balloon to ridiculous proportions
+            bpy.data.objects['BasePoseObject'].animation_data.action.use_fake_user = False
+            #bpy.ops.render.render(animation=True)
+
+            for body in all_bodies:
+                pose_obj = bpy.data.objects[body + 'PoseObject']
+                if pose_obj.animation_data == None:
+                    pose_obj.animation_data_create()
+                pose_obj.animation_data.action = bpy.data.objects['BasePoseObject'].animation_data.action
+                bpy.data.armatures[body + 'Pose'].pose_position = 'POSE'
+
+            bvh_name = os.path.basename(bvh['file'])
+            self.report({'INFO'}, "rendering " + bvh_name)
+
+            #for frame in range(bvh['start'], bvh['end']):
+            for frame in range(bvh['start'], bvh['end']):
+                if frame == bvh['start'] or frame % 5 == 0:
+
+                    self.report({'INFO'}, "> randomizing " + bvh_name + " render")
+
+                    for obj in render_objects:
+                        obj.layers[0] = False
+                        if "Clothes:" in obj.name:
+                            obj.hide = True
+                            obj.layers = obj.parent.layers
+                    render_objects = []
+                    #for body in all_bodies:
+                    #    bpy.data.objects[body + "BodyMeshObject"].layers[0] = False
+
+                    # randomize the model
+                    body = numpy.random.choice(all_bodies)
+                    hat = numpy.random.choice(hat_choices, p=hat_probabilities)
+                    trousers = numpy.random.choice(trouser_choices, p=trouser_probabilities)
+                    top = numpy.random.choice(top_choices, p=top_probabilities)
+                    glasses = numpy.random.choice(glasses_choices, p=glasses_probabilities)
+
+                    body_obj = bpy.data.objects[body + "BodyMeshObject"]
+                    body_obj.layers[0] = True
+                    render_objects.append(body_obj)
+
+                    if hat != 'none':
+                        hat_obj = bpy.data.objects[body + "Clothes:" + hat]
+                        if hat_obj:
+                            hat_obj.hide = False
+                            hat_obj.layers[0] = True
+                            render_objects.append(hat_obj)
+
+                    if trousers != 'none':
+                        trouser_obj = bpy.data.objects[body + "Clothes:" + trousers]
+                        if trouser_obj:
+                            trouser_obj.hide = False
+                            trouser_obj.layers[0] = True
+                            render_objects.append(trouser_obj)
+
+                        #add_clothing(self, context, trousers)
+                        #trouser_obj.layers[0] = True
+                        #render_objects.append(trouser_obj)
+
+                    if top != 'none':
+                        top_obj = bpy.data.objects[body + "Clothes:" + top]
+                        if top_obj:
+                            top_obj.hide = False
+                            top_obj.layers[0] = True
+                            render_objects.append(top_obj)
+
+                        #add_clothing(self, context, top)
+                        #top_obj.layers[0] = True
+                        #render_objects.append(top_obj)
+
+                    if glasses != 'none':
+                        glasses_obj = bpy.data.objects[body + "Clothes:" + glasses]
+                        if glasses_obj:
+                            glasses_obj.hide = False
+                            glasses_obj.layers[0] = True
+                            render_objects.append(glasses_obj)
+
+                        #add_clothing(self, context, glasses)
+                        #glasses_obj.layers[0] = True
+                        #render_objects.append(glasses_obj)
+
+                    dirname =  body + "_hat_" + hat + "_trousers_" + trousers + "_top_" + top + "_glasses_" + glasses
+                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("color-test", bvh_name[:-4], dirname))
+                    context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("depth-test", bvh_name[:-4], dirname))
+                    context.scene.update()
+
+                self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
+                context.scene.layers = render_layers
+                bpy.context.scene.frame_current = frame
+                bpy.ops.render.render(write_still=True)
 
         return {'FINISHED'}
+
 
     def draw(self, context):
         layout = self.layout
@@ -156,6 +441,8 @@ class GeneratePanel(bpy.types.Panel):
         ob = context.object
         scn = context.scene
         
+        layout.separator()
+        layout.prop(scn, "GlimpseDataRoot", text="Output")
         layout.separator()
         layout.prop(scn, "GlimpseClothesRoot", text="Clothes")
         layout.separator()
@@ -178,13 +465,13 @@ def set_bvh_index_pos(self, value):
     global bvh_index_pos
 
     if value >= 0 and value < len(bvh_index) and value != bvh_index_pos:
-        updateCurrentBvhState(None)
+        update_current_bvh_state(None)
         bvh_index_pos = value
-        loadCurrentBvhFile(None)
+        load_current_bvh_file(None)
 
 
 # NB: sometimes called with no op
-def updateCurrentBvhState(ignore_op):
+def update_current_bvh_state(ignore_op):
     if bvh_index_pos >= len(bvh_index):
         if ignore_op != None:
             op.report({'ERROR'}, "Invalid Mo-cap index")
@@ -201,15 +488,7 @@ def updateCurrentBvhState(ignore_op):
                             'rotation': [cam_rot[0], cam_rot[1], cam_rot[2], cam_rot[3]] }
 
 
-# NB: sometimes called with no op
-def loadCurrentBvhFile(ignore_op):
-    if bvh_index_pos >= len(bvh_index):
-        if ignore_op != None:
-            op.report({'ERROR'}, "Invalid Mo-cap index")
-        return
-
-    bvh_state = bvh_index[bvh_index_pos]
-
+def load_bvh_file(bvh_state):
     bpy.context.scene.McpStartFrame = 1
     bpy.context.scene.McpEndFrame = 1000
     bpy.ops.mcp.load_and_retarget(filepath=bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + bvh_state['file']))
@@ -218,7 +497,10 @@ def loadCurrentBvhFile(ignore_op):
     if 'end' in bvh_state:
         bpy.context.scene.frame_end = bvh_state['end']
     else:
-        bpy.context.scene.frame_end = 1000
+        if bpy.context.object.animation_data:
+            bpy.context.scene.frame_end = bpy.context.object.animation_data.action.frame_range[1]
+        else:
+            bpy.context.scene.frame_end = 1000
 
     if 'camera' in bvh_state:
         if 'location' in bvh_state['camera']:
@@ -234,6 +516,43 @@ def loadCurrentBvhFile(ignore_op):
     #    bpy.context.scene.GlimpseMoCapBlacklist = False
 
 
+# NB: sometimes called with no op
+def load_current_bvh_file(ignore_op):
+    if bvh_index_pos >= len(bvh_index):
+        if ignore_op != None:
+            op.report({'ERROR'}, "Invalid Mo-cap index")
+        return
+
+    load_bvh_file(bvh_index[bvh_index_pos])
+
+
+def load_mocap_index():
+
+    bvh_index = []
+
+    try:
+        with open(bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + "index.json")) as fp:
+            bvh_index = json.load(fp)
+
+        # early version might have indexed non-bvh files...
+        keep = [bvh for bvh in bvh_index if bvh['file'][-4:] == '.bvh']
+        bvh_index = keep
+
+        bpy.types.Scene.GlimpseBvhIndexPos[1]['max'] = max(0, len(bvh_index) - 1)
+
+        for bvh in bvh_index:
+            bvh_file_index[bvh['file']] = bvh
+
+            # normalize so we don't have to consider that it's left unspecified
+            if 'blacklist' not in bvh:
+                bvh['blacklist'] = False
+
+    except IOError as e:
+        self.report({'INFO'}, str(e))
+
+    return bvh_index
+
+
 class VIEW3D_MoCap_OpenBvhIndexButton(bpy.types.Operator):
     bl_idname = "glimpse.open_bvh_index"
     bl_label = "Load Index"
@@ -247,22 +566,12 @@ class VIEW3D_MoCap_OpenBvhIndexButton(bpy.types.Operator):
         bvh_file_index = {}
         bvh_index_pos = 0
 
-        try:
-            with open(bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + "index.json")) as fp:
-                bvh_index = json.load(fp)
+        bvh_index = load_mocap_index()
 
-            # early version might have indexed non-bvh files...
-            keep = [bvh for bvh in bvh_index if bvh['file'][-4:] == '.bvh']
-            bvh_index = keep
-
-            bpy.types.Scene.GlimpseBvhIndexPos[1]['max'] = max(0, len(bvh_index) - 1)
-
-            for bvh in bvh_index:
-                bvh_file_index[bvh['file']] = bvh
-
-            loadCurrentBvhFile(self)
-        except IOError as e:
-            self.report({'INFO'}, str(e))
+        if len(bvh_index) > 0:
+            if bvh_index[0]['blacklist']:
+                skip_to_next_bvh(self)
+            load_current_bvh_file(self)
 
         return {"FINISHED"}
 
@@ -310,17 +619,26 @@ class VIEW3D_MoCap_OpenBvhPrev(bpy.types.Operator):
         global bvh_index
         global bvh_index_pos
 
-        updateCurrentBvhState(self)
+        update_current_bvh_state(self)
 
         while bvh_index_pos > 0:
             bvh_index_pos = bvh_index_pos - 1
 
-            if 'blacklist' not in bvh_index[bvh_index_pos] or bvh_index[bvh_index_pos]['blacklist'] == False:
+            if bvh_index[bvh_index_pos]['blacklist'] == False:
                 break
 
-        loadCurrentBvhFile(self)
+        load_current_bvh_file(self)
 
         return {"FINISHED"}
+
+
+def skip_to_next_bvh(op):
+    global bvh_index_pos
+
+    while bvh_index_pos < len(bvh_index) - 1:
+        bvh_index_pos = bvh_index_pos + 1
+        if bvh_index[bvh_index_pos]['blacklist'] == False:
+            break
 
 
 class VIEW3D_MainPanel_OpenBvhNext(bpy.types.Operator):
@@ -335,14 +653,11 @@ class VIEW3D_MainPanel_OpenBvhNext(bpy.types.Operator):
         global bvh_index
         global bvh_index_pos
 
-        updateCurrentBvhState(self)
+        update_current_bvh_state(self)
 
-        while bvh_index_pos < len(bvh_index) - 1:
-            bvh_index_pos = bvh_index_pos + 1
-            if 'blacklist' not in bvh_index[bvh_index_pos] or bvh_index[bvh_index_pos]['blacklist'] == False:
-                break
+        skip_to_next_bvh(self)
 
-        loadCurrentBvhFile(self)
+        load_current_bvh_file(self)
 
         return {"FINISHED"}
 
@@ -374,7 +689,7 @@ class VIEW3D_MoCap_SaveBvhIndexButton(bpy.types.Operator):
     def execute(self, context):
 
         if len(bvh_index):
-            updateCurrentBvhState(self)
+            update_current_bvh_state(self)
 
             try: 
                 with open(bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + "index.json"), "w", encoding="utf-8") as fp:
@@ -442,6 +757,12 @@ class MoCapFilePanel(bpy.types.Panel):
 
 
 def register():
+    bpy.types.Scene.GlimpseDataRoot = StringProperty(
+            name="Training Directory",
+            description="Root directory for training data",
+            subtype='DIR_PATH',
+            )
+
     bpy.types.Scene.GlimpseClothesRoot = StringProperty(
             name="Clothes Directory",
             description="Root directory for makehuman clothes",
