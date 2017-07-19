@@ -16,6 +16,7 @@
 #   - Don't recalculate the label histogram for the current node on every epoch
 
 import os
+import sys
 import math
 import Imath
 import pickle
@@ -42,6 +43,8 @@ N_EPOCHS=40
 COMBO_SIZE=50
 # How frequently to display epoch progress
 DISPLAY_STEP=1
+# Whether to display epoch progress
+DISPLAY_EPOCH_PROGRESS=True
 # Depth to train tree to (paper specifies 20)
 MAX_DEPTH=20
 # The range to probe for generated u/v pairs (paper specifies 129 pixel meters)
@@ -74,6 +77,15 @@ def read_depth(data):
     depth = np.reshape(depth, (hdr['dataWindow'].max.y + 1, hdr['dataWindow'].max.x + 1, 1))
     exrfile.close()
     return depth
+
+def elapsed(begin):
+    now = datetime.utcnow()
+    seconds = (now - begin).total_seconds()
+    minutes = seconds / 60
+    hours = minutes / 60
+    seconds = seconds % 60
+    minutes = minutes % 60
+    return hours, minutes, seconds
 
 def get_offset_indices(image, pixels, x, u, v):
     # Calculate the two inner terms of equation (1) from 3.2 of the paper
@@ -188,6 +200,7 @@ def testImage(depth_image, label_image, u, v, x, label_pixels, hq, q):
     return meta, meta_indices, lindices, rindices
 
 # Collect training data
+print 'Collecting training data...'
 label_images = []
 depth_images = []
 for imagefile in find_files('training/color', ['png']):
@@ -197,7 +210,13 @@ for imagefile in find_files('training/depth', ['exr']):
 
 n_images = len(label_images)
 assert(n_images == len(depth_images))
+print '%d training image sets' % (n_images)
 
+print 'Sorting training data...'
+label_images.sort()
+depth_images.sort()
+
+print 'Creating data reading nodes...'
 # Setup file readers
 label_files = tf.train.string_input_producer(label_images, shuffle=False)
 depth_files = tf.train.string_input_producer(depth_images, shuffle=False)
@@ -219,6 +238,7 @@ tf.train.add_queue_runner(qr)
 
 ##############################
 
+print 'Creating graph...'
 # Number of iterations to run (number of images to test)
 batch_size = tf.placeholder(tf.int32, shape=[], name='batch_size')
 
@@ -330,12 +350,14 @@ init = tf.global_variables_initializer()
 session = tf.Session()
 
 with session.as_default():
+    print 'Initialising...'
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
 
     session.run(init)
 
     # Generate the coordinates for the pixel samples for the root node
+    print 'Generating initial coordinates...'
     initial_coords = \
         np.stack((np.random.random_integers(0, HEIGHT-1, N_SAMP * n_images), \
                   np.random.random_integers(0, WIDTH-1, N_SAMP * n_images)), \
@@ -380,12 +402,7 @@ with session.as_default():
             if epoch == 1 or \
                epoch % DISPLAY_STEP == 0 or \
                epoch == N_EPOCHS:
-                now = datetime.utcnow()
-                seconds = (now - begin).total_seconds()
-                minutes = seconds / 60
-                hours = minutes / 60
-                seconds = seconds % 60
-                minutes = minutes % 60
+                hours, minutes, seconds = elapsed(begin)
                 print '\t(%s) Epoch %dx%d (%d) (%02d:%02d:%02d elapsed)' % \
                     (current['name'], epoch, COMBO_SIZE, epoch * COMBO_SIZE, \
                      hours, minutes, seconds)
@@ -399,6 +416,14 @@ with session.as_default():
 
             batch = 0
             while batch < n_images:
+                if DISPLAY_EPOCH_PROGRESS:
+                    hours, minutes, seconds = elapsed(begin)
+                    sys.stdout.write( \
+                        '(%02d:%02d:%02d) Epoch %04d Training batch %04d/%04d... ' % \
+                        (hours, minutes, seconds, epoch, batch / BATCH_SIZE, \
+                         n_images / BATCH_SIZE))
+                    sys.stdout.flush()
+
                 c_batch_size = min(n_images - batch, BATCH_SIZE)
 
                 # Work out if we can skip gain calculation for this batch
@@ -425,6 +450,12 @@ with session.as_default():
                                                len_x: current['xl'][batch:(batch+c_batch_size)], \
                                                batch_size: c_batch_size, \
                                                combo_size: c_combo_size})
+
+                if DISPLAY_EPOCH_PROGRESS:
+                    hours, minutes, seconds = elapsed(begin)
+                    sys.stdout.write('(%02d:%02d:%02d) Collating results...\r' % \
+                                     (hours, minutes, seconds))
+                    sys.stdout.flush()
 
                 # Collect left/right pixels for each u,v,t combination and
                 # label histograms for each image in this batch.
@@ -493,6 +524,11 @@ with session.as_default():
 
                 # Progress to the next batch
                 batch += c_batch_size
+                if DISPLAY_EPOCH_PROGRESS:
+                    sys.stdout.write('                                     ' + \
+                                     '                                     ' + \
+                                     '       \r')
+                    sys.stdout.flush()
 
             # Accumulate threshold gains to find the most effective 't' for
             # this u,v pair.
