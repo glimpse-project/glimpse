@@ -27,20 +27,20 @@ import tensorflow as tf
 from datetime import datetime
 
 # Image dimensions
-WIDTH=1080
-HEIGHT=1920
+WIDTH=540
+HEIGHT=960
 # Pixels per meter
-PPM=1158.0
+PPM=579.0
 # Maximum number of images to process at once
-BATCH_SIZE=25
+BATCH_SIZE=10
 # Number of images to pre-load in the queue
-QUEUE_BUFFER=50
+QUEUE_BUFFER=30
 # Number of threads to use when pre-loading queue
 QUEUE_THREADS=1
 # Number of epochs to train per node
-N_EPOCHS=40
+N_EPOCHS=10
 # Maximum number of u,v pairs to test per epoch (paper specifies 2000)
-COMBO_SIZE=50
+COMBO_SIZE=200
 # How frequently to display epoch progress
 DISPLAY_STEP=1
 # Whether to display epoch progress
