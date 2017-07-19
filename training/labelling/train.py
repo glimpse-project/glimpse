@@ -476,11 +476,17 @@ with session.as_default():
 
                             key = (t, j)
                             if key not in gains:
-                                gains[key] = []
+                                gains[key] = { 'g': [], \
+                                               'lcoords': [], \
+                                               'rcoords': [],
+                                               'nlcoords': [],
+                                               'nrcoords': [] }
 
-                            gains[key].append({ 'g': t_g, \
-                                                'lcoords': t_lcoords, \
-                                                'rcoords': t_rcoords })
+                            gains[key]['g'].append(t_g)
+                            gains[key]['lcoords'].append(t_lcoords)
+                            gains[key]['rcoords'].append(t_rcoords)
+                            gains[key]['nlcoords'].append(len(t_lcoords))
+                            gains[key]['nrcoords'].append(len(t_rcoords))
 
                         lindex_base += meta_indices[-1][0][1]
                         rindex_base += meta_indices[-1][1][1]
@@ -495,9 +501,7 @@ with session.as_default():
             combo = -1
 
             for key, gain_data in gains.items():
-                acc_gain = 0
-                for datum in gain_data:
-                    acc_gain += datum['g']
+                acc_gain = np.sum(np.array(gain_data['g']))
                 if acc_gain > gain:
                     gain = acc_gain
                     threshold = key[0]
@@ -517,22 +521,13 @@ with session.as_default():
                     best_t = threshold
 
                     # Collect l/r pixels for this u,v,t combination
-                    lcoords = []
-                    nlcoords = []
-                    maxlcoords = 0
-                    rcoords = []
-                    nrcoords = []
-                    maxrcoords = 0
                     gain_data = gains[(threshold, combo)]
-                    for datum in gain_data:
-                        lcoords.append(datum['lcoords'])
-                        rcoords.append(datum['rcoords'])
-                        nlcoords.append(len(lcoords[-1]))
-                        nrcoords.append(len(rcoords[-1]))
-                        if nlcoords[-1] > maxlcoords:
-                            maxlcoords = nlcoords[-1]
-                        if nrcoords[-1] > maxrcoords:
-                            maxrcoords = nrcoords[-1]
+                    lcoords = gain_data['lcoords']
+                    rcoords = gain_data['rcoords']
+                    nlcoords = np.array(gain_data['nlcoords'])
+                    nrcoords = np.array(gain_data['nrcoords'])
+                    maxlcoords = np.amax(nlcoords)
+                    maxrcoords = np.amax(nrcoords)
 
                     # Pad out (lr)coords
                     for i in xrange(len(lcoords)):
