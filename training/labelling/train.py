@@ -3,7 +3,7 @@
 # Points for optimisation
 # - [DONE] Asynchronous image decoding in queue, rather than in graph
 # - [DONE as much as possible?] Remove, or reduce usage of feed_dict
-# - Pre-process images before starting (decode, decolorize, resize?)
+# - Pre-process images before starting (decode, resize?)
 # - [DONE] Process multiple images (or nodes?) at once
 # - Use the calculated label histograms to short-circuit combination testing
 #   in graph (i.e. if n_labels < 2, skip testing)
@@ -100,10 +100,6 @@ def get_offset_indices(image, pixels, x, u, v):
 
     return uindices, vindices
 
-def decolorize(pixels):
-    pixels = tf.multiply(tf.cast(pixels, tf.int32), [256 * 256, 256, 1])
-    return tf.reduce_sum(pixels, 1)
-
 def shannon_entropy(values):
     y, idx, count = tf.unique_with_counts(values)
     ncount = tf.cast(count, tf.float32) / tf.cast(tf.reduce_sum(count), tf.float32)
@@ -115,10 +111,6 @@ def computeDepthPixels(depth_image, u, v, x):
     depth_pixels = tf.gather_nd(depth_image, x)
     uindices, vindices = get_offset_indices(depth_image, depth_pixels, x, u, v)
     return tf.gather_nd(depth_image, uindices) - tf.gather_nd(depth_image, vindices)
-
-def getLabelPixels(label_image, x):
-    # Gather and compress the RGB label image
-    return decolorize(tf.gather_nd(label_image, x))
 
 def computeLabelHistogramAndEntropy(label_pixels):
     # Compute the shannon entropy for storage of the labels of the candidate
@@ -216,10 +208,10 @@ depth_key, depth_value = reader.read(depth_files)
 label_key, label_value = reader.read(label_files)
 
 depth_image = tf.py_func(read_depth, [depth_value], tf.float32, stateful=False)
-label_image = tf.image.decode_png(label_value, channels=3)
+label_image = tf.cast(tf.image.decode_png(label_value, channels=1), tf.int32)
 
 image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, \
-                           dtypes=(tf.float32, tf.uint8))
+                           dtypes=(tf.float32, tf.int32))
 enqueue = image_queue.enqueue((depth_image, label_image))
 
 qr = tf.train.QueueRunner(image_queue, [enqueue] * QUEUE_THREADS)
@@ -253,7 +245,7 @@ def collect_results(i, all_meta, all_meta_indices, all_lindices, \
     x = tf.slice(all_x, [i, 0, 0], [1, len_x[i], 2])[0]
 
     # Compute label pixels, histogram shannon entropy
-    label_pixels = getLabelPixels(label_image, x)
+    label_pixels = tf.reshape(tf.gather_nd(label_image, x), [len_x[i]])
     hq, q, x_labels, x_label_prob = computeLabelHistogramAndEntropy(label_pixels)
 
     # Test u,v pairs against a range of thresholds
