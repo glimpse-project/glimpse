@@ -450,8 +450,8 @@ with session.as_default():
                     hours, minutes, seconds = elapsed(begin)
                     sys.stdout.write( \
                         '(%02d:%02d:%02d) Epoch %04d Training batch %04d/%04d... ' % \
-                        (hours, minutes, seconds, epoch, batch / BATCH_SIZE, \
-                         n_images / BATCH_SIZE))
+                        (hours, minutes, seconds, epoch, batch / BATCH_SIZE + 1, \
+                         (n_images - 1) / BATCH_SIZE + 1))
                     sys.stdout.flush()
 
                 c_batch_size = min(n_images - batch, BATCH_SIZE)
