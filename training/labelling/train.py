@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Points for optimisation
 # - [DONE] Asynchronous image decoding in queue, rather than in graph
@@ -16,13 +16,11 @@
 #   - Don't recalculate the label histogram for the current node on every epoch
 
 import os
+import cv2
 import sys
 import math
-import Imath
 import pickle
-import StringIO
 import numpy as np
-import OpenEXR as exr
 import tensorflow as tf
 from datetime import datetime
 
@@ -77,13 +75,8 @@ def find_files(base_dir, extensions, name=None):
                     break
 
 def read_depth(data):
-    exrfile = exr.InputFile(StringIO.StringIO(data))
-    hdr = exrfile.header()
-    binary = exrfile.channel(hdr['channels'].keys()[0], Imath.PixelType(Imath.PixelType.FLOAT))
-    depth = np.fromstring(binary, dtype=np.float32)
-    depth = np.reshape(depth, (hdr['dataWindow'].max.y + 1, hdr['dataWindow'].max.x + 1, 1))
-    exrfile.close()
-    return depth
+    exr = cv2.imdecode(np.frombuffer(data, dtype='uint8'), cv2.IMREAD_UNCHANGED)
+    return exr[...,0:1]
 
 def elapsed(begin):
     now = datetime.utcnow()
@@ -212,7 +205,7 @@ def testImage(depth_image, label_image, u, v, x, label_pixels, hq, q):
     return meta, meta_indices, lindices, rindices
 
 # Collect training data
-print 'Collecting training data...'
+print('Collecting training data...')
 label_images = []
 depth_images = []
 for imagefile in find_files('training/color', ['png']):
@@ -220,7 +213,7 @@ for imagefile in find_files('training/color', ['png']):
 for imagefile in find_files('training/depth', ['exr']):
     depth_images.append(imagefile)
 
-print 'Sorting training data...'
+print('Sorting training data...')
 label_images.sort()
 depth_images.sort()
 if DATA_LIMIT > 0:
@@ -229,9 +222,9 @@ if DATA_LIMIT > 0:
 
 n_images = len(label_images)
 assert(n_images == len(depth_images))
-print '%d training image sets' % (n_images)
+print('%d training image sets' % (n_images))
 
-print 'Creating data reading nodes...'
+print('Creating data reading nodes...')
 # Setup file readers
 label_files = tf.train.string_input_producer(label_images, shuffle=False)
 depth_files = tf.train.string_input_producer(depth_images, shuffle=False)
@@ -253,7 +246,7 @@ tf.train.add_queue_runner(qr)
 
 ##############################
 
-print 'Creating graph...'
+print('Creating graph...')
 # Number of iterations to run (number of images to test)
 batch_size = tf.placeholder(tf.int32, shape=[], name='batch_size')
 
@@ -371,14 +364,14 @@ init = tf.global_variables_initializer()
 session = tf.Session()
 
 with session.as_default():
-    print 'Initialising...'
+    print('Initialising...')
     coord = tf.train.Coordinator()
     threads = tf.train.start_queue_runners(coord=coord)
 
     session.run(init)
 
     # Generate the coordinates for the pixel samples for the root node
-    print 'Generating initial coordinates...'
+    print('Generating initial coordinates...')
     initial_coords = \
         np.stack((np.random.random_integers(0, HEIGHT-1, N_SAMP * n_images), \
                   np.random.random_integers(0, WIDTH-1, N_SAMP * n_images)), \
@@ -416,17 +409,17 @@ with session.as_default():
         if len(current['name']) >= MAX_DEPTH or max_pixels < 2:
             force_leaf = True
 
-        print 'Training node (%s) (Max %d pixels)' % \
-            (current['name'], max_pixels)
+        print('Training node (%s) (Max %d pixels)' % \
+              (current['name'], max_pixels))
 
-        for epoch in xrange(1, N_EPOCHS + 1):
+        for epoch in range(1, N_EPOCHS + 1):
             if epoch == 1 or \
                epoch % DISPLAY_STEP == 0 or \
                epoch == N_EPOCHS:
                 hours, minutes, seconds = elapsed(begin)
-                print '\t(%s) Epoch %dx%d (%d) (%02d:%02d:%02d elapsed)' % \
-                    (current['name'], epoch, COMBO_SIZE, epoch * COMBO_SIZE, \
-                     hours, minutes, seconds)
+                print('\t(%s) Epoch %dx%d (%d) (%02d:%02d:%02d elapsed)' % \
+                      (current['name'], epoch, COMBO_SIZE, epoch * COMBO_SIZE, \
+                       hours, minutes, seconds))
 
             # Initialise trial splitting candidates
             c_u = np.random.uniform(-RANGE_UV/2.0, RANGE_UV/2.0, (COMBO_SIZE, 2))
@@ -435,7 +428,7 @@ with session.as_default():
             labels = []
             gains = {}
             thresholds = np.linspace(MIN_T, MAX_T, N_T)
-            for i in xrange(COMBO_SIZE):
+            for i in range(COMBO_SIZE):
                 for t in thresholds:
                     key = (t, i)
                     gains[key] = { 'g': np.zeros([n_images], dtype=np.float32), \
@@ -462,7 +455,7 @@ with session.as_default():
                     c_combo_size = 0
                 else:
                     can_skip = True
-                    for i in xrange(batch, batch + c_batch_size):
+                    for i in range(batch, batch + c_batch_size):
                         if current['xl'][i] > 1:
                             can_skip = False
                             break
@@ -494,28 +487,28 @@ with session.as_default():
                 label_base = 0
                 idx = 0
 
-                for i in xrange(batch, batch + c_batch_size):
+                for i in range(batch, batch + c_batch_size):
                     # Skip processing if there are no pixels
                     if current['xl'][i] == 0:
                         continue
 
                     # Store the label histogram for this image
                     label_end = label_base + t_n_labels[i - batch]
-                    labels.append(zip(t_labels[label_base:label_end], \
-                                      t_label_probs[label_base:label_end]))
+                    labels.append(list(zip(t_labels[label_base:label_end], \
+                                           t_label_probs[label_base:label_end])))
                     label_base = label_end
 
                     # Skip processing if there's only one label
                     if len(labels[-1]) < 2:
                         continue
 
-                    for j in xrange(c_combo_size):
+                    for j in range(c_combo_size):
                         meta = t_meta[idx]
                         meta_indices = t_meta_indices[idx]
                         idx += 1
 
                         assert(len(meta) == N_T)
-                        for k in xrange(N_T) :
+                        for k in range(N_T) :
                             t = thresholds[k]
                             t_g = meta[k]
 
@@ -594,11 +587,11 @@ with session.as_default():
                     maxrcoords = np.amax(nrcoords)
 
                     # Pad out (lr)coords
-                    for i in xrange(len(lcoords)):
+                    for i in range(len(lcoords)):
                         lcoords[i] = \
                             np.resize(np.array(lcoords[i], dtype=np.int32), \
                                       (maxlcoords, 2))
-                    for i in xrange(len(rcoords)):
+                    for i in range(len(rcoords)):
                         rcoords[i] = \
                             np.resize(np.array(rcoords[i], dtype=np.int32), \
                                       (maxrcoords, 2))
@@ -611,11 +604,11 @@ with session.as_default():
                                    'x': rcoords, \
                                    'xl': nrcoords }]
 
-                    print '\t\tG = ' + str(best_G)
-                    print '\t\tu = ' + str(best_u)
-                    print '\t\tv = ' + str(best_v)
-                    print '\t\tt = ' + str(best_t)
-                    print '\t\tl,r = %d, %d' % (maxlcoords, maxrcoords)
+                    print('\t\tG = ' + str(best_G))
+                    print('\t\tu = ' + str(best_u))
+                    print('\t\tv = ' + str(best_v))
+                    print('\t\tt = ' + str(best_t))
+                    print('\t\tl,r = %d, %d' % (maxlcoords, maxrcoords))
 
             # Don't process further epochs if this is a leaf node or we've
             # reached our target gain
@@ -645,7 +638,7 @@ with session.as_default():
             elif best_G <= 0.0:
                 excuse = 'No gain increase'
 
-            print '\tLeaf node (%s):' % (excuse)
+            print('\tLeaf node (%s):' % (excuse))
             label_probs = {}
             for probs in best_label_probs:
                 for prob in probs:
@@ -656,7 +649,7 @@ with session.as_default():
                         label_probs[key] += prob[1]
             for key, value in label_probs.items():
                 label_probs[key] = value / float(len(best_label_probs))
-                print '\t\t%8d - %0.3f' % (key, label_probs[key])
+                print('\t\t%8d - %0.3f' % (key, label_probs[key]))
 
             current['label_probs'] = label_probs
 
@@ -671,8 +664,8 @@ with session.as_default():
     coord.request_stop()
 
     # Save tree
-    print 'Writing tree to \'tree.pkl\''
-    with open('tree.pkl', 'w') as f:
+    print('Writing tree to \'tree.pkl\'')
+    with open('tree.pkl', 'wb') as f:
         pickle.dump(tree, f)
 
     coord.join(threads)

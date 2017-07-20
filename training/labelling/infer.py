@@ -1,21 +1,15 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 import os
+import cv2
 import png
 import sys
-import Imath
 import pickle
 import numpy as np
-import OpenEXR as exr
 
 def get_depth(path):
-    exrfile = exr.InputFile(path)
-    hdr = exrfile.header()
-    binary = exrfile.channel(hdr['channels'].keys()[0], Imath.PixelType(Imath.PixelType.FLOAT))
-    depth = np.fromstring(binary, dtype=np.float32)
-    depth = np.reshape(depth, (hdr['dataWindow'].max.y + 1, hdr['dataWindow'].max.x + 1))
-    exrfile.close()
-    return depth
+    exr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    return exr[...,0]
 
 def eval_pixel(tree, depth, x, node_path = ''):
     clip = np.array(np.shape(depth)) - 1
@@ -58,7 +52,7 @@ def generate_png(label_probs, name):
         col = coord[1]
         while row >= len(image):
             image.append([])
-        while (col + 1) * 3 > len(image[row]):
+        while col >= len(image[row]):
             image[row].append(0)
 
         label = 0
@@ -68,34 +62,27 @@ def generate_png(label_probs, name):
                 prob = value
                 label = key
 
-        label = int(label)
-        r = label >> 16
-        g = (label >> 8) & 0xFF
-        b = label & 0xFF
+        image[row][col] = int(label)
 
-        image[row][(col * 3)] = r
-        image[row][(col * 3) + 1] = g
-        image[row][(col * 3) + 2] = b
-
-    with open(name, 'w') as f:
-        w = png.Writer(len(image[0]) / 3, len(image))
+    with open(name, 'wb') as f:
+        w = png.Writer(len(image[0]), len(image), greyscale=True)
         w.write(f, image)
 
 # Open decision tree
-with open(sys.argv[1], 'r') as f:
-    tree = pickle.load(f)
+with open(sys.argv[1], 'rb') as f:
+    tree = pickle.load(f, encoding='latin1')
 
 # Open depth image
 depth = get_depth(sys.argv[2])
 
 # Evaluate each pixel in the image
-print 'Evaluating image...'
+print('Evaluating image...')
 label_probs = eval_image(tree, depth)
 
 # Write that out and generate a png showing the most likely result
-print 'Writing out probability map'
-with open('output.pkl', 'w') as f:
+print('Writing out probability map')
+with open('output.pkl', 'wb') as f:
     pickle.dump(label_probs, f)
 
-print 'Writing out png of likeliest labels'
+print('Writing out png of likeliest labels')
 generate_png(label_probs, 'output.png')
