@@ -325,13 +325,7 @@ class RigGeneratorOperator(bpy.types.Operator):
             # other armatures we have
             bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
             self.report({'INFO'}, "loading")
-            load_bvh_file(bvh)
-
-            # It's a nasty gotcha but the MalkWalk addon will set the fake user
-            # reference on the imported action which makes the .blend file
-            # eventually balloon to ridiculous proportions
-            bpy.data.objects['BasePoseObject'].animation_data.action.use_fake_user = False
-            #bpy.ops.render.render(animation=True)
+            load_bvh_file(bvh, interactive_mode=False)
 
             for body in all_bodies:
                 pose_obj = bpy.data.objects[body + 'PoseObject']
@@ -505,33 +499,85 @@ def update_current_bvh_state(ignore_op):
     bvh_state['start'] = bpy.context.scene.frame_start
     bvh_state['end'] = bpy.context.scene.frame_end
 
-    cam_pos = bpy.data.objects['Camera'].location.xyz
-    cam_rot = bpy.data.objects['Camera'].rotation_quaternion
+    camera = bpy.data.objects['Camera']
+    cam_pos = camera.location.xyz
+    cam_rot = camera.rotation_quaternion
+
+    vertical_fov = bpy.data.cameras['Camera'].angle
+
     bvh_state['camera'] = { 'location': [cam_pos[0], cam_pos[1], cam_pos[2]],
-                            'rotation': [cam_rot[0], cam_rot[1], cam_rot[2], cam_rot[3]] }
+                            'rotation': [cam_rot[0], cam_rot[1], cam_rot[2], cam_rot[3]],
+                            'vertical_fov': vertical_fov }
 
 
-def load_bvh_file(bvh_state):
+def load_bvh_file(bvh_state, interactive_mode=False):
+
+    pose_obj = bpy.context.scene.objects.active
+
     bpy.context.scene.McpStartFrame = 1
     bpy.context.scene.McpEndFrame = 1000
     bpy.ops.mcp.load_and_retarget(filepath=bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + bvh_state['file']))
+
+    # It's a nasty gotcha but the MalkWalk addon will set the fake user
+    # reference on the imported action which makes the .blend file eventually
+    # balloon to ridiculous proportions
+    pose_obj.animation_data.action.use_fake_user = False
 
     bpy.context.scene.frame_start = bvh_state['start']
     if 'end' in bvh_state:
         bpy.context.scene.frame_end = bvh_state['end']
     else:
         if bpy.context.object.animation_data:
-            bpy.context.scene.frame_end = bpy.context.object.animation_data.action.frame_range[1]
+            frame_end = bpy.context.object.animation_data.action.frame_range[1]
         else:
-            bpy.context.scene.frame_end = 1000
+            frame_end = 1000
+        bpy.context.scene.frame_end = frame_end
+        bvh_state['end'] = frame_end
+
+    # While interactively reviewing mocap files then it seems more likely than
+    # not that the camera state that was good for the previous file could be
+    # good default for this one if we haven't got camera state in the index.
+    #
+    # We want to make a more deterministic default while running
+    # non-interactively
+    #
+    if not interactive_mode:
+        cam_pos = bpy.data.objects['Camera'].location.xyz
+        cam_rot = bpy.data.objects['Camera'].rotation_quaternion
+    else:
+        cam_pos = [0, -2, 1.4]
+        cam_rot = [1, 0, 0, 0]
+    cam_fov = 83 # (vertical)
 
     if 'camera' in bvh_state:
         if 'location' in bvh_state['camera']:
             cam_pos = bvh_state['camera']['location']
-            bpy.data.objects['Camera'].location.xyz = cam_pos
+
         if 'quaternion' in bvh_state['camera']:
             cam_rot = bvh_state['camera']['quaternion']
-            bpy.data.objects['Camera'].rotation_quaternion = cam_rot
+
+        # Originally it was fixed (part of the .blend file) that the camera
+        # had a vertical fov of 49.13 degrees, but since that doesn't really
+        # match the typical fov of a phone camera well we now track the fov
+        # of the camera as part of the index (at time of writing we switched
+        # to an fov of 83 degrees)
+        #
+        if 'vertical_fov' in bvh_state:
+            cam_fov = bvh_state['camera']['vertical_fov']
+        else:
+            # instead of keeping the old FOV we will instead use the new
+            # default but move the camera closer
+            cam_pos[1] = cam_pos[1] / 2
+    else:
+        bvh_state['camera'] = {}
+
+    bpy.data.objects['Camera'].location.xyz = cam_pos
+    bpy.data.objects['Camera'].rotation_quaternion = cam_rot
+    bpy.data.cameras['Camera'].angle = math.radians(cam_fov)
+
+    bvh_state['camera']['location'] = cam_pos
+    bvh_state['camera']['quaternion'] = cam_rot
+    bvh_state['camera']['vertical_fov'] = cam_fov
 
     #if 'blacklist' in bvh_state:
     #    bpy.context.scene.GlimpseMoCapBlacklist = bvh_state['blacklist']
@@ -546,7 +592,7 @@ def load_current_bvh_file(ignore_op):
             op.report({'ERROR'}, "Invalid Mo-cap index")
         return
 
-    load_bvh_file(bvh_index[bvh_index_pos])
+    load_bvh_file(bvh_index[bvh_index_pos], interactive_mode=True)
 
 
 def load_mocap_index():
