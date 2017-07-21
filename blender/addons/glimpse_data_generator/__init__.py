@@ -863,7 +863,7 @@ def register():
             description="Current BVH state index",
             default=0,
             min=0,
-            max=100,
+            max=5000,
             get=get_bvh_index_pos,
             set=set_bvh_index_pos
             )
