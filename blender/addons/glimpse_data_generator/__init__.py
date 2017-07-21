@@ -313,7 +313,7 @@ class RigGeneratorOperator(bpy.types.Operator):
         render_objects = []
 
         #for bvh in bvh_index:
-        for idx in range(15, 100):
+        for idx in range(0, 500):
             bvh = bvh_index[idx]
 
             if bvh['blacklist']:
@@ -343,81 +343,104 @@ class RigGeneratorOperator(bpy.types.Operator):
             bvh_name = os.path.basename(bvh['file'])
             self.report({'INFO'}, "rendering " + bvh_name)
 
-            #for frame in range(bvh['start'], bvh['end']):
-            for frame in range(bvh['start'], bvh['end']):
-                if frame == bvh['start'] or frame % 5 == 0:
+            randomization_step = 5
 
-                    self.report({'INFO'}, "> randomizing " + bvh_name + " render")
+            # extend the range end beyond the length in case it's not a multiple
+            # of the randomization_step...
+            range_end = bvh['end'] + randomization_step - 1
 
-                    for obj in render_objects:
-                        obj.layers[0] = False
-                        if "Clothes:" in obj.name:
-                            obj.hide = True
-                            obj.layers = obj.parent.layers
-                    render_objects = []
-                    #for body in all_bodies:
-                    #    bpy.data.objects[body + "BodyMeshObject"].layers[0] = False
+            # Hit some errors with the range bounds not being integer and I
+            # guess that comes from the json library loading our mocap index
+            # may make some numeric feilds float so bvh['start'] or bvh['end']
+            # might be float
+            for start_frame in range(int(bvh['start']), int(range_end), randomization_step):
 
-                    # randomize the model
-                    body = numpy.random.choice(all_bodies)
-                    hat = numpy.random.choice(hat_choices, p=hat_probabilities)
-                    trousers = numpy.random.choice(trouser_choices, p=trouser_probabilities)
-                    top = numpy.random.choice(top_choices, p=top_probabilities)
-                    glasses = numpy.random.choice(glasses_choices, p=glasses_probabilities)
+                self.report({'INFO'}, "> randomizing " + bvh_name + " render")
 
-                    body_obj = bpy.data.objects[body + "BodyMeshObject"]
-                    body_obj.layers[0] = True
-                    render_objects.append(body_obj)
+                for obj in render_objects:
+                    obj.layers[0] = False
+                    if "Clothes:" in obj.name:
+                        obj.hide = True
+                        obj.layers = obj.parent.layers
+                render_objects = []
+                #for body in all_bodies:
+                #    bpy.data.objects[body + "BodyMeshObject"].layers[0] = False
 
-                    if hat != 'none':
-                        hat_obj = bpy.data.objects[body + "Clothes:" + hat]
-                        if hat_obj:
-                            hat_obj.hide = False
-                            hat_obj.layers[0] = True
-                            render_objects.append(hat_obj)
+                # randomize the model
+                body = numpy.random.choice(all_bodies)
+                hat = numpy.random.choice(hat_choices, p=hat_probabilities)
+                trousers = numpy.random.choice(trouser_choices, p=trouser_probabilities)
+                top = numpy.random.choice(top_choices, p=top_probabilities)
+                glasses = numpy.random.choice(glasses_choices, p=glasses_probabilities)
 
-                    if trousers != 'none':
-                        trouser_obj = bpy.data.objects[body + "Clothes:" + trousers]
-                        if trouser_obj:
-                            trouser_obj.hide = False
-                            trouser_obj.layers[0] = True
-                            render_objects.append(trouser_obj)
+                body_obj = bpy.data.objects[body + "BodyMeshObject"]
+                body_obj.layers[0] = True
+                render_objects.append(body_obj)
 
-                        #add_clothing(self, context, trousers)
-                        #trouser_obj.layers[0] = True
-                        #render_objects.append(trouser_obj)
+                body_pose = bpy.data.objects[body + "PoseObject"]
+                bpy.data.objects['Camera'].constraints['Track To'].target = body_pose
 
-                    if top != 'none':
-                        top_obj = bpy.data.objects[body + "Clothes:" + top]
-                        if top_obj:
-                            top_obj.hide = False
-                            top_obj.layers[0] = True
-                            render_objects.append(top_obj)
+                if hat != 'none':
+                    hat_obj = bpy.data.objects[body + "Clothes:" + hat]
+                    if hat_obj:
+                        hat_obj.hide = False
+                        hat_obj.layers[0] = True
+                        render_objects.append(hat_obj)
 
-                        #add_clothing(self, context, top)
-                        #top_obj.layers[0] = True
-                        #render_objects.append(top_obj)
+                if trousers != 'none':
+                    trouser_obj = bpy.data.objects[body + "Clothes:" + trousers]
+                    if trouser_obj:
+                        trouser_obj.hide = False
+                        trouser_obj.layers[0] = True
+                        render_objects.append(trouser_obj)
 
-                    if glasses != 'none':
-                        glasses_obj = bpy.data.objects[body + "Clothes:" + glasses]
-                        if glasses_obj:
-                            glasses_obj.hide = False
-                            glasses_obj.layers[0] = True
-                            render_objects.append(glasses_obj)
+                    #add_clothing(self, context, trousers)
+                    #trouser_obj.layers[0] = True
+                    #render_objects.append(trouser_obj)
 
-                        #add_clothing(self, context, glasses)
-                        #glasses_obj.layers[0] = True
-                        #render_objects.append(glasses_obj)
+                if top != 'none':
+                    top_obj = bpy.data.objects[body + "Clothes:" + top]
+                    if top_obj:
+                        top_obj.hide = False
+                        top_obj.layers[0] = True
+                        render_objects.append(top_obj)
 
-                    dirname =  body + "_hat_" + hat + "_trousers_" + trousers + "_top_" + top + "_glasses_" + glasses
-                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("color-test", bvh_name[:-4], dirname))
-                    context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("depth-test", bvh_name[:-4], dirname))
-                    context.scene.update()
+                    #add_clothing(self, context, top)
+                    #top_obj.layers[0] = True
+                    #render_objects.append(top_obj)
 
-                self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
+                if glasses != 'none':
+                    glasses_obj = bpy.data.objects[body + "Clothes:" + glasses]
+                    if glasses_obj:
+                        glasses_obj.hide = False
+                        glasses_obj.layers[0] = True
+                        render_objects.append(glasses_obj)
+
+                    #add_clothing(self, context, glasses)
+                    #glasses_obj.layers[0] = True
+                    #render_objects.append(glasses_obj)
+
+                # NB. the range extends beyond the length of animation in case
+                # it's not a multiple of the randomization step, so clip end here:
+                end_frame = min(start_frame + randomization_step, bvh['end'])
+
+                dirname =  str(start_frame) + "_" + str(end_frame-1) + "_" + body + "_hat_" + hat + "_trousers_" + trousers + "_top_" + top + "_glasses_" + glasses
+                context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("color-test", bvh_name[:-4], dirname))
+                context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("depth-test", bvh_name[:-4], dirname))
+                context.scene.update()
+
                 context.scene.layers = render_layers
-                bpy.context.scene.frame_current = frame
-                bpy.ops.render.render(write_still=True)
+
+                for frame in range(start_frame, end_frame):
+                    bpy.context.scene.frame_current = frame
+
+                    pose_cam_vec = body_pose.pose.bones['pelvis'].head - bpy.data.objects['Camera'].location
+                    if pose_cam_vec.length < 1.5:
+                        self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
+                        continue
+
+                    self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
+                    bpy.ops.render.render(write_still=True)
 
         return {'FINISHED'}
 
