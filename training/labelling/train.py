@@ -552,13 +552,13 @@ with session.as_default():
                 lcoords.append(current['x'][i][lindices])
                 rcoords.append(current['x'][i][rindices])
 
-                nlcoords[i] = len(lcoords[-1])
-                nrcoords[i] = len(rcoords[-1])
+                nlcoords[i] = meta_indices[0]
+                nrcoords[i] = meta_indices[1]
 
-                if nlcoords[-1] > maxlcoords:
-                    maxlcoords = nlcoords[-1]
-                if nrcoords[-1] > maxrcoords:
-                    maxrcoords = nrcoords[-1]
+                if meta_indices[0] > maxlcoords:
+                    maxlcoords = meta_indices[0]
+                if meta_indices[1] > maxrcoords:
+                    maxrcoords = meta_indices[1]
 
                 lindex_base = lend
                 rindex_base = rend
@@ -575,11 +575,11 @@ with session.as_default():
 
             # Add left/right nodes to the queue
             queue.extend([{ 'name': current['name'] + 'l', \
-                           'x': lcoords, \
-                           'xl': nlcoords }, \
-                         { 'name': current['name'] + 'r', \
-                           'x': rcoords, \
-                           'xl': nrcoords }])
+                            'x': lcoords, \
+                            'xl': nlcoords }, \
+                          { 'name': current['name'] + 'r', \
+                            'x': rcoords, \
+                            'xl': nrcoords }])
 
             if DISPLAY_EPOCH_PROGRESS:
                 sys.stdout.write('                                \r')
