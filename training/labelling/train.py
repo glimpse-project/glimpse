@@ -533,8 +533,8 @@ with session.as_default():
 
             lcoords = []
             rcoords = []
-            nlcoords = np.array([n_images], dtype=np.int64)
-            nrcoords = np.array([n_images], dtype=np.int64)
+            nlcoords = np.zeros([n_images], dtype=np.int32)
+            nrcoords = np.zeros([n_images], dtype=np.int32)
             maxlcoords = 0
             maxrcoords = 0
 
