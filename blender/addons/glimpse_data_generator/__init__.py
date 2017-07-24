@@ -312,8 +312,8 @@ class RigGeneratorOperator(bpy.types.Operator):
 
         render_objects = []
 
-        #for bvh in bvh_index:
-        for idx in range(0, 500):
+        self.report({'INFO'}, "Rendering MoCap indices from " + str(bpy.context.scene.GlimpseBvhGenFrom) + " to " + str(bpy.context.scene.GlimpseBvhGenTo))
+        for idx in range(bpy.context.scene.GlimpseBvhGenFrom, bpy.context.scene.GlimpseBvhGenTo):
             bvh = bvh_index[idx]
 
             if bvh['blacklist']:
@@ -463,7 +463,11 @@ class GeneratePanel(bpy.types.Panel):
         layout.separator()
         layout.prop(scn, "GlimpseClothesRoot", text="Clothes")
         layout.separator()
-        layout.prop(scn, "GlimpseDebug")
+        #layout.prop(scn, "GlimpseDebug")
+        #layout.separator()
+        row = layout.row()
+        row.prop(scn, "GlimpseBvhGenFrom", text="From")
+        row.prop(scn, "GlimpseBvhGenTo", text="To")
         layout.separator()
         layout.operator("glimpse.generate_data")
 
@@ -635,6 +639,14 @@ class VIEW3D_MoCap_OpenBvhIndexButton(bpy.types.Operator):
         bvh_file_index = {}
         bvh_index_pos = 0
 
+        bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
+        bpy.ops.object.select_all(action='DESELECT')
+
+        pose_obj = bpy.data.objects['Man0PoseObject']
+        pose_obj.select=True
+        context.scene.layers = pose_obj.layers
+        context.scene.objects.active = pose_obj
+
         bvh_index = load_mocap_index()
 
         if len(bvh_index) > 0:
@@ -777,9 +789,9 @@ class MoCapPanel(bpy.types.Panel):
     bl_space_type = "VIEW_3D"
     bl_region_type = "TOOLS"
 
-    @classmethod
-    def poll(self, context):
-        return (context.object and context.object.type == 'ARMATURE')
+    #@classmethod
+    #def poll(self, context):
+    #    return (context.object and context.object.type == 'ARMATURE')
 
     def draw(self, context):
         layout = self.layout
@@ -867,6 +879,18 @@ def register():
             get=get_bvh_index_pos,
             set=set_bvh_index_pos
             )
+
+    bpy.types.Scene.GlimpseBvhGenFrom = IntProperty(
+            name="Index",
+            description="From",
+            default=0,
+            min=0)
+
+    bpy.types.Scene.GlimpseBvhGenTo = IntProperty(
+            name="Index",
+            description="To",
+            default=0,
+            min=0)
 
     bpy.utils.register_module(__name__)
 
