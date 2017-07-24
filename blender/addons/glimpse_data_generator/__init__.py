@@ -425,7 +425,7 @@ class RigGeneratorOperator(bpy.types.Operator):
 
                 context.scene.layers = render_layers
 
-                for frame in range(start_frame, end_frame):
+                for frame in range(int(start_frame), int(end_frame)):
                     bpy.context.scene.frame_current = frame
 
                     pose_cam_vec = body_pose.pose.bones['pelvis'].head - bpy.data.objects['Camera'].location
