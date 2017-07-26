@@ -690,12 +690,14 @@ with session.as_default():
             del node['xl']
 
         # Possibly checkpoint
+        now = time.monotonic()
         if exit_after_checkpoint.triggered or \
-           time.monotonic() - begin > CHECKPOINT_TIME:
+           now - checkpoint_time > CHECKPOINT_TIME:
             hours, minutes, seconds = elapsed(begin)
             print('(%02d:%02d:%02d) Writing checkpoint...' % \
                   (hours, minutes, seconds))
             write_checkpoint(root, queue)
+            checkpoint_time = now
             if exit_after_checkpoint.triggered is True:
                 sys.exit()
 
