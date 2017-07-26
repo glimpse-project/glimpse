@@ -21,6 +21,7 @@ import sys
 import math
 import time
 import pickle
+import signal
 import numpy as np
 import multiprocessing
 import tensorflow as tf
@@ -45,6 +46,8 @@ MAX_NODES=16384
 COMBO_SIZE=2000
 # How frequently to display epoch progress
 DISPLAY_STEP=1
+# How long to let elapse before creating a checkpoint (in seconds)
+CHECKPOINT_TIME=1800
 # Whether to display verbose progress
 DISPLAY_VERBOSE_PROGRESS=False
 # Depth to train tree to (paper specifies 20)
@@ -445,6 +448,25 @@ _i, all_meta_indices, all_lindices, all_rindices = tf.while_loop( \
 init = tf.global_variables_initializer()
 session = tf.Session()
 
+def write_checkpoint(root, queue):
+    checkpoint = (root, queue)
+    with open('checkpoint.pkl', 'wb') as f:
+        pickle.dump(checkpoint, f)
+
+def read_checkpoint():
+    with open('checkpoint.pkl', 'rb') as f:
+        print('Restoring checkpoint...')
+        checkpoint = pickle.load(f, encoding='latin1')
+        return checkpoint
+
+class BreakHandler:
+    triggered = False
+    def __init__(self):
+        signal.signal(signal.SIGINT, self.handler)
+
+    def handler(self, signal, frame):
+        self.triggered = True
+
 with session.as_default():
     print('Initialising...')
     coord = tf.train.Coordinator()
@@ -452,25 +474,33 @@ with session.as_default():
 
     session.run(init)
 
-    # Generate the coordinates for the pixel samples for the root node
-    print('Generating initial coordinates...')
-    initial_coords = \
-        np.stack((np.random.random_integers(0, HEIGHT-1, N_SAMP * n_images), \
-                  np.random.random_integers(0, WIDTH-1, N_SAMP * n_images)), \
-                 axis=1)
+    try:
+        # Try to restore checkpoint
+        root, queue = read_checkpoint()
+    except FileNotFoundError:
+        # Generate the coordinates for the pixel samples for the root node
+        print('Generating initial coordinates...')
+        initial_coords = \
+            np.stack((np.random.random_integers(0, HEIGHT-1, N_SAMP * n_images), \
+                      np.random.random_integers(0, WIDTH-1, N_SAMP * n_images)), \
+                     axis=1)
 
-    # Push the root node onto the training queue
-    root = { 'name': '', \
-             'depth': 0,
-             'x': np.reshape(initial_coords, (n_images, N_SAMP, 2)),
-             'xl': np.tile([N_SAMP], n_images)}
-    queue = [root]
+        # Push the root node onto the training queue
+        root = { 'name': '', \
+                 'depth': 0,
+                 'x': np.reshape(initial_coords, (n_images, N_SAMP, 2)),
+                 'xl': np.tile([N_SAMP], n_images)}
+        queue = [root]
 
     # Initialise the output tree
     thresholds = np.linspace(MIN_T, MAX_T, N_T)
 
     # Start timing
     begin = time.monotonic()
+    checkpoint_time = begin
+
+    # Setup signal handler
+    exit_after_checkpoint = BreakHandler()
 
     while len(queue) > 0:
         n_nodes = min(len(queue), MAX_NODES)
@@ -658,6 +688,16 @@ with session.as_default():
             del node['depth']
             del node['x']
             del node['xl']
+
+        # Possibly checkpoint
+        if exit_after_checkpoint.triggered or \
+           time.monotonic() - begin > CHECKPOINT_TIME:
+            hours, minutes, seconds = elapsed(begin)
+            print('(%02d:%02d:%02d) Writing checkpoint...' % \
+                  (hours, minutes, seconds))
+            write_checkpoint(root, queue)
+            if exit_after_checkpoint.triggered is True:
+                sys.exit()
 
     coord.request_stop()
 
