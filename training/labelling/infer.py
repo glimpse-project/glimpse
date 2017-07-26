@@ -11,20 +11,18 @@ def get_depth(path):
     exr = cv2.imread(path, cv2.IMREAD_UNCHANGED)
     return exr[...,0]
 
-def eval_pixel(tree, depth, x, node_path = ''):
+def eval_pixel(node, depth, x):
     clip = np.array(np.shape(depth)) - 1
     dx = depth[x[0]][x[1]]
-    node = tree[node_path]
 
     while 't' in node:
         u = np.around(np.clip(np.add(x, np.divide(node['u'], dx)), [0, 0], clip)).astype(np.int32)
         v = np.around(np.clip(np.add(x, np.divide(node['v'], dx)), [0, 0], clip)).astype(np.int32)
         fx = depth[u[0]][u[1]] - depth[v[0]][v[1]]
         if fx < node['t']:
-            node_path += 'l'
+            node = node['l']
         else:
-            node_path += 'r'
-        node = tree[node_path]
+            node = node['r']
 
     return node['label_probs']
 
