@@ -527,7 +527,7 @@ with session.as_default():
             max_node_pixels = np.amax(node['xl'])
             if max_node_pixels > max_pixels:
                 max_pixels = max_node_pixels
-            c_skip_mask[i] = node['depth'] >= MAX_DEPTH or max_pixels <= 1
+            c_skip_mask[i] = node['depth'] >= MAX_DEPTH or max_node_pixels <= 1
 
         c_all_x = np.zeros([n_nodes, n_images, max_pixels, 2], dtype=np.int32)
         for i in range(n_nodes):
