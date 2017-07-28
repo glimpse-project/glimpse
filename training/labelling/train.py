@@ -148,21 +148,24 @@ def computeGain(fdepth_pixels, label_pixels, t, hq, q):
     # Partition candidate depth pixels into two groups
     lindex, rindex = getLRPixelIndices(fdepth_pixels, t)
 
-    # Compute gain (see equation (6) from 3.3 of the paper)
-    llabel_pixels = tf.gather_nd(label_pixels, lindex)
-    hql, l_labels, l_label_prob = shannon_entropy(llabel_pixels)
-    ql = tf.cast(tf.shape(llabel_pixels)[0], tf.float32)
+    def calculate_gain():
+        # Compute gain (see equation (6) from 3.3 of the paper)
+        llabel_pixels = tf.gather_nd(label_pixels, lindex)
+        hql, l_labels, l_label_prob = shannon_entropy(llabel_pixels)
+        ql = tf.cast(tf.shape(llabel_pixels)[0], tf.float32)
 
-    rlabel_pixels = tf.gather_nd(label_pixels, rindex)
-    hqr, r_labels, r_label_prob = shannon_entropy(rlabel_pixels)
-    qr = tf.cast(tf.shape(rlabel_pixels)[0], tf.float32)
+        rlabel_pixels = tf.gather_nd(label_pixels, rindex)
+        hqr, r_labels, r_label_prob = shannon_entropy(rlabel_pixels)
+        qr = tf.cast(tf.shape(rlabel_pixels)[0], tf.float32)
+
+        return hq - ((ql / q * hql) + (qr / q * hqr))
 
     # Short-circuit these equations if lindex/rindex are 0-length
     G = tf.cond(tf.size(lindex) < 1, \
         lambda: tf.constant(0.0), \
         lambda: tf.cond(tf.size(rindex) < 1, \
                         lambda: tf.constant(0.0), \
-                        lambda: hq - ((ql / q * hql) + (qr / q * hqr))))
+                        lambda: calculate_gain()))
 
     # Return the indices for the left branch and the right branch, as well as
     # the calculated gain. These will be used later if this threshold and
@@ -267,15 +270,13 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
 
         # Test u,v pairs against a range of thresholds
         def test_uv(i, all_gain):
-            # Slice out the appropriate u and v
-            u = tf.slice(all_u, [n, i, 0], [1, 1, 2])[0][0]
-            v = tf.slice(all_v, [n, i, 0], [1, 1, 2])[0][0]
-
             # Short-circuit all this work if there are fewer than 2 labels (and thus
             # no gain increase is possible)
             G = tf.cond(tf.size(x_labels) < 2, \
                         lambda: tf.zeros([N_T]), \
-                        lambda: testImage(depth_image, u, v, x, label_pixels, hq, q))
+                        lambda: testImage(depth_image, \
+                                          all_u[n][i], all_v[n][i], \
+                                          x, label_pixels, hq, q))
 
             # Collect the run metadata
             # meta is [N_T], float32
@@ -294,15 +295,16 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
 
         # Keep track of the gains for this node, but short-circuit if there are
         # no label pixels or we're not testing this node
-        add_gain = tf.concat([node_gains, [all_gain]], axis=0)
-        skip_gain = tf.concat([node_gains, tf.zeros([1, COMBO_SIZE, N_T], \
-                                                    dtype=tf.float32)], axis=0)
-
+        def add_gain():
+            return tf.concat([node_gains, [all_gain]], axis=0)
+        def skip_gain():
+            return tf.concat([node_gains, tf.zeros([1, COMBO_SIZE, N_T], \
+                                                   dtype=tf.float32)], axis=0)
         node_gains = tf.cond(skip_mask[n], \
-            lambda: skip_gain,
+            lambda: skip_gain(),
             lambda: tf.cond(tf.size(x_labels) < 2, \
-                            lambda: skip_gain,
-                            lambda: add_gain))
+                            lambda: skip_gain(),
+                            lambda: add_gain()))
 
         # Collect label histogram data
         # xlabels is [?], int32
