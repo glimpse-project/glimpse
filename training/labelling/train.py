@@ -189,7 +189,8 @@ def testImage(depth_image, u, v, x, label_pixels, hq, q):
         testThreshold, \
         [MIN_T, tf.zeros([0], dtype=tf.float32)], \
         shape_invariants=[tf.TensorShape([]), \
-                          tf.TensorShape([None])])
+                          tf.TensorShape([None])], \
+        back_prop=False)
 
     return meta
 
@@ -291,7 +292,8 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                 test_uv, \
                 [0, tf.zeros([0, N_T])], \
                 shape_invariants=[tf.TensorShape([]), \
-                                  tf.TensorShape([None, N_T])])
+                                  tf.TensorShape([None, N_T])], \
+                back_prop=False)
 
         # Keep track of the gains for this node, but short-circuit if there are
         # no label pixels or we're not testing this node
@@ -330,7 +332,8 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                               tf.TensorShape([None, COMBO_SIZE, N_T]), \
                               tf.TensorShape([None]), \
                               tf.TensorShape([None]), \
-                              tf.TensorShape([None])])
+                              tf.TensorShape([None])], \
+            back_prop=False)
 
     # Accumulate gain
     acc_gain += node_gains
@@ -351,10 +354,11 @@ _i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs = tf.while_loop( \
                       tf.TensorShape([None, COMBO_SIZE, N_T]), \
                       tf.TensorShape([None]), \
                       tf.TensorShape([None]), \
-                      tf.TensorShape([None])])
+                      tf.TensorShape([None])], \
+    back_prop=False)
 
 # Scan over all_n_labels to make the indices absolute
-all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels)
+all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels, back_prop=False)
 
 # Find the best gain and the best combination index
 flat_gain = tf.reshape(acc_gain, [nodes_size, COMBO_SIZE * N_T])
@@ -383,7 +387,8 @@ _n, best_gains, best_u, best_v, best_t = tf.while_loop( \
                       tf.TensorShape([None]), \
                       tf.TensorShape([None, 2]), \
                       tf.TensorShape([None, 2]), \
-                      tf.TensorShape([None])])
+                      tf.TensorShape([None])], \
+    back_prop=False)
 
 # Construct graph for retrieving lr pixel coordinates
 # For retrieving the coordinates of a particular u,v,t combination
@@ -429,7 +434,8 @@ def collect_indices(i, all_meta_indices, all_lindices, all_rindices):
         shape_invariants=[tf.TensorShape([]), \
                           tf.TensorShape([None, 2]), \
                           tf.TensorShape([None]), \
-                          tf.TensorShape([None])])
+                          tf.TensorShape([None])], \
+        back_prop=False)
 
     return i + 1, all_meta_indices, all_lindices, all_rindices
 
@@ -444,7 +450,8 @@ _i, all_meta_indices, all_lindices, all_rindices = tf.while_loop( \
     shape_invariants=[tf.TensorShape([]), \
                       tf.TensorShape([None, 2]), \
                       tf.TensorShape([None]), \
-                      tf.TensorShape([None])])
+                      tf.TensorShape([None])], \
+    back_prop=False)
 
 # Initialise and run the session
 init = tf.global_variables_initializer()
