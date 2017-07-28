@@ -25,6 +25,7 @@ import signal
 import numpy as np
 import multiprocessing
 import tensorflow as tf
+from collections import deque
 
 # Image dimensions
 WIDTH=540
@@ -32,7 +33,7 @@ HEIGHT=960
 # Pixels per meter
 PPM=579.0
 # Number of images to pre-load in the queue
-QUEUE_BUFFER=1000
+QUEUE_BUFFER=200
 # Number of threads to use when pre-loading queue
 QUEUE_THREADS=multiprocessing.cpu_count()
 # Limit the number of images in the training set
@@ -40,7 +41,7 @@ DATA_LIMIT=0
 # Number of epochs to train per node
 N_EPOCHS=1
 # Maximum number of nodes to train at once
-MAX_NODES=16384
+MAX_NODES=8192
 # Maximum number of u,v pairs to test per epoch. The paper specifies testing
 # 2000 candidate u,v pairs (the equivalent number is N_EPOCHS * COMBO_SIZE)
 COMBO_SIZE=2000
@@ -121,10 +122,9 @@ def shannon_entropy(values):
     ncount = tf.cast(count, tf.float32) / tf.cast(tf.reduce_sum(count), tf.float32)
     return -tf.reduce_sum(ncount * (tf.log(ncount) / tf.log(2.0))), y, ncount
 
-def computeDepthPixels(depth_image, u, v, x):
+def computeDepthPixels(depth_image, depth_pixels, u, v, x):
     # Gather the candidate pixels from the depth image and apply
     # equation (1) from 3.2 of the paper
-    depth_pixels = tf.gather_nd(depth_image, x)
     uindices, vindices = get_offset_indices(depth_image, depth_pixels, x, u, v)
     return tf.gather_nd(depth_image, uindices) - tf.gather_nd(depth_image, vindices)
 
@@ -172,9 +172,9 @@ def computeGain(fdepth_pixels, label_pixels, t, hq, q):
     # candidate u,v pair produce the best accumulated gain over all images.
     return G
 
-def testImage(depth_image, u, v, x, label_pixels, hq, q):
+def testImage(depth_image, depth_pixels, u, v, x, label_pixels, hq, q):
     # Compute the set of pixels that will be used for partitioning
-    fdepth_pixels = computeDepthPixels(depth_image, u, v, x)
+    fdepth_pixels = computeDepthPixels(depth_image, depth_pixels, u, v, x)
 
     def testThreshold(t, meta):
         G = computeGain(fdepth_pixels, label_pixels, t, hq, q)
@@ -248,8 +248,8 @@ all_u = tf.random_uniform([nodes_size, COMBO_SIZE, 2], MIN_UV, MAX_UV, name='all
 all_v = tf.random_uniform([nodes_size, COMBO_SIZE, 2], MIN_UV, MAX_UV, name='all_v')
 
 # Pixel coordinates to test
-all_x = tf.placeholder(tf.int32, shape=[None, n_images, None, 2], name='pixels')
-len_x = tf.placeholder(tf.int32, shape=[None, n_images], name='dim_pixels')
+all_x = tf.placeholder(tf.int32, shape=[None, 2], name='pixels')
+x_index = tf.placeholder(tf.int32, shape=[None, n_images, 2], name='pixel_indices')
 
 # Which nodes to test
 skip_mask = tf.placeholder(tf.bool, shape=[None], name='skip_mask')
@@ -261,12 +261,19 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
     depth_image.set_shape([HEIGHT, WIDTH, 1])
     label_image.set_shape([HEIGHT, WIDTH, 1])
 
-    def test_node(n, node_gains, all_x_labels, all_x_label_probs, all_n_labels):
-        # Slice out the appropriate x values for the image
-        x = tf.slice(all_x, [n, i, 0, 0], [1, 1, len_x[n][i], 2])[0][0]
+    all_depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x), [1])
+    all_label_pixels = tf.squeeze(tf.gather_nd(label_image, all_x), [1])
 
-        # Compute label pixels, histogram shannon entropy
-        label_pixels = tf.reshape(tf.gather_nd(label_image, x), [len_x[n][i]])
+    def test_node(n, node_gains, all_x_labels, all_x_label_probs, all_n_labels):
+        # Slice out the appropriate values for the image
+        x_start = x_index[n][i][0]
+        x_size = x_index[n][i][1]
+
+        x = tf.slice(all_x, [x_start, 0], [x_size, -1])
+        depth_pixels = tf.slice(all_depth_pixels, [x_start], [x_size])
+        label_pixels = tf.slice(all_label_pixels, [x_start], [x_size])
+
+        # Compute histogram shannon entropy
         hq, q, x_labels, x_label_prob = computeLabelHistogramAndEntropy(label_pixels)
 
         # Test u,v pairs against a range of thresholds
@@ -275,7 +282,7 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
             # no gain increase is possible)
             G = tf.cond(tf.size(x_labels) < 2, \
                         lambda: tf.zeros([N_T]), \
-                        lambda: testImage(depth_image, \
+                        lambda: testImage(depth_image, depth_pixels, \
                                           all_u[n][i], all_v[n][i], \
                                           x, label_pixels, hq, q))
 
@@ -400,16 +407,20 @@ def collect_indices(i, all_meta_indices, all_lindices, all_rindices):
     # Dequeue the depth image
     depth_image = depth_image_queue.dequeue()
     depth_image.set_shape([HEIGHT, WIDTH, 1])
+    depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x))
 
     def collect_node_indices(n, all_meta_indices, all_lindices, all_rindices):
-        # Slice out the appropriate x values for the image
-        x = tf.slice(all_x, [n, i, 0, 0], [1, 1, len_x[n][i], 2])[0][0]
+        # Slice out the appropriate values for the image
+        x_start = x_index[n][i][0]
+        x_size = x_index[n][i][1]
+        x = tf.slice(all_x, [x_start, 0], [x_size, -1])
+        ndepth_pixels = tf.slice(depth_pixels, [x_start], [x_size])
 
         # Compute the depth pixels that we'll need to compare against the threshold
-        depth_pixels = computeDepthPixels(depth_image, u[n], v[n], x)
+        fdepth_pixels = computeDepthPixels(depth_image, ndepth_pixels, u[n], v[n], x)
 
         # Get the left/right pixel indices
-        lindices, rindices = getLRPixelIndices(depth_pixels, t[n])
+        lindices, rindices = getLRPixelIndices(fdepth_pixels, t[n])
 
         # Work out index ranges
         lsize = tf.size(lindices)
@@ -417,8 +428,8 @@ def collect_indices(i, all_meta_indices, all_lindices, all_rindices):
         meta_index = [lsize, rsize]
 
         # Flatten indices
-        lindices = tf.reshape(lindices, [lsize])
-        rindices = tf.reshape(rindices, [rsize])
+        lindices = tf.reshape(lindices + x_start, [lsize])
+        rindices = tf.reshape(rindices + x_start, [rsize])
 
         # Add indices to index lists
         all_meta_indices = tf.concat([all_meta_indices, [meta_index]], axis=0)
@@ -497,8 +508,7 @@ with session.as_default():
         # Push the root node onto the training queue
         root = { 'name': '', \
                  'depth': 0,
-                 'x': np.reshape(initial_coords, (n_images, N_SAMP, 2)),
-                 'xl': np.tile([N_SAMP], n_images)}
+                 'x': np.reshape(initial_coords, (n_images, N_SAMP, 2)) }
         queue = [root]
 
     # Initialise the output tree
@@ -525,23 +535,29 @@ with session.as_default():
         t_n_labels, t_labels, t_label_probs = None, None, None
 
         # Concatenate the data from all the nodes at this depth
-        c_len_x = np.empty([n_nodes, n_images], dtype=np.int32)
+        c_all_x = deque([])
+        c_x_index = np.empty([n_nodes, n_images, 2], dtype=np.int32)
         c_skip_mask = np.empty([n_nodes], dtype=np.bool)
         max_pixels = 0
-        for i in range(n_nodes):
-            node = queue[i]
-            c_len_x[i][:] = node['xl']
-            max_node_pixels = np.amax(node['xl'])
+        idx_start = 0
+        for n in range(n_nodes):
+            node = queue[n]
+
+            max_node_pixels = 0
+            pixels = node['x']
+            for i in range(n_images):
+                n_pixels = len(pixels[i])
+                if n_pixels > max_node_pixels:
+                    max_node_pixels = n_pixels
+
+                c_x_index[n][i] = [idx_start, n_pixels]
+                c_all_x.extend(pixels[i])
+                idx_start += n_pixels
+
             if max_node_pixels > max_pixels:
                 max_pixels = max_node_pixels
-            c_skip_mask[i] = node['depth'] >= MAX_DEPTH or max_node_pixels <= 1
-
-        c_all_x = np.zeros([n_nodes, n_images, max_pixels, 2], dtype=np.int32)
-        for i in range(n_nodes):
-            node = queue[i]
-            for j in range(n_images):
-                n_pixels = c_len_x[i][j]
-                c_all_x[i, j, 0:n_pixels, 0:2] = node['x'][j]
+            c_skip_mask[n] = node['depth'] >= MAX_DEPTH or max_node_pixels <= 1
+        c_all_x = np.array(c_all_x)
 
         for epoch in range(1, N_EPOCHS + 1):
             if epoch == 1 or \
@@ -556,7 +572,7 @@ with session.as_default():
             (c_gains, c_u, c_v, c_t) = (None, None, None, None)
 
             params = { all_x: c_all_x, \
-                       len_x: c_len_x, \
+                       x_index: c_x_index, \
                        nodes_size: n_nodes, \
                        skip_mask: c_skip_mask }
             if epoch == 1:
@@ -595,14 +611,12 @@ with session.as_default():
                         v: candidate_v, \
                         t: candidate_t, \
                         all_x: c_all_x, \
-                        len_x: c_len_x, \
+                        x_index: c_x_index, \
                         nodes_size: n_nodes })
 
         # Extract l/r pixels from the previously collected arrays
         lcoords = [[None for i in range(n_images)] for i in range(n_nodes)]
         rcoords = [[None for i in range(n_images)] for i in range(n_nodes)]
-        nlcoords = np.empty([n_nodes, n_images], dtype=np.int32)
-        nrcoords = np.empty([n_nodes, n_images], dtype=np.int32)
         maxlcoords = np.zeros([n_nodes], dtype=np.int32)
         maxrcoords = np.zeros([n_nodes], dtype=np.int32)
 
@@ -620,11 +634,8 @@ with session.as_default():
                 lindices = t_lindices[lindex_base:lend]
                 rindices = t_rindices[rindex_base:rend]
 
-                lcoords[n][i] = c_all_x[n][i][lindices]
-                rcoords[n][i] = c_all_x[n][i][rindices]
-
-                nlcoords[n][i] = meta_indices[0]
-                nrcoords[n][i] = meta_indices[1]
+                lcoords[n][i] = c_all_x[lindices]
+                rcoords[n][i] = c_all_x[rindices]
 
                 if meta_indices[0] > maxlcoords[n]:
                     maxlcoords[n] = meta_indices[0]
@@ -652,12 +663,10 @@ with session.as_default():
                 # Add left/right nodes to the queue
                 node['l'] = { 'name': node['name'] + 'l', \
                               'depth': depth + 1, \
-                              'x': lcoords[n], \
-                              'xl': nlcoords[n] }
+                              'x': lcoords[n] }
                 node['r'] = { 'name': node['name'] + 'r', \
                               'depth': depth + 1, \
-                              'x': rcoords[n], \
-                              'xl': nrcoords[n] }
+                              'x': rcoords[n] }
                 queue.extend([node['l'], node['r']])
             else:
                 # This is a leaf node, store the label probabilities
@@ -696,7 +705,6 @@ with session.as_default():
             del node['name']
             del node['depth']
             del node['x']
-            del node['xl']
 
         # Possibly checkpoint
         now = time.monotonic()
