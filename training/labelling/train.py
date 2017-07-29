@@ -95,25 +95,20 @@ def elapsed(begin):
 def get_offset_indices(image, pixels, x, u, v):
     # Calculate the two inner terms of equation (1) from 3.2 of the paper
     # for each candidate pixel.
-    extents = tf.shape(image)[0:2] - 1
+    extents = [HEIGHT - 1, WIDTH - 1]
     n_pixels = tf.size(pixels)
     clip = tf.reshape(tf.tile(extents, [n_pixels]), [n_pixels, 2])
-    pixels = tf.cast(tf.reshape(pixels, [n_pixels]), tf.float32)
+    pixels = tf.expand_dims(tf.cast(pixels, tf.float32), 1)
 
-    ux = tf.divide(tf.tile([u[0]], [n_pixels]), pixels)
-    uy = tf.divide(tf.tile([u[1]], [n_pixels]), pixels)
-    u = tf.stack((ux, uy), axis=1)
-
-    vx = tf.divide(tf.tile([v[0]], [n_pixels]), pixels)
-    vy = tf.divide(tf.tile([v[1]], [n_pixels]), pixels)
-    v = tf.stack((vx, vy), axis=1)
+    u = tf.tile([u], [n_pixels, 1]) / pixels
+    v = tf.tile([v], [n_pixels, 1]) / pixels
 
     # Note, we clip the coordinates here. The paper says that any coordinate
     # that references outside of the image should essentially result in the
     # background depth - we can assure this by processing the input images.
     x = tf.cast(x, tf.float32)
-    uindices = tf.clip_by_value(tf.cast(x + u, tf.int32), 0, clip)
-    vindices = tf.clip_by_value(tf.cast(x + v, tf.int32), 0, clip)
+    uindices = tf.clip_by_value(tf.cast(tf.round(x + u), tf.int32), 0, clip)
+    vindices = tf.clip_by_value(tf.cast(tf.round(x + v), tf.int32), 0, clip)
 
     return uindices, vindices
 
@@ -225,10 +220,10 @@ depth_key, depth_value = reader.read(depth_files)
 label_key, label_value = reader.read(label_files)
 
 depth_image = tf.py_func(read_depth, [depth_value], tf.float32, stateful=False)
-label_image = tf.cast(tf.image.decode_png(label_value, channels=1), tf.int32)
+label_image = tf.image.decode_png(label_value, channels=1)
 
 depth_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.float32))
-label_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.int32))
+label_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.uint8))
 enqueue_depth = depth_image_queue.enqueue((depth_image))
 enqueue_label = label_image_queue.enqueue((label_image))
 
@@ -350,7 +345,7 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
 # Run n_images iterations over COMBO_SIZE u,v pairs
 acc_gain = tf.zeros([nodes_size, COMBO_SIZE, N_T], dtype=tf.float32)
 all_n_labels = tf.zeros([0], dtype=tf.int32)
-all_x_labels = tf.zeros([0], dtype=tf.int32)
+all_x_labels = tf.zeros([0], dtype=tf.uint8)
 all_x_label_probs = tf.zeros([0], dtype=tf.float32)
 
 _i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs = tf.while_loop( \
