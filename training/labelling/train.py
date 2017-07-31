@@ -185,6 +185,7 @@ def testImage(depth_image, depth_pixels, u, v, x, label_pixels, hq, q):
         [MIN_T, tf.zeros([0], dtype=tf.float32)], \
         shape_invariants=[tf.TensorShape([]), \
                           tf.TensorShape([None])], \
+        parallel_iterations=N_T, \
         back_prop=False)
 
     return meta
@@ -295,6 +296,7 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                 [0, tf.zeros([0, N_T])], \
                 shape_invariants=[tf.TensorShape([]), \
                                   tf.TensorShape([None, N_T])], \
+                parallel_iterations=COMBO_SIZE, \
                 back_prop=False)
 
         # Keep track of the gains for this node, but short-circuit if there are
@@ -357,6 +359,7 @@ _i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs = tf.while_loop( \
                       tf.TensorShape([None]), \
                       tf.TensorShape([None]), \
                       tf.TensorShape([None])], \
+    parallel_iterations = 1, \
     back_prop=False)
 
 # Scan over all_n_labels to make the indices absolute
@@ -502,7 +505,7 @@ with session.as_default():
 
         # Push the root node onto the training queue
         root = { 'name': '', \
-                 'depth': 0,
+                 'depth': 1,
                  'x': np.reshape(initial_coords, (n_images, N_SAMP, 2)) }
         queue = [root]
 
