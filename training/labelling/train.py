@@ -139,54 +139,37 @@ def getLRPixelIndices(depth_pixels, t):
 
     return lindex, rindex
 
-def computeGain(fdepth_pixels, label_pixels, t, hq, q):
-    # Partition candidate depth pixels into two groups
-    lindex, rindex = getLRPixelIndices(fdepth_pixels, t)
+def computeGain(llabel_pixels, rlabel_pixels, hq, q):
+    # Compute gain (see equation (6) from 3.3 of the paper)
+    hql, l_labels, l_label_prob = shannon_entropy(llabel_pixels)
+    ql = tf.cast(tf.shape(llabel_pixels)[0], tf.float32)
 
-    def calculate_gain():
-        # Compute gain (see equation (6) from 3.3 of the paper)
-        llabel_pixels = tf.gather_nd(label_pixels, lindex)
-        hql, l_labels, l_label_prob = shannon_entropy(llabel_pixels)
-        ql = tf.cast(tf.shape(llabel_pixels)[0], tf.float32)
+    hqr, r_labels, r_label_prob = shannon_entropy(rlabel_pixels)
+    qr = tf.cast(tf.shape(rlabel_pixels)[0], tf.float32)
 
-        rlabel_pixels = tf.gather_nd(label_pixels, rindex)
-        hqr, r_labels, r_label_prob = shannon_entropy(rlabel_pixels)
-        qr = tf.cast(tf.shape(rlabel_pixels)[0], tf.float32)
-
-        return hq - ((ql / q * hql) + (qr / q * hqr))
-
-    # Short-circuit these equations if lindex/rindex are 0-length
-    G = tf.cond(tf.size(lindex) < 1, \
-        lambda: tf.constant(0.0), \
-        lambda: tf.cond(tf.size(rindex) < 1, \
-                        lambda: tf.constant(0.0), \
-                        lambda: calculate_gain()))
-
-    # Return the indices for the left branch and the right branch, as well as
-    # the calculated gain. These will be used later if this threshold and
-    # candidate u,v pair produce the best accumulated gain over all images.
-    return G
+    return hq - ((ql / q * hql) + (qr / q * hqr))
 
 def testImage(depth_image, depth_pixels, u, v, x, label_pixels, hq, q):
     # Compute the set of pixels that will be used for partitioning
-    fdepth_pixels = computeDepthPixels(depth_image, depth_pixels, u, v, x)
+    fdepth_pixels = tf.squeeze( \
+        computeDepthPixels(depth_image, depth_pixels, u, v, x), [1])
 
-    def testThreshold(t, meta):
-        G = computeGain(fdepth_pixels, label_pixels, t, hq, q)
+    # Partition candidate depth pixels into threshold buckets
+    t_partitions = tf.clip_by_value( \
+        tf.cast((fdepth_pixels - MIN_T) / T_INC + 1, tf.int32), 0, N_T)
+    t_buckets = tf.dynamic_partition(label_pixels, t_partitions, N_T + 1)
 
-        # Log gain
-        meta = tf.concat([meta, [G]], axis=0)
-
-        return t + T_INC, meta
-
-    _, meta = tf.while_loop(\
-        lambda t, meta: t <= MAX_T, \
-        testThreshold, \
-        [MIN_T, tf.zeros([0], dtype=tf.float32)], \
-        shape_invariants=[tf.TensorShape([]), \
-                          tf.TensorShape([None])], \
-        parallel_iterations=N_T, \
-        back_prop=False)
+    meta = []
+    for i in range(1, N_T + 1):
+        l_pixels = tf.concat(t_buckets[0:i], axis=0)
+        r_pixels = tf.concat(t_buckets[i:], axis=0)
+        G = tf.cond(tf.size(l_pixels) < 1, \
+                    lambda: 0.0, \
+                    lambda: tf.cond(tf.size(r_pixels) < 1, \
+                                    lambda: 0.0, \
+                                    lambda: computeGain(l_pixels, r_pixels, hq, q)))
+        meta.append([G])
+    meta = tf.concat(meta, axis=0)
 
     return meta
 
