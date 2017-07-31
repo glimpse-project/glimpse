@@ -1,7 +1,7 @@
 all: image-pre-processor
 
 CXX=g++
-CXXFLAGS=`pkg-config --cflags OpenEXR libpng`
+CXXFLAGS=`pkg-config --cflags OpenEXR libpng` -g3 -march=native
 LDFLAGS=`pkg-config --libs OpenEXR libpng`
 
 
