@@ -43,7 +43,7 @@
 
 #include <ImathBox.h>
 
-#define DEBUG
+//#define DEBUG
 
 #ifdef DEBUG
 #define PNG_DEBUG 3
@@ -369,7 +369,7 @@ process_exr_file(const char *filename, const char *out_filename)
     in_file.setFrameBuffer(&pixels[0][0] - dw.min.x - dw.min.y * width, 1, width);
     in_file.readPixels(dw.min.y, dw.max.y);
 
-    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height, out_filename);
+    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
 
     for (int y = 0; y < height; y++) {
         Rgba *rgba_row = &pixels[y][0];
