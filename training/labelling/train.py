@@ -507,9 +507,17 @@ with session.as_default():
     # Setup session options/metadata
     options = None
     profile_no = 0
+    summary_writer = None
     run_metadata = tf.RunMetadata()
+    profile_train_dir = os.path.join('profile', 'train')
+    profile_collect_dir = os.path.join('profile', 'train')
     if PROFILE:
+        os.makedirs(profile_train_dir, exist_ok=True)
+        os.makedirs(profile_collect_dir, exist_ok=True)
         options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+
+        summary_dir = os.path.join('profile', 'summary')
+        summary_writer = tf.summary.FileWriter(summary_dir, session.graph)
     else:
         options = tf.RunOptions()
 
@@ -579,12 +587,6 @@ with session.as_default():
                     session.run(tensors, feed_dict=params, options=options, \
                                 run_metadata=run_metadata)
 
-            if PROFILE:
-                run_timeline = timeline.Timeline(run_metadata.step_stats)
-                chrome_trace = run_timeline.generate_chrome_trace_format()
-                with open('%02d_%02d_profile.json' % (profile_no, epoch), 'w') as f:
-                    f.write(chrome_trace)
-
             # See what the best-performing u,v,t combination was for each node
             for n in range(n_nodes):
                 if c_gains[n] > candidate_G[n]:
@@ -599,6 +601,23 @@ with session.as_default():
                         print('\t\tu = ' + str(candidate_u[n]))
                         print('\t\tv = ' + str(candidate_v[n]))
                         print('\t\tt = ' + str(candidate_t[n]))
+
+            if PROFILE:
+                hours, minutes, seconds = elapsed(begin)
+                print('(%02d:%02d:%02d) Writing training profile data...' % \
+                      (hours, minutes, seconds))
+
+                run_timeline = timeline.Timeline(run_metadata.step_stats)
+                chrome_trace = run_timeline.generate_chrome_trace_format()
+                chrome_filename = \
+                    os.path.join(profile_train_dir, \
+                                 '%02d_%02d_profile.json' % (profile_no, epoch))
+                with open(chrome_filename, 'w') as f:
+                    f.write(chrome_trace)
+
+                summary_writer.add_run_metadata(run_metadata, \
+                                                '%02d_%02d' % (profile_no, epoch))
+                summary_writer.flush()
 
         # Collect l/r pixels for the best u,v,t combinations for each node
         hours, minutes, seconds = elapsed(begin)
@@ -616,10 +635,18 @@ with session.as_default():
             options=options, run_metadata=run_metadata)
 
         if PROFILE:
+            hours, minutes, seconds = elapsed(begin)
+            print('(%02d:%02d:%02d) Writing collection profile data...' % \
+                  (hours, minutes, seconds))
+
             run_timeline = timeline.Timeline(run_metadata.step_stats)
             chrome_trace = run_timeline.generate_chrome_trace_format()
             with open('%02dc_profile.json' % (profile_no), 'w') as f:
                 f.write(chrome_trace)
+
+            summary_writer.add_run_metadata(run_metadata, '%02dc' % (profile_no))
+            summary_writer.flush()
+
             profile_no += 1
 
         # Extract l/r pixels from the previously collected arrays
@@ -724,6 +751,9 @@ with session.as_default():
                 sys.exit()
 
     coord.request_stop()
+
+    if PROFILE:
+        summary_writer.close()
 
     # Save tree
     hours, minutes, seconds = elapsed(begin)
