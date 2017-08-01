@@ -257,37 +257,36 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
         # Compute histogram shannon entropy
         hq, q, x_labels, x_label_prob = computeLabelHistogramAndEntropy(label_pixels)
 
-        # Test u,v pairs against a range of thresholds
-        def test_uv(i, all_gain):
-            # Short-circuit all this work if there are fewer than 2 labels (and thus
-            # no gain increase is possible)
-            G = tf.cond(tf.size(x_labels) < 2, \
-                        lambda: tf.zeros([N_T]), \
-                        lambda: computeThresholdGains(depth_image, depth_pixels, \
-                                                      all_u[n][i], all_v[n][i], \
-                                                      x, label_pixels, hq, q))
-
-            # Collect the run metadata
-            # G is [N_T], float32
-            #   (gain)
-            all_gain = tf.concat([all_gain, [G]], axis=0)
-
-            return i + 1, all_gain
-
-        _i, all_gain = \
-            tf.while_loop( \
-                lambda i, all_gain: i < COMBO_SIZE, \
-                test_uv, \
-                [0, tf.zeros([0, N_T])], \
-                shape_invariants=[tf.TensorShape([]), \
-                                  tf.TensorShape([None, N_T])], \
-                parallel_iterations=COMBO_SIZE, \
-                back_prop=False, name='combo_loop')
-
         # Keep track of the gains for this node, but short-circuit if there are
         # no label pixels or we're not testing this node
         def add_gain():
+            # Test u,v pairs against a range of thresholds
+            def test_uv(i, all_gain):
+                # Short-circuit all this work if there are fewer than 2 labels (and thus
+                # no gain increase is possible)
+                G = computeThresholdGains(depth_image, depth_pixels, \
+                                          all_u[n][i], all_v[n][i], \
+                                          x, label_pixels, hq, q)
+
+                # Collect the run metadata
+                # G is [N_T], float32
+                #   (gain)
+                all_gain = tf.concat([all_gain, [G]], axis=0)
+
+                return i + 1, all_gain
+
+            _i, all_gain = \
+                tf.while_loop( \
+                    lambda i, all_gain: i < COMBO_SIZE, \
+                    test_uv, \
+                    [0, tf.zeros([0, N_T])], \
+                    shape_invariants=[tf.TensorShape([]), \
+                                      tf.TensorShape([None, N_T])], \
+                    parallel_iterations=COMBO_SIZE, \
+                    back_prop=False, name='combo_loop')
+
             return tf.concat([node_gains, [all_gain]], axis=0)
+
         def skip_gain():
             return tf.concat([node_gains, tf.zeros([1, COMBO_SIZE, N_T], \
                                                    dtype=tf.float32)], axis=0)
