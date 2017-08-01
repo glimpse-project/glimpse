@@ -26,33 +26,34 @@ import numpy as np
 import multiprocessing
 import tensorflow as tf
 from collections import deque
+from tensorflow.python.client import timeline
 
 # Image dimensions
-WIDTH=540
-HEIGHT=960
+WIDTH = 540
+HEIGHT = 960
 # Pixels per meter
-PPM=579.0
+PPM = 579.0
 # Number of images to pre-load in the queue
-QUEUE_BUFFER=200
+QUEUE_BUFFER = 200
 # Number of threads to use when pre-loading queue
-QUEUE_THREADS=multiprocessing.cpu_count()
+QUEUE_THREADS = multiprocessing.cpu_count()
 # Limit the number of images in the training set
-DATA_LIMIT=0
+DATA_LIMIT = 0
 # Number of epochs to train per node
-N_EPOCHS=1
+N_EPOCHS = 1
 # Maximum number of nodes to train at once
-MAX_NODES=8192
+MAX_NODES = 8192
 # Maximum number of u,v pairs to test per epoch. The paper specifies testing
 # 2000 candidate u,v pairs (the equivalent number is N_EPOCHS * COMBO_SIZE)
-COMBO_SIZE=2000
+COMBO_SIZE = 2000
 # How frequently to display epoch progress
-DISPLAY_STEP=1
+DISPLAY_STEP = 1
 # How long to let elapse before creating a checkpoint (in seconds)
-CHECKPOINT_TIME=1800
+CHECKPOINT_TIME = 1800
 # Whether to display verbose progress
-DISPLAY_VERBOSE_PROGRESS=False
+DISPLAY_VERBOSE_PROGRESS = False
 # Depth to train tree to (paper specifies 20)
-MAX_DEPTH=20
+MAX_DEPTH = 20
 # The range to probe for generated u/v pairs (paper specifies 129 pixel meters)
 RANGE_UV = 1.29 * PPM
 MIN_UV = -RANGE_UV/2.0
@@ -67,6 +68,8 @@ N_T = 50
 T_INC = RANGE_T / (float(N_T) - 0.5)
 # Number of pixel samples (paper specifies 2000)
 N_SAMP = 2000
+# Whether to do profiling
+PROFILE = False
 
 def find_files(base_dir, extensions, name=None):
     for root, dirs, files in os.walk(base_dir):
@@ -121,7 +124,9 @@ def computeDepthPixels(depth_image, depth_pixels, u, v, x):
     # Gather the candidate pixels from the depth image and apply
     # equation (1) from 3.2 of the paper
     uindices, vindices = get_offset_indices(depth_image, depth_pixels, x, u, v)
-    return tf.gather_nd(depth_image, uindices) - tf.gather_nd(depth_image, vindices)
+    return tf.squeeze( \
+        tf.gather_nd(depth_image, uindices) - \
+        tf.gather_nd(depth_image, vindices), [1])
 
 def computeLabelHistogramAndEntropy(label_pixels):
     # Compute the shannon entropy for storage of the labels of the candidate
@@ -131,13 +136,10 @@ def computeLabelHistogramAndEntropy(label_pixels):
 
     return hq, q, x_labels, x_label_prob
 
-def getLRPixelIndices(depth_pixels, t):
-    # TODO: Find an alternative way of doing this that doesn't require two
-    #       conditions to be evaluated.
-    lindex, _ = tf.split(tf.cast(tf.where(tf.less(depth_pixels, t)), tf.int32), 2, axis=1)
-    rindex, _ = tf.split(tf.cast(tf.where(tf.greater_equal(depth_pixels, t)), tf.int32), 2, axis=1)
-
-    return lindex, rindex
+def splitOnThreshold(splitee, splitter, t):
+    partitions = tf.cast( \
+        tf.floor(tf.clip_by_value(splitter - (t - 1.0), 0.0, 1.0)), tf.int32)
+    return tf.dynamic_partition(splitee, partitions, 2)
 
 def computeGain(llabel_pixels, rlabel_pixels, hq, q):
     # Compute gain (see equation (6) from 3.3 of the paper)
@@ -149,29 +151,29 @@ def computeGain(llabel_pixels, rlabel_pixels, hq, q):
 
     return hq - ((ql / q * hql) + (qr / q * hqr))
 
-def testImage(depth_image, depth_pixels, u, v, x, label_pixels, hq, q):
+def computeThresholdGains(depth_image, depth_pixels, u, v, x, label_pixels, hq, q):
     # Compute the set of pixels that will be used for partitioning
-    fdepth_pixels = tf.squeeze( \
-        computeDepthPixels(depth_image, depth_pixels, u, v, x), [1])
+    fdepth_pixels = computeDepthPixels(depth_image, depth_pixels, u, v, x)
 
-    # Partition candidate depth pixels into threshold buckets
-    t_partitions = tf.clip_by_value( \
-        tf.cast((fdepth_pixels - MIN_T) / T_INC + 1, tf.int32), 0, N_T)
-    t_buckets = tf.dynamic_partition(label_pixels, t_partitions, N_T + 1)
-
-    meta = []
-    for i in range(1, N_T + 1):
-        l_pixels = tf.concat(t_buckets[0:i], axis=0)
-        r_pixels = tf.concat(t_buckets[i:], axis=0)
+    def computeThresholdGain(t, gains):
+        l_pixels, r_pixels = splitOnThreshold(label_pixels, fdepth_pixels, t)
         G = tf.cond(tf.size(l_pixels) < 1, \
                     lambda: 0.0, \
                     lambda: tf.cond(tf.size(r_pixels) < 1, \
                                     lambda: 0.0, \
                                     lambda: computeGain(l_pixels, r_pixels, hq, q)))
-        meta.append([G])
-    meta = tf.concat(meta, axis=0)
+        return t + T_INC, tf.concat([gains, [G]], axis=0)
 
-    return meta
+    _t, gains = tf.while_loop( \
+        lambda t, gains: t <= MAX_T, \
+        computeThresholdGain, \
+        [MIN_T, tf.zeros([0])], \
+        shape_invariants=[tf.TensorShape([]), \
+                          tf.TensorShape([None])], \
+        parallel_iterations=N_T, \
+        back_prop=False, name='threshold_loop')
+
+    return gains
 
 # Collect training data
 print('Collecting training data...')
@@ -261,12 +263,12 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
             # no gain increase is possible)
             G = tf.cond(tf.size(x_labels) < 2, \
                         lambda: tf.zeros([N_T]), \
-                        lambda: testImage(depth_image, depth_pixels, \
-                                          all_u[n][i], all_v[n][i], \
-                                          x, label_pixels, hq, q))
+                        lambda: computeThresholdGains(depth_image, depth_pixels, \
+                                                      all_u[n][i], all_v[n][i], \
+                                                      x, label_pixels, hq, q))
 
             # Collect the run metadata
-            # meta is [N_T], float32
+            # G is [N_T], float32
             #   (gain)
             all_gain = tf.concat([all_gain, [G]], axis=0)
 
@@ -280,7 +282,7 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                 shape_invariants=[tf.TensorShape([]), \
                                   tf.TensorShape([None, N_T])], \
                 parallel_iterations=COMBO_SIZE, \
-                back_prop=False)
+                back_prop=False, name='combo_loop')
 
         # Keep track of the gains for this node, but short-circuit if there are
         # no label pixels or we're not testing this node
@@ -293,19 +295,22 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
             lambda: skip_gain(),
             lambda: tf.cond(tf.size(x_labels) < 2, \
                             lambda: skip_gain(),
-                            lambda: add_gain()))
+                            lambda: add_gain()), name='collect_gain')
 
         # Collect label histogram data
         # xlabels is [?], int32
         #   (Unique labels for pixels in x)
-        all_x_labels = tf.concat([all_x_labels, x_labels], axis=0)
+        all_x_labels = tf.concat([all_x_labels, x_labels], axis=0, \
+                                 name='collect_labels')
 
         # x_label_prob is [len(xlabels)], float32
         #   (Distribution of each label in xlabels)
-        all_x_label_probs = tf.concat([all_x_label_probs, x_label_prob], axis=0)
+        all_x_label_probs = tf.concat([all_x_label_probs, x_label_prob], axis=0, \
+                                      name='collect_label_probs')
 
         # Store the index of the label histogram
-        all_n_labels = tf.concat([all_n_labels, [tf.size(x_labels)]], axis=0)
+        all_n_labels = tf.concat([all_n_labels, [tf.size(x_labels)]], axis=0, \
+                                 name='collect_labels_len')
 
         return n+1, node_gains, all_x_labels, all_x_label_probs, all_n_labels
 
@@ -320,7 +325,7 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                               tf.TensorShape([None]), \
                               tf.TensorShape([None]), \
                               tf.TensorShape([None])], \
-            back_prop=False)
+            back_prop=False, name='node_loop')
 
     # Accumulate gain
     acc_gain += node_gains
@@ -343,10 +348,11 @@ _i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs = tf.while_loop( \
                       tf.TensorShape([None]), \
                       tf.TensorShape([None])], \
     parallel_iterations = 1, \
-    back_prop=False)
+    back_prop=False, name='image_loop')
 
 # Scan over all_n_labels to make the indices absolute
-all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels, back_prop=False)
+all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels, back_prop=False, \
+                       name='label_acc_scan')
 
 # Find the best gain and the best combination index
 flat_gain = tf.reshape(acc_gain, [nodes_size, COMBO_SIZE * N_T])
@@ -376,7 +382,7 @@ _n, best_gains, best_u, best_v, best_t = tf.while_loop( \
                       tf.TensorShape([None, 2]), \
                       tf.TensorShape([None, 2]), \
                       tf.TensorShape([None])], \
-    back_prop=False)
+    back_prop=False, name='best_combo_loop')
 
 # Construct graph for retrieving lr pixel coordinates
 # For retrieving the coordinates of a particular u,v,t combination
@@ -384,13 +390,13 @@ u = tf.placeholder(tf.float32, shape=[None, 2], name='u')
 v = tf.placeholder(tf.float32, shape=[None, 2], name='v')
 t = tf.placeholder(tf.float32, shape=[None], name='t')
 
-def collect_indices(i, all_meta_indices, all_lindices, all_rindices):
+def collect_indices(i, all_meta_indices, all_lcoords, all_rcoords):
     # Dequeue the depth image
     depth_image = depth_image_queue.dequeue()
     depth_image.set_shape([HEIGHT, WIDTH, 1])
     depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x))
 
-    def collect_node_indices(n, all_meta_indices, all_lindices, all_rindices):
+    def collect_node_indices(n, all_meta_indices, all_lcoords, all_rcoords):
         # Slice out the appropriate values for the image
         x_start = x_index[n][i][0]
         x_size = x_index[n][i][1]
@@ -400,50 +406,46 @@ def collect_indices(i, all_meta_indices, all_lindices, all_rindices):
         # Compute the depth pixels that we'll need to compare against the threshold
         fdepth_pixels = computeDepthPixels(depth_image, ndepth_pixels, u[n], v[n], x)
 
-        # Get the left/right pixel indices
-        lindices, rindices = getLRPixelIndices(fdepth_pixels, t[n])
+        # Get the left/right pixels
+        lcoords, rcoords = splitOnThreshold(x, fdepth_pixels, t[n])
 
         # Work out index ranges
-        lsize = tf.size(lindices)
-        rsize = tf.size(rindices)
+        lsize = tf.shape(lcoords)[0]
+        rsize = tf.shape(rcoords)[0]
         meta_index = [lsize, rsize]
 
-        # Flatten indices
-        lindices = tf.reshape(lindices + x_start, [lsize])
-        rindices = tf.reshape(rindices + x_start, [rsize])
-
-        # Add indices to index lists
+        # Add pixels to pixel lists
         all_meta_indices = tf.concat([all_meta_indices, [meta_index]], axis=0)
-        all_lindices = tf.concat([all_lindices, lindices], axis=0)
-        all_rindices = tf.concat([all_rindices, rindices], axis=0)
+        all_lcoords = tf.concat([all_lcoords, lcoords], axis=0)
+        all_rcoords = tf.concat([all_rcoords, rcoords], axis=0)
 
-        return n+1, all_meta_indices, all_lindices, all_rindices
+        return n+1, all_meta_indices, all_lcoords, all_rcoords
 
-    _n, all_meta_indices, all_lindices, all_rindices = tf.while_loop( \
+    _n, all_meta_indices, all_lcoords, all_rcoords = tf.while_loop( \
         lambda n, _ami, _al, _ar: n < nodes_size, \
         collect_node_indices, \
-        [0, all_meta_indices, all_lindices, all_rindices],
+        [0, all_meta_indices, all_lcoords, all_rcoords],
         shape_invariants=[tf.TensorShape([]), \
                           tf.TensorShape([None, 2]), \
-                          tf.TensorShape([None]), \
-                          tf.TensorShape([None])], \
-        back_prop=False)
+                          tf.TensorShape([None, 2]), \
+                          tf.TensorShape([None, 2])], \
+        back_prop=False, name='lr_collection_node_loop')
 
-    return i + 1, all_meta_indices, all_lindices, all_rindices
+    return i + 1, all_meta_indices, all_lcoords, all_rcoords
 
 all_meta_indices = tf.zeros([0, 2], dtype=tf.int32)
-all_lindices = tf.zeros([0], dtype=tf.int32)
-all_rindices = tf.zeros([0], dtype=tf.int32)
+all_lcoords = tf.zeros([0, 2], dtype=tf.int32)
+all_rcoords = tf.zeros([0, 2], dtype=tf.int32)
 
-_i, all_meta_indices, all_lindices, all_rindices = tf.while_loop( \
+_i, all_meta_indices, all_lcoords, all_rcoords = tf.while_loop( \
     lambda i, a, b, c: i < n_images, \
     collect_indices, \
-    [0, all_meta_indices, all_lindices, all_rindices], \
+    [0, all_meta_indices, all_lcoords, all_rcoords], \
     shape_invariants=[tf.TensorShape([]), \
                       tf.TensorShape([None, 2]), \
-                      tf.TensorShape([None]), \
-                      tf.TensorShape([None])], \
-    back_prop=False)
+                      tf.TensorShape([None, 2]), \
+                      tf.TensorShape([None, 2])], \
+    back_prop=False, name='lr_collection_image_loop')
 
 # Initialise and run the session
 init = tf.global_variables_initializer()
@@ -501,6 +503,15 @@ with session.as_default():
 
     # Setup signal handler
     exit_after_checkpoint = BreakHandler()
+
+    # Setup session options/metadata
+    options = None
+    profile_no = 0
+    run_metadata = tf.RunMetadata()
+    if PROFILE:
+        options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
+    else:
+        options = tf.RunOptions()
 
     while len(queue) > 0:
         n_nodes = min(len(queue), MAX_NODES)
@@ -560,11 +571,19 @@ with session.as_default():
                 tensors = (best_gains, best_u, best_v, best_t, \
                            all_n_labels, all_x_labels, all_x_label_probs)
                 c_gains, c_u, c_v, c_t, t_n_labels, t_labels, t_label_probs = \
-                    session.run(tensors, feed_dict=params)
+                    session.run(tensors, feed_dict=params, options=options, \
+                                run_metadata=run_metadata)
             else:
                 tensors = (best_gains, best_u, best_v, best_t)
                 c_gains, c_u, c_v, c_t = \
-                    session.run(tensors, feed_dict=params)
+                    session.run(tensors, feed_dict=params, options=options, \
+                                run_metadata=run_metadata)
+
+            if PROFILE:
+                run_timeline = timeline.Timeline(run_metadata.step_stats)
+                chrome_trace = run_timeline.generate_chrome_trace_format()
+                with open('%02d_%02d_profile.json' % (profile_no, epoch), 'w') as f:
+                    f.write(chrome_trace)
 
             # See what the best-performing u,v,t combination was for each node
             for n in range(n_nodes):
@@ -586,14 +605,22 @@ with session.as_default():
         print('(%02d:%02d:%02d) Collecting pixels...' % \
               (hours, minutes, seconds))
 
-        t_meta_indices, t_lindices, t_rindices = session.run( \
-            (all_meta_indices, all_lindices, all_rindices), \
+        t_meta_indices, t_lcoords, t_rcoords = session.run( \
+            (all_meta_indices, all_lcoords, all_rcoords), \
             feed_dict={ u: candidate_u, \
                         v: candidate_v, \
                         t: candidate_t, \
                         all_x: c_all_x, \
                         x_index: c_x_index, \
-                        nodes_size: n_nodes })
+                        nodes_size: n_nodes }, \
+            options=options, run_metadata=run_metadata)
+
+        if PROFILE:
+            run_timeline = timeline.Timeline(run_metadata.step_stats)
+            chrome_trace = run_timeline.generate_chrome_trace_format()
+            with open('%02dc_profile.json' % (profile_no), 'w') as f:
+                f.write(chrome_trace)
+            profile_no += 1
 
         # Extract l/r pixels from the previously collected arrays
         lcoords = [[None for i in range(n_images)] for i in range(n_nodes)]
@@ -612,11 +639,8 @@ with session.as_default():
                 lend = lindex_base + meta_indices[0]
                 rend = rindex_base + meta_indices[1]
 
-                lindices = t_lindices[lindex_base:lend]
-                rindices = t_rindices[rindex_base:rend]
-
-                lcoords[n][i] = c_all_x[lindices]
-                rcoords[n][i] = c_all_x[rindices]
+                lcoords[n][i] = t_lcoords[lindex_base:lend]
+                rcoords[n][i] = t_rcoords[rindex_base:rend]
 
                 if meta_indices[0] > maxlcoords[n]:
                     maxlcoords[n] = meta_indices[0]
@@ -690,7 +714,7 @@ with session.as_default():
         # Possibly checkpoint
         now = time.monotonic()
         if exit_after_checkpoint.triggered or \
-           now - checkpoint_time > CHECKPOINT_TIME:
+           (CHECKPOINT_TIME >= 0 and now - checkpoint_time > CHECKPOINT_TIME):
             hours, minutes, seconds = elapsed(begin)
             print('(%02d:%02d:%02d) Writing checkpoint...' % \
                   (hours, minutes, seconds))
