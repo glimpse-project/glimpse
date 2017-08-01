@@ -72,7 +72,7 @@ git clone https://github.com/opencv/opencv
 cd opencv
 mkdir build-release
 cd build-release
-cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/opencv -DWITH_TBB=ON -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake $@ ../
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/opencv -DWITH_TBB=ON -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake ../
 make -j8 && make install
 ```
 *Note: see platforms/android/build_sdk.py and
