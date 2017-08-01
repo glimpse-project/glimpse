@@ -155,25 +155,24 @@ def computeThresholdGains(depth_image, depth_pixels, u, v, x, label_pixels, hq, 
     # Compute the set of pixels that will be used for partitioning
     fdepth_pixels = computeDepthPixels(depth_image, depth_pixels, u, v, x)
 
-    def computeThresholdGain(t, gains):
+    def computeThresholdGain(i, t, gains):
         l_pixels, r_pixels = splitOnThreshold(label_pixels, fdepth_pixels, t)
         G = tf.cond(tf.size(l_pixels) < 1, \
                     lambda: 0.0, \
                     lambda: tf.cond(tf.size(r_pixels) < 1, \
                                     lambda: 0.0, \
                                     lambda: computeGain(l_pixels, r_pixels, hq, q)))
-        return t + T_INC, tf.concat([gains, [G]], axis=0)
+        return i + 1, t + T_INC, gains.write(i, G)
 
-    _t, gains = tf.while_loop( \
-        lambda t, gains: t <= MAX_T, \
+    gains = tf.TensorArray(tf.float32, N_T)
+    _i, _t, gains = tf.while_loop( \
+        lambda i, t, gains: i < N_T, \
         computeThresholdGain, \
-        [MIN_T, tf.zeros([0])], \
-        shape_invariants=[tf.TensorShape([]), \
-                          tf.TensorShape([None])], \
+        [0, MIN_T, gains], \
         parallel_iterations=N_T, \
         back_prop=False, name='threshold_loop')
 
-    return gains
+    return gains.stack()
 
 # Collect training data
 print('Collecting training data...')
@@ -245,6 +244,8 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
     all_depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x), [1])
     all_label_pixels = tf.squeeze(tf.gather_nd(label_image, all_x), [1])
 
+    base = i * nodes_size
+
     def test_node(n, node_gains, all_x_labels, all_x_label_probs, all_n_labels):
         # Slice out the appropriate values for the image
         x_start = x_index[n][i][0]
@@ -268,28 +269,21 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                                           all_u[n][i], all_v[n][i], \
                                           x, label_pixels, hq, q)
 
-                # Collect the run metadata
-                # G is [N_T], float32
-                #   (gain)
-                all_gain = tf.concat([all_gain, [G]], axis=0)
+                return i + 1, all_gain.write(i, G)
 
-                return i + 1, all_gain
-
+            all_gain = tf.TensorArray(tf.float32, COMBO_SIZE)
             _i, all_gain = \
                 tf.while_loop( \
                     lambda i, all_gain: i < COMBO_SIZE, \
-                    test_uv, \
-                    [0, tf.zeros([0, N_T])], \
-                    shape_invariants=[tf.TensorShape([]), \
-                                      tf.TensorShape([None, N_T])], \
+                    test_uv, [0, all_gain], \
                     parallel_iterations=COMBO_SIZE, \
                     back_prop=False, name='combo_loop')
 
-            return tf.concat([node_gains, [all_gain]], axis=0)
+            return node_gains.write(n, all_gain.stack())
 
         def skip_gain():
-            return tf.concat([node_gains, tf.zeros([1, COMBO_SIZE, N_T], \
-                                                   dtype=tf.float32)], axis=0)
+            return node_gains.write(n, tf.zeros([COMBO_SIZE, N_T]))
+
         node_gains = tf.cond(skip_mask[n], \
             lambda: skip_gain(),
             lambda: tf.cond(tf.size(x_labels) < 2, \
@@ -297,61 +291,54 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
                             lambda: add_gain()), name='collect_gain')
 
         # Collect label histogram data
+        idx = base + n
+
         # xlabels is [?], int32
         #   (Unique labels for pixels in x)
-        all_x_labels = tf.concat([all_x_labels, x_labels], axis=0, \
-                                 name='collect_labels')
+        all_x_labels = all_x_labels.write(idx, x_labels)
 
         # x_label_prob is [len(xlabels)], float32
         #   (Distribution of each label in xlabels)
-        all_x_label_probs = tf.concat([all_x_label_probs, x_label_prob], axis=0, \
-                                      name='collect_label_probs')
+        all_x_label_probs = all_x_label_probs.write(idx, x_label_prob)
 
         # Store the index of the label histogram
-        all_n_labels = tf.concat([all_n_labels, [tf.size(x_labels)]], axis=0, \
-                                 name='collect_labels_len')
+        all_n_labels = all_n_labels.write(idx, tf.size(x_labels))
 
         return n+1, node_gains, all_x_labels, all_x_label_probs, all_n_labels
 
+    node_gains = tf.TensorArray(tf.float32, nodes_size)
     _n, node_gains, all_x_labels, all_x_label_probs, all_n_labels = \
         tf.while_loop( \
             lambda n, _ng, _xl, _xlp, _nl: n < nodes_size,
             test_node,
-            [0, tf.zeros([0, COMBO_SIZE, N_T]), \
-             all_x_labels, all_x_label_probs, all_n_labels], \
-            shape_invariants=[tf.TensorShape([]), \
-                              tf.TensorShape([None, COMBO_SIZE, N_T]), \
-                              tf.TensorShape([None]), \
-                              tf.TensorShape([None]), \
-                              tf.TensorShape([None])], \
+            [0, node_gains, all_x_labels, all_x_label_probs, all_n_labels], \
+            parallel_iterations=MAX_NODES, \
             back_prop=False, name='node_loop')
 
     # Accumulate gain
-    acc_gain += node_gains
+    acc_gain += node_gains.stack()
 
     return i + 1, acc_gain, all_n_labels, all_x_labels, all_x_label_probs
 
 # Run n_images iterations over COMBO_SIZE u,v pairs
 acc_gain = tf.zeros([nodes_size, COMBO_SIZE, N_T], dtype=tf.float32)
-all_n_labels = tf.zeros([0], dtype=tf.int32)
-all_x_labels = tf.zeros([0], dtype=tf.uint8)
-all_x_label_probs = tf.zeros([0], dtype=tf.float32)
+all_n_labels = tf.TensorArray(tf.int32, n_images * nodes_size)
+all_x_labels = tf.TensorArray(tf.uint8, 0, dynamic_size=True)
+all_x_label_probs = tf.TensorArray(tf.float32, 0, dynamic_size=True)
 
 _i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs = tf.while_loop( \
     lambda i, a, b, c, d: i < n_images, \
     accumulate_gain, \
     [0, acc_gain, all_n_labels, all_x_labels, all_x_label_probs], \
-    shape_invariants=[tf.TensorShape([]), \
-                      tf.TensorShape([None, COMBO_SIZE, N_T]), \
-                      tf.TensorShape([None]), \
-                      tf.TensorShape([None]), \
-                      tf.TensorShape([None])], \
     parallel_iterations = 1, \
     back_prop=False, name='image_loop')
 
+all_x_labels = all_x_labels.concat()
+all_x_label_probs = all_x_label_probs.concat()
+
 # Scan over all_n_labels to make the indices absolute
-all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels, back_prop=False, \
-                       name='label_acc_scan')
+all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels.stack(), \
+                       back_prop=False, name='label_acc_scan')
 
 # Find the best gain and the best combination index
 flat_gain = tf.reshape(acc_gain, [nodes_size, COMBO_SIZE * N_T])
