@@ -80,6 +80,17 @@ platforms/scripts/cmake_android_arm.sh to see how to match builds of official
 sdks*
 
 
+## libpng
+*Note: zlib (which libpng depends on) is provided by the NDK itself)*
+```
+git clone https://github.com/glennrp/libpng
+mkdir build-release
+cd build-release
+cmake -GNinja -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/libpng -DCMAKE_INSTALL_LIBDIR=lib/arm64-v8a -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake $@ ../
+cmake --build .
+cmake --build . --target install
+```
+
 # Misc Android development notes / reminders
 
 To install a built debug apk explicitly either do `adb install -r
