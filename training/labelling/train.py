@@ -378,7 +378,7 @@ def collect_indices(i, all_meta_indices, all_lcoords, all_rcoords):
     # Dequeue the depth image
     depth_image = depth_image_queue.dequeue()
     depth_image.set_shape([HEIGHT, WIDTH, 1])
-    depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x))
+    depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x), [1])
 
     def collect_node_indices(n, all_meta_indices, all_lcoords, all_rcoords):
         # Slice out the appropriate values for the image
@@ -698,17 +698,17 @@ with session.as_default():
                 # Collect label histograms
                 n_labels = 0
                 label_probs = {}
-                idx = n * n_images
-                label_base = 0 if idx == 0 else t_n_labels[idx - 1]
-                for i in range(n_images):
-                    label_end = t_n_labels[idx]
-                    for l in range(label_base, label_end):
-                        key = t_labels[l]
-                        if key not in label_probs:
-                            label_probs[key] = t_label_probs[l]
-                            n_labels += 1
-                        else:
-                            label_probs[key] += t_label_probs[l]
+                for i in range(n, n + (n_images * n_nodes), n_nodes):
+                    label_base = 0 if i == 0 else t_n_labels[i - 1]
+                    label_end = t_n_labels[i]
+                    if label_end > label_base:
+                        n_labels += 1
+                        for l in range(label_base, label_end):
+                            key = t_labels[l]
+                            if key not in label_probs:
+                                label_probs[key] = t_label_probs[l]
+                            else:
+                                label_probs[key] += t_label_probs[l]
 
                 for key, value in label_probs.items():
                     label_probs[key] = value / float(n_labels)
