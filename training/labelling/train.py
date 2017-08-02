@@ -42,7 +42,7 @@ DATA_LIMIT = 0
 # Number of epochs to train per node
 N_EPOCHS = 1
 # Maximum number of nodes to train at once
-MAX_NODES = 8192
+MAX_NODES = 2048
 # Maximum number of u,v pairs to test per epoch. The paper specifies testing
 # 2000 candidate u,v pairs (the equivalent number is N_EPOCHS * COMBO_SIZE)
 COMBO_SIZE = 2000
@@ -262,19 +262,17 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
         # no label pixels or we're not testing this node
         def add_gain():
             # Test u,v pairs against a range of thresholds
-            def test_uv(i, all_gain):
-                # Short-circuit all this work if there are fewer than 2 labels (and thus
-                # no gain increase is possible)
-                G = computeThresholdGains(depth_image, depth_pixels, \
-                                          all_u[n][i], all_v[n][i], \
-                                          x, label_pixels, hq, q)
+            def test_uv(c, all_gain):
+                gains = computeThresholdGains(depth_image, depth_pixels, \
+                                              all_u[n][c], all_v[n][c], \
+                                              x, label_pixels, hq, q)
 
-                return i + 1, all_gain.write(i, G)
+                return c + 1, all_gain.write(c, gains)
 
             all_gain = tf.TensorArray(tf.float32, COMBO_SIZE)
-            _i, all_gain = \
+            _c, all_gain = \
                 tf.while_loop( \
-                    lambda i, all_gain: i < COMBO_SIZE, \
+                    lambda c, all_gain: c < COMBO_SIZE, \
                     test_uv, [0, all_gain], \
                     parallel_iterations=COMBO_SIZE, \
                     back_prop=False, name='combo_loop')
