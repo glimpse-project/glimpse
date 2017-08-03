@@ -28,6 +28,8 @@ import tensorflow as tf
 from collections import deque
 from tensorflow.python.client import timeline
 
+# Seed to use for random number generation
+RANDOM_SEED = 1
 # Image dimensions
 WIDTH = 540
 HEIGHT = 960
@@ -70,6 +72,9 @@ T_INC = RANGE_T / (float(N_T) - 0.5)
 N_SAMP = 2000
 # Whether to do profiling
 PROFILE = False
+
+tf.set_random_seed(RANDOM_SEED)
+np.random.seed(RANDOM_SEED)
 
 def find_files(base_dir, extensions, name=None):
     for root, dirs, files in os.walk(base_dir):
