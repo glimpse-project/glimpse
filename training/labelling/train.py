@@ -74,9 +74,12 @@ N_SAMP = 2000
 PROFILE = False
 # If profiling is enabled, whether to write out a Chrome trace
 CHROME_PROFILE = False
+# Whether to enable XLA JIT for graph optimisation
+XLA_JIT = True
 
 tf.set_random_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
+jit_scope = tf.contrib.compiler.jit.experimental_jit_scope
 
 def find_files(base_dir, extensions, name=None):
     for root, dirs, files in os.walk(base_dir):
@@ -128,20 +131,22 @@ def shannon_entropy(values):
     return -tf.reduce_sum(ncount * (tf.log(ncount) / tf.log(2.0))), y, ncount
 
 def computeDepthPixels(depth_image, depth_pixels, u, v, x):
-    # Gather the candidate pixels from the depth image and apply
-    # equation (1) from 3.2 of the paper
-    uindices, vindices = get_offset_indices(depth_image, depth_pixels, x, u, v)
-    return tf.squeeze( \
-        tf.gather_nd(depth_image, uindices) - \
-        tf.gather_nd(depth_image, vindices), [1])
+    with jit_scope(compile_ops=XLA_JIT):
+        # Gather the candidate pixels from the depth image and apply
+        # equation (1) from 3.2 of the paper
+        uindices, vindices = get_offset_indices(depth_image, depth_pixels, x, u, v)
+        return tf.squeeze( \
+            tf.gather_nd(depth_image, uindices) - \
+            tf.gather_nd(depth_image, vindices), [1])
 
 def computeLabelHistogramAndEntropy(label_pixels):
-    # Compute the shannon entropy for storage of the labels of the candidate
-    # depth pixels.
-    hq, x_labels, x_label_prob = shannon_entropy(label_pixels)
-    q = tf.cast(tf.size(label_pixels), tf.float32)
+    with jit_scope(compile_ops=XLA_JIT):
+        # Compute the shannon entropy for storage of the labels of the candidate
+        # depth pixels.
+        hq, x_labels, x_label_prob = shannon_entropy(label_pixels)
+        q = tf.cast(tf.size(label_pixels), tf.float32)
 
-    return hq, q, x_labels, x_label_prob
+        return hq, q, x_labels, x_label_prob
 
 def splitOnThreshold(splitee, splitter, t):
     partitions = tf.cast( \
@@ -149,14 +154,15 @@ def splitOnThreshold(splitee, splitter, t):
     return tf.dynamic_partition(splitee, partitions, 2)
 
 def computeGain(llabel_pixels, rlabel_pixels, hq, q):
-    # Compute gain (see equation (6) from 3.3 of the paper)
-    hql, l_labels, l_label_prob = shannon_entropy(llabel_pixels)
-    ql = tf.cast(tf.shape(llabel_pixels)[0], tf.float32)
+    with jit_scope(compile_ops=XLA_JIT):
+        # Compute gain (see equation (6) from 3.3 of the paper)
+        hql, l_labels, l_label_prob = shannon_entropy(llabel_pixels)
+        ql = tf.cast(tf.shape(llabel_pixels)[0], tf.float32)
 
-    hqr, r_labels, r_label_prob = shannon_entropy(rlabel_pixels)
-    qr = tf.cast(tf.shape(rlabel_pixels)[0], tf.float32)
+        hqr, r_labels, r_label_prob = shannon_entropy(rlabel_pixels)
+        qr = tf.cast(tf.shape(rlabel_pixels)[0], tf.float32)
 
-    return hq - ((ql / q * hql) + (qr / q * hqr))
+        return hq - ((ql / q * hql) + (qr / q * hqr))
 
 def computeThresholdGains(depth_image, depth_pixels, u, v, x, label_pixels, hq, q):
     # Compute the set of pixels that will be used for partitioning
@@ -168,10 +174,11 @@ def computeThresholdGains(depth_image, depth_pixels, u, v, x, label_pixels, hq, 
                     lambda: 0.0, \
                     lambda: tf.cond(tf.size(r_pixels) < 1, \
                                     lambda: 0.0, \
-                                    lambda: computeGain(l_pixels, r_pixels, hq, q)))
+                                    lambda: computeGain(l_pixels, r_pixels, hq, q)), \
+                    name='computeGain')
         return i + 1, t + T_INC, gains.write(i, G)
 
-    gains = tf.TensorArray(tf.float32, N_T)
+    gains = tf.TensorArray(tf.float32, N_T, name='threshold_gains')
     _i, _t, gains = tf.while_loop( \
         lambda i, t, gains: i < N_T, \
         computeThresholdGain, \
@@ -214,8 +221,10 @@ label_key, label_value = reader.read(label_files)
 depth_image = tf.py_func(read_depth, [depth_value], tf.float32, stateful=False)
 label_image = tf.image.decode_png(label_value, channels=1)
 
-depth_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.float32))
-label_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.uint8))
+depth_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.float32), \
+                                 name='depth_queue')
+label_image_queue = tf.FIFOQueue(capacity=QUEUE_BUFFER, dtypes=(tf.uint8), \
+                                 name='label_queue')
 enqueue_depth = depth_image_queue.enqueue((depth_image))
 enqueue_label = label_image_queue.enqueue((label_image))
 
@@ -231,8 +240,10 @@ print('Creating graph...')
 nodes_size = tf.placeholder(tf.int32, shape=[], name='nodes_size')
 
 # Pick splitting candidates (1)
-all_u = tf.random_uniform([nodes_size, COMBO_SIZE, 2], MIN_UV, MAX_UV, name='all_u')
-all_v = tf.random_uniform([nodes_size, COMBO_SIZE, 2], MIN_UV, MAX_UV, name='all_v')
+all_u = tf.random_uniform([nodes_size, COMBO_SIZE, 2], MIN_UV, MAX_UV, \
+                          name='all_u')
+all_v = tf.random_uniform([nodes_size, COMBO_SIZE, 2], MIN_UV, MAX_UV, \
+                          name='all_v')
 
 # Pixel coordinates to test
 all_x = tf.placeholder(tf.int32, shape=[None, 2], name='pixels')
@@ -275,7 +286,8 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
 
                 return c + 1, all_gain.write(c, gains)
 
-            all_gain = tf.TensorArray(tf.float32, COMBO_SIZE)
+            all_gain = tf.TensorArray(tf.float32, COMBO_SIZE, \
+                                      name='combo_gains')
             _c, all_gain = \
                 tf.while_loop( \
                     lambda c, all_gain: c < COMBO_SIZE, \
@@ -310,7 +322,7 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
 
         return n+1, node_gains, all_x_labels, all_x_label_probs, all_n_labels
 
-    node_gains = tf.TensorArray(tf.float32, nodes_size)
+    node_gains = tf.TensorArray(tf.float32, nodes_size, name='node_gains')
     _n, node_gains, all_x_labels, all_x_label_probs, all_n_labels = \
         tf.while_loop( \
             lambda n, _ng, _xl, _xlp, _nl: n < nodes_size,
@@ -325,10 +337,14 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
     return i + 1, acc_gain, all_n_labels, all_x_labels, all_x_label_probs
 
 # Run n_images iterations over COMBO_SIZE u,v pairs
-acc_gain = tf.zeros([nodes_size, COMBO_SIZE, N_T], dtype=tf.float32)
-all_n_labels = tf.TensorArray(tf.int32, n_images * nodes_size)
-all_x_labels = tf.TensorArray(tf.uint8, 0, dynamic_size=True)
-all_x_label_probs = tf.TensorArray(tf.float32, 0, dynamic_size=True)
+acc_gain = \
+    tf.zeros([nodes_size, COMBO_SIZE, N_T], dtype=tf.float32, name='acc_gain')
+all_n_labels = \
+    tf.TensorArray(tf.int32, n_images * nodes_size, name='all_n_labels')
+all_x_labels = \
+    tf.TensorArray(tf.uint8, 0, dynamic_size=True, name='all_x_labels')
+all_x_label_probs = \
+    tf.TensorArray(tf.float32, 0, dynamic_size=True, name='all_x_label_probs')
 
 _i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs = tf.while_loop( \
     lambda i, a, b, c, d: i < n_images, \
@@ -345,7 +361,8 @@ all_n_labels = tf.scan(lambda a, x: a + x, all_n_labels.stack(), \
                        back_prop=False, name='label_acc_scan')
 
 # Find the best gain and the best combination index
-flat_gain = tf.reshape(acc_gain, [nodes_size, COMBO_SIZE * N_T])
+flat_gain = tf.reshape(acc_gain, [nodes_size, COMBO_SIZE * N_T], \
+                       name='flat_gain')
 def find_best_combinations(n, best_gains, best_u, best_v, best_t):
     idx = tf.cast(tf.argmax(flat_gain[n], axis=0), dtype=tf.int32)
     combo = tf.div(idx, N_T)
@@ -450,7 +467,11 @@ _i, all_meta_indices, all_lcoords, all_rcoords = tf.while_loop( \
 
 # Initialise and run the session
 init = tf.global_variables_initializer()
-session = tf.Session()
+config = tf.ConfigProto()
+if XLA_JIT:
+    config.graph_options.optimizer_options.global_jit_level = \
+        tf.OptimizerOptions.ON_1
+session = tf.Session(config=config)
 
 def write_checkpoint(root, queue):
     checkpoint = (root, queue)
