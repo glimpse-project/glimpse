@@ -105,8 +105,7 @@ def get_offset_indices(image, pixels, x, u, v):
     # for each candidate pixel.
     extents = [HEIGHT - 1, WIDTH - 1]
     n_pixels = tf.size(pixels)
-    clip = tf.reshape(tf.tile(extents, [n_pixels]), [n_pixels, 2])
-    pixels = tf.expand_dims(tf.cast(pixels, tf.float32), 1)
+    pixels = tf.cast(pixels, tf.float32)
 
     u = tf.tile([u], [n_pixels, 1]) / pixels
     v = tf.tile([v], [n_pixels, 1]) / pixels
@@ -115,14 +114,15 @@ def get_offset_indices(image, pixels, x, u, v):
     # that references outside of the image should essentially result in the
     # background depth - we can assure this by processing the input images.
     x = tf.cast(x, tf.float32)
-    uindices = tf.clip_by_value(tf.cast(tf.round(x + u), tf.int32), 0, clip)
-    vindices = tf.clip_by_value(tf.cast(tf.round(x + v), tf.int32), 0, clip)
+    uindices = tf.clip_by_value(tf.cast(tf.round(x + u), tf.int32), 0, extents)
+    vindices = tf.clip_by_value(tf.cast(tf.round(x + v), tf.int32), 0, extents)
 
     return uindices, vindices
 
 def shannon_entropy(values):
     y, idx, count = tf.unique_with_counts(values)
-    ncount = tf.cast(count, tf.float32) / tf.cast(tf.reduce_sum(count), tf.float32)
+    count = tf.cast(count, tf.float32)
+    ncount = count / tf.reduce_sum(count)
     return -tf.reduce_sum(ncount * (tf.log(ncount) / tf.log(2.0))), y, ncount
 
 def computeDepthPixels(depth_image, depth_pixels, u, v, x):
@@ -143,7 +143,7 @@ def computeLabelHistogramAndEntropy(label_pixels):
 
 def splitOnThreshold(splitee, splitter, t):
     partitions = tf.cast( \
-        tf.floor(tf.clip_by_value(splitter - (t - 1.0), 0.0, 1.0)), tf.int32)
+        tf.clip_by_value(splitter - (t - 1.0), 0.0, 1.0), tf.int32)
     return tf.dynamic_partition(splitee, partitions, 2)
 
 def computeGain(llabel_pixels, rlabel_pixels, hq, q):
@@ -243,11 +243,8 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
     # Read in depth and label image
     depth_image = depth_image_queue.dequeue()
     label_image = label_image_queue.dequeue()
-    depth_image.set_shape([HEIGHT, WIDTH, 1])
-    label_image.set_shape([HEIGHT, WIDTH, 1])
-
-    all_depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x), [1])
-    all_label_pixels = tf.squeeze(tf.gather_nd(label_image, all_x), [1])
+    depth_image.set_shape([HEIGHT, WIDTH])
+    label_image.set_shape([HEIGHT, WIDTH])
 
     base = i * nodes_size
 
@@ -255,13 +252,15 @@ def accumulate_gain(i, acc_gain, all_n_labels, all_x_labels, all_x_label_probs):
         # Slice out the appropriate values for the image
         x_start = x_index[n][i][0]
         x_size = x_index[n][i][1]
-
         x = tf.slice(all_x, [x_start, 0], [x_size, -1])
-        depth_pixels = tf.slice(all_depth_pixels, [x_start], [x_size])
-        label_pixels = tf.slice(all_label_pixels, [x_start], [x_size])
+
+        depth_pixels = tf.gather_nd(depth_image, x, name='depth_pixels')
+        label_pixels = tf.squeeze(tf.gather_nd( \
+            label_image, x, name='label_pixels'), [1])
 
         # Compute histogram shannon entropy
-        hq, q, x_labels, x_label_prob = computeLabelHistogramAndEntropy(label_pixels)
+        hq, q, x_labels, x_label_prob = \
+            computeLabelHistogramAndEntropy(label_pixels)
 
         # Keep track of the gains for this node, but short-circuit if there are
         # no label pixels or we're not testing this node
@@ -382,26 +381,37 @@ t = tf.placeholder(tf.float32, shape=[None], name='t')
 def collect_indices(i, all_meta_indices, all_lcoords, all_rcoords):
     # Dequeue the depth image
     depth_image = depth_image_queue.dequeue()
-    depth_image.set_shape([HEIGHT, WIDTH, 1])
-    depth_pixels = tf.squeeze(tf.gather_nd(depth_image, all_x), [1])
+    depth_image.set_shape([HEIGHT, WIDTH])
 
     def collect_node_indices(n, all_meta_indices, all_lcoords, all_rcoords):
         # Slice out the appropriate values for the image
         x_start = x_index[n][i][0]
         x_size = x_index[n][i][1]
         x = tf.slice(all_x, [x_start, 0], [x_size, -1])
-        ndepth_pixels = tf.slice(depth_pixels, [x_start], [x_size])
 
-        # Compute the depth pixels that we'll need to compare against the threshold
-        fdepth_pixels = computeDepthPixels(depth_image, ndepth_pixels, u[n], v[n], x)
+        def collectDepthPixels():
+            # Compute the depth pixels that we'll need to compare against the threshold
+            depth_pixels = tf.gather_nd(depth_image, x)
+            fdepth_pixels = computeDepthPixels(depth_image, depth_pixels, u[n], v[n], x)
 
-        # Get the left/right pixels
-        lcoords, rcoords = splitOnThreshold(x, fdepth_pixels, t[n])
+            # Get the left/right pixels
+            lcoords, rcoords = splitOnThreshold(x, fdepth_pixels, t[n])
 
-        # Work out index ranges
-        lsize = tf.shape(lcoords)[0]
-        rsize = tf.shape(rcoords)[0]
-        meta_index = [lsize, rsize]
+            # Work out index ranges
+            lsize = tf.shape(lcoords)[0]
+            rsize = tf.shape(rcoords)[0]
+            meta_index = [lsize, rsize]
+
+            return lcoords, rcoords, meta_index
+
+        def collectZeroPixels():
+            return tf.zeros([0, 2], dtype=tf.int32), \
+                   tf.zeros([0, 2], dtype=tf.int32), [0, 0]
+
+        lcoords, rcoords, meta_index = \
+            tf.cond(tf.shape(x)[0] < 1, \
+                    lambda: collectZeroPixels(), \
+                    lambda: collectDepthPixels(), name='collect_depth_pixels')
 
         # Add pixels to pixel lists
         all_meta_indices = tf.concat([all_meta_indices, [meta_index]], axis=0)
