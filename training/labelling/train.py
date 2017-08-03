@@ -72,6 +72,8 @@ T_INC = RANGE_T / (float(N_T) - 0.5)
 N_SAMP = 2000
 # Whether to do profiling
 PROFILE = False
+# If profiling is enabled, whether to write out a Chrome trace
+CHROME_PROFILE = False
 
 tf.set_random_seed(RANDOM_SEED)
 np.random.seed(RANDOM_SEED)
@@ -511,11 +513,13 @@ with session.as_default():
     profile_train_dir = os.path.join('profile', 'train')
     profile_collect_dir = os.path.join('profile', 'train')
     if PROFILE:
-        os.makedirs(profile_train_dir, exist_ok=True)
-        os.makedirs(profile_collect_dir, exist_ok=True)
+        if CHROME_PROFILE:
+            os.makedirs(profile_train_dir, exist_ok=True)
+            os.makedirs(profile_collect_dir, exist_ok=True)
         options = tf.RunOptions(trace_level=tf.RunOptions.FULL_TRACE)
 
         summary_dir = os.path.join('profile', 'summary')
+        os.makedirs(summary_dir, exist_ok=True)
         summary_writer = tf.summary.FileWriter(summary_dir, session.graph)
     else:
         options = tf.RunOptions()
@@ -606,13 +610,15 @@ with session.as_default():
                 print('(%02d:%02d:%02d) Writing training profile data...' % \
                       (hours, minutes, seconds))
 
-                run_timeline = timeline.Timeline(run_metadata.step_stats)
-                chrome_trace = run_timeline.generate_chrome_trace_format()
-                chrome_filename = \
-                    os.path.join(profile_train_dir, \
-                                 '%02d_%02d_profile.json' % (profile_no, epoch))
-                with open(chrome_filename, 'w') as f:
-                    f.write(chrome_trace)
+                if CHROME_PROFILE:
+                    run_timeline = timeline.Timeline(run_metadata.step_stats)
+                    chrome_trace = run_timeline.generate_chrome_trace_format()
+                    chrome_filename = \
+                        os.path.join(profile_train_dir, \
+                                     '%02d_%02d_profile.json' % \
+                                     (profile_no, epoch))
+                    with open(chrome_filename, 'w') as f:
+                        f.write(chrome_trace)
 
                 summary_writer.add_run_metadata(run_metadata, \
                                                 '%02d_%02d' % (profile_no, epoch))
@@ -638,10 +644,11 @@ with session.as_default():
             print('(%02d:%02d:%02d) Writing collection profile data...' % \
                   (hours, minutes, seconds))
 
-            run_timeline = timeline.Timeline(run_metadata.step_stats)
-            chrome_trace = run_timeline.generate_chrome_trace_format()
-            with open('%02dc_profile.json' % (profile_no), 'w') as f:
-                f.write(chrome_trace)
+            if CHROME_PROFILE:
+                run_timeline = timeline.Timeline(run_metadata.step_stats)
+                chrome_trace = run_timeline.generate_chrome_trace_format()
+                with open('%02dc_profile.json' % (profile_no), 'w') as f:
+                    f.write(chrome_trace)
 
             summary_writer.add_run_metadata(run_metadata, '%02dc' % (profile_no))
             summary_writer.flush()
