@@ -1,12 +1,25 @@
-all: image-pre-processor
+all: image-pre-processor pfm-debug exr-to-pfm
+
+#OPT=-g3 -O3 -march=native
+OPT=-g3 -O0
+
+CC=gcc
+CFLAGS=$(OPT)
 
 CXX=g++
-CXXFLAGS=`pkg-config --cflags OpenEXR libpng` -g3 -march=native
-LDFLAGS=`pkg-config --libs OpenEXR libpng`
+CXXFLAGS=$(OPT)
 
+LDFLAGS=
+
+
+pfm-debug: pfm-debug.c
+	$(CC) -o $(@) $(^) $(CFLAGS) $(LDFLAGS)
 
 image-pre-processor: image-pre-processor.cc
-	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS)
+	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
+
+exr-to-pfm: exr-to-pfm.cc
+	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
 
 clean:
-	rm -f image-pre-processor
+	rm -f image-pre-processor pfm-debug exr-to-pfm
