@@ -34,7 +34,7 @@
 #include <stdint.h>
 #include <libgen.h>
 
-#include <ImfRgbaFile.h>
+#include <ImfInputFile.h>
 #include <ImfOutputFile.h>
 #include <ImfStringAttribute.h>
 #include <ImfMatrixAttribute.h>
@@ -350,14 +350,23 @@ write_exr(Array2D<float> &pixels, const char *filename)
 static bool
 process_exr_file(const char *filename, const char *out_filename)
 {
-    RgbaInputFile in_file(filename);
-    Array2D<Rgba> pixels;
+    /* Just for posterity and to vent frustration within comments, the
+     * RgbaInputFile and Rgba struct that the openexr documentation recommends
+     * for reading typical RGBA EXR images is only good for half float
+     * components.
+     *
+     * We noticed this after seeing lots of 'inf' float values due to out of
+     * range floats.
+     */
+    InputFile in_file(filename);
+    Array2D<float> pixels;
+
     Array2D<float> grey;
     Array2D<float> grey_flipped;
     int out_filename_len = strlen(out_filename);
     char *exr_filename;
 
-    Box2i dw = in_file.dataWindow();
+    Box2i dw = in_file.header().dataWindow();
 
     int width = dw.max.x - dw.min.x + 1;
     int height = dw.max.y - dw.min.y + 1;
@@ -366,24 +375,45 @@ process_exr_file(const char *filename, const char *out_filename)
     grey.resizeErase(height, width);
     grey_flipped.resizeErase(height, width);
 
-    in_file.setFrameBuffer(&pixels[0][0] - dw.min.x - dw.min.y * width, 1, width);
+    /* We assume the green and blue channels are redundant and arbitrarily
+     * just pick the red channel to read...
+     */
+    FrameBuffer framebuffer;
+    framebuffer.insert ("R",
+                        Slice (FLOAT,
+                               (char *)&pixels[0][0],
+                               sizeof(pixels[0][0]), // x stride,
+                               sizeof(float) * pixels.width())); // y stride
+
+    in_file.setFrameBuffer(framebuffer);
+
+#if 0 // uncomment to debug / check the channels available
+    const ChannelList &channels = in_file.header().channels();
+    for (ChannelList::ConstIterator i = channels.begin(); i != channels.end(); ++i) {
+        const Channel &channel = i.channel();
+        const char *name = i.name();
+
+        debug("EXR: Channel '%s': type %s\n", name, channel.type == FLOAT ? "== FLOAT" : "!= FLOAT");
+    }
+#endif
+
     in_file.readPixels(dw.min.y, dw.max.y);
 
     debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
 
     for (int y = 0; y < height; y++) {
-        Rgba *rgba_row = &pixels[y][0];
+        float *red_row = &pixels[y][0];
         float *grey_row = &grey[y][0];
         float *grey_flipped_row = &grey_flipped[y][0];
 
         for (int x = 0; x < width; x++)
-            grey_row[x] = rgba_row[x].r;
+            grey_row[x] = red_row[x];
 
         for (int x = 0; x < width; x++) {
             int opposite = width - 1 - x;
 
-            grey_flipped_row[x] = rgba_row[opposite].r;
-            grey_flipped_row[opposite] = rgba_row[x].r;
+            grey_flipped_row[x] = red_row[opposite];
+            grey_flipped_row[opposite] = red_row[x];
         }
     }
 
