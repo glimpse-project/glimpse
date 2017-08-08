@@ -171,7 +171,7 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    struct image *img = load_pfm_asset(argv[1]);
+    struct image *img = load_pfm(argv[1]);
 
     for (int y = 0; y < img->height; y++) {
         for (int x = 0; x < img->width; x++) {
