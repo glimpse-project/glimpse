@@ -1,12 +1,12 @@
 all: image-pre-processor pfm-debug exr-to-pfm pfm-to-exr
 
-#OPT=-g3 -O3 -march=native
-OPT=-g3 -O0
+OPT=-g3 -O3 -march=native
+#OPT=-g3 -O0 -DDEBUG
 
 CC=gcc
 CFLAGS=$(OPT)
 
-CXX=g++
+CXX=g++ -std=c++14
 CXXFLAGS=$(OPT)
 
 LDFLAGS=

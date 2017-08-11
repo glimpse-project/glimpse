@@ -22,17 +22,22 @@
  * SOFTWARE.
  */
 
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#include <fcntl.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <assert.h>
 #include <dirent.h>
 #include <stdint.h>
 #include <libgen.h>
+#include <assert.h>
+
+#include <type_traits>
 
 #include <ImfInputFile.h>
 #include <ImfOutputFile.h>
@@ -43,8 +48,6 @@
 
 #include <ImathBox.h>
 
-//#define DEBUG
-
 #ifdef DEBUG
 #define PNG_DEBUG 3
 #define debug(ARGS...) printf(ARGS)
@@ -54,6 +57,8 @@
 
 #include <png.h>
 
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
+
 using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
 
@@ -62,6 +67,8 @@ static int indent = 0;
 static int grey_to_id_map[255];
 static int left_to_right_map[34];
 
+static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
+static int n_cpus = 0;
 
 
 static void *
@@ -160,18 +167,34 @@ process_png_file(const char *filename, const char *out_filename)
     char *ids_png_filename, *flipped_png_filename;
 
     struct stat st;
+    FILE *fp;
 
     bool ret = false;
 
+    if (asprintf(&ids_png_filename, "%.*s.png",
+                 out_filename_len - 4, out_filename) == -1)
+        exit(1);
+    if (asprintf(&flipped_png_filename, "%.*s-flipped.png",
+                 out_filename_len - 4, out_filename) == -1)
+        exit(1);
 
-    /* open file and test for it being a png */
-    FILE *fp = fopen(filename, "rb");
-    if (!fp) {
-        fprintf(stderr, "Failed to open %s for reading\n", filename);
-        return false;
+    if (stat(ids_png_filename, &st) != -1 && stat(flipped_png_filename, &st) != -1) {
+        debug("%*sSkipping PNG processing as outputs already exist\n", indent, "");
+        ret = true;
+        goto error_stat_outputs;
     }
 
-    fread(header, 1, 8, fp);
+    /* open file and test for it being a png */
+    fp = fopen(filename, "rb");
+    if (!fp) {
+        fprintf(stderr, "Failed to open %s for reading\n", filename);
+        goto error_open;
+    }
+
+    if (fread(header, 1, 8, fp) != 1) {
+        fprintf(stderr, "IO error reading %s file\n", filename);
+        goto error_check_header;
+    }
     if (png_sig_cmp(header, 0, 8)) {
         fprintf(stderr, "%s was not recognised as a PNG file\n", filename);
         goto error_check_header;
@@ -258,8 +281,6 @@ process_png_file(const char *filename, const char *out_filename)
         goto error_write_ids_file;
     }
 
-    asprintf(&ids_png_filename, "%.*s-34-ids.png",
-             out_filename_len - 4, out_filename);
     if (stat(ids_png_filename, &st) == -1) {
         if (!write_png_file(ids_png_filename,
                             width, height,
@@ -279,8 +300,6 @@ process_png_file(const char *filename, const char *out_filename)
         goto error_write_flipped_file;
     }
 
-    asprintf(&flipped_png_filename, "%.*s-34-ids-flipped.png",
-             out_filename_len - 4, out_filename);
     if (stat(flipped_png_filename, &st) == -1) {
         if (!write_png_file(flipped_png_filename,
                             width, height,
@@ -298,9 +317,7 @@ process_png_file(const char *filename, const char *out_filename)
     ret = true;
 
 error_write_ids_file:
-    free(ids_png_filename);
 error_write_flipped_file:
-    free(flipped_png_filename);
 error_read_image:
     free(input_rows);
     free(id_rows);
@@ -316,6 +333,11 @@ error_create_read:
 
 error_check_header:
     fclose(fp);
+
+error_open:
+error_stat_outputs:
+    free(ids_png_filename);
+    free(flipped_png_filename);
 
     return ret;
 }
@@ -350,6 +372,24 @@ write_exr(Array2D<float> &pixels, const char *filename)
 static bool
 process_exr_file(const char *filename, const char *out_filename)
 {
+    int out_filename_len = strlen(out_filename);
+    char *exr_filename, *exr_flipped_filename;
+    struct stat st;
+
+    if (asprintf(&exr_filename, "%.*s.exr",
+                 out_filename_len - 4, out_filename) == -1)
+        exit(1);
+    if (asprintf(&exr_flipped_filename, "%.*s-flipped.exr",
+                 out_filename_len - 4, out_filename) == -1)
+        exit(1);
+
+    if (stat(exr_filename, &st) != -1 && stat(exr_flipped_filename, &st) != -1) {
+        free(exr_filename);
+        free(exr_flipped_filename);
+        debug("%*sSkipping EXR file as outputs already exist\n", indent, "");
+        return true;
+    }
+
     /* Just for posterity and to vent frustration within comments, the
      * RgbaInputFile and Rgba struct that the openexr documentation recommends
      * for reading typical RGBA EXR images is only good for half float
@@ -363,8 +403,6 @@ process_exr_file(const char *filename, const char *out_filename)
 
     Array2D<float> grey;
     Array2D<float> grey_flipped;
-    int out_filename_len = strlen(out_filename);
-    char *exr_filename;
 
     Box2i dw = in_file.header().dataWindow();
 
@@ -417,17 +455,13 @@ process_exr_file(const char *filename, const char *out_filename)
         }
     }
 
-    asprintf(&exr_filename, "%.*s-y-only.exr",
-             out_filename_len - 4, out_filename);
     write_exr(grey, exr_filename);
     debug("%*swrote %s\n", indent, "", exr_filename);
     free(exr_filename);
 
-    asprintf(&exr_filename, "%.*s-y-only-flipped.exr",
-             out_filename_len - 4, out_filename);
-    write_exr(grey_flipped, exr_filename);
-    debug("%*swrote %s\n", indent, "", exr_filename);
-    free(exr_filename);
+    write_exr(grey_flipped, exr_flipped_filename);
+    debug("%*swrote %s\n", indent, "", exr_flipped_filename);
+    free(exr_flipped_filename);
 }
 
 static void
@@ -484,10 +518,14 @@ directory_recurse(const char *src_label_dir_path,
         if (strstr(label_entry->d_name, "-34-ids"))
             continue;
 
-        asprintf(&next_src_label_path, "%s/%s", src_label_dir_path, label_entry->d_name);
-        asprintf(&next_src_depth_path, "%s/%s", src_depth_dir_path, label_entry->d_name);
-        asprintf(&next_dest_label_path, "%s/%s", dest_label_dir_path, label_entry->d_name);
-        asprintf(&next_dest_depth_path, "%s/%s", dest_depth_dir_path, label_entry->d_name);
+        if (asprintf(&next_src_label_path, "%s/%s", src_label_dir_path, label_entry->d_name) == -1)
+            exit(1);
+        if (asprintf(&next_src_depth_path, "%s/%s", src_depth_dir_path, label_entry->d_name) == -1)
+            exit(1);
+        if (asprintf(&next_dest_label_path, "%s/%s", dest_label_dir_path, label_entry->d_name) == -1)
+            exit(1);
+        if (asprintf(&next_dest_depth_path, "%s/%s", dest_depth_dir_path, label_entry->d_name) == -1)
+            exit(1);
 
         stat(next_src_label_path, &st);
         if (S_ISDIR(st.st_mode)) {
@@ -568,7 +606,7 @@ main(int argc, char **argv)
     grey_to_id_map[0x40] = 33; // background
 
 
-    for (int i = 0; i < sizeof(left_to_right_map); i++)
+    for (int i = 0; i < ARRAY_LEN(left_to_right_map); i++)
         left_to_right_map[i] = i;
 
 #define flip(A, B) do {  \
@@ -596,8 +634,10 @@ main(int argc, char **argv)
 
 #undef flip
 
-    asprintf(&label_dest, "%s/%s", argv[3], argv[1]);
-    asprintf(&depth_dest, "%s/%s", argv[3], argv[2]);
+    if (asprintf(&label_dest, "%s/labels", argv[3]) == -1)
+        exit(1);
+    if (asprintf(&depth_dest, "%s/depth", argv[3]) == -1)
+        exit(1);
 
     directory_recurse(argv[1], argv[2], label_dest, depth_dest);
 
