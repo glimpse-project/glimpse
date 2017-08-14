@@ -325,14 +325,13 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
 }
 
 static void
-initialize_node_train_data(TrainContext* ctx, NodeTrainData* data)
+initialize_node_train_data(TrainContext* ctx, NodeTrainData* data,
+                           uint32_t* root_histogram, uint32_t* lr_histograms)
 {
-  data->root_histogram = (uint32_t*)
-    xcalloc(ctx->n_labels * ctx->n_images, sizeof(uint32_t));
-
-  data->lr_histograms = (uint32_t*)
-    xcalloc(ctx->n_labels * ctx->n_uv * ctx->n_t * 2,
-            sizeof(uint32_t));
+  data->root_histogram = root_histogram;
+  data->lr_histograms = lr_histograms;
+  memset(root_histogram, 0, ctx->n_labels * sizeof(uint32_t));
+  memset(lr_histograms, 0, ctx->n_labels * ctx->n_uv * ctx->n_t * 2 * sizeof(uint32_t));
 }
 
 static NodeTrainData*
@@ -386,14 +385,6 @@ create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
 static void
 destroy_node_train_data(NodeTrainData* data)
 {
-  if (data->lr_histograms)
-    {
-      xfree(data->lr_histograms);
-    }
-  if (data->root_histogram)
-    {
-      xfree(data->root_histogram);
-    }
   xfree(data->pixels);
   xfree(data->pixel_base);
   xfree(data);
@@ -869,6 +860,10 @@ main(int argc, char **argv)
   clock_gettime(CLOCK_MONOTONIC, &begin);
   last = begin;
   uint32_t last_depth = UINT32_MAX;
+  uint32_t* root_histogram = (uint32_t*)
+    malloc(ctx.n_labels * sizeof(uint32_t));
+  uint32_t* lr_histograms = (uint32_t*)
+    malloc(ctx.n_labels * ctx.n_uv * ctx.n_t * 2 * sizeof(uint32_t));
   while (train_queue != NULL)
     {
       uint32_t best_uv;
@@ -892,16 +887,14 @@ main(int argc, char **argv)
         }
 
       // Initialise arrays needed for histogram storage
-      initialize_node_train_data(&ctx, node_data);
+      initialize_node_train_data(&ctx, node_data,
+                                 root_histogram, lr_histograms);
 
       // Signal threads to start work
       pthread_barrier_wait(&ready_barrier);
 
       // Wait for threads to finish
       pthread_barrier_wait(&finished_barrier);
-
-      // Accumulate histograms for all images and all combinations of u,v,t
-      //accumulate_histograms(&ctx, node_data, 0, ctx.n_uv);
 
       // Calculate the normalised label histogram and get the number of pixels
       // and the number of labels in the root histogram.
@@ -1021,6 +1014,10 @@ main(int argc, char **argv)
       // We no longer need the train data, free it
       destroy_node_train_data(node_data);
     }
+
+  // Free these, they're no longer needed
+  xfree(root_histogram);
+  xfree(lr_histograms);
 
   // Restore tree histograms list pointer
   tree_histograms = llist_first(tree_histograms);
