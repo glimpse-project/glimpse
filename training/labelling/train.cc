@@ -294,6 +294,13 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
       memcpy(&ctx->label_images[dest_idx], &input_data[src_idx], width);
     }
 
+  // Close the label file
+  if (fclose(fp) != 0)
+    {
+      fprintf(stderr, "Error closing label file '%s'\n", label_path);
+      exit(1);
+    }
+
   // Read depth file
   float* dest;
   InputFile in_file(depth_path);
@@ -1108,20 +1115,27 @@ main(int argc, char **argv)
   if (fwrite(&header, sizeof(RDLHeader), 1, output) != 1)
     {
       fprintf(stderr, "Error writing header\n");
-      exit(1);
+      return 1;
     }
   if (fwrite(tree, sizeof(Node), n_nodes, output) != n_nodes)
     {
       fprintf(stderr, "Error writing tree\n");
-      exit(1);
+      return 1;
     }
   for (LList* l = tree_histograms; l; l = l->next)
     {
       if (fwrite(l->data, sizeof(float), ctx.n_labels, output) != ctx.n_labels)
         {
           fprintf(stderr, "Error writing labels\n");
-          exit(1);
+          return 1;
         }
+    }
+
+  // Close the output file
+  if (fclose(output) != 0)
+    {
+      fprintf(stderr, "Error closing output file\n");
+      return 1;
     }
 
   // Free the last data
