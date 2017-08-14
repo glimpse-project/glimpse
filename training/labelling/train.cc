@@ -74,8 +74,6 @@ typedef struct {
   uint32_t  depth;           // Tree depth at which this node sits.
   uint32_t* pixel_base;      // Index at which a particular image's pixels starts
   Int2D*    pixels;          // A list of pixel pairs.
-  uint32_t* root_histogram;  // The histogram of this node.
-  uint32_t* lr_histograms;   // Histograms for each branch of each u,v,t combination
 } NodeTrainData;
 
 typedef struct {
@@ -83,8 +81,12 @@ typedef struct {
   NodeTrainData**    data;               // The node data to use and modify
   uint32_t           c_start;            // The uv combination to start on
   uint32_t           c_end;              // The uv combination to end on
-  pthread_barrier_t* ready_barrier;
-  pthread_barrier_t* finished_barrier;
+  float*             root_nhistogram;    // Normalised histogram of labels
+  float*             best_gain;          // Best gain achieved
+  uint32_t*          best_uv;            // Index of the best uv combination
+  uint32_t*          best_t;             // Index of the best threshold
+  pthread_barrier_t* ready_barrier;      // Barrier to wait on to start work
+  pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
 } TrainThreadData;
 
 static bool
@@ -110,8 +112,14 @@ gather_train_data(const char* label_dir_path,
           strcmp(label_entry->d_name, "..") == 0)
           continue;
 
-      asprintf(&next_label_path, "%s/%s", label_dir_path, label_entry->d_name);
-      asprintf(&next_depth_path, "%s/%s", depth_dir_path, label_entry->d_name);
+      if (asprintf(&next_label_path, "%s/%s",
+                   label_dir_path, label_entry->d_name) == -1 ||
+          asprintf(&next_depth_path, "%s/%s",
+                   depth_dir_path, label_entry->d_name) == -1)
+        {
+          fprintf(stderr, "Error creating file paths\n");
+          exit(1);
+        }
 
       stat(next_label_path, &st);
       if (S_ISDIR(st.st_mode))
@@ -189,7 +197,10 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
     }
 
   // Load label file
-  fread(header, 1, 8, fp);
+  if (fread(header, 1, 8, fp) != 8)
+    {
+      fprintf(stderr, "Error reading header of %s\n", label_path);
+    }
   if (png_sig_cmp(header, 0, 8))
     {
       fprintf(stderr, "%s was not recognised as a PNG file\n", label_path);
@@ -324,16 +335,6 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   return true;
 }
 
-static void
-initialize_node_train_data(TrainContext* ctx, NodeTrainData* data,
-                           uint32_t* root_histogram, uint32_t* lr_histograms)
-{
-  data->root_histogram = root_histogram;
-  data->lr_histograms = lr_histograms;
-  memset(root_histogram, 0, ctx->n_labels * sizeof(uint32_t));
-  memset(lr_histograms, 0, ctx->n_labels * ctx->n_uv * ctx->n_t * 2 * sizeof(uint32_t));
-}
-
 static NodeTrainData*
 create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
                        uint32_t* pixel_base, Int2D* pixels)
@@ -449,7 +450,8 @@ calculate_gain(float entropy, uint32_t n_pixels,
 
 static void
 accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
-                      uint32_t c_start, uint32_t c_end)
+                      uint32_t c_start, uint32_t c_end,
+                      uint32_t* root_histogram, uint32_t* lr_histograms)
 {
   uint32_t image_idx = 0;
   for (uint32_t i = 0; i < ctx->n_images;
@@ -472,15 +474,10 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
               exit(1);
             }
 
-          if (c_start == 0)
-            {
-              // Accumulate root histogram
-              ++data->root_histogram[label];
-            }
+          // Accumulate root histogram
+          ++root_histogram[label];
 
-          uint32_t lr_histogram_idx =
-            (c_start * ctx->n_t * ctx->n_labels * 2);
-          for (uint32_t c = c_start; c < c_end; c++)
+          for (uint32_t c = c_start, lr_histogram_idx = 0; c < c_end; c++)
             {
               UVPair* uv = &ctx->uvs[c];
               float value = sample_uv(depth_image,
@@ -492,7 +489,7 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
                   // Accumulate histogram for this particular uvt combination
                   // on both theoretical branches
                   float threshold = ctx->ts[t];
-                  ++data->lr_histograms[value < threshold ?
+                  ++lr_histograms[value < threshold ?
                     lr_histogram_idx + label :
                     lr_histogram_idx + ctx->n_labels + label];
                 }
@@ -505,12 +502,111 @@ static void*
 thread_body(void* userdata)
 {
   TrainThreadData* data = (TrainThreadData*)userdata;
+
+  // Histogram for the node being processed
+  uint32_t* root_histogram = (uint32_t*)
+    malloc(data->ctx->n_labels * sizeof(uint32_t));
+
+  // Histograms for each uvt combination being tested
+  uint32_t* lr_histograms = (uint32_t*)
+    malloc(data->ctx->n_labels * (data->c_end - data->c_start) *
+           data->ctx->n_t * 2 * sizeof(uint32_t));
+
+  float* nhistogram = (float*)xmalloc(data->ctx->n_labels * sizeof(float));
+  float* root_nhistogram = data->root_nhistogram ? data->root_nhistogram :
+    (float*)xmalloc(data->ctx->n_labels * sizeof(float));
+
   while (1)
     {
+      // Wait for everything to be ready to start processing
       pthread_barrier_wait(data->ready_barrier);
-      accumulate_histograms(data->ctx, *data->data, data->c_start, data->c_end);
+
+      // Quit out if we've nothing left to process
+      if (!(*data->data))
+        {
+          break;
+        }
+
+      // Clear histogram accumulators
+      memset(root_histogram, 0, data->ctx->n_labels * sizeof(uint32_t));
+      memset(lr_histograms, 0, data->ctx->n_labels *
+             (data->c_end - data->c_start) * data->ctx->n_t * 2 *
+             sizeof(uint32_t));
+
+      // Accumulate histograms
+      accumulate_histograms(data->ctx, *data->data, data->c_start, data->c_end,
+                            root_histogram, lr_histograms);
+
+      // Calculate the normalised label histogram and get the number of pixels
+      // and the number of labels in the root histogram.
+      Int2D root_n_pixels = normalize_histogram(root_histogram,
+                                                data->ctx->n_labels,
+                                                root_nhistogram);
+
+      // Determine the best u,v,t combination
+      *data->best_gain = 0.f;
+
+      // If there's only 1 label, skip all this, gain is zero
+      if (root_n_pixels.y > 1)
+        {
+          // Calculate the shannon entropy for the normalised label histogram
+          float entropy = calculate_shannon_entropy(root_nhistogram,
+                                                    data->ctx->n_labels);
+
+          // Calculate the gain for each combination of u,v,t and store the best
+          for (uint32_t i = data->c_start, lr_histo_base = 0;
+               i < data->c_end; i++)
+            {
+              for (uint32_t j = 0; j < data->ctx->n_t;
+                   j++, lr_histo_base += data->ctx->n_labels * 2)
+                {
+                  float l_entropy, r_entropy, gain;
+
+                  Int2D l_n_pixels =
+                    normalize_histogram(&lr_histograms[lr_histo_base],
+                                        data->ctx->n_labels, nhistogram);
+                  if (l_n_pixels.x == 0 || l_n_pixels.x == root_n_pixels.x)
+                    {
+                      continue;
+                    }
+                  l_entropy = calculate_shannon_entropy(nhistogram,
+                                                        data->ctx->n_labels);
+
+                  Int2D r_n_pixels =
+                    normalize_histogram(
+                      &lr_histograms[lr_histo_base + data->ctx->n_labels],
+                      data->ctx->n_labels, nhistogram);
+                  r_entropy = calculate_shannon_entropy(nhistogram,
+                                                        data->ctx->n_labels);
+
+                  gain = calculate_gain(entropy, root_n_pixels.x,
+                                        l_entropy, l_n_pixels.x,
+                                        r_entropy, r_n_pixels.x);
+
+                  if (gain > *data->best_gain)
+                    {
+                      *data->best_gain = gain;
+                      *data->best_uv = i;
+                      *data->best_t = j;
+                    }
+                }
+            }
+        }
+
+      // Signal work is finished
       pthread_barrier_wait(data->finished_barrier);
     }
+
+  xfree(root_histogram);
+  xfree(lr_histograms);
+  if (!data->root_nhistogram)
+    {
+      xfree(root_nhistogram);
+    }
+  xfree(nhistogram);
+  xfree(data);
+
+  pthread_exit(NULL);
 }
 
 static void
@@ -562,6 +658,13 @@ collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair* uv, float t,
                                (*l_pixel_base)[ctx->n_images] * sizeof(Int2D));
   *r_pixels = (Int2D*)xrealloc((void*)(*r_pixels),
                                (*r_pixel_base)[ctx->n_images] * sizeof(Int2D));
+}
+
+static bool
+list_free_cb(LList* node, uint32_t index, void* userdata)
+{
+  xfree(node->data);
+  return true;
 }
 
 static void
@@ -824,7 +927,6 @@ main(int argc, char **argv)
 
   LList* train_queue =
     llist_new(create_node_train_data(&ctx, 0, 0, NULL, NULL));
-  float* nhistogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
   float* root_nhistogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
 
   NodeTrainData* node_data;
@@ -837,6 +939,9 @@ main(int argc, char **argv)
       return 1;
     }
   uint32_t n_c = (ctx.n_uv + n_threads - 1) / n_threads;
+  float* best_gains = (float*)malloc(n_threads * sizeof(float));
+  uint32_t* best_uvs = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
+  uint32_t* best_ts = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
   for (uint32_t i = 0; i < n_threads; i++)
     {
       TrainThreadData* thread_data = (TrainThreadData*)
@@ -845,6 +950,10 @@ main(int argc, char **argv)
       thread_data->data = &node_data;
       thread_data->c_start = i * n_c;
       thread_data->c_end = std::min((i + 1) * n_c, ctx.n_uv);
+      thread_data->root_nhistogram = (i == 0) ? root_nhistogram : NULL;
+      thread_data->best_gain = &best_gains[i];
+      thread_data->best_uv = &best_uvs[i];
+      thread_data->best_t = &best_ts[i];
       thread_data->ready_barrier = &ready_barrier;
       thread_data->finished_barrier = &finished_barrier;
 
@@ -860,18 +969,14 @@ main(int argc, char **argv)
   clock_gettime(CLOCK_MONOTONIC, &begin);
   last = begin;
   uint32_t last_depth = UINT32_MAX;
-  uint32_t* root_histogram = (uint32_t*)
-    malloc(ctx.n_labels * sizeof(uint32_t));
-  uint32_t* lr_histograms = (uint32_t*)
-    malloc(ctx.n_labels * ctx.n_uv * ctx.n_t * 2 * sizeof(uint32_t));
   while (train_queue != NULL)
     {
       uint32_t best_uv;
       uint32_t best_t;
+      float best_gain = 0.0;
 
       LList* current = train_queue;
       node_data = (NodeTrainData*)current->data;
-      float entropy, best_gain = 0.0;
 
       if (node_data->depth != last_depth)
         {
@@ -886,63 +991,20 @@ main(int argc, char **argv)
                  last_depth + 1, llist_length(train_queue));
         }
 
-      // Initialise arrays needed for histogram storage
-      initialize_node_train_data(&ctx, node_data,
-                                 root_histogram, lr_histograms);
-
       // Signal threads to start work
       pthread_barrier_wait(&ready_barrier);
 
       // Wait for threads to finish
       pthread_barrier_wait(&finished_barrier);
 
-      // Calculate the normalised label histogram and get the number of pixels
-      // and the number of labels in the root histogram.
-      Int2D root_n_pixels = normalize_histogram(node_data->root_histogram,
-                                                ctx.n_labels, root_nhistogram);
-
-      // If there's only 1 label, skip all this, gain is zero
-      if (root_n_pixels.y > 1)
+      // See which thread got the best uvt combination
+      for (uint32_t i = 0; i < n_threads; i++)
         {
-          // Calculate the shannon entropy for the normalised label histogram
-          entropy = calculate_shannon_entropy(root_nhistogram, ctx.n_labels);
-
-          // Calculate the gain for each combination of u,v,t and store the best
-          for (uint32_t i = 0, lr_histo_base = 0; i < ctx.n_uv; i++)
+          if (best_gains[i] > best_gain)
             {
-              for (uint32_t j = 0; j < ctx.n_t;
-                   j++, lr_histo_base += ctx.n_labels * 2)
-                {
-                  float l_entropy, r_entropy, gain;
-
-                  Int2D l_n_pixels =
-                    normalize_histogram(&node_data->lr_histograms[lr_histo_base],
-                                        ctx.n_labels, nhistogram);
-                  if (l_n_pixels.x == 0 || l_n_pixels.x == root_n_pixels.x)
-                    {
-                      continue;
-                    }
-                  l_entropy = calculate_shannon_entropy(nhistogram,
-                                                        ctx.n_labels);
-
-                  Int2D r_n_pixels =
-                    normalize_histogram(
-                      &node_data->lr_histograms[lr_histo_base + ctx.n_labels],
-                      ctx.n_labels, nhistogram);
-                  r_entropy = calculate_shannon_entropy(nhistogram,
-                                                        ctx.n_labels);
-
-                  gain = calculate_gain(entropy, root_n_pixels.x,
-                                        l_entropy, l_n_pixels.x,
-                                        r_entropy, r_n_pixels.x);
-
-                  if (gain > best_gain)
-                    {
-                      best_gain = gain;
-                      best_uv = i;
-                      best_t = j;
-                    }
-                }
+              best_gain = best_gains[i];
+              best_uv = best_uvs[i];
+              best_t = best_ts[i];
             }
         }
 
@@ -1002,9 +1064,10 @@ main(int argc, char **argv)
             }
 
           node->label_pr_idx = ++n_histograms;
+          float* node_histogram = (float*)malloc(ctx.n_labels * sizeof(float));
+          memcpy(node_histogram, root_nhistogram, ctx.n_labels * sizeof(float));
           tree_histograms = llist_insert_after(tree_histograms,
-                                               llist_new(root_nhistogram));
-          root_nhistogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
+                                               llist_new(node_histogram));
         }
 
       // Remove this node from the queue
@@ -1015,9 +1078,17 @@ main(int argc, char **argv)
       destroy_node_train_data(node_data);
     }
 
-  // Free these, they're no longer needed
-  xfree(root_histogram);
-  xfree(lr_histograms);
+  // Signal threads to free memory and quit
+  node_data = NULL;
+  pthread_barrier_wait(&ready_barrier);
+
+  // Free memory that isn't needed anymore
+  xfree(root_nhistogram);
+  xfree(ctx.uvs);
+  xfree(ctx.ts);
+  xfree(best_gains);
+  xfree(best_uvs);
+  xfree(best_ts);
 
   // Restore tree histograms list pointer
   tree_histograms = llist_first(tree_histograms);
@@ -1052,6 +1123,10 @@ main(int argc, char **argv)
           exit(1);
         }
     }
+
+  // Free the last data
+  xfree(tree);
+  llist_free(tree_histograms, list_free_cb, NULL);
 
   clock_gettime(CLOCK_MONOTONIC, &now);
   since_begin = get_time_for_display(&begin, &now);
