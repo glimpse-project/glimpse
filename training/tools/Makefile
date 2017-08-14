@@ -16,7 +16,7 @@ pfm-debug: pfm-debug.c
 	$(CC) -o $(@) $(^) $(CFLAGS) $(LDFLAGS)
 
 image-pre-processor: image-pre-processor.cc
-	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
+	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng` -lpthread
 
 exr-to-pfm: exr-to-pfm.cc
 	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`

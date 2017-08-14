@@ -36,8 +36,10 @@
 #include <stdint.h>
 #include <libgen.h>
 #include <assert.h>
+#include <pthread.h>
 
 #include <type_traits>
+#include <queue>
 
 #include <ImfInputFile.h>
 #include <ImfOutputFile.h>
@@ -59,8 +61,26 @@
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
+struct work {
+    char *src_label_path;
+    char *dst_label_path;
+    char *src_depth_path;
+    char *dst_depth_path;
+};
+
+struct worker_state
+{
+    int idx;
+    pthread_t thread;
+};
+
 using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
+
+static std::vector<struct worker_state> workers;
+
+static pthread_mutex_t work_queue_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::queue<struct work> work_queue;
 
 static int indent = 0;
 
@@ -82,6 +102,41 @@ xmalloc(size_t size)
     return ret;
 }
 
+static uint64_t
+get_time(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+const char *
+get_duration_ns_print_scale_suffix(uint64_t duration_ns)
+{
+    if (duration_ns > 1000000000)
+        return "s";
+    else if (duration_ns > 1000000)
+        return "ms";
+    else if (duration_ns > 1000)
+        return "us";
+    else
+        return "ns";
+}
+
+float
+get_duration_ns_print_scale(uint64_t duration_ns)
+{
+    if (duration_ns > 1000000000)
+        return duration_ns / 1e9;
+    else if (duration_ns > 1000000)
+        return duration_ns / 1e6;
+    else if (duration_ns > 1000)
+        return duration_ns / 1e3;
+    else
+        return duration_ns;
+}
+
 static bool
 write_png_file(const char *filename,
                 int width, int height,
@@ -92,7 +147,6 @@ write_png_file(const char *filename,
     png_structp png_ptr;
     png_infop info_ptr;
     bool ret = false;
-    int y;
 
     /* create file */
     FILE *fp = fopen(filename, "wb");
@@ -152,10 +206,6 @@ process_png_file(const char *filename, const char *out_filename)
     png_infop info_ptr;
 
     int width, height;
-    int half_width;
-    png_byte color_type;
-    png_byte bit_depth;
-    int number_of_passes;
 
     png_bytep *input_rows;
     png_bytep input_data;
@@ -193,7 +243,7 @@ process_png_file(const char *filename, const char *out_filename)
         goto error_open;
     }
 
-    if (fread(header, 1, 8, fp) != 1) {
+    if (fread(header, 1, 8, fp) != 8) {
         fprintf(stderr, "IO error reading %s file\n", filename);
         goto error_check_header;
     }
@@ -227,10 +277,7 @@ process_png_file(const char *filename, const char *out_filename)
 
     width = png_get_image_width(png_ptr, info_ptr);
     height = png_get_image_height(png_ptr, info_ptr);
-    color_type = png_get_color_type(png_ptr, info_ptr);
-    bit_depth = png_get_bit_depth(png_ptr, info_ptr);
 
-    number_of_passes = png_set_interlace_handling(png_ptr);
     png_read_update_info(png_ptr, info_ptr);
 
     row_stride = png_get_rowbytes(png_ptr, info_ptr);
@@ -525,9 +572,6 @@ directory_recurse(const char *src_label_dir_path,
         if (strcmp(label_entry->d_name, ".") == 0 || strcmp(label_entry->d_name, "..") == 0)
             continue;
 
-        if (strstr(label_entry->d_name, "-34-ids"))
-            continue;
-
         if (asprintf(&next_src_label_path, "%s/%s", src_label_dir_path, label_entry->d_name) == -1)
             exit(1);
         if (asprintf(&next_src_depth_path, "%s/%s", src_depth_dir_path, label_entry->d_name) == -1)
@@ -544,29 +588,103 @@ directory_recurse(const char *src_label_dir_path,
             directory_recurse(next_src_label_path, next_src_depth_path,
                               next_dest_label_path, next_dest_depth_path);
             indent -= 2;
+
+            free(next_src_label_path);
+            free(next_dest_label_path);
+            free(next_src_depth_path);
+            free(next_dest_depth_path);
         } else if ((ext = strstr(label_entry->d_name, ".png")) && ext[4] == '\0') {
+            struct work work;
 
-            debug("%*sprocessing %s\n", indent, "", next_src_label_path);
-            indent += 2;
-            process_png_file(next_src_label_path, next_dest_label_path);
-            indent -= 2;
+            work.src_label_path = next_src_label_path;
+            work.dst_label_path = next_dest_label_path;
+            work.src_depth_path = next_src_depth_path;
+            work.dst_depth_path = next_dest_depth_path;
 
-            strcpy(next_src_depth_path + strlen(next_src_depth_path) - 4, ".exr");
-            strcpy(next_dest_depth_path + strlen(next_dest_depth_path) - 4, ".exr");
-
-            debug("%*sprocessing %s\n", indent, "", next_src_depth_path);
-            indent += 2;
-            process_exr_file(next_src_depth_path, next_dest_depth_path);
-            indent -= 2;
+            work_queue.push(work);
         }
-
-        free(next_src_label_path);
-        free(next_src_depth_path);
-        free(next_dest_label_path);
-        free(next_dest_depth_path);
     }
 
     closedir(label_dir);
+}
+
+static void *
+worker_thread_cb(void *data)
+{
+    debug("Running worker thread\n");
+
+    for (;;) {
+        struct work work;
+
+        pthread_mutex_lock(&work_queue_lock);
+        if (!work_queue.empty()) {
+            work = work_queue.front();
+            work_queue.pop();
+        } else {
+            pthread_mutex_unlock(&work_queue_lock);
+            debug("Worker thread finished\n");
+            return NULL;
+        }
+        pthread_mutex_unlock(&work_queue_lock);
+
+        debug("Thread %d: processing %s\n", state->idx, work.src_label_path);
+        process_png_file(work.src_label_path, work.dst_label_path);
+
+        strcpy(work.src_depth_path + strlen(work.src_depth_path) - 4, ".exr");
+        strcpy(work.dst_depth_path + strlen(work.dst_depth_path) - 4, ".exr");
+
+        debug("Thread %d: processing %s\n", state->idx, work.src_depth_path);
+        process_exr_file(work.src_depth_path, work.dst_depth_path);
+
+        free(work.src_label_path);
+        free(work.src_depth_path);
+        free(work.dst_label_path);
+        free(work.dst_depth_path);
+    }
+
+    return NULL;
+}
+
+static bool
+read_file(const char *filename, void *buf, int max)
+{
+    int fd;
+    int n;
+
+    memset(buf, 0, max);
+
+    fd = open(filename, 0);
+    if (fd < 0)
+        return false;
+    n = read(fd, buf, max - 1);
+    close(fd);
+    if (n < 0)
+        return false;
+
+    return true;
+}
+
+static void
+cpu_count_once_cb(void)
+{
+    char buf[32];
+    unsigned ignore = 0, max_cpu = 0;
+
+    if (!read_file("/sys/devices/system/cpu/present", buf, sizeof(buf)))
+        return;
+
+    if (sscanf(buf, "%u-%u", &ignore, &max_cpu) != 2)
+        return;
+
+    n_cpus = max_cpu + 1;
+}
+
+static int
+cpu_count(void)
+{
+    pthread_once(&cpu_count_once, cpu_count_once_cb);
+
+    return n_cpus;
 }
 
 int
@@ -653,7 +771,47 @@ main(int argc, char **argv)
     if (asprintf(&depth_dest, "%s/depth", argv[3]) == -1)
         exit(1);
 
+    printf("Queuing frames to process...\n");
+
+    uint64_t start = get_time();
     directory_recurse(argv[1], argv[2], label_dest, depth_dest);
+    uint64_t end = get_time();
+
+    uint64_t duration_ns = end - start;
+    printf("%d frames queued to process, in %.3f%s\n",
+           (int)work_queue.size(),
+           get_duration_ns_print_scale(duration_ns),
+           get_duration_ns_print_scale_suffix(duration_ns));
+
+    int n_cpus = cpu_count();
+    //n_cpus = 1;
+
+    printf("Spawning %d worker threads\n", n_cpus);
+
+    workers.resize(n_cpus, worker_state());
+
+    start = get_time();
+
+    for (int i = 0; i < n_cpus; i++) {
+        workers[i].idx = i;
+        pthread_create(&workers[i].thread,
+                       NULL, //sttributes
+                       worker_thread_cb,
+                       &workers[i]); //data
+    }
+
+    for (int i = 0; i < n_cpus; i++) {
+        void *ret;
+
+        pthread_join(workers[i].thread, &ret);
+    }
+
+    end = get_time();
+    duration_ns = end - start;
+
+    printf("Finished processing all frames in %.3f%s\n",
+           get_duration_ns_print_scale(duration_ns),
+           get_duration_ns_print_scale_suffix(duration_ns));
 
     return 0;
 }
