@@ -65,7 +65,9 @@ using namespace IMATH_NAMESPACE;
 static int indent = 0;
 
 static int grey_to_id_map[255];
-static int left_to_right_map[34];
+
+#define MAX_PACKED_INDEX 33
+static int left_to_right_map[MAX_PACKED_INDEX + 1];
 
 static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
 static int n_cpus = 0;
@@ -256,14 +258,20 @@ process_png_file(const char *filename, const char *out_filename)
     png_read_image(png_ptr, input_rows);
     debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
 
-    half_width = width / 2;
     for (int y = 0; y < height; y++) {
         uint8_t *input_row = (uint8_t *)input_data + row_stride * y;
         uint8_t *id_row = (uint8_t *)id_data + row_stride * y;
         uint8_t *flipped_row = (uint8_t *)flipped_data + row_stride * y;
 
-        for (int x = 0; x < width; x++)
+        for (int x = 0; x < width; x++) {
             id_row[x] = grey_to_id_map[input_row[x]];
+            if (id_row[x] > MAX_PACKED_INDEX) {
+                fprintf(stderr, "Failed to map a label value of 0x%x/%d in image %s\n",
+                        input_row[x], input_row[x],
+                        filename);
+                exit(1);
+            }
+        }
 
         /* XXX: assuming even width so we don't have to handle an odd
          * center pixel
@@ -271,8 +279,8 @@ process_png_file(const char *filename, const char *out_filename)
         for (int x = 0; x < width; x++) {
             int opposite = width - 1 - x;
 
-            flipped_row[x] = id_row[opposite];
-            flipped_row[opposite] = id_row[x];
+            flipped_row[x] = left_to_right_map[id_row[opposite]];
+            flipped_row[opposite] = left_to_right_map[id_row[x]];
         }
     }
 
@@ -462,6 +470,8 @@ process_exr_file(const char *filename, const char *out_filename)
     write_exr(grey_flipped, exr_flipped_filename);
     debug("%*swrote %s\n", indent, "", exr_flipped_filename);
     free(exr_flipped_filename);
+
+    return true;
 }
 
 static void
@@ -588,7 +598,7 @@ main(int argc, char **argv)
     grey_to_id_map[0x7c] = 16; // left hand
     grey_to_id_map[0x83] = 17; // right wrist
     grey_to_id_map[0x8a] = 18; // right hand
-    grey_to_id_map[0x97] = 19; // left hip
+    grey_to_id_map[0x92] = 19; // left hip
     grey_to_id_map[0x99] = 20; // left thigh
     grey_to_id_map[0xa0] = 21; // right hip
     grey_to_id_map[0xa8] = 22; // right thigh
@@ -605,8 +615,12 @@ main(int argc, char **argv)
 
     grey_to_id_map[0x40] = 33; // background
 
+    // A few paranoid checks...
+    static_assert(MAX_PACKED_INDEX == 33, "Only expecting 33 labels");
+    static_assert(ARRAY_LEN(left_to_right_map) == (MAX_PACKED_INDEX + 1),
+                  "Only expecting to flip 33 packed labels");
 
-    for (int i = 0; i < ARRAY_LEN(left_to_right_map); i++)
+    for (unsigned i = 0; i < ARRAY_LEN(left_to_right_map); i++)
         left_to_right_map[i] = i;
 
 #define flip(A, B) do {  \
