@@ -405,7 +405,7 @@ destroy_node_train_data(NodeTrainData* data)
   xfree(data);
 }
 
-static Int2D
+static inline Int2D
 normalize_histogram(uint32_t* histogram, uint8_t n_labels, float* normalized)
 {
   Int2D sums = { 0, 0 };
@@ -434,26 +434,22 @@ normalize_histogram(uint32_t* histogram, uint8_t n_labels, float* normalized)
   return sums;
 }
 
-static float
+static inline float
 calculate_shannon_entropy(float* normalized_histogram, uint8_t n_labels)
 {
   float entropy = 0.f;
   for (int i = 0; i < n_labels; i++)
     {
       float value = normalized_histogram[i];
-      if (value > 0.f)
+      if (value > 0.f && value < 1.f)
         {
-          float add = -value * log2f(value);
-          if (std::isnormal(add))
-            {
-              entropy += add;
-            }
+          entropy += -value * log2f(value);
         }
     }
   return entropy;
 }
 
-static float
+static inline float
 calculate_gain(float entropy, uint32_t n_pixels,
                float l_entropy, uint32_t l_n_pixels,
                float r_entropy, uint32_t r_n_pixels)
