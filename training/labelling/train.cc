@@ -31,6 +31,7 @@ using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
 
 static bool verbose = false;
+static uint32_t seed = 0;
 
 typedef bool (*TrainDataCallback)(const char* label_path,
                                   const char* depth_path,
@@ -301,6 +302,12 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
       exit(1);
     }
 
+  // Free data associated with PNG reading
+  png_destroy_info_struct(png_ptr, &info_ptr);
+  png_destroy_read_struct(&png_ptr, NULL, NULL);
+  xfree(input_rows);
+  xfree(input_data);
+
   // Read depth file
   float* dest;
   InputFile in_file(depth_path);
@@ -376,8 +383,8 @@ create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
       uint32_t total_pixels = ctx->n_images * ctx->n_pixels;
       data->pixels = (Int2D*)xmalloc(total_pixels * sizeof(Int2D));
 
-      std::random_device rd;
-      std::mt19937 rng(rd());
+      //std::random_device rd;
+      std::mt19937 rng(seed);
       std::uniform_int_distribution<int> rand_x(0, ctx->width - 1);
       std::uniform_int_distribution<int> rand_y(0, ctx->height - 1);
       for (uint32_t i = 0; i < total_pixels; i++)
@@ -691,6 +698,7 @@ print_usage(FILE* stream)
 "  -u, --uv-range=NUMBER     Range of UV combinations to test (default 1.29)\n"
 "  -d, --depth=NUMBER        Depth to train tree to (default: 20)\n"
 "  -m, --threads=NUMBER      Number of threads to use (default: autodetect)\n"
+"  -n, --seed=NUMBER         Seed to use for RNG (default: 0)\n"
 "  -v, --verbose             Verbose output\n"
 "  -h, --help                Display this message\n");
 }
@@ -803,6 +811,11 @@ main(int argc, char **argv)
               number_text = &argv[i][10];
               uint32_target = &n_threads;
             }
+          else if (strcmp(argv[i], "--seed=") == 0)
+            {
+              number_text = &argv[i][7];
+              uint32_target = &seed;
+            }
           else if (strcmp(argv[i], "--help") == 0)
             {
               print_usage(stdout);
@@ -843,6 +856,10 @@ main(int argc, char **argv)
 
             case 'm':
               uint32_target = &n_threads;
+              break;
+
+            case 'n':
+              uint32_target = &seed;
               break;
 
             case 'h':
@@ -909,8 +926,8 @@ main(int argc, char **argv)
   // Initialise root node training data and add it to the queue
   printf("Preparing training metadata...\n");
   ctx.uvs = (UVPair*)xmalloc(ctx.n_uv * sizeof(UVPair));
-  std::random_device rd;
-  std::mt19937 rng(rd());
+  //std::random_device rd;
+  std::mt19937 rng(seed);
   std::uniform_real_distribution<float> rand_uv(-ctx.uv_range / 2.f,
                                                  ctx.uv_range / 2.f);
   for (uint32_t i = 0; i < ctx.n_uv; i++)
@@ -1093,6 +1110,8 @@ main(int argc, char **argv)
   xfree(root_nhistogram);
   xfree(ctx.uvs);
   xfree(ctx.ts);
+  xfree(ctx.label_images);
+  xfree(ctx.depth_images);
   xfree(best_gains);
   xfree(best_uvs);
   xfree(best_ts);
