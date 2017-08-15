@@ -491,19 +491,28 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
           // Accumulate root histogram
           ++root_histogram[label];
 
-          for (uint32_t c = c_start, lr_histogram_idx = 0; c < c_end; c++)
+          // Accumulate LR branch histograms
+
+          // Sample pixels
+          float samples[c_end - c_start];
+          for (uint32_t c = c_start; c < c_end; c++)
             {
               UVPair uv = ctx->uvs[c];
-              float value = sample_uv(depth_image,
-                                      ctx->width, ctx->height,
-                                      pixel, depth, uv);
+              samples[c - c_start] = sample_uv(depth_image,
+                                               ctx->width, ctx->height,
+                                               pixel, depth, uv);
+            }
+
+          // Partition on thresholds
+          for (uint32_t c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
+            {
               for (uint32_t t = 0; t < ctx->n_t;
                    t++, lr_histogram_idx += ctx->n_labels * 2)
                 {
                   // Accumulate histogram for this particular uvt combination
                   // on both theoretical branches
                   float threshold = ctx->ts[t];
-                  ++lr_histograms[value < threshold ?
+                  ++lr_histograms[samples[c] < threshold ?
                     lr_histogram_idx + label :
                     lr_histogram_idx + ctx->n_labels + label];
                 }
