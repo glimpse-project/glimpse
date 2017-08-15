@@ -37,9 +37,11 @@
 #include <libgen.h>
 #include <assert.h>
 #include <pthread.h>
+#include <getopt.h>
 
 #include <type_traits>
 #include <queue>
+#include <random>
 
 #include <ImfInputFile.h>
 #include <ImfOutputFile.h>
@@ -61,11 +63,34 @@
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
+#define BACKGROUND_ID 33
+
+enum image_format {
+    IMAGE_FORMAT_X8,
+    IMAGE_FORMAT_XFLOAT,
+};
+
+struct image
+{
+    enum image_format format;
+    int width;
+    int height;
+    int stride;
+
+    union {
+        uint8_t *data_u8;
+        float *data_float;
+    };
+};
+
+
+/* Work is grouped by directories where the clothes are the same since we want
+ * to diff sequential images to discard redundant frames which makes sense
+ * for a single worker thread to handle
+ */
 struct work {
-    char *src_label_path;
-    char *dst_label_path;
-    char *src_depth_path;
-    char *dst_depth_path;
+    char *dir;
+    std::vector<char *> files;
 };
 
 struct worker_state
@@ -76,6 +101,14 @@ struct worker_state
 
 using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
+
+static const char *top_src_dir;
+static const char *top_out_dir;
+
+static bool write_half_float = true;
+
+static int labels_width = 0;
+static int labels_height = 0;
 
 static std::vector<struct worker_state> workers;
 
@@ -92,6 +125,49 @@ static int left_to_right_map[MAX_PACKED_INDEX + 1];
 static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
 static int n_cpus = 0;
 
+static std::default_random_engine rand_generator;
+
+static png_color palette[] = {
+    { 0xff, 0x5d, 0xaa },
+    { 0xd1, 0x15, 0x40 },
+    { 0xda, 0x1d, 0x0e },
+    { 0xdd, 0x5d, 0x1e },
+    { 0x49, 0xa2, 0x24 },
+    { 0x29, 0xdc, 0xe3 },
+    { 0x02, 0x68, 0xc2 },
+    { 0x90, 0x29, 0xf9 },
+    { 0xff, 0x00, 0xcf },
+    { 0xef, 0xd2, 0x37 },
+    { 0x92, 0xa1, 0x3a },
+    { 0x48, 0x21, 0xeb },
+    { 0x2f, 0x93, 0xe5 },
+    { 0x1d, 0x6b, 0x0e },
+    { 0x07, 0x66, 0x4b },
+    { 0xfc, 0xaa, 0x98 },
+    { 0xb6, 0x85, 0x91 },
+    { 0xab, 0xae, 0xf1 },
+    { 0x5c, 0x62, 0xe0 },
+    { 0x48, 0xf7, 0x36 },
+    { 0xa3, 0x63, 0x0d },
+    { 0x78, 0x1d, 0x07 },
+    { 0x5e, 0x3c, 0x00 },
+    { 0x9f, 0x9f, 0x60 },
+    { 0x51, 0x76, 0x44 },
+    { 0xd4, 0x6d, 0x46 },
+    { 0xff, 0xfb, 0x7e },
+    { 0xd8, 0x4b, 0x4b },
+    { 0xa9, 0x02, 0x52 },
+    { 0x0f, 0xc1, 0x66 },
+    { 0x2b, 0x5e, 0x44 },
+    { 0x00, 0x9c, 0xad },
+    { 0x00, 0x40, 0xad },
+    { 0x21, 0x21, 0x21 },
+};
+
+#define xsnprintf(dest, fmt, ...) do { \
+        if (snprintf(dest, sizeof(dest), fmt,  __VA_ARGS__) >= (int)sizeof(dest)) \
+            exit(1); \
+    } while(0)
 
 static void *
 xmalloc(size_t size)
@@ -137,6 +213,36 @@ get_duration_ns_print_scale(uint64_t duration_ns)
         return duration_ns;
 }
 
+static struct image *
+xalloc_image(enum image_format format,
+             int width,
+             int height)
+{
+    struct image *img = (struct image *)xmalloc(sizeof(struct image));
+    img->format = format;
+    img->width = width;
+    img->height = height;
+
+    switch (format) {
+    case IMAGE_FORMAT_X8:
+        img->stride = width;
+        break;
+    case IMAGE_FORMAT_XFLOAT:
+        img->stride = width * sizeof(float);
+        break;
+    }
+    img->data_u8 = (uint8_t *)xmalloc(img->stride * img->height);
+
+    return img;
+}
+
+static void
+free_image(struct image *image)
+{
+    free(image->data_u8);
+    free(image);
+}
+
 static bool
 write_png_file(const char *filename,
                 int width, int height,
@@ -178,6 +284,9 @@ write_png_file(const char *filename,
                  bit_depth, color_type, PNG_INTERLACE_NONE,
                  PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
 
+    if (color_type == PNG_COLOR_TYPE_PALETTE)
+        png_set_PLTE(png_ptr, info_ptr, palette, ARRAY_LEN(palette));
+
     png_write_info(png_ptr, info_ptr);
 
     png_write_image(png_ptr, row_pointers);
@@ -196,10 +305,74 @@ error_create_write:
     return ret;
 }
 
-static bool
-process_png_file(const char *filename, const char *out_filename)
+
+/* Using EXR is a nightmare. If we try and only add an 'R' channel then
+ * e.g. Krita will be able to open the file and it looks reasonable,
+ * but OpenCV will end up creating an image with the G and B containing
+ * uninitialized garbage. If instead we create a 'Y' only image then
+ * OpenCV has special handling for that case and loads it as a greyscale
+ * image but Krita will bork and warn that it's not supported. We choose
+ * the version that works with OpenCV...
+ */
+static void
+write_exr(const char *filename,
+          struct image *image)
 {
-    int out_filename_len = strlen(out_filename);
+    int width = image->width;
+    int height = image->height;
+    Header header(width, height);
+
+    if (write_half_float) {
+        Array2D<half> half_image;
+
+        half_image.resizeErase(height, width);
+
+        for (int y = 0; y < height; y++) {
+            float *float_row = image->data_float + width * y;
+            half *half_row = &half_image[y][0];
+
+            for (int x = 0; x < width; x++)
+                half_row[x] = float_row[x];
+        }
+
+        header.channels().insert("Y", Channel(HALF));
+
+        OutputFile out_file(filename, header);
+
+        FrameBuffer outFrameBuffer;
+        outFrameBuffer.insert("Y",
+                              Slice(HALF,
+                                    (char *)&half_image[0][0],
+                                    sizeof(half_image[0][0]), // x stride,
+                                    sizeof(half_image[0][0]) * width)); // y stride
+
+        out_file.setFrameBuffer(outFrameBuffer);
+        out_file.writePixels(height);
+    } else {
+        header.channels().insert("Y", Channel(FLOAT));
+
+        OutputFile out_file(filename, header);
+
+        FrameBuffer outFrameBuffer;
+        outFrameBuffer.insert("Y",
+                              Slice(FLOAT,
+                                    (char *)image->data_float,
+                                    sizeof(float), // x stride,
+                                    sizeof(float) * width)); // y stride
+
+        out_file.setFrameBuffer(outFrameBuffer);
+        out_file.writePixels(height);
+    }
+}
+
+
+static struct image *
+load_frame_labels(const char *dir,
+                  const char *filename)
+{
+    char input_filename[1024];
+
+    FILE *fp;
 
     unsigned char header[8]; // 8 is the maximum size that can be checked
     png_structp png_ptr;
@@ -207,48 +380,27 @@ process_png_file(const char *filename, const char *out_filename)
 
     int width, height;
 
-    png_bytep *input_rows;
-    png_bytep input_data;
-    png_bytep *id_rows;
-    png_bytep id_data;
-    png_bytep *flipped_rows;
-    png_bytep flipped_data;
+    png_bytep *rows;
 
     int row_stride;
 
-    char *ids_png_filename, *flipped_png_filename;
+    struct image *img = NULL, *ret = NULL;
 
-    struct stat st;
-    FILE *fp;
-
-    bool ret = false;
-
-    if (asprintf(&ids_png_filename, "%.*s.png",
-                 out_filename_len - 4, out_filename) == -1)
-        exit(1);
-    if (asprintf(&flipped_png_filename, "%.*s-flipped.png",
-                 out_filename_len - 4, out_filename) == -1)
-        exit(1);
-
-    if (stat(ids_png_filename, &st) != -1 && stat(flipped_png_filename, &st) != -1) {
-        debug("%*sSkipping PNG processing as outputs already exist\n", indent, "");
-        ret = true;
-        goto error_stat_outputs;
-    }
+    xsnprintf(input_filename, "%s/labels/%s/%s", top_src_dir, dir, filename);
 
     /* open file and test for it being a png */
-    fp = fopen(filename, "rb");
+    fp = fopen(input_filename, "rb");
     if (!fp) {
-        fprintf(stderr, "Failed to open %s for reading\n", filename);
+        fprintf(stderr, "Failed to open %s for reading\n", input_filename);
         goto error_open;
     }
 
     if (fread(header, 1, 8, fp) != 8) {
-        fprintf(stderr, "IO error reading %s file\n", filename);
+        fprintf(stderr, "IO error reading %s file\n", input_filename);
         goto error_check_header;
     }
     if (png_sig_cmp(header, 0, 8)) {
-        fprintf(stderr, "%s was not recognised as a PNG file\n", filename);
+        fprintf(stderr, "%s was not recognised as a PNG file\n", input_filename);
         goto error_check_header;
     }
 
@@ -278,108 +430,52 @@ process_png_file(const char *filename, const char *out_filename)
     width = png_get_image_width(png_ptr, info_ptr);
     height = png_get_image_height(png_ptr, info_ptr);
 
+    if (labels_width) {
+        if (width != labels_width || height != labels_height) {
+            fprintf(stderr, "Inconsistent size for %s (%dx%d) of label image (expected %dx%d)\n",
+                    input_filename, width, height, labels_width, labels_height);
+            exit(1);
+        }
+    }
+
     png_read_update_info(png_ptr, info_ptr);
 
     row_stride = png_get_rowbytes(png_ptr, info_ptr);
 
-    input_rows = (png_bytep *)xmalloc(sizeof(png_bytep) * height);
-    input_data = (png_bytep)xmalloc(row_stride * height);
+    img = xalloc_image(IMAGE_FORMAT_X8, width, height);
+    rows = (png_bytep *)alloca(sizeof(png_bytep) * height);
 
-    id_rows = (png_bytep *)xmalloc(sizeof(png_bytep) * height);
-    id_data = (png_bytep)xmalloc(row_stride * height);
-
-    flipped_rows = (png_bytep *)xmalloc(sizeof(png_bytep) * height);
-    flipped_data = (png_bytep)xmalloc(row_stride * height);
-
-    for (int y = 0; y < height; y++) {
-        input_rows[y] = (png_byte *)input_data + row_stride * y;
-        id_rows[y] = (png_byte *)id_data + row_stride * y;
-        flipped_rows[y] = (png_byte *)flipped_data + row_stride * y;
-    }
+    for (int y = 0; y < height; y++)
+        rows[y] = (png_byte *)(img->data_u8 + row_stride * y);
 
     if (setjmp(png_jmpbuf(png_ptr))) {
         fprintf(stderr, "png_read_image_error\n");
         goto error_read_image;
     }
 
-    png_read_image(png_ptr, input_rows);
-    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
+    png_read_image(png_ptr, rows);
+    debug("read %s/%s (%dx%d) OK\n", dir, filename, width, height);
 
     for (int y = 0; y < height; y++) {
-        uint8_t *input_row = (uint8_t *)input_data + row_stride * y;
-        uint8_t *id_row = (uint8_t *)id_data + row_stride * y;
-        uint8_t *flipped_row = (uint8_t *)flipped_data + row_stride * y;
+        uint8_t *row = img->data_u8 + row_stride * y;
 
         for (int x = 0; x < width; x++) {
-            id_row[x] = grey_to_id_map[input_row[x]];
-            if (id_row[x] > MAX_PACKED_INDEX) {
+            row[x] = grey_to_id_map[row[x]];
+
+            if (row[x] > MAX_PACKED_INDEX) {
                 fprintf(stderr, "Failed to map a label value of 0x%x/%d in image %s\n",
-                        input_row[x], input_row[x],
-                        filename);
-                exit(1);
+                        row[x], row[x],
+                        input_filename);
+                goto error_read_image;
             }
         }
-
-        /* XXX: assuming even width so we don't have to handle an odd
-         * center pixel
-         */
-        for (int x = 0; x < width; x++) {
-            int opposite = width - 1 - x;
-
-            flipped_row[x] = left_to_right_map[id_row[opposite]];
-            flipped_row[opposite] = left_to_right_map[id_row[x]];
-        }
     }
 
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "Error writing PNG with packed IDs\n");
-        goto error_write_ids_file;
-    }
+    ret = img;
 
-    if (stat(ids_png_filename, &st) == -1) {
-        if (!write_png_file(ids_png_filename,
-                            width, height,
-                            id_rows,
-                            PNG_COLOR_TYPE_GRAY,
-                            8)) { /* bit depth */
-            goto error_write_ids_file;
-        }
-        debug("%*swrote %s\n", indent, "", ids_png_filename);
-    } else {
-        fprintf(stderr, "%*sSKIP: %s file already exists\n",
-                indent, "", ids_png_filename);
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "Error writing horizontally flipped PNG\n");
-        goto error_write_flipped_file;
-    }
-
-    if (stat(flipped_png_filename, &st) == -1) {
-        if (!write_png_file(flipped_png_filename,
-                            width, height,
-                            flipped_rows,
-                            PNG_COLOR_TYPE_GRAY,
-                            8)) { /* bit depth */
-            goto error_write_flipped_file;
-        }
-        debug("%*swrote %s\n", indent, "", flipped_png_filename);
-    } else {
-        fprintf(stderr, "%*sSKIP: %s file already exists\n",
-                indent, "", flipped_png_filename);
-    }
-
-    ret = true;
-
-error_write_ids_file:
-error_write_flipped_file:
 error_read_image:
-    free(input_rows);
-    free(id_rows);
-    free(flipped_rows);
-    free(input_data);
-    free(id_data);
-    free(flipped_data);
+    if (img && ret == NULL)
+        free_image(img);
 error_png_setjmp:
     png_destroy_info_struct(png_ptr, &info_ptr);
 error_create_info:
@@ -390,60 +486,262 @@ error_check_header:
     fclose(fp);
 
 error_open:
-error_stat_outputs:
-    free(ids_png_filename);
-    free(flipped_png_filename);
 
     return ret;
 }
 
-/* Using EXR is a nightmare. If we try and only add an 'R' channel then
- * e.g. Krita will be able to open the file and it looks reasonable,
- * but OpenCV will end up creating an image with the G and B containing
- * uninitialized garbage. If instead we create a 'Y' only image then
- * OpenCV has special handling for that case and loads it as a greyscale
- * image but Krita will bork and warn that it's not supported. We choose
- * the version that works with OpenCV...
- */
+
 static void
-write_exr(Array2D<float> &pixels, const char *filename)
+flip_frame_depth(struct image *__restrict__ depth,
+                 struct image *__restrict__ out)
 {
-    Header header(pixels.width(), pixels.height());
-    header.channels().insert ("Y", Channel(FLOAT));
+    int width = depth->width;
+    int height = depth->height;
 
-    OutputFile out_file(filename, header);
+    for (int y = 0; y < height; y++) {
+        float *depth_row = depth->data_float + y * width;
+        float *out_row = out->data_float + y * width;
 
-    FrameBuffer outFrameBuffer;
-    outFrameBuffer.insert ("Y",
-                           Slice (FLOAT,
-                                  (char *)&pixels[0][0],
-                                  sizeof(float), // x stride,
-                                  sizeof(float) * pixels.width())); // y stride
+        for (int x = 0; x < width; x++) {
+            int opposite = width - 1 - x;
 
-    out_file.setFrameBuffer(outFrameBuffer);
-    out_file.writePixels(pixels.height());
+            out_row[x] = depth_row[opposite];
+            out_row[opposite] = depth_row[x];
+        }
+    }
+}
+
+static void
+flip_frame_labels(struct image *__restrict__ labels,
+                  struct image *__restrict__ out)
+{
+    int width = labels->width;
+    int height = labels->height;
+
+    for (int y = 0; y < height; y++) {
+        uint8_t *label_row = labels->data_u8 + y * width;
+        uint8_t *out_row = out->data_u8 + y * width;
+
+        for (int x = 0; x < width; x++) {
+            int opposite = width - 1 - x;
+
+            out_row[x] = label_row[opposite];
+            out_row[opposite] = label_row[x];
+        }
+    }
 }
 
 static bool
-process_exr_file(const char *filename, const char *out_filename)
+frame_diff(struct image *a, struct image *b,
+           int *n_different_px_out,
+           int *n_body_px_out)
 {
-    int out_filename_len = strlen(out_filename);
-    char *exr_filename, *exr_flipped_filename;
+    int width = a->width;
+    int height = a->height;
+    int n_body_px = 0;
+    int n_different_px = 0;
+
+    for (int y = 0; y < height; y++) {
+        uint8_t *row = a->data_u8 + a->stride * y;
+
+        for (int x = 0; x < width; x++) {
+            if (row[x] != BACKGROUND_ID)
+                n_body_px++;
+        }
+    }
+
+    for (int y = 0; y < height; y++) {
+        uint8_t *a_row = a->data_u8 + a->stride * y;
+        uint8_t *b_row = b->data_u8 + b->stride * y;
+
+        for (int x = 0; x < width; x++) {
+            if (a_row[x] != b_row[x])
+                n_different_px++;
+        }
+    }
+
+    *n_different_px_out = n_different_px;
+    *n_body_px_out = n_body_px;
+
+    if (n_different_px <= (n_body_px / 1000))
+        return false;
+    else
+        return true;
+}
+
+static void
+frame_add_noise(const struct image *__restrict__ labels,
+                const struct image *__restrict__ depth,
+                struct image *__restrict__ noisy_labels,
+                struct image *__restrict__ noisy_depth)
+{
+    int width = labels->width;
+    int height = labels->height;
+    const float *in_depth_px = depth->data_float;
+    const uint8_t *in_labels_px = labels->data_u8;
+    float *out_depth_px = noisy_depth->data_float;
+    uint8_t *out_labels_px = noisy_labels->data_u8;
+
+    rand_generator.seed(234987);
+
+    /* For picking one of 8 random neighbours for fuzzing the silhouettes */
+    std::uniform_int_distribution<int> uniform_distribution(0, 7);
+
+    /* We use a Gaussian distribution of error offsets for the depth values.
+     *
+     * We want the variance to mostly be ~ +- 2mm.
+     *
+     * According to Wikipedia the full width at tenth of maximum of a Gaussian
+     * curve = approximately 4.29193c (where c is the standard deviation which
+     * we need to pass to construct this distribution)
+     */
+    std::normal_distribution<float> gaus_distribution(0, 20.0f / 4.29193f);
+
+    struct rel_pos {
+        int x, y;
+    } neighbour_position[] = {
+        - 1, - 1,
+          0, - 1,
+          1, - 1,
+        - 1,   0,
+          1,   0,
+        - 1,   1,
+          0,   1,
+          1,   1,
+    };
+
+#define in_depth_at(x, y) *(in_depth_px + width * y + x)
+#define in_label_at(x, y) *(in_labels_px + width * y + x)
+#define out_depth_at(x, y) *(out_depth_px + width * y + x)
+#define out_label_at(x, y) *(out_labels_px + width * y + x)
+
+    memcpy(noisy_labels->data_u8, labels->data_u8, labels->stride);
+    memcpy(noisy_depth->data_float, depth->data_float, depth->stride);
+
+    for (int y = 1; y < height - 2; y++) {
+        for (int x = 1; x < width - 2; x++) {
+#if 1
+            if (in_label_at(x, y) != BACKGROUND_ID) {
+                bool edge = false;
+                uint8_t neighbour_label[8] = {
+                    in_label_at(x - 1, y - 1),
+                    in_label_at(x,     y - 1),
+                    in_label_at(x + 1, y - 1),
+                    in_label_at(x - 1, y),
+                    in_label_at(x + 1, y),
+                    in_label_at(x - 1, y + 1),
+                    in_label_at(x,     y + 1),
+                    in_label_at(x + 1, y + 1),
+                };
+
+                for (int i = 0; i < 8; i++) {
+                    if (neighbour_label[i] != BACKGROUND_ID) {
+                        edge = true;
+                        break;
+                    }
+                }
+
+                if (edge) {
+                    int neighbour = uniform_distribution(rand_generator);
+                    out_label_at(x, y) = neighbour_label[neighbour];
+
+                    struct rel_pos *rel_pos = &neighbour_position[neighbour];
+                    out_depth_at(x, y) = in_depth_at(x + rel_pos->x, y + rel_pos->y);
+                } else {
+                    out_label_at(x, y) = in_label_at(x, y);
+                    out_depth_at(x, y) = in_depth_at(x, y);
+                }
+            } else {
+                out_label_at(x, y) = in_label_at(x, y);
+                out_depth_at(x, y) = in_depth_at(x, y);
+            }
+#endif
+        }
+    }
+
+    memcpy(noisy_labels->data_u8 + (height - 1) * width,
+           labels->data_u8 + (height - 1) * width,
+           labels->stride);
+    memcpy(noisy_depth->data_float + (height - 1) * width,
+           depth->data_float + (height - 1) * width,
+           depth->stride);
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            if (in_label_at(x, y) != BACKGROUND_ID) {
+                float delta_mm = gaus_distribution(rand_generator);
+                out_depth_at(x, y) += (delta_mm / 1000.0f);
+            } else {
+                out_depth_at(x, y) = 20;
+            }
+        }
+    }
+#undef in_depth_at
+#undef in_label_at
+#undef out_depth_at
+#undef out_label_at
+}
+
+
+static void
+save_frame_depth(const char *dir, const char *filename,
+                 struct image *depth)
+{
+    char output_filename[1024];
     struct stat st;
 
-    if (asprintf(&exr_filename, "%.*s.exr",
-                 out_filename_len - 4, out_filename) == -1)
-        exit(1);
-    if (asprintf(&exr_flipped_filename, "%.*s-flipped.exr",
-                 out_filename_len - 4, out_filename) == -1)
-        exit(1);
+    xsnprintf(output_filename, "%s/depth/%s/%s", top_out_dir, dir, filename);
 
-    if (stat(exr_filename, &st) != -1 && stat(exr_flipped_filename, &st) != -1) {
-        free(exr_filename);
-        free(exr_flipped_filename);
-        debug("%*sSkipping EXR file as outputs already exist\n", indent, "");
-        return true;
+    if (stat(output_filename, &st) != -1) {
+        fprintf(stderr, "Skipping EXR file %s as output already exist\n", output_filename);
+        return;
     }
+
+    write_exr(output_filename, depth);
+    debug("wrote %s\n", output_filename);
+}
+
+static bool
+save_frame_labels(const char *dir, const char *filename,
+                  struct image *labels)
+{
+    int width = labels->width;
+    int height = labels->height;
+    int row_stride = labels->stride;
+    char output_filename[1024];
+    png_bytep rows[height];
+
+    xsnprintf(output_filename, "%s/labels/%s/%s", top_out_dir, dir, filename);
+
+    for (int y = 0; y < height; y++)
+        rows[y] = (png_byte *)(labels->data_u8 + row_stride * y);
+
+    struct stat st;
+
+    if (stat(output_filename, &st) == -1) {
+        if (!write_png_file(output_filename,
+                            width, height,
+                            rows,
+                            PNG_COLOR_TYPE_PALETTE,
+                            8)) { /* bit depth */
+            return false;
+        }
+        debug("wrote %s\n", output_filename);
+    } else {
+        fprintf(stderr, "SKIP: %s file already exists\n",
+                output_filename);
+        return false;
+    }
+
+    return true;
+}
+
+static struct image *
+load_frame_depth(const char *dir, const char *filename)
+{
+    char input_filename[1024];
+
+    xsnprintf(input_filename, "%s/depth/%s/%s", top_src_dir, dir, filename);
 
     /* Just for posterity and to vent frustration within comments, the
      * RgbaInputFile and Rgba struct that the openexr documentation recommends
@@ -453,30 +751,27 @@ process_exr_file(const char *filename, const char *out_filename)
      * We noticed this after seeing lots of 'inf' float values due to out of
      * range floats.
      */
-    InputFile in_file(filename);
-    Array2D<float> pixels;
-
-    Array2D<float> grey;
-    Array2D<float> grey_flipped;
+    InputFile in_file(input_filename);
 
     Box2i dw = in_file.header().dataWindow();
 
     int width = dw.max.x - dw.min.x + 1;
     int height = dw.max.y - dw.min.y + 1;
 
-    pixels.resizeErase(height, width);
-    grey.resizeErase(height, width);
-    grey_flipped.resizeErase(height, width);
+    struct image *depth = xalloc_image(IMAGE_FORMAT_XFLOAT, width, height);
 
     /* We assume the green and blue channels are redundant and arbitrarily
      * just pick the red channel to read...
+     *
+     * We're also assuming the channels aren't interleaved (does EXA support
+     * that?)
      */
     FrameBuffer framebuffer;
-    framebuffer.insert ("R",
-                        Slice (FLOAT,
-                               (char *)&pixels[0][0],
-                               sizeof(pixels[0][0]), // x stride,
-                               sizeof(float) * pixels.width())); // y stride
+    framebuffer.insert("R",
+                       Slice(FLOAT,
+                             (char *)depth->data_float,
+                             sizeof(float), // x stride,
+                             sizeof(float) * width)); // y stride
 
     in_file.setFrameBuffer(framebuffer);
 
@@ -492,34 +787,11 @@ process_exr_file(const char *filename, const char *out_filename)
 
     in_file.readPixels(dw.min.y, dw.max.y);
 
-    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
+    debug("read %s/%s (%dx%d) OK\n", dir, filename, width, height);
 
-    for (int y = 0; y < height; y++) {
-        float *red_row = &pixels[y][0];
-        float *grey_row = &grey[y][0];
-        float *grey_flipped_row = &grey_flipped[y][0];
-
-        for (int x = 0; x < width; x++)
-            grey_row[x] = red_row[x];
-
-        for (int x = 0; x < width; x++) {
-            int opposite = width - 1 - x;
-
-            grey_flipped_row[x] = red_row[opposite];
-            grey_flipped_row[opposite] = red_row[x];
-        }
-    }
-
-    write_exr(grey, exr_filename);
-    debug("%*swrote %s\n", indent, "", exr_filename);
-    free(exr_filename);
-
-    write_exr(grey_flipped, exr_flipped_filename);
-    debug("%*swrote %s\n", indent, "", exr_flipped_filename);
-    free(exr_flipped_filename);
-
-    return true;
+    return depth;
 }
+
 
 static void
 ensure_directory(const char *path)
@@ -550,58 +822,60 @@ ensure_directory(const char *path)
 }
 
 static void
-directory_recurse(const char *src_label_dir_path,
-                  const char *src_depth_dir_path,
-                  const char *dest_label_dir_path,
-                  const char *dest_depth_dir_path)
+directory_recurse(const char *rel_path)
 {
+    char label_src_path[1024];
+    //char depth_src_path[1024];
+    char label_dst_path[1024];
+    char depth_dst_path[1024];
+
     struct stat st;
     DIR *label_dir;
     struct dirent *label_entry;
     char *ext;
 
-    ensure_directory(dest_label_dir_path);
-    ensure_directory(dest_depth_dir_path);
+    struct work *work = NULL;
 
-    label_dir = opendir(src_label_dir_path);
+    xsnprintf(label_src_path, "%s/labels/%s", top_src_dir, rel_path);
+    //xsnprintf(depth_src_path, "%s/depth/%s", top_src_dir, rel_path);
+    xsnprintf(label_dst_path, "%s/labels/%s", top_out_dir, rel_path);
+    xsnprintf(depth_dst_path, "%s/depth/%s", top_out_dir, rel_path);
+
+    ensure_directory(label_dst_path);
+    ensure_directory(depth_dst_path);
+
+    label_dir = opendir(label_src_path);
 
     while ((label_entry = readdir(label_dir)) != NULL) {
-        char *next_src_label_path, *next_src_depth_path;
-        char *next_dest_label_path, *next_dest_depth_path;
+        char next_rel_path[1024];
+        char next_src_label_path[1024];
 
-        if (strcmp(label_entry->d_name, ".") == 0 || strcmp(label_entry->d_name, "..") == 0)
+        if (strcmp(label_entry->d_name, ".") == 0 ||
+            strcmp(label_entry->d_name, "..") == 0)
             continue;
 
-        if (asprintf(&next_src_label_path, "%s/%s", src_label_dir_path, label_entry->d_name) == -1)
-            exit(1);
-        if (asprintf(&next_src_depth_path, "%s/%s", src_depth_dir_path, label_entry->d_name) == -1)
-            exit(1);
-        if (asprintf(&next_dest_label_path, "%s/%s", dest_label_dir_path, label_entry->d_name) == -1)
-            exit(1);
-        if (asprintf(&next_dest_depth_path, "%s/%s", dest_depth_dir_path, label_entry->d_name) == -1)
-            exit(1);
+        xsnprintf(next_rel_path, "%s/%s", rel_path, label_entry->d_name);
+        xsnprintf(next_src_label_path, "%s/labels/%s", top_src_dir, next_rel_path);
 
         stat(next_src_label_path, &st);
         if (S_ISDIR(st.st_mode)) {
-            debug("%*srecursing into %s\n", indent, "", next_src_label_path);
+            debug("%*srecursing into %s\n", indent, "", next_rel_path);
             indent += 2;
-            directory_recurse(next_src_label_path, next_src_depth_path,
-                              next_dest_label_path, next_dest_depth_path);
+            directory_recurse(next_rel_path);
             indent -= 2;
-
-            free(next_src_label_path);
-            free(next_dest_label_path);
-            free(next_src_depth_path);
-            free(next_dest_depth_path);
         } else if ((ext = strstr(label_entry->d_name, ".png")) && ext[4] == '\0') {
-            struct work work;
 
-            work.src_label_path = next_src_label_path;
-            work.dst_label_path = next_dest_label_path;
-            work.src_depth_path = next_src_depth_path;
-            work.dst_depth_path = next_dest_depth_path;
+            if (!work) {
+                struct work empty;
 
-            work_queue.push(work);
+                work_queue.push(empty);
+                work = &work_queue.back();
+
+                work->dir = strdup(rel_path);
+                work->files = std::vector<char *>();
+            }
+
+            work->files.push_back(strdup(label_entry->d_name));
         }
     }
 
@@ -611,10 +885,18 @@ directory_recurse(const char *src_label_dir_path,
 static void *
 worker_thread_cb(void *data)
 {
+    struct worker_state *state = (struct worker_state *)data;
+    struct image *noisy_labels, *noisy_depth;
+    struct image *flipped_labels, *flipped_depth;
+
     debug("Running worker thread\n");
 
     for (;;) {
         struct work work;
+
+        char label_dir_path[1024];
+
+        struct image *prev_frame_labels = NULL;
 
         pthread_mutex_lock(&work_queue_lock);
         if (!work_queue.empty()) {
@@ -627,19 +909,87 @@ worker_thread_cb(void *data)
         }
         pthread_mutex_unlock(&work_queue_lock);
 
-        debug("Thread %d: processing %s\n", state->idx, work.src_label_path);
-        process_png_file(work.src_label_path, work.dst_label_path);
+        xsnprintf(label_dir_path, "%s/labels/%s", top_src_dir, work.dir);
 
-        strcpy(work.src_depth_path + strlen(work.src_depth_path) - 4, ".exr");
-        strcpy(work.dst_depth_path + strlen(work.dst_depth_path) - 4, ".exr");
+        for (unsigned i = 0; i < work.files.size(); i++) {
+            debug("Thread %d: processing %s/%s\n", state->idx, work.dir, work.files[i]);
 
-        debug("Thread %d: processing %s\n", state->idx, work.src_depth_path);
-        process_exr_file(work.src_depth_path, work.dst_depth_path);
+            struct image *labels = load_frame_labels(work.dir, work.files[i]);
 
-        free(work.src_label_path);
-        free(work.src_depth_path);
-        free(work.dst_label_path);
-        free(work.dst_depth_path);
+            int n_different_px = 0, n_body_px = 0;
+            if (prev_frame_labels) {
+                bool differ = frame_diff(labels,
+                                         prev_frame_labels,
+                                         &n_different_px,
+                                         &n_body_px);
+
+                if (n_body_px == 0) {
+                    fprintf(stderr, "Skipping spurious frame with not body pixels!\n");
+                    free_image(labels);
+                    continue;
+                }
+
+                if (!differ) {
+                    fprintf(stderr, "SKIPPING: %s/%s - too similar to previous frame (only %d out of %d body pixels differ)\n",
+                            work.dir, work.files[i],
+                            n_different_px,
+                            n_body_px);
+                    free_image(labels);
+                    continue;
+                }
+            }
+
+            if (prev_frame_labels)
+                free_image(prev_frame_labels);
+            prev_frame_labels = labels;
+
+            char filename[128];
+
+            xsnprintf(filename, "%.*s.exr",
+                      (int)strlen(work.files[i]) - 4,
+                      work.files[i]);
+
+            struct image *depth = load_frame_depth(work.dir, filename);
+
+            if (!noisy_labels) {
+                int width = labels->width;
+                int height = labels->height;
+
+                noisy_labels = xalloc_image(IMAGE_FORMAT_X8, width, height);
+                noisy_depth = xalloc_image(IMAGE_FORMAT_XFLOAT, width, height);
+
+                flipped_labels = xalloc_image(IMAGE_FORMAT_X8, width, height);
+                flipped_depth = xalloc_image(IMAGE_FORMAT_XFLOAT, width, height);
+            }
+
+            frame_add_noise(labels, depth, noisy_labels, noisy_depth);
+
+            save_frame_labels(work.dir, work.files[i], noisy_labels);
+            save_frame_depth(work.dir, filename, noisy_depth);
+
+            flip_frame_labels(labels, flipped_labels);
+            flip_frame_depth(depth, flipped_depth);
+            frame_add_noise(flipped_labels, flipped_depth, noisy_labels, noisy_depth);
+
+            xsnprintf(filename, "%.*s-flipped.png",
+                      (int)strlen(work.files[i]) - 4,
+                      work.files[i]);
+            save_frame_labels(work.dir, filename, noisy_labels);
+
+            xsnprintf(filename, "%.*s-flipped.exr",
+                      (int)strlen(work.files[i]) - 4,
+                      work.files[i]);
+            save_frame_depth(work.dir, filename, noisy_depth);
+
+            // Note: we don't free the labels here because they are preserved
+            // for comparing with the next frame
+            free(depth);
+        }
+
+        if (prev_frame_labels) {
+            free_image(prev_frame_labels);
+            prev_frame_labels = NULL;
+        }
     }
 
     return NULL;
@@ -687,15 +1037,50 @@ cpu_count(void)
     return n_cpus;
 }
 
+static void
+usage(void)
+{
+    printf("Usage image-pre-processor [options] <top_src> <top_dest>\n"
+           "\n"
+           "    --half              Write full-float channel depth images\n"
+           "                        (otherwise writes half-float)\n"
+           "\n"
+           "    -h,--help           Display this help\n\n"
+           "\n");
+    exit(1);
+}
+
+
 int
 main(int argc, char **argv)
 {
-    char *label_dest, *depth_dest;
+    int opt;
 
-    if (argc != 4) {
-        fprintf(stderr, "Usage: program_name <top_label_dir> <top_depth_dir> <dest>\n");
-        exit(1);
+    /* N.B. The initial '+' means that getopt will stop looking for options
+     * after the first non-option argument...
+     */
+    const char *short_options="+hf";
+    const struct option long_options[] = {
+        {"help",            no_argument,        0, 'h'},
+        {"full",            no_argument,        0, 'f'},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
+           != -1)
+    {
+        switch (opt) {
+            case 'h':
+                usage();
+                return 0;
+            case 'f':
+                write_half_float = false;
+                break;
+        }
     }
+
+    if (optind != argc - 2)
+        usage();
 
     grey_to_id_map[0x07] = 0; // head left
     grey_to_id_map[0x0f] = 1; // head right
@@ -731,7 +1116,8 @@ main(int argc, char **argv)
     grey_to_id_map[0xe9] = 31; // left waist
     grey_to_id_map[0xf0] = 32; // right waist
 
-    grey_to_id_map[0x40] = 33; // background
+static_assert(BACKGROUND_ID == 33, "");
+    grey_to_id_map[0x40] = BACKGROUND_ID;
 
     // A few paranoid checks...
     static_assert(MAX_PACKED_INDEX == 33, "Only expecting 33 labels");
@@ -766,33 +1152,33 @@ main(int argc, char **argv)
 
 #undef flip
 
-    if (asprintf(&label_dest, "%s/labels", argv[3]) == -1)
-        exit(1);
-    if (asprintf(&depth_dest, "%s/depth", argv[3]) == -1)
-        exit(1);
+    top_src_dir = argv[optind];
+    top_out_dir = argv[optind + 1];
 
     printf("Queuing frames to process...\n");
 
     uint64_t start = get_time();
-    directory_recurse(argv[1], argv[2], label_dest, depth_dest);
+    directory_recurse("" /* initially empty relative path */);
     uint64_t end = get_time();
 
     uint64_t duration_ns = end - start;
-    printf("%d frames queued to process, in %.3f%s\n",
+    printf("%d directories queued to process, in %.3f%s\n",
            (int)work_queue.size(),
            get_duration_ns_print_scale(duration_ns),
            get_duration_ns_print_scale_suffix(duration_ns));
 
     int n_cpus = cpu_count();
-    //n_cpus = 1;
+    int n_threads = n_cpus * 32;
 
-    printf("Spawning %d worker threads\n", n_cpus);
+    //n_threads = 1;
 
-    workers.resize(n_cpus, worker_state());
+    printf("Spawning %d worker threads\n", n_threads);
+
+    workers.resize(n_threads, worker_state());
 
     start = get_time();
 
-    for (int i = 0; i < n_cpus; i++) {
+    for (int i = 0; i < n_threads; i++) {
         workers[i].idx = i;
         pthread_create(&workers[i].thread,
                        NULL, //sttributes
@@ -800,7 +1186,7 @@ main(int argc, char **argv)
                        &workers[i]); //data
     }
 
-    for (int i = 0; i < n_cpus; i++) {
+    for (int i = 0; i < n_threads; i++) {
         void *ret;
 
         pthread_join(workers[i].thread, &ret);
