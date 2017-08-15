@@ -6,22 +6,12 @@
 #include <sys/types.h>
 #include <math.h>
 
-#define OUT_VERSION 1
+#define OUT_VERSION 2
 
-typedef struct {
-  int32_t x;
-  int32_t y;
-} Int2D;
+#define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
-typedef struct {
-  float x;
-  float y;
-} Float2D;
-
-typedef struct {
-  Float2D u;
-  Float2D v;
-} UVPair;
+typedef vector(int32_t, 2) Int2D;
+typedef vector(float, 4) UVPair;
 
 typedef struct {
   UVPair uv;              // U and V parameters
@@ -38,21 +28,40 @@ typedef struct __attribute__((__packed__)) {
 
 inline float
 sample_uv(float* depth_image, uint32_t width, uint32_t height,
-          Int2D* pixel, float depth, UVPair* uv)
+          Int2D pixel, float depth, UVPair uv)
 {
-  Int2D u = { (int32_t)(pixel->x + uv->u.x / depth),
-              (int32_t)(pixel->y + uv->u.y / depth) };
-  Int2D v = { (int32_t)(pixel->x + uv->v.x / depth),
-              (int32_t)(pixel->y + uv->v.y / depth) };
+#if 0
+  // This code path is slower. gcc is cleverer than me, leaving this here as
+  // a reminder.
+  vector(float, 4) uv_pixel = { (float)pixel[0], (float)pixel[1],
+                                (float)pixel[0], (float)pixel[1] };
+  uv_pixel += uv / depth;
 
-  float upixel = (u.x >= 0 && u.x < (int32_t)width &&
-                  u.y >= 0 && u.y < (int32_t)height) ?
-    depth_image[((u.y * width) + u.x)] : INFINITY;
-  float vpixel = (v.x >= 0 && v.x < (int32_t)width &&
-                  v.y >= 0 && v.y < (int32_t)height) ?
-    depth_image[((v.y * width) + v.x)] : INFINITY;
+  vector(float, 4) extents = { (float)width, (float)height,
+                               (float)width, (float)height };
+  vector(int, 4) mask = (uv_pixel >= 0.f && uv_pixel < extents);
+
+  float upixel = (mask[0] && mask[1]) ?
+    depth_image[(((uint32_t)uv_pixel[1] * width) + (uint32_t)uv_pixel[0])] : INFINITY;
+  float vpixel = (mask[2] && mask[3]) ?
+    depth_image[(((uint32_t)uv_pixel[3] * width) + (uint32_t)uv_pixel[2])] : INFINITY;
 
   return upixel - vpixel;
+#else
+  Int2D u = { (int32_t)(pixel[0] + uv[0] / depth),
+              (int32_t)(pixel[1] + uv[1] / depth) };
+  Int2D v = { (int32_t)(pixel[0] + uv[2] / depth),
+              (int32_t)(pixel[1] + uv[3] / depth) };
+
+  float upixel = (u[0] >= 0 && u[0] < (int32_t)width &&
+                  u[1] >= 0 && u[1] < (int32_t)height) ?
+    depth_image[((u[1] * width) + u[0])] : INFINITY;
+  float vpixel = (v[0] >= 0 && v[0] < (int32_t)width &&
+                  v[1] >= 0 && v[1] < (int32_t)height) ?
+    depth_image[((v[1] * width) + v[0])] : INFINITY;
+
+  return upixel - vpixel;
+#endif
 }
 
 #endif /* __UTILS__ */

@@ -10,6 +10,13 @@ xmalloc(size_t size)
   return_if_valid(mem);
 }
 
+void*
+xaligned_alloc(size_t alignment, size_t size)
+{
+  void* mem = aligned_alloc(alignment, size);
+  return_if_valid(mem);
+}
+
 void
 xfree(void *ptr)
 {

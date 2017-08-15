@@ -4,10 +4,10 @@ CFLAGS ?= -O0 -g -Wall
 LDFLAGS ?= 
 CXX ?= g++
 
-train: train.cc xalloc.cc llist.cc
+train: train.cc xalloc.cc llist.cc utils.h
 	$(CXX) -o $(@) $(^) $(CFLAGS) -std=c++11 -lrt $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
 
-infer: infer.cc xalloc.cc
+infer: infer.cc xalloc.cc utils.h
 	$(CXX) -o $(@) $(^) $(CFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
 
 clean:

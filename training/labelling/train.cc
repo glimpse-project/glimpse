@@ -382,8 +382,8 @@ create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
       std::uniform_int_distribution<int> rand_y(0, ctx->height - 1);
       for (uint32_t i = 0; i < total_pixels; i++)
         {
-          data->pixels[i].x = rand_x(rng);
-          data->pixels[i].y = rand_y(rng);
+          data->pixels[i][0] = rand_x(rng);
+          data->pixels[i][1] = rand_y(rng);
         }
     }
 
@@ -407,16 +407,16 @@ normalize_histogram(uint32_t* histogram, uint8_t n_labels, float* normalized)
     {
       if (histogram[i] > 0)
         {
-          sums.x += histogram[i];
-          ++sums.y;
+          sums[0] += histogram[i];
+          ++sums[1];
         }
     }
 
-  if (sums.x > 0)
+  if (sums[0] > 0)
     {
       for (int i = 0; i < n_labels; i++)
         {
-          normalized[i] = histogram[i] / (float)sums.x;
+          normalized[i] = histogram[i] / (float)sums[0];
         }
     }
   else
@@ -469,8 +469,8 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
 
       for (uint32_t p = data->pixel_base[i]; p < data->pixel_base[i + 1]; p++)
         {
-          Int2D* pixel = &data->pixels[p];
-          uint32_t pixel_idx = (pixel->y * ctx->width) + pixel->x;
+          Int2D pixel = data->pixels[p];
+          uint32_t pixel_idx = (pixel[1] * ctx->width) + pixel[0];
           uint8_t label = label_image[pixel_idx];
           float depth = depth_image[pixel_idx];
 
@@ -486,7 +486,7 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
 
           for (uint32_t c = c_start, lr_histogram_idx = 0; c < c_end; c++)
             {
-              UVPair* uv = &ctx->uvs[c];
+              UVPair uv = ctx->uvs[c];
               float value = sample_uv(depth_image,
                                       ctx->width, ctx->height,
                                       pixel, depth, uv);
@@ -554,7 +554,7 @@ thread_body(void* userdata)
       *data->best_gain = 0.f;
 
       // If there's only 1 label, skip all this, gain is zero
-      if (root_n_pixels.y > 1)
+      if (root_n_pixels[1] > 1)
         {
           // Calculate the shannon entropy for the normalised label histogram
           float entropy = calculate_shannon_entropy(root_nhistogram,
@@ -572,7 +572,7 @@ thread_body(void* userdata)
                   Int2D l_n_pixels =
                     normalize_histogram(&lr_histograms[lr_histo_base],
                                         data->ctx->n_labels, nhistogram);
-                  if (l_n_pixels.x == 0 || l_n_pixels.x == root_n_pixels.x)
+                  if (l_n_pixels[0] == 0 || l_n_pixels[0] == root_n_pixels[0])
                     {
                       continue;
                     }
@@ -586,9 +586,9 @@ thread_body(void* userdata)
                   r_entropy = calculate_shannon_entropy(nhistogram,
                                                         data->ctx->n_labels);
 
-                  gain = calculate_gain(entropy, root_n_pixels.x,
-                                        l_entropy, l_n_pixels.x,
-                                        r_entropy, r_n_pixels.x);
+                  gain = calculate_gain(entropy, root_n_pixels[0],
+                                        l_entropy, l_n_pixels[0],
+                                        r_entropy, r_n_pixels[0]);
 
                   if (gain > *data->best_gain)
                     {
@@ -617,7 +617,7 @@ thread_body(void* userdata)
 }
 
 static void
-collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair* uv, float t,
+collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
                uint32_t** l_pixel_base, Int2D** l_pixels,
                uint32_t** r_pixel_base, Int2D** r_pixels)
 {
@@ -635,19 +635,19 @@ collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair* uv, float t,
       float* depth_image = &ctx->depth_images[image_idx];
       for (uint32_t p = data->pixel_base[i]; p < data->pixel_base[i + 1]; p++)
         {
-          Int2D* pixel = &data->pixels[p];
-          float depth = depth_image[(pixel->y * ctx->width) + pixel->x];
+          Int2D pixel = data->pixels[p];
+          float depth = depth_image[(pixel[1] * ctx->width) + pixel[0]];
           float value = sample_uv(depth_image, ctx->width, ctx->height,
                                   pixel, depth, uv);
 
           if (value < t)
             {
-              (*l_pixels)[(*l_pixel_base)[i + 1]] = *pixel;
+              (*l_pixels)[(*l_pixel_base)[i + 1]] = pixel;
               ++(*l_pixel_base)[i + 1];
             }
           else
             {
-              (*r_pixels)[(*r_pixel_base)[i + 1]] = *pixel;
+              (*r_pixels)[(*r_pixel_base)[i + 1]] = pixel;
               ++(*r_pixel_base)[i + 1];
             }
         }
@@ -915,10 +915,10 @@ main(int argc, char **argv)
                                                  ctx.uv_range / 2.f);
   for (uint32_t i = 0; i < ctx.n_uv; i++)
     {
-      ctx.uvs[i].u.x = rand_uv(rng);
-      ctx.uvs[i].u.y = rand_uv(rng);
-      ctx.uvs[i].v.x = rand_uv(rng);
-      ctx.uvs[i].v.y = rand_uv(rng);
+      ctx.uvs[i][0] = rand_uv(rng);
+      ctx.uvs[i][1] = rand_uv(rng);
+      ctx.uvs[i][2] = rand_uv(rng);
+      ctx.uvs[i][3] = rand_uv(rng);
     }
   ctx.ts = (float*)xmalloc(ctx.n_t * sizeof(float));
   for (uint32_t i = 0; i < ctx.n_t; i++)
@@ -1030,8 +1030,8 @@ main(int argc, char **argv)
                      "    V: (%f, %f)\n"
                      "    T: %f\n",
                      node_data->id, best_gain,
-                     node->uv.u.x, node->uv.u.y,
-                     node->uv.v.x, node->uv.v.y,
+                     node->uv[0], node->uv[1],
+                     node->uv[2], node->uv[3],
                      node->t);
             }
 
@@ -1040,7 +1040,7 @@ main(int argc, char **argv)
           Int2D* l_pixels;
           Int2D* r_pixels;
 
-          collect_pixels(&ctx, node_data, &node->uv, node->t,
+          collect_pixels(&ctx, node_data, node->uv, node->t,
                          &l_pixel_base, &l_pixels,
                          &r_pixel_base, &r_pixels);
 

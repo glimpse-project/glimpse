@@ -218,8 +218,8 @@ main(int argc, char **argv)
               uint32_t id = 0;
               while (node->label_pr_idx == 0)
                 {
-                  float value = sample_uv(depth_image, width, height, &pixel,
-                                          depth_value, &node->uv);
+                  float value = sample_uv(depth_image, width, height, pixel,
+                                          depth_value, node->uv);
                   id = (value < node->t) ? 2 * id + 1 : 2 * id + 2;
                   node = &tree[id];
                 }
