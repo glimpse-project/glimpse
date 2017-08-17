@@ -1135,8 +1135,8 @@ main(int argc, char **argv)
          argv[5]);
 
   // Write a header (3 bytes 'RDT', 1 byte version, 1 byte depth, 1 byte n_labels)
-  RDLHeader header = { { 'R', 'D', 'T' }, OUT_VERSION, ctx.max_depth, ctx.n_labels };
-  if (fwrite(&header, sizeof(RDLHeader), 1, output) != 1)
+  RDTHeader header = { { 'R', 'D', 'T' }, OUT_VERSION, ctx.max_depth, ctx.n_labels };
+  if (fwrite(&header, sizeof(RDTHeader), 1, output) != 1)
     {
       fprintf(stderr, "Error writing header\n");
       return 1;

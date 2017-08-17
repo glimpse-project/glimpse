@@ -24,7 +24,7 @@ typedef struct __attribute__((__packed__)) {
   uint8_t version;
   uint8_t depth;
   uint8_t n_labels;
-} RDLHeader;
+} RDTHeader;
 
 inline float
 sample_uv(float* depth_image, uint32_t width, uint32_t height,
