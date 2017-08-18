@@ -31,7 +31,6 @@ typedef struct {
   int32_t  width;         // Width of training images
   int32_t  height;        // Height of training images
   float    fov;           // Camera field of view
-  float    ppm;           // Pixels per meter
   uint8_t  n_labels;      // Number of labels in label images
 
   uint32_t n_images;      // Number of training images
@@ -409,9 +408,9 @@ static void
 print_usage(FILE* stream)
 {
   fprintf(stream,
-"Usage: train <fov> <n_labels> <label_dir> <depth_dir> <out_file> [OPTIONS]\n"
-"Train a randomised decision tree to infer n_labels from depth images with\n"
-"a given camera FOV. Default values assume depth data to be in meters.\n"
+"Usage: train_rdt <fov> <n labels> <label dir> <depth dir> <out file> [OPTIONS]\n"
+"Train a randomised decision tree to infer n_labels from depth and label images\n"
+"with a given camera FOV. Default values assume depth data to be in meters.\n"
 "\n"
 "  -l, --limit=NUMBER        Limit training data to this many images\n"
 "  -s, --shuffle             Shuffle order of training images\n"
@@ -636,8 +635,8 @@ main(int argc, char **argv)
                     &ctx.depth_images, &ctx.label_images);
 
   // Work out pixels per meter and adjust uv range accordingly
-  ctx.ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
-  ctx.uv_range *= ctx.ppm;
+  float ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
+  ctx.uv_range *= ppm;
 
   // Initialise root node training data and add it to the queue
   printf("Preparing training metadata...\n");
