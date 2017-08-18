@@ -3,10 +3,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <assert.h>
-#include <dirent.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <libgen.h>
@@ -17,25 +13,13 @@
 #include <pthread.h>
 #include <time.h>
 
-#include <png.h>
-
-#include <ImfInputFile.h>
-#include <ImfChannelList.h>
-#include <ImathBox.h>
-
 #include "xalloc.h"
 #include "llist.h"
 #include "utils.h"
-
-using namespace OPENEXR_IMF_NAMESPACE;
-using namespace IMATH_NAMESPACE;
+#include "train_utils.h"
 
 static bool verbose = false;
 static uint32_t seed = 0;
-
-typedef bool (*TrainDataCallback)(const char* label_path,
-                                  const char* depth_path,
-                                  void*       userdata);
 
 typedef struct {
   int32_t hours;
@@ -64,13 +48,6 @@ typedef struct {
 } TrainContext;
 
 typedef struct {
-  uint32_t n_images;      // Number of training images
-  uint32_t limit;         // Limit to number of training images
-  bool     shuffle;       // Whether to shuffle images
-  LList*   image_paths;   // List of label and depth file paths
-} TrainData;
-
-typedef struct {
   uint32_t  id;              // Unique id to place the node a tree.
   uint32_t  depth;           // Tree depth at which this node sits.
   uint32_t* pixel_base;      // Index at which a particular image's pixels starts
@@ -89,265 +66,6 @@ typedef struct {
   pthread_barrier_t* ready_barrier;      // Barrier to wait on to start work
   pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
 } TrainThreadData;
-
-static bool
-gather_train_data(const char* label_dir_path,
-                  const char* depth_dir_path,
-                  TrainDataCallback train_cb,
-                  void* userdata)
-{
-  struct stat st;
-  DIR *label_dir;
-  struct dirent *label_entry;
-  char *ext;
-  bool cont;
-
-  cont = true;
-  label_dir = opendir(label_dir_path);
-
-  while (cont && (label_entry = readdir(label_dir)) != NULL)
-    {
-      char *next_label_path, *next_depth_path;
-
-      if (strcmp(label_entry->d_name, ".") == 0 ||
-          strcmp(label_entry->d_name, "..") == 0)
-          continue;
-
-      if (asprintf(&next_label_path, "%s/%s",
-                   label_dir_path, label_entry->d_name) == -1 ||
-          asprintf(&next_depth_path, "%s/%s",
-                   depth_dir_path, label_entry->d_name) == -1)
-        {
-          fprintf(stderr, "Error creating file paths\n");
-          exit(1);
-        }
-
-      stat(next_label_path, &st);
-      if (S_ISDIR(st.st_mode))
-        {
-          cont = gather_train_data(next_label_path, next_depth_path, train_cb,
-                                   userdata);
-        }
-      else if ((ext = strstr(label_entry->d_name, ".png")) && ext[4] == '\0')
-        {
-          strcpy(next_depth_path + strlen(next_depth_path) - 4, ".exr");
-          cont = train_cb(next_label_path, next_depth_path, userdata);
-        }
-
-      free(next_label_path);
-      free(next_depth_path);
-    }
-
-  closedir(label_dir);
-
-  return cont;
-}
-
-static bool
-gather_cb(const char* label_path, const char* depth_path, void* userdata)
-{
-  TrainData* data = (TrainData*)userdata;
-  char** paths = (char**)xmalloc(2 * sizeof(char*));
-  paths[0] = strdup(label_path);
-  paths[1] = strdup(depth_path);
-  data->image_paths = llist_insert_after(data->image_paths, llist_new(paths));
-  ++data->n_images;
-  return data->shuffle || (data->n_images < data->limit);
-}
-
-static bool
-free_train_data_cb(LList* node, uint32_t index, void* userdata)
-{
-  char** paths = (char**)node->data;
-  xfree(paths[0]);
-  xfree(paths[1]);
-  xfree(paths);
-  return true;
-}
-
-static bool
-train_data_cb(LList* node, uint32_t index, void* userdata)
-{
-  FILE* fp;
-  unsigned char header[8]; // 8 is the maximum size that can be checked
-
-  png_structp png_ptr;
-  png_infop info_ptr;
-
-  int width, height, row_stride;
-  size_t n_pixels;
-
-  png_bytep *input_rows;
-  png_bytep input_data;
-
-  char** paths = (char**)node->data;
-  char* label_path = paths[0];
-  char* depth_path = paths[1];
-  TrainContext *ctx = (TrainContext*)userdata;
-
-  if (verbose)
-    {
-      printf("%06u - %s\n         %s\n", index, depth_path, label_path);
-    }
-
-  // Open label file
-  if (!(fp = fopen(label_path, "rb")))
-    {
-      fprintf(stderr, "Failed to open image '%s'\n", label_path);
-      exit(1);
-    }
-
-  // Load label file
-  if (fread(header, 1, 8, fp) != 8)
-    {
-      fprintf(stderr, "Error reading header of %s\n", label_path);
-    }
-  if (png_sig_cmp(header, 0, 8))
-    {
-      fprintf(stderr, "%s was not recognised as a PNG file\n", label_path);
-      exit(1);
-    }
-
-  // Start reading label png
-  png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-  if (!png_ptr)
-    {
-      fprintf(stderr, "png_create_read_struct failed\n");
-      exit(1);
-    }
-
-  info_ptr = png_create_info_struct(png_ptr);
-  if (!info_ptr)
-    {
-      fprintf(stderr, "png_create_info_struct failed\n");
-      exit(1);
-    }
-
-  if (setjmp(png_jmpbuf(png_ptr)))
-    {
-      fprintf(stderr, "libpng setjmp failure\n");
-      exit(1);
-    }
-
-  png_init_io(png_ptr, fp);
-  png_set_sig_bytes(png_ptr, 8);
-
-  png_read_info(png_ptr, info_ptr);
-
-  width = png_get_image_width(png_ptr, info_ptr);
-  height = png_get_image_height(png_ptr, info_ptr);
-
-  // Verify width/height
-  if (ctx->width == 0)
-    {
-      ctx->width = width;
-      ctx->height = height;
-      n_pixels = width * height * ctx->n_images;
-      ctx->label_images = (uint8_t*)xmalloc(n_pixels * sizeof(uint8_t));
-      ctx->depth_images = (float*)xmalloc(n_pixels * sizeof(float));
-    }
-  else
-    {
-      if (width != ctx->width || height != ctx->height)
-        {
-          fprintf(stderr, "%s: size mismatch (%dx%d), expected (%dx%d)\n",
-                  label_path, width, height, ctx->width, ctx->height);
-          exit(1);
-        }
-    }
-
-  // Verify pixel type
-  if (png_get_color_type(png_ptr, info_ptr) != 0)
-    {
-      fprintf(stderr, "%s: Expected a grayscale PNG\n", label_path);
-      exit(1);
-    }
-
-  if (png_get_bit_depth(png_ptr, info_ptr) != 8)
-    {
-      fprintf(stderr, "%s: Expected 8-bit grayscale\n", label_path);
-      exit(1);
-    }
-
-  // Start reading data
-  row_stride = png_get_rowbytes(png_ptr, info_ptr);
-  input_rows = (png_bytep *)xmalloc(sizeof(png_bytep*) * height);
-  input_data = (png_bytep)xmalloc(row_stride * height * sizeof(png_bytep));
-
-  for (int y = 0; y < height; y++)
-    {
-      input_rows[y] = (png_byte*)input_data + row_stride * y;
-    }
-
-  if (setjmp(png_jmpbuf(png_ptr)))
-    {
-      fprintf(stderr, "%s: png_read_image_error\n", label_path);
-      exit(1);
-    }
-
-  png_read_image(png_ptr, input_rows);
-
-  // Copy label image data into training context struct
-  for (int y = 0, src_idx = 0, dest_idx = index * width * height;
-       y < height;
-       y++, src_idx += row_stride, dest_idx += width)
-    {
-      memcpy(&ctx->label_images[dest_idx], &input_data[src_idx], width);
-    }
-
-  // Close the label file
-  if (fclose(fp) != 0)
-    {
-      fprintf(stderr, "Error closing label file '%s'\n", label_path);
-      exit(1);
-    }
-
-  // Free data associated with PNG reading
-  png_destroy_info_struct(png_ptr, &info_ptr);
-  png_destroy_read_struct(&png_ptr, NULL, NULL);
-  xfree(input_rows);
-  xfree(input_data);
-
-  // Read depth file
-  float* dest;
-  InputFile in_file(depth_path);
-  Box2i dw = in_file.header().dataWindow();
-
-  width = dw.max.x - dw.min.x + 1;
-  height = dw.max.y - dw.min.y + 1;
-
-  if (width != ctx->width || height != ctx->height)
-    {
-      fprintf(stderr, "%s: size mismatch (%dx%d), expected (%dx%d)\n",
-              depth_path, width, height, ctx->width, ctx->height);
-      exit(1);
-    }
-
-  const ChannelList& channels = in_file.header().channels();
-  if (!channels.findChannel("Y"))
-    {
-      fprintf(stderr, "%s: Only expected to load greyscale EXR files "
-              "with a single 'Y' channel\n", depth_path);
-      exit(1);
-    }
-
-  dest = &ctx->depth_images[index * width * height];
-
-  FrameBuffer frameBuffer;
-  frameBuffer.insert("Y",
-                     Slice (FLOAT,
-                            (char *)dest,
-                            sizeof(float), // x stride,
-                            sizeof(float) * width)); // y stride
-
-  in_file.setFrameBuffer(frameBuffer);
-  in_file.readPixels(dw.min.y, dw.max.y);
-
-  // Free file path copies
-  free_train_data_cb(node, index, userdata);
-
-  return true;
-}
 
 static NodeTrainData*
 create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
@@ -729,7 +447,6 @@ int
 main(int argc, char **argv)
 {
   TrainContext ctx = { 0, };
-  TrainData data = { 0, };
   TimeForDisplay since_begin, since_last;
   struct timespec begin, last, now;
   uint32_t n_threads = std::thread::hardware_concurrency();
@@ -747,8 +464,8 @@ main(int argc, char **argv)
   ctx.t_range = 1.29;
   ctx.max_depth = 20;
   ctx.n_pixels = 2000;
-  data.limit = UINT32_MAX;
-  data.shuffle = false;
+  uint32_t limit = UINT32_MAX;
+  bool shuffle = false;
 
   for (int i = 6; i < argc; i++)
     {
@@ -759,7 +476,7 @@ main(int argc, char **argv)
 
       if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--shuffle") == 0)
         {
-          data.shuffle = true;
+          shuffle = true;
           continue;
         }
       if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
@@ -779,7 +496,7 @@ main(int argc, char **argv)
           if (strcmp(argv[i], "--limit=") == 0)
             {
               number_text = &argv[i][8];
-              uint32_target = &data.limit;
+              uint32_target = &limit;
             }
           else if (strcmp(argv[i], "--pixels=") == 0)
             {
@@ -832,7 +549,7 @@ main(int argc, char **argv)
           switch (argv[i][1])
             {
             case 'l':
-              uint32_target = &data.limit;
+              uint32_target = &limit;
               break;
 
             case 'p':
@@ -914,19 +631,9 @@ main(int argc, char **argv)
     }
 
   printf("Scanning training directories...\n");
-  gather_train_data(argv[3], argv[4], gather_cb, (void*)&data);
-
-  ctx.n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
-  printf("Loading %d training image pairs into memory...\n", ctx.n_images);
-  data.image_paths = llist_first(data.image_paths);
-  if (data.shuffle)
-    {
-      data.image_paths = llist_slice(llist_shuffle(data.image_paths),
-                                     0, data.limit, free_train_data_cb, NULL);
-    }
-  llist_foreach(data.image_paths, train_data_cb, (void*)&ctx);
-  llist_free(data.image_paths, NULL, NULL);
-  data.image_paths = NULL;
+  gather_train_data(argv[3], argv[4], limit, shuffle, &ctx.n_images,
+                    &ctx.width, &ctx.height,
+                    &ctx.depth_images, &ctx.label_images);
 
   // Initialise root node training data and add it to the queue
   printf("Preparing training metadata...\n");
