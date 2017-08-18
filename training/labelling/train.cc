@@ -30,6 +30,7 @@ typedef struct {
 typedef struct {
   int32_t  width;         // Width of training images
   int32_t  height;        // Height of training images
+  float    fov;           // Camera field of view
   float    ppm;           // Pixels per meter
   uint8_t  n_labels;      // Number of labels in label images
 
@@ -408,9 +409,9 @@ static void
 print_usage(FILE* stream)
 {
   fprintf(stream,
-"Usage: train <ppm> <n_labels> <label_dir> <depth_dir> <out_file> [OPTIONS]\n"
+"Usage: train <fov> <n_labels> <label_dir> <depth_dir> <out_file> [OPTIONS]\n"
 "Train a randomised decision tree to infer n_labels from depth images with\n"
-"ppm pixels per meter.\n"
+"a given camera FOV. Default values assume depth data to be in meters.\n"
 "\n"
 "  -l, --limit=NUMBER        Limit training data to this many images\n"
 "  -s, --shuffle             Shuffle order of training images\n"
@@ -618,8 +619,7 @@ main(int argc, char **argv)
         }
     }
 
-  ctx.ppm = strtof(argv[1], NULL);
-  ctx.uv_range *= ctx.ppm;
+  ctx.fov = strtof(argv[1], NULL);
   ctx.n_labels = (uint8_t)atoi(argv[2]);
 
   printf("Opening output file...\n");
@@ -634,6 +634,10 @@ main(int argc, char **argv)
   gather_train_data(argv[3], argv[4], limit, shuffle, &ctx.n_images,
                     &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images);
+
+  // Work out pixels per meter and adjust uv range accordingly
+  ctx.ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
+  ctx.uv_range *= ctx.ppm;
 
   // Initialise root node training data and add it to the queue
   printf("Preparing training metadata...\n");
@@ -841,8 +845,9 @@ main(int argc, char **argv)
          since_last.hours, since_last.minutes, since_last.seconds,
          argv[5]);
 
-  // Write a header (3 bytes 'RDT', 1 byte version, 1 byte depth, 1 byte n_labels)
-  RDTHeader header = { { 'R', 'D', 'T' }, OUT_VERSION, ctx.max_depth, ctx.n_labels };
+  // Write a header
+  RDTHeader header = { { 'R', 'D', 'T' }, OUT_VERSION, ctx.max_depth, \
+                       ctx.n_labels, ctx.fov };
   if (fwrite(&header, sizeof(RDTHeader), 1, output) != 1)
     {
       fprintf(stderr, "Error writing header\n");

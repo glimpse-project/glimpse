@@ -6,7 +6,7 @@
 #include <sys/types.h>
 #include <math.h>
 
-#define OUT_VERSION 2
+#define OUT_VERSION 3
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
@@ -24,6 +24,7 @@ typedef struct __attribute__((__packed__)) {
   uint8_t version;
   uint8_t depth;
   uint8_t n_labels;
+  float   fov;
 } RDTHeader;
 
 inline float
