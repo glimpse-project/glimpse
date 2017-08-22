@@ -45,8 +45,6 @@
 
 #include <ImathBox.h>
 
-#define DEBUG
-
 #ifdef DEBUG
 #define PNG_DEBUG 3
 #define debug(ARGS...) printf(ARGS)
@@ -83,64 +81,106 @@ xmalloc(size_t size)
     return ret;
 }
 
+static const char *
+exr_pixel_type_name(enum PixelType type)
+{
+    switch (type) {
+    case FLOAT:
+        return "FLOAT";
+    case HALF:
+        return "HALF";
+    case UINT:
+        return "UINT";
+    case NUM_PIXELTYPES: //keep compiler happy
+        exit(1);
+        return "FAIL";
+    }
+
+    return "FAIL";
+}
+
 static struct image *
 load_exr_file(const char *filename)
 {
     InputFile in_file(filename);
-    Array2D<float> depth;
 
     Box2i dw = in_file.header().dataWindow();
 
     int width = dw.max.x - dw.min.x + 1;
     int height = dw.max.y - dw.min.y + 1;
 
-    struct image *ret;
+    const Channel *channel;
+    const char *channel_name = NULL;
 
     const ChannelList &channels = in_file.header().channels();
-    for (ChannelList::ConstIterator i = channels.begin(); i != channels.end(); ++i) {
+    for (ChannelList::ConstIterator i = channels.begin(); i != channels.end(); i++) {
         const Channel &channel = i.channel();
         const char *name = i.name();
+        const char *type_name = exr_pixel_type_name(channel.type);
 
-        debug("EXR: Channel '%s': type %s\n", name, channel.type == FLOAT ? "== FLOAT" : "!= FLOAT");
+        debug("EXR: Channel '%s': type %s\n", name, type_name);
     }
 
-    if (!channels.findChannel("Y")) {
-        fprintf(stderr, "Only expected to load greyscale EXR files with a single 'Y' channel\n");
-        return NULL;
+    channel = channels.findChannel("Y");
+    if (channel) {
+        channel_name = "Y";
+    } else {
+        channel = channels.findChannel("R");
+        if (channel)
+            channel_name = "R";
+        else {
+            fprintf(stderr, "Failed to find 'Y' or 'R' channel\n");
+            return NULL;
+        }
     }
 
-    depth.resizeErase(height, width);
-
-    FrameBuffer frameBuffer;
-
-    frameBuffer.insert("Y",
-                       Slice (FLOAT,
-                              (char *)&depth[0][0],
-                              sizeof(float), // x stride,
-                              sizeof(float) * depth.width())); // y stride
-
-    in_file.setFrameBuffer(frameBuffer);
-    in_file.readPixels(dw.min.y, dw.max.y);
-
-    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
-
-    ret = (struct image *)xmalloc(sizeof(*ret) + sizeof(float) * width * height);
+    struct image *ret =
+        (struct image *)xmalloc(sizeof(*ret) + sizeof(float) * width * height);
     ret->format = IMAGE_FORMAT_XFLOAT;
     ret->width = width;
     ret->height = height;
     ret->data_float = (float *)(ret + 1);
 
-    for (int y = 0; y < height; y++) {
-        float *exr_row = &depth[y][0];
-        float *out_row = ret->data_float + y * width;
+    FrameBuffer frameBuffer;
 
-        for (int x = 0; x < width; x++) {
-            out_row[x] = exr_row[x];
-            //printf("%f ", exr_row[x]);
+    if (channel->type == FLOAT) {
+        frameBuffer.insert(channel_name,
+                           Slice(FLOAT,
+                                 (char *)ret->data_float,
+                                 sizeof(float), // x stride,
+                                 sizeof(float) * width)); // y stride
+
+        in_file.setFrameBuffer(frameBuffer);
+        in_file.readPixels(dw.min.y, dw.max.y);
+    } else {
+        Array2D<half> depth;
+        depth.resizeErase(height, width);
+
+        frameBuffer.insert(channel_name,
+                           Slice(HALF,
+                                 (char *)&depth[0][0],
+                                 sizeof(half), // x stride,
+                                 sizeof(half) * width)); // y stride
+
+        in_file.setFrameBuffer(frameBuffer);
+        in_file.readPixels(dw.min.y, dw.max.y);
+
+        for (int y = 0; y < height; y++) {
+            half *exr_row = &depth[y][0];
+            float *out_row = ret->data_float + y * width;
+
+            for (int x = 0; x < width; x++) {
+                out_row[x] = exr_row[x];
+                //printf("%f ", exr_row[x]);
+            }
+            //printf("\n");
         }
-        //printf("\n");
     }
 
+    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
+
+    debug("Keeping \"%s\" %s channel\n",
+          channel_name, exr_pixel_type_name(channel->type));
     return ret;
 }
 
@@ -149,7 +189,7 @@ write_pfm_file(struct image *image, const char *filename)
 {
     int fd;
     char header[128];
-    int header_len;
+    size_t header_len;
     int file_len;
     char *buf;
 
@@ -200,8 +240,6 @@ write_pfm_file(struct image *image, const char *filename)
 int
 main(int argc, char **argv)
 {
-    char *label_dest, *depth_dest;
-
     if (argc != 3) {
         fprintf(stderr, "Usage: %s <in_file> <out_file>\n", argv[0]);
         exit(1);
