@@ -4,9 +4,9 @@ OPT=-g3 -O3 -march=native
 #OPT=-g3 -O0 -DDEBUG
 
 CC=gcc
-CFLAGS=$(OPT)
+CFLAGS=$(OPT) -Wall
 
-CXX=g++ -std=c++14
+CXX=g++ -std=c++14 -Wall
 CXXFLAGS=$(OPT)
 
 LDFLAGS=
