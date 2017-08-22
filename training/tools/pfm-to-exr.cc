@@ -12,6 +12,7 @@
 #include <dirent.h>
 #include <stdint.h>
 #include <libgen.h>
+#include <getopt.h>
 
 #include <ImfOutputFile.h>
 #include <ImfStringAttribute.h>
@@ -21,8 +22,6 @@
 
 #include <ImathBox.h>
 
-#define DEBUG
-
 #ifdef DEBUG
 #define debug(ARGS...) printf(ARGS)
 #else
@@ -31,6 +30,8 @@
 
 using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
+
+static bool write_half_float = false;
 
 static void *
 xmalloc(size_t size)
@@ -100,14 +101,14 @@ load_pfm(const char *filename)
     asset_buf = (const char *)mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
     if (asset_buf) {
         asset_buf_len = sb.st_size;
-        debug("Mapped PFM asset %p, len = %ld\n", asset_buf, asset_buf_len);
+        debug("Mapped PFM file %p, len = %ld\n", asset_buf, asset_buf_len);
     } else {
-        fprintf(stderr, "Failed to open shape predictor asset\n");
-        return NULL;
+        fprintf(stderr, "Failed to map PFM file\n");
+        goto error_mmap;
     }
 
-    int i, j = 0;
-    for (i = 0; i < asset_buf_len && j < 3; i++) {
+    int i, j;
+    for (i = 0, j = 0; i < asset_buf_len && j < 3; i++) {
         if (asset_buf[i] == '\n')
             line_end[j++] = i;
     }
@@ -147,10 +148,10 @@ load_pfm(const char *filename)
         fprintf(stderr, "Nothing expected after PFM scale");
         goto error_check_header;
     }
-    //if (scale >= 0) {
-    //    fprintf(stderr, "Only support loading little endian PFM files\n");
-    //    goto error_check_header;
-    // }
+    if (scale >= 0) {
+        fprintf(stderr, "Only support loading little endian PFM files\n");
+        goto error_check_header;
+    }
 
     pfm_data_start = scale_end + 1;
     pfm_data_len = sizeof(float) * width * height;
@@ -178,36 +179,102 @@ error_mmap:
 static void
 write_exr(struct image *image, const char *filename)
 {
-    Header header(image->width, image->height);
-    header.channels().insert ("Y", Channel(FLOAT));
+    int width = image->width;
+    int height = image->height;
+    Header header(width, height);
 
-    OutputFile out_file(filename, header);
+    if (write_half_float) {
+        Array2D<half> pixels;
 
-    FrameBuffer outFrameBuffer;
-    outFrameBuffer.insert ("Y",
-                           Slice (FLOAT,
-                                  (char *)image->data_float,
-                                  sizeof(float), // x stride,
-                                  sizeof(float) * image->width)); // y stride
+        pixels.resizeErase(height, width);
 
-    out_file.setFrameBuffer(outFrameBuffer);
-    out_file.writePixels(image->height);
+        for (int y = 0; y < height; y++) {
+            float *row = image->data_float + y * width;
+            for (int x = 0; x < width; x++) {
+                pixels[y][x] = row[x];
+            }
+        }
 
-    debug("wrote EXR %s (%dx%d) OK\n", filename, image->width, image->height);
+        header.channels().insert("Y", Channel(HALF));
+        OutputFile out_file(filename, header);
+
+        FrameBuffer outFrameBuffer;
+        outFrameBuffer.insert("Y",
+                              Slice(HALF,
+                                    (char *)&pixels[0][0],
+                                    sizeof(half), // x stride,
+                                    sizeof(half) * width)); // y stride
+
+        out_file.setFrameBuffer(outFrameBuffer);
+        out_file.writePixels(height);
+    } else {
+        header.channels().insert ("Y", Channel(FLOAT));
+        OutputFile out_file(filename, header);
+
+        FrameBuffer outFrameBuffer;
+        outFrameBuffer.insert("Y",
+                              Slice(FLOAT,
+                                    (char *)image->data_float,
+                                    sizeof(float), // x stride,
+                                    sizeof(float) * image->width)); // y stride
+
+        out_file.setFrameBuffer(outFrameBuffer);
+        out_file.writePixels(height);
+    }
+
+    debug("wrote EXR %s (%dx%d:'Y'=%s) OK\n",
+          filename, width, height, write_half_float ? "HALF" : "FLOAT");
 }
 
+static void
+usage(void)
+{
+    printf("Usage pfm-to-exr [options] <in_pfm_file> <out_exr_file>\n"
+           "\n"
+           "    --half              Write a half-float channel (otherwise\n"
+           "                        writes full-float)\n"
+           "\n"
+           "    -h,--help           Display this help\n\n"
+           "\n");
+    exit(1);
+}
 
 int
 main(int argc, char **argv)
 {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s IN_PFM_FILE OUT_EXR_FILE\n", argv[0]);
-        exit(1);
+    int opt;
+
+#define HALF_OPT    (CHAR_MAX + 1) // no short opt
+
+    /* N.B. The initial '+' means that getopt will stop looking for options
+     * after the first non-option argument...
+     */
+    const char *short_options="+h";
+    const struct option long_options[] = {
+        {"help",            no_argument,        0, 'h'},
+        {"half",            no_argument,        0, HALF_OPT},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
+           != -1)
+    {
+        switch (opt) {
+            case 'h':
+                usage();
+                return 0;
+            case HALF_OPT:
+                write_half_float = true;
+                break;
+        }
     }
 
-    struct image *img = load_pfm(argv[1]);
+    if (optind != argc - 2)
+        usage();
 
-    write_exr(img, argv[2]);
+    struct image *img = load_pfm(argv[optind]);
+
+    write_exr(img, argv[optind + 1]);
 
     return 0;
 }
