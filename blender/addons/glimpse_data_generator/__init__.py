@@ -38,6 +38,10 @@ import os
 import json
 import ntpath
 import numpy
+import time
+import datetime
+import random
+import json
 
 import bpy
 from bpy.props import (
@@ -296,6 +300,9 @@ class RigGeneratorOperator(bpy.types.Operator):
         bpy.ops.object.select_all(action='DESELECT')
         bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
 
+        dt = datetime.datetime.today()
+        date_str = "%04u-%02u-%02u-%02u-%02u-%02u" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+
         render_layers = []
         for i in range(0, 20):
             render_layers.append(False)
@@ -312,6 +319,10 @@ class RigGeneratorOperator(bpy.types.Operator):
 
         render_objects = []
 
+        camera = bpy.data.objects['Camera']
+
+        z_forward = mathutils.Vector((0, 0, 1))
+
         self.report({'INFO'}, "Rendering MoCap indices from " + str(bpy.context.scene.GlimpseBvhGenFrom) + " to " + str(bpy.context.scene.GlimpseBvhGenTo))
         for idx in range(bpy.context.scene.GlimpseBvhGenFrom, bpy.context.scene.GlimpseBvhGenTo):
             bvh = bvh_index[idx]
@@ -319,6 +330,9 @@ class RigGeneratorOperator(bpy.types.Operator):
             if bvh['blacklist']:
                 self.report({'INFO'}, "skipping blacklisted")
                 continue
+
+            numpy.random.seed(0)
+            random.seed(0)
 
             # Note we always load the mocap animations with the base the base
             # mesh, and then associate the animation_data.action with all the
@@ -343,98 +357,193 @@ class RigGeneratorOperator(bpy.types.Operator):
             # of the randomization_step...
             range_end = bvh['end'] + randomization_step - 1
 
-            # Hit some errors with the range bounds not being integer and I
-            # guess that comes from the json library loading our mocap index
-            # may make some numeric feilds float so bvh['start'] or bvh['end']
-            # might be float
-            for start_frame in range(int(bvh['start']), int(range_end), randomization_step):
+            # For now we unconditionally render each mocap using all the body
+            # meshes we have, just randomizing the clothing
+            for body in all_bodies:
+                self.report({'INFO'}, "> Rendering for body = " + body)
 
-                self.report({'INFO'}, "> randomizing " + bvh_name + " render")
+                # Hit some errors with the range bounds not being integer and I
+                # guess that comes from the json library loading our mocap index
+                # may make some numeric feilds float so bvh['start'] or bvh['end']
+                # might be float
+                for start_frame in range(int(bvh['start']), int(range_end), randomization_step):
 
-                for obj in render_objects:
-                    obj.layers[0] = False
-                    if "Clothes:" in obj.name:
-                        obj.hide = True
-                        obj.layers = obj.parent.layers
-                render_objects = []
-                #for body in all_bodies:
-                #    bpy.data.objects[body + "BodyMeshObject"].layers[0] = False
+                    meta = {}
+                    camera_meta = {}
 
-                # randomize the model
-                body = numpy.random.choice(all_bodies)
-                hat = numpy.random.choice(hat_choices, p=hat_probabilities)
-                trousers = numpy.random.choice(trouser_choices, p=trouser_probabilities)
-                top = numpy.random.choice(top_choices, p=top_probabilities)
-                glasses = numpy.random.choice(glasses_choices, p=glasses_probabilities)
+                    meta['start'] = start_frame
 
-                body_obj = bpy.data.objects[body + "BodyMeshObject"]
-                body_obj.layers[0] = True
-                render_objects.append(body_obj)
+                    # NB. the range extends beyond the length of animation in case
+                    # it's not a multiple of the randomization step, so clip end here:
+                    end_frame = min(start_frame + randomization_step, bvh['end'])
 
-                body_pose = bpy.data.objects[body + "PoseObject"]
-                bpy.data.objects['Camera'].constraints['Track To'].target = body_pose
+                    meta['end'] = end_frame
 
-                if hat != 'none':
-                    hat_obj = bpy.data.objects[body + "Clothes:" + hat]
-                    if hat_obj:
-                        hat_obj.hide = False
-                        hat_obj.layers[0] = True
-                        render_objects.append(hat_obj)
+                    self.report({'INFO'}, "> randomizing " + bvh_name + " render")
 
-                if trousers != 'none':
-                    trouser_obj = bpy.data.objects[body + "Clothes:" + trousers]
-                    if trouser_obj:
-                        trouser_obj.hide = False
-                        trouser_obj.layers[0] = True
-                        render_objects.append(trouser_obj)
+                    for obj in render_objects:
+                        obj.layers[0] = False
+                        if "Clothes:" in obj.name:
+                            obj.hide = True
+                            obj.layers = obj.parent.layers
+                    render_objects = []
+                    #for body in all_bodies:
+                    #    bpy.data.objects[body + "BodyMeshObject"].layers[0] = False
 
-                    #add_clothing(self, context, trousers)
-                    #trouser_obj.layers[0] = True
-                    #render_objects.append(trouser_obj)
+                    # randomize the model
+                    #body = numpy.random.choice(all_bodies)
+                    hat = numpy.random.choice(hat_choices, p=hat_probabilities)
+                    trousers = numpy.random.choice(trouser_choices, p=trouser_probabilities)
+                    top = numpy.random.choice(top_choices, p=top_probabilities)
+                    glasses = numpy.random.choice(glasses_choices, p=glasses_probabilities)
 
-                if top != 'none':
-                    top_obj = bpy.data.objects[body + "Clothes:" + top]
-                    if top_obj:
-                        top_obj.hide = False
-                        top_obj.layers[0] = True
-                        render_objects.append(top_obj)
+                    body_obj = bpy.data.objects[body + "BodyMeshObject"]
+                    body_obj.layers[0] = True
+                    render_objects.append(body_obj)
 
-                    #add_clothing(self, context, top)
-                    #top_obj.layers[0] = True
-                    #render_objects.append(top_obj)
+                    body_pose = bpy.data.objects[body + "PoseObject"]
+                    bpy.data.objects['Camera'].constraints['Track To'].target = body_pose
 
-                if glasses != 'none':
-                    glasses_obj = bpy.data.objects[body + "Clothes:" + glasses]
-                    if glasses_obj:
-                        glasses_obj.hide = False
-                        glasses_obj.layers[0] = True
-                        render_objects.append(glasses_obj)
 
-                    #add_clothing(self, context, glasses)
-                    #glasses_obj.layers[0] = True
-                    #render_objects.append(glasses_obj)
+                    spine = body_pose.pose.bones['spine_02']
+                    person_forward_2d = (spine.matrix.to_3x3() * z_forward).xy.normalized()
 
-                # NB. the range extends beyond the length of animation in case
-                # it's not a multiple of the randomization step, so clip end here:
-                end_frame = min(start_frame + randomization_step, bvh['end'])
+                    dist_mm = random.randrange(2000, 2500)
+                    dist_m = dist_mm / 1000
 
-                dirname =  str(start_frame) + "_" + str(end_frame-1) + "_" + body + "_hat_" + hat + "_trousers_" + trousers + "_top_" + top + "_glasses_" + glasses
-                context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("color-test", bvh_name[:-4], dirname))
-                context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("depth-test", bvh_name[:-4], dirname))
-                context.scene.update()
+                    camera.location.xy = spine.head.xy + dist_m * person_forward_2d
 
-                context.scene.layers = render_layers
+                    height_mm = random.randrange(1100, 1400)
+                    camera.location.z = height_mm / 1000
 
-                for frame in range(int(start_frame), int(end_frame)):
-                    bpy.context.scene.frame_current = frame
+                    camera_meta['distance'] = dist_m
 
-                    pose_cam_vec = body_pose.pose.bones['pelvis'].head - bpy.data.objects['Camera'].location
-                    if pose_cam_vec.length < 1.5:
-                        self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
-                        continue
+                    # We roughly point the camera at the spine_02 bone but randomize
+                    # this a little...
+                    target_fuzz_range_mm = 200
+                    spine_x_mm = spine.head.x * 1000
+                    spine_y_mm = spine.head.y * 1000
+                    spine_z_mm = spine.head.z * 1000
+                    target_x_mm = random.randrange(int(spine_x_mm - target_fuzz_range_mm), int(spine_x_mm + target_fuzz_range_mm))
+                    target_y_mm = random.randrange(int(spine_y_mm - target_fuzz_range_mm), int(spine_y_mm + target_fuzz_range_mm))
+                    target_z_mm = random.randrange(int(spine_z_mm - target_fuzz_range_mm), int(spine_z_mm + target_fuzz_range_mm))
+                    target = mathutils.Vector((target_x_mm / 1000, target_y_mm / 1000, target_z_mm / 1000))
 
-                    self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
-                    bpy.ops.render.render(write_still=True)
+                    direction = target - camera.location
+                    rot = direction.to_track_quat('-Z', 'Y')
+
+                    camera.rotation_mode = 'QUATERNION'
+                    camera.rotation_quaternion = rot
+                    camera_world_inverse_mat4 = camera.matrix_world.inverted()
+
+                    dirname =  str(start_frame) + "_" + str(end_frame-1) + "_" + body
+
+                    clothes_meta = {}
+
+                    if hat != 'none':
+                        hat_obj = bpy.data.objects[body + "Clothes:" + hat]
+                        if hat_obj:
+                            hat_obj.hide = False
+                            hat_obj.layers[0] = True
+                            render_objects.append(hat_obj)
+
+                            dirname += "_hat_" + hat
+                            clothes_meta['hat'] = hat
+
+                    if trousers != 'none':
+                        trouser_obj = bpy.data.objects[body + "Clothes:" + trousers]
+                        if trouser_obj:
+                            trouser_obj.hide = False
+                            trouser_obj.layers[0] = True
+                            render_objects.append(trouser_obj)
+
+                            dirname += "_trousers_" + trousers
+                            clothes_meta['trousers'] = trousers
+
+                        #add_clothing(self, context, trousers)
+                        #trouser_obj.layers[0] = True
+                        #render_objects.append(trouser_obj)
+
+                    if top != 'none':
+                        top_obj = bpy.data.objects[body + "Clothes:" + top]
+                        if top_obj:
+                            top_obj.hide = False
+                            top_obj.layers[0] = True
+                            render_objects.append(top_obj)
+
+                            dirname += "_top_" + top
+                            clothes_meta['top'] = top
+
+                        #add_clothing(self, context, top)
+                        #top_obj.layers[0] = True
+                        #render_objects.append(top_obj)
+
+                    if glasses != 'none':
+                        glasses_obj = bpy.data.objects[body + "Clothes:" + glasses]
+                        if glasses_obj:
+                            glasses_obj.hide = False
+                            glasses_obj.layers[0] = True
+                            render_objects.append(glasses_obj)
+
+                            dirname += "_glasses_" + glasses
+                            clothes_meta['glasses'] = glasses
+
+                        #add_clothing(self, context, glasses)
+                        #glasses_obj.layers[0] = True
+                        #render_objects.append(glasses_obj)
+
+                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name[:-4], dirname))
+                    #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name[:-4], dirname))
+                    
+
+                    context.scene.layers = render_layers
+
+                    meta['clothes'] = clothes_meta
+
+                    camera_meta['width'] = bpy.context.scene.render.resolution_x
+                    camera_meta['height'] = bpy.context.scene.render.resolution_y
+                    camera_meta['vertical_fov'] = math.degrees(bpy.data.cameras['Camera'].angle)
+                    meta['camera'] = camera_meta
+
+                    for frame in range(int(start_frame), int(end_frame)):
+
+                        bpy.context.scene.frame_set(frame)
+                        context.scene.update()
+
+                        meta['bones'] = []
+                        for bone in body_pose.pose.bones:
+                            head_cam = camera_world_inverse_mat4 * bone.head.to_4d()
+                            tail_cam = camera_world_inverse_mat4 * bone.tail.to_4d()
+                            bone_meta = {
+                                    'name': bone.name,
+                                    'head': [head_cam.x, head_cam.y, head_cam.z],
+                                    'tail': [tail_cam.x, tail_cam.y, tail_cam.z],
+                            }
+                            meta['bones'].append(bone_meta)
+
+                        pose_cam_vec = body_pose.pose.bones['pelvis'].head - camera.location
+
+                        forward = mathutils.Vector((0, 0, 1))
+                        
+                        facing = (spine.matrix.to_3x3() * forward).dot(camera.matrix_world.to_3x3() * forward)
+
+                        if facing < 0:
+                            self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": facing back of body")
+                            continue
+
+                        if pose_cam_vec.length < 1.5:
+                            self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
+                            continue
+
+                        context.scene.render.filepath = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name[:-4], dirname, "Image%04u" % frame))
+                        self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
+                        bpy.ops.render.render(write_still=True)
+
+                        meta_filename = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name[:-4], dirname, 'Image%04u.json' % frame))
+                        with open(meta_filename, 'w') as fp:
+                            json.dump(meta, fp, indent=2)
+
+
 
         return {'FINISHED'}
 
@@ -520,12 +629,27 @@ def load_bvh_file(bvh_state, interactive_mode=False):
 
     bpy.context.scene.McpStartFrame = 1
     bpy.context.scene.McpEndFrame = 1000
-    bpy.ops.mcp.load_and_retarget(filepath=bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + bvh_state['file']))
 
-    # It's a nasty gotcha but the MalkWalk addon will set the fake user
-    # reference on the imported action which makes the .blend file eventually
-    # balloon to ridiculous proportions
-    pose_obj.animation_data.action.use_fake_user = False
+    # If we've already loaded the .bvh and retargeted before then we may have
+    # an action we can apply to the active object without needing to retarget
+    # again, which can be very slow.
+    #
+    action_name = ntpath.split(bvh_state['file'])[1].split('.')[0]
+    if 'Base' + action_name in bpy.data.actions and bpy.context.scene.objects.active.type == 'ARMATURE':
+        arm = bpy.context.scene.objects.active
+        arm.animation_data.action = bpy.data.actions['Base' + action_name]
+    else:
+        bpy.ops.mcp.load_and_retarget(filepath = bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + ntpath_to_os(bvh_state['file'])))
+
+        # It's a nasty gotcha but the MakeWalk addon will set the fake user
+        # reference on the imported action which makes the .blend file eventually
+        # balloon to ridiculous proportions
+        #
+        # XXX: actually on the other hand loading a .bvh is really slow so it's
+        # beneficial to re-use the actions so we should instead add an operator
+        # to help purge these when we want to compact the size of the .blend
+        # file.
+        #pose_obj.animation_data.action.use_fake_user = False
 
     bpy.context.scene.frame_start = bvh_state['start']
     if 'end' in bvh_state:
@@ -575,9 +699,9 @@ def load_bvh_file(bvh_state, interactive_mode=False):
     else:
         bvh_state['camera'] = {}
 
-    bpy.data.objects['Camera'].location.xyz = cam_pos
-    bpy.data.objects['Camera'].rotation_quaternion = cam_rot
-    bpy.data.cameras['Camera'].angle = math.radians(cam_fov)
+    #bpy.data.objects['Camera'].location.xyz = cam_pos
+    #bpy.data.objects['Camera'].rotation_quaternion = cam_rot
+    #bpy.data.cameras['Camera'].angle = math.radians(cam_fov)
 
     bvh_state['camera']['location'] = cam_pos
     bvh_state['camera']['quaternion'] = cam_rot
@@ -656,6 +780,10 @@ class VIEW3D_MoCap_OpenBvhIndexButton(bpy.types.Operator):
 
         return {"FINISHED"}
 
+# we index bvh files using ntpath conventions
+def ntpath_to_os(path):
+    elems = path.split('\\')
+    return os.path.join(*elems)
 
 class VIEW3D_MoCap_BvhScanButton(bpy.types.Operator):
     bl_idname = "glimpse.scan_bvh_files"
