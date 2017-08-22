@@ -13,8 +13,6 @@
 #include <stdint.h>
 #include <libgen.h>
 
-#define DEBUG
-
 #ifdef DEBUG
 #define debug(ARGS...) printf(ARGS)
 #else
