@@ -1,54 +1,20 @@
 
-#include <stdio.h>
-#include <string.h>
-#include <stdbool.h>
-
 #include "infer.h"
 #include "xalloc.h"
 #include "utils.h"
 #include "loader.h"
 
 float*
-infer(char** files, uint32_t n_files, float* depth_image,
-      uint32_t width, uint32_t height, uint8_t* out_n_labels)
+infer(RDTree** forest, uint8_t n_trees, float* depth_image,
+      uint32_t width, uint32_t height)
 {
-  bool error = false;
-  float* output_pr = NULL;
-  uint8_t n_labels = 0;
+  uint8_t n_labels = forest[0]->header.n_labels;
+  float* output_pr = (float*)
+    xcalloc(width * height * forest[0]->header.n_labels, sizeof(float));
 
-  for (uint32_t i = 0; i < n_files; i++)
+  for (uint8_t i = 0; i < n_trees; i++)
     {
-      // Validate the decision tree
-      FILE* tree_file = fopen(files[i], "rb");
-      if (!tree_file)
-        {
-          fprintf(stderr, "Error opening tree '%s'\n", files[i]);
-          error = true;
-          break;
-        }
-      RDTree* tree = read_rdt(tree_file);
-      fclose(tree_file);
-
-      if (!tree)
-        {
-          error = true;
-          break;
-        }
-
-      if (n_labels == 0)
-        {
-          n_labels = tree->header.n_labels;
-          output_pr = (float*)
-            xcalloc(width * height * n_labels, sizeof(float));
-        }
-      if (tree->header.n_labels != n_labels)
-        {
-          fprintf(stderr, "Tree in '%s' has %u labels, expected %u\n",
-                  files[i], (uint32_t)tree->header.n_labels,
-                  (uint32_t)n_labels);
-          error = true;
-          break;
-        }
+      RDTree* tree = forest[i];
 
       // Accumulate probability map
       for (uint32_t y = 0; y < height; y++)
@@ -78,18 +44,6 @@ infer(char** files, uint32_t n_files, float* depth_image,
                 }
             }
         }
-
-      // Free RDT
-      free_rdt(tree);
-    }
-
-  if (error)
-    {
-      if (output_pr)
-        {
-          xfree(output_pr);
-        }
-      return NULL;
     }
 
   // Correct the probabilities
@@ -99,14 +53,9 @@ infer(char** files, uint32_t n_files, float* depth_image,
         {
           for (uint8_t l = 0; l < n_labels; l++, idx++)
             {
-              output_pr[idx] /= (float)n_files;
+              output_pr[idx] /= (float)n_trees;
             }
         }
-    }
-
-  if (out_n_labels)
-    {
-      *out_n_labels = n_labels;
     }
 
   return output_pr;

@@ -123,13 +123,15 @@ main(int argc, char **argv)
     }
 
   // Do inference
-  uint8_t n_labels;
-  float* output_pr =
-    infer(&argv[3], argc - 3, depth_image, width, height, &n_labels);
-  if (!output_pr)
+  uint8_t n_trees = argc - 3;
+  RDTree** forest = read_forest(&argv[3], n_trees);
+  if (!forest)
     {
       return 1;
     }
+  float* output_pr = infer(forest, n_trees, depth_image, width, height);
+  uint8_t n_labels = forest[0]->header.n_labels;
+  free_forest(forest, n_trees);
 
   // Write out png of most likely labels
   png_bytep* rows = (png_bytep*)xmalloc(height * sizeof(png_bytep));
