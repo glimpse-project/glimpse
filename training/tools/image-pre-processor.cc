@@ -620,7 +620,7 @@ frame_add_noise(const struct image *__restrict__ labels,
 
     for (int y = 1; y < height - 2; y++) {
         for (int x = 1; x < width - 2; x++) {
-#if 1
+
             if (in_label_at(x, y) != BACKGROUND_ID) {
                 bool edge = false;
                 uint8_t neighbour_label[8] = {
@@ -655,7 +655,7 @@ frame_add_noise(const struct image *__restrict__ labels,
                 out_label_at(x, y) = in_label_at(x, y);
                 out_depth_at(x, y) = in_depth_at(x, y);
             }
-#endif
+
         }
     }
 
