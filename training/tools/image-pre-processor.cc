@@ -885,9 +885,9 @@ directory_recurse(const char *rel_path)
 static void *
 worker_thread_cb(void *data)
 {
-    struct worker_state *state = (struct worker_state *)data;
-    struct image *noisy_labels, *noisy_depth;
-    struct image *flipped_labels, *flipped_depth;
+    //struct worker_state *state = (struct worker_state *)data;
+    struct image *noisy_labels = NULL, *noisy_depth = NULL;
+    struct image *flipped_labels = NULL, *flipped_depth = NULL;
 
     debug("Running worker thread\n");
 
