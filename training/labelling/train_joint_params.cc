@@ -62,7 +62,8 @@ print_usage(FILE* stream)
 "                          -- <tree file 1> [tree file 2] ...\n"
 "Given a trained decision tree, train parameters for joint position proposal.\n"
 "\n"
-"  -l, --limit=NUMBER          Limit training data to this many images\n"
+"  -l, --limit=NUMBER[,NUMBER] Limit training data to this many images.\n"
+"                              Optionally, skip the first N images.\n"
 "  -s, --shuffle               Shuffle order of training images\n"
 "  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
 "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
@@ -199,6 +200,7 @@ main (int argc, char** argv)
   // Set default parameters
   TrainContext ctx = { 0, };
   uint32_t limit = UINT32_MAX;
+  uint32_t skip = 0;
   bool shuffle = false;
   ctx.n_bandwidths = 50;
   float min_bandwidth = 0.015f;
@@ -336,7 +338,11 @@ main (int argc, char** argv)
       switch(param)
         {
         case 'l':
-          limit = (uint32_t)atoi(value);
+          limit = (uint32_t)strtol(value, &value, 10);
+          if (value[0] != '\0')
+            {
+              skip = (uint32_t)strtol(value + 1, NULL, 10);
+            }
           break;
         case 'b':
           read_three(value, &min_bandwidth, &max_bandwidth, &ctx.n_bandwidths);
@@ -373,7 +379,7 @@ main (int argc, char** argv)
   ctx.forest = read_forest(tree_paths, ctx.n_trees);
 
   printf("Scanning training directories...\n");
-  gather_train_data(label_dir, depth_dir, joint_dir, limit, shuffle,
+  gather_train_data(label_dir, depth_dir, joint_dir, limit, skip, shuffle,
                     &ctx.n_images, &ctx.n_joints, &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images, &ctx.joints);
 

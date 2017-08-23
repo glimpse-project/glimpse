@@ -21,6 +21,7 @@ typedef struct {
   uint32_t n_images;      // Number of training images
   uint8_t  n_joints;      // Number of joints
   uint32_t limit;         // Limit to number of training images
+  uint32_t skip;          // Number of images to skip
   bool     shuffle;       // Whether to shuffle images
   LList*   paths;   // List of label, depth and joint file paths,
   int32_t  width;         // Image width
@@ -37,13 +38,16 @@ static bool
 gather_cb(const char* label_path, const char* depth_path,
           const char* joint_path, TrainData* data)
 {
-  char** paths = (char**)xmalloc(3 * sizeof(char*));
-  paths[0] = label_path ? strdup(label_path) : NULL;
-  paths[1] = depth_path ? strdup(depth_path) : NULL;
-  paths[2] = joint_path ? strdup(joint_path) : NULL;
-  data->paths = llist_insert_after(data->paths, llist_new(paths));
+  if (data->n_images >= data->skip)
+    {
+      char** paths = (char**)xmalloc(3 * sizeof(char*));
+      paths[0] = label_path ? strdup(label_path) : NULL;
+      paths[1] = depth_path ? strdup(depth_path) : NULL;
+      paths[2] = joint_path ? strdup(joint_path) : NULL;
+      data->paths = llist_insert_after(data->paths, llist_new(paths));
+    }
   ++data->n_images;
-  return data->shuffle || (data->n_images < data->limit);
+  return data->shuffle || (data->n_images < data->limit + data->skip);
 }
 
 static bool
@@ -436,7 +440,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
 void
 gather_train_data(const char* label_dir_path, const char* depth_dir_path,
                   const char* joint_dir_path,
-                  uint32_t limit, bool shuffle,
+                  uint32_t limit, uint32_t skip, bool shuffle,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
                   float** out_depth_images, uint8_t** out_label_images,
@@ -446,6 +450,7 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
     0,                        // Number of training images
     0,                        // Number of joints
     limit,                    // Limit to number of training images
+    skip,                     // Number of images to skip
     shuffle,                  // Whether to shuffle images
     NULL,                     // Image paths
     0,                        // Image width
@@ -459,6 +464,7 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
   };
 
   gather_train_files(label_dir_path, depth_dir_path, joint_dir_path, &data);
+  data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
 
   *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
   printf("Processing %d training images...\n", *out_n_images);

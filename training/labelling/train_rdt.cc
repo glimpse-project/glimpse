@@ -412,18 +412,27 @@ print_usage(FILE* stream)
 "Train a randomised decision tree to infer n_labels from depth and label images\n"
 "with a given camera FOV. Default values assume depth data to be in meters.\n"
 "\n"
-"  -l, --limit=NUMBER        Limit training data to this many images\n"
-"  -s, --shuffle             Shuffle order of training images\n"
-"  -p, --pixels=NUMBER       Number of pixels to sample per image (default: 2000)\n"
-"  -t, --thresholds=NUMBER   Number of thresholds to test (default: 50)\n"
-"  -r, --t-range=NUMBER      Range of thresholds to test (default: 1.29)\n"
-"  -c, --combos=NUMBER       Number of UV combinations to test (default: 2000)\n"
-"  -u, --uv-range=NUMBER     Range of UV combinations to test (default 1.29)\n"
-"  -d, --depth=NUMBER        Depth to train tree to (default: 20)\n"
-"  -m, --threads=NUMBER      Number of threads to use (default: autodetect)\n"
-"  -n, --seed=NUMBER         Seed to use for RNG (default: 0)\n"
-"  -v, --verbose             Verbose output\n"
-"  -h, --help                Display this message\n");
+"  -l, --limit=NUMBER[,NUMBER]   Limit training data to this many images.\n"
+"                                Optionally, skip the first N images.\n"
+"  -s, --shuffle                 Shuffle order of training images.\n"
+"  -p, --pixels=NUMBER           Number of pixels to sample per image.\n"
+"                                  (default: 2000)\n"
+"  -t, --thresholds=NUMBER       Number of thresholds to test.\n"
+"                                  (default: 50)\n"
+"  -r, --t-range=NUMBER          Range of thresholds to test.\n"
+"                                  (default: 1.29)\n"
+"  -c, --combos=NUMBER           Number of UV combinations to test.\n"
+"                                  (default: 2000)\n"
+"  -u, --uv-range=NUMBER         Range of UV combinations to test.\n"
+"                                  (default 1.29)\n"
+"  -d, --depth=NUMBER            Depth to train tree to.\n"
+"                                  (default: 20)\n"
+"  -m, --threads=NUMBER          Number of threads to use.\n"
+"                                  (default: autodetect)\n"
+"  -n, --seed=NUMBER             Seed to use for RNG.\n"
+"                                  (default: 0)\n"
+"  -v, --verbose                 Verbose output.\n"
+"  -h, --help                    Display this message.\n");
 }
 
 TimeForDisplay
@@ -465,156 +474,157 @@ main(int argc, char **argv)
   ctx.max_depth = 20;
   ctx.n_pixels = 2000;
   uint32_t limit = UINT32_MAX;
+  uint32_t skip = 0;
   bool shuffle = false;
 
   for (int i = 6; i < argc; i++)
     {
-      char* number_text = NULL;
-      uint32_t* uint32_target = NULL;
-      uint8_t* uint8_target = NULL;
-      float* float_target = NULL;
-
-      if (strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--shuffle") == 0)
-        {
-          shuffle = true;
-          continue;
-        }
-      if (strcmp(argv[i], "-v") == 0 || strcmp(argv[i], "--verbose") == 0)
-        {
-          verbose = true;
-          continue;
-        }
-
+      // All arguments should start with '-'
       if (argv[i][0] != '-')
         {
-          fprintf(stderr, "Unrecognised option: %s", argv[i]);
+          print_usage(stderr);
           return 1;
         }
+      char* arg = &argv[i][1];
 
-      if (argv[i][1] == '-')
+      char param = '\0';
+      char* value = NULL;
+      if (arg[0] == '-')
         {
-          if (strcmp(argv[i], "--limit=") == 0)
+          // Store the location of the value (if applicable)
+          value = strchr(arg, '=');
+          if (value)
             {
-              number_text = &argv[i][8];
-              uint32_target = &limit;
+              value += 1;
             }
-          else if (strcmp(argv[i], "--pixels=") == 0)
+
+          // Check argument
+          arg++;
+          if (strstr(arg, "limit="))
             {
-              number_text = &argv[i][9];
-              uint32_target = &ctx.n_pixels;
+              param = 'l';
             }
-          else if (strcmp(argv[i], "--thresholds=") == 0)
+          else if (strcmp(arg, "shuffle") == 0)
             {
-              number_text = &argv[i][13];
-              uint32_target = &ctx.n_t;
+              param = 's';
             }
-          else if (strcmp(argv[i], "--t-range=") == 0)
+          else if (strstr(arg, "pixels="))
             {
-              number_text = &argv[i][10];
-              float_target = &ctx.t_range;
+              param = 'p';
             }
-          else if (strcmp(argv[i], "--combos=") == 0)
+          else if (strstr(arg, "thresholds="))
             {
-              number_text = &argv[i][9];
-              uint32_target = &ctx.n_uv;
+              param = 't';
             }
-          else if (strcmp(argv[i], "--uv-range=") == 0)
+          else if (strstr(arg, "t-range="))
             {
-              number_text = &argv[i][11];
-              float_target = &ctx.uv_range;
+              param = 'r';
             }
-          else if (strcmp(argv[i], "--depth=") == 0)
+          else if (strstr(arg, "combos="))
             {
-              number_text = &argv[i][8];
-              uint8_target = &ctx.max_depth;
+              param = 'c';
             }
-          else if (strcmp(argv[i], "--threads=") == 0)
+          else if (strstr(arg, "uv-range="))
             {
-              number_text = &argv[i][10];
-              uint32_target = &n_threads;
+              param = 'u';
             }
-          else if (strcmp(argv[i], "--seed=") == 0)
+          else if (strstr(arg, "depth="))
             {
-              number_text = &argv[i][7];
-              uint32_target = &seed;
+              param = 'd';
             }
-          else if (strcmp(argv[i], "--help") == 0)
+          else if (strstr(arg, "threads="))
             {
-              print_usage(stdout);
-              return 0;
+              param = 'm';
             }
+          else if (strstr(arg, "seed="))
+            {
+              param = 'n';
+            }
+          else if (strcmp(arg, "verbose") == 0)
+            {
+              param = 'v';
+            }
+          else if (strcmp(arg, "help") == 0)
+            {
+              param = 'h';
+            }
+          arg--;
         }
       else
         {
-          switch (argv[i][1])
+          if (arg[1] == '\0')
             {
-            case 'l':
-              uint32_target = &limit;
-              break;
-
-            case 'p':
-              uint32_target = &ctx.n_pixels;
-              break;
-
-            case 't':
-              uint32_target = &ctx.n_t;
-              break;
-
-            case 'r':
-              float_target = &ctx.t_range;
-              break;
-
-            case 'c':
-              uint32_target = &ctx.n_uv;
-              break;
-
-            case 'u':
-              float_target = &ctx.uv_range;
-              break;
-
-            case 'd':
-              uint8_target = &ctx.max_depth;
-              break;
-
-            case 'm':
-              uint32_target = &n_threads;
-              break;
-
-            case 'n':
-              uint32_target = &seed;
-              break;
-
-            case 'h':
-              print_usage(stdout);
-              return 0;
-
-            default:
-              fprintf(stderr, "Unrecognised option: %s", argv[i]);
-              print_usage(stderr);
-              return 1;
+              param = arg[0];
             }
 
-          ++i;
-          if (i >= argc)
+          if (i + 1 < argc)
             {
-              fprintf(stderr, "Incorrect usage");
-              print_usage(stderr);
-              return 1;
+              value = argv[i + 1];
             }
-          number_text = argv[i];
         }
 
-      if (uint32_target)
+      // Check for parameter-less options
+      switch(param)
         {
-          *uint32_target = (uint32_t)atoi(number_text);
+        case 's':
+          shuffle = true;
+          continue;
+        case 'v':
+          verbose = true;
+          continue;
+        case 'h':
+          print_usage(stdout);
+          return 0;
         }
-      else if (uint8_target)
+
+      // Now check for options that require parameters
+      if (!value)
         {
-          *uint8_target = (uint8_t)atoi(number_text);
+          print_usage(stderr);
+          return 1;
         }
-      else if (float_target)
+      if (arg[0] != '-')
         {
-          *float_target = strtof(number_text, NULL);
+          i++;
+        }
+
+      switch(param)
+        {
+        case 'l':
+          limit = (uint32_t)strtol(value, &value, 10);
+          if (value[0] != '\0')
+            {
+              skip = (uint32_t)strtol(value + 1, NULL, 10);
+            }
+          break;
+        case 'p':
+          ctx.n_pixels = (uint32_t)atoi(value);
+          break;
+        case 't':
+          ctx.n_t = (uint32_t)atoi(value);
+          break;
+        case 'r':
+          ctx.t_range = strtof(value, NULL);
+          break;
+        case 'c':
+          ctx.n_uv = (uint32_t)atoi(value);
+          break;
+        case 'u':
+          ctx.uv_range = strtof(value, NULL);
+          break;
+        case 'd':
+          ctx.max_depth = (uint8_t)atoi(value);
+          break;
+        case 'm':
+          n_threads = (uint32_t)atoi(value);
+          break;
+        case 'n':
+          seed = (uint32_t)atoi(value);
+          break;
+
+        default:
+          print_usage(stderr);
+          return 1;
         }
     }
 
@@ -630,7 +640,7 @@ main(int argc, char **argv)
     }
 
   printf("Scanning training directories...\n");
-  gather_train_data(argv[3], argv[4], NULL, limit, shuffle,
+  gather_train_data(argv[3], argv[4], NULL, limit, skip, shuffle,
                     &ctx.n_images, NULL, &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images, NULL);
 
