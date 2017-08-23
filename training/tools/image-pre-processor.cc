@@ -241,6 +241,76 @@ xalloc_image(enum image_format format,
     return img;
 }
 
+static uint8_t *
+read_file(const char *filename, int *len)
+{
+    int fd;
+    struct stat st;
+    uint8_t *buf;
+    int n = 0;
+
+    *len = 0;
+
+    fd = open(filename, O_RDONLY|O_CLOEXEC);
+    if (fd < 0)
+        return NULL;
+
+    if (fstat(fd, &st) < 0)
+        return NULL;
+
+    // N.B. st_size may be zero for special files like /proc/ files so we
+    // speculate
+    if (st.st_size == 0)
+        st.st_size = 1024;
+
+    buf = (uint8_t *)xmalloc(st.st_size);
+
+    while (n < st.st_size) {
+        int ret = read(fd, buf + n, st.st_size - n);
+        if (ret == -1) {
+            if (errno == EINTR)
+                continue;
+            else {
+                free(buf);
+                return NULL;
+            }
+        } else if (ret == 0)
+            break;
+        else
+            n += ret;
+    }
+
+    close(fd);
+
+    *len = n;
+
+    return buf;
+}
+
+static bool
+write_file(const char *filename, uint8_t *buf, int len)
+{
+    int fd = open(filename, O_WRONLY|O_CREAT|O_CLOEXEC, 0644);
+    if (fd < 0)
+        return false;
+
+    int n = 0;
+    while (n < len) {
+        int ret = write(fd, buf + n, len - n);
+        if (ret == -1) {
+            if (errno == EINTR)
+                continue;
+            else
+                return false;
+        } else
+            n += ret;
+    }
+
+    close(fd);
+
+    return true;
+}
+
 static void
 free_image(struct image *image)
 {
@@ -895,6 +965,7 @@ worker_thread_cb(void *data)
     struct worker_state *state = (struct worker_state *)data;
     struct image *noisy_labels = NULL, *noisy_depth = NULL;
     struct image *flipped_labels = NULL, *flipped_depth = NULL;
+    char filename[1024];
 
     debug("Running worker thread\n");
 
@@ -958,8 +1029,6 @@ worker_thread_cb(void *data)
                 free_image(prev_frame_labels);
             prev_frame_labels = labels;
 
-            char filename[128];
-
             xsnprintf(filename, "%.*s.exr",
                       (int)strlen(work.files[i]) - 4,
                       work.files[i]);
@@ -999,6 +1068,48 @@ worker_thread_cb(void *data)
             // Note: we don't free the labels here because they are preserved
             // for comparing with the next frame
             free(depth);
+
+
+            /*
+             * Copy the frame's .json metadata
+             */
+
+            xsnprintf(filename, "%s/labels/%s/%.*s.json",
+                      top_src_dir,
+                      work.dir,
+                      (int)strlen(work.files[i]) - 4,
+                      work.files[i]);
+            int len = 0;
+            uint8_t *json_data = read_file(filename, &len);
+            if (!json_data) {
+                fprintf(stderr, "WARNING: Failed to read frame's meta data %s: %m\n",
+                        filename);
+            }
+
+            if (json_data) {
+                xsnprintf(filename, "%s/labels/%s/%.*s.json",
+                          top_out_dir,
+                          work.dir,
+                          (int)strlen(work.files[i]) - 4,
+                          work.files[i]);
+                if (!write_file(filename, json_data, len)) {
+                    fprintf(stderr, "WARNING: Failed to copy frame's meta data to %s: %m\n",
+                            filename);
+                }
+
+                /* For consistency... */
+                xsnprintf(filename, "%s/labels/%s/%.*s-flipped.json",
+                          top_out_dir,
+                          work.dir,
+                          (int)strlen(work.files[i]) - 4,
+                          work.files[i]);
+                if (!write_file(filename, json_data, len)) {
+                    fprintf(stderr, "WARNING: Failed to copy frame's meta data to %s: %m\n",
+                            filename);
+                }
+
+                free(json_data);
+            }
         }
 
         if (prev_frame_labels) {
@@ -1010,36 +1121,26 @@ worker_thread_cb(void *data)
     return NULL;
 }
 
-static bool
-read_file(const char *filename, void *buf, int max)
-{
-    int fd;
-    int n;
-
-    memset(buf, 0, max);
-
-    fd = open(filename, 0);
-    if (fd < 0)
-        return false;
-    n = read(fd, buf, max - 1);
-    close(fd);
-    if (n < 0)
-        return false;
-
-    return true;
-}
-
 static void
 cpu_count_once_cb(void)
 {
-    char buf[32];
+    uint8_t *buf;
+    int len;
     unsigned ignore = 0, max_cpu = 0;
 
-    if (!read_file("/sys/devices/system/cpu/present", buf, sizeof(buf)))
+    buf = read_file("/sys/devices/system/cpu/present", &len);
+    if (!buf) {
+        fprintf(stderr, "Failed to read number of CPUs\n");
         return;
+    }
 
-    if (sscanf(buf, "%u-%u", &ignore, &max_cpu) != 2)
+    if (sscanf((char *)buf, "%u-%u", &ignore, &max_cpu) != 2) {
+        fprintf(stderr, "Failed to parse /sys/devices/system/cpu/present\n");
+        free(buf);
         return;
+    }
+
+    free(buf);
 
     n_cpus = max_cpu + 1;
 }
