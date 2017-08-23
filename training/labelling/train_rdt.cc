@@ -630,9 +630,9 @@ main(int argc, char **argv)
     }
 
   printf("Scanning training directories...\n");
-  gather_train_data(argv[3], argv[4], limit, shuffle, &ctx.n_images,
-                    &ctx.width, &ctx.height,
-                    &ctx.depth_images, &ctx.label_images);
+  gather_train_data(argv[3], argv[4], NULL, limit, shuffle,
+                    &ctx.n_images, NULL, &ctx.width, &ctx.height,
+                    &ctx.depth_images, &ctx.label_images, NULL);
 
   // Work out pixels per meter and adjust uv range accordingly
   float ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
