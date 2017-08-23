@@ -924,7 +924,15 @@ worker_thread_cb(void *data)
                                          &n_body_px);
 
                 if (n_body_px == 0) {
-                    fprintf(stderr, "Skipping spurious frame with not body pixels!\n");
+                    fprintf(stderr, "SKIPPING: %s/%s - spurious frame with no body pixels!\n",
+                            work.dir, work.files[i]);
+                    free_image(labels);
+                    continue;
+                }
+
+                if (n_body_px < 10000) {
+                    fprintf(stderr, "SKIPPING: %s/%s - frame with too few (less than 10000) body pixels\n",
+                            work.dir, work.files[i]);
                     free_image(labels);
                     continue;
                 }
