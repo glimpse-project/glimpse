@@ -525,8 +525,8 @@ flip_frame_labels(struct image *__restrict__ labels,
         for (int x = 0; x < width; x++) {
             int opposite = width - 1 - x;
 
-            out_row[x] = label_row[opposite];
-            out_row[opposite] = label_row[x];
+            out_row[x] = left_to_right_map[label_row[opposite]];
+            out_row[opposite] = left_to_right_map[label_row[x]];
         }
     }
 }
