@@ -111,6 +111,7 @@ static float depth_variance_mm = 20;
 static float background_depth_m = 1000;
 static int min_body_size_px = 5000;
 static float min_body_change_percent = 0.1f;
+static int n_threads_override = 0;
 
 static int labels_width = 0;
 static int labels_height = 0;
@@ -1178,6 +1179,7 @@ usage(void)
 "    --min-body-change=<%%>      Minimum percentage of changed body pixels\n"
 "                               between sequential frames\n"
 "                               (default = %.3f%%)\n"
+"    -t,--threads=<n>           Override how many worker threads are run\n"
 "\n"
 "    -h,--help                  Display this help\n\n"
 "\n",
@@ -1202,7 +1204,7 @@ main(int argc, char **argv)
     /* N.B. The initial '+' means that getopt will stop looking for options
      * after the first non-option argument...
      */
-    const char *short_options="+hfgv:b:";
+    const char *short_options="+hfgv:b:t:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
@@ -1211,6 +1213,7 @@ main(int argc, char **argv)
         {"background",      required_argument,  0, 'b'},
         {"min-body-size",   required_argument,  0, MIN_BODY_PX_OPT},
         {"min-body-change", required_argument,  0, MIN_BODY_CHNG_PC_OPT},
+        {"threads",         required_argument,  0, 't'},
         {0, 0, 0, 0}
     };
 
@@ -1246,6 +1249,11 @@ main(int argc, char **argv)
                 break;
             case MIN_BODY_CHNG_PC_OPT:
                 min_body_change_percent = strtod(optarg, &end);
+                if (*optarg == '\0' || *end != '\0')
+                    usage();
+                break;
+            case 't':
+                n_threads_override = strtoul(optarg, &end, 10);
                 if (*optarg == '\0' || *end != '\0')
                     usage();
                 break;
@@ -1343,8 +1351,14 @@ static_assert(BACKGROUND_ID == 33, "");
            get_duration_ns_print_scale(duration_ns),
            get_duration_ns_print_scale_suffix(duration_ns));
 
-    int n_cpus = cpu_count();
-    int n_threads = n_cpus * 32;
+    int n_threads;
+
+    if (!n_threads_override) {
+        int n_cpus = cpu_count();
+        n_threads = n_cpus * 32;
+    } else {
+        n_threads = n_threads_override;
+    }
 
     //n_threads = 1;
 
