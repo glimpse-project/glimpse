@@ -106,6 +106,11 @@ static const char *top_src_dir;
 static const char *top_out_dir;
 
 static bool write_half_float = true;
+static bool write_palettized_pngs = true;
+static float depth_variance_mm = 20;
+static float background_depth_m = 1000;
+static int min_body_size_px = 5000;
+static float min_body_change_percent = 0.1f;
 
 static int labels_width = 0;
 static int labels_height = 0;
@@ -563,7 +568,8 @@ frame_diff(struct image *a, struct image *b,
     *n_different_px_out = n_different_px;
     *n_body_px_out = n_body_px;
 
-    if (n_different_px <= (n_body_px / 1000))
+    float percent = ((float)n_different_px * 100.0f) / (float)n_body_px;
+    if (percent < min_body_change_percent)
         return false;
     else
         return true;
@@ -586,16 +592,6 @@ frame_add_noise(const struct image *__restrict__ labels,
 
     /* For picking one of 8 random neighbours for fuzzing the silhouettes */
     std::uniform_int_distribution<int> uniform_distribution(0, 7);
-
-    /* We use a Gaussian distribution of error offsets for the depth values.
-     *
-     * We want the variance to mostly be ~ +- 2mm.
-     *
-     * According to Wikipedia the full width at tenth of maximum of a Gaussian
-     * curve = approximately 4.29193c (where c is the standard deviation which
-     * we need to pass to construct this distribution)
-     */
-    std::normal_distribution<float> gaus_distribution(0, 20.0f / 4.29193f);
 
     struct rel_pos {
         int x, y;
@@ -666,13 +662,24 @@ frame_add_noise(const struct image *__restrict__ labels,
            depth->data_float + (height - 1) * width,
            depth->stride);
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            if (in_label_at(x, y) != BACKGROUND_ID) {
-                float delta_mm = gaus_distribution(rand_generator);
-                out_depth_at(x, y) += (delta_mm / 1000.0f);
-            } else {
-                out_depth_at(x, y) = 20;
+    if (depth_variance_mm) {
+        /* We use a Gaussian distribution of error offsets for the depth
+         * values.
+         *
+         * According to Wikipedia the full width at tenth of maximum of a
+         * Gaussian curve = approximately 4.29193c (where c is the standard
+         * deviation which we need to pass to construct this distribution)
+         */
+        std::normal_distribution<float> gaus_distribution(0, depth_variance_mm / 4.29193f);
+
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                if (in_label_at(x, y) != BACKGROUND_ID) {
+                    float delta_mm = gaus_distribution(rand_generator);
+                    out_depth_at(x, y) += (delta_mm / 1000.0f);
+                } else {
+                    out_depth_at(x, y) = background_depth_m;
+                }
             }
         }
     }
@@ -722,7 +729,7 @@ save_frame_labels(const char *dir, const char *filename,
         if (!write_png_file(output_filename,
                             width, height,
                             rows,
-                            PNG_COLOR_TYPE_PALETTE,
+                            write_palettized_pngs ? PNG_COLOR_TYPE_PALETTE : PNG_COLOR_TYPE_GRAY,
                             8)) { /* bit depth */
             return false;
         }
@@ -885,7 +892,7 @@ directory_recurse(const char *rel_path)
 static void *
 worker_thread_cb(void *data)
 {
-    //struct worker_state *state = (struct worker_state *)data;
+    struct worker_state *state = (struct worker_state *)data;
     struct image *noisy_labels = NULL, *noisy_depth = NULL;
     struct image *flipped_labels = NULL, *flipped_depth = NULL;
 
@@ -930,9 +937,9 @@ worker_thread_cb(void *data)
                     continue;
                 }
 
-                if (n_body_px < 10000) {
-                    fprintf(stderr, "SKIPPING: %s/%s - frame with too few (less than 10000) body pixels\n",
-                            work.dir, work.files[i]);
+                if (n_body_px < min_body_size_px) {
+                    fprintf(stderr, "SKIPPING: %s/%s - frame with less than %d body pixels\n",
+                            work.dir, work.files[i], min_body_size_px);
                     free_image(labels);
                     continue;
                 }
@@ -1048,13 +1055,29 @@ cpu_count(void)
 static void
 usage(void)
 {
-    printf("Usage image-pre-processor [options] <top_src> <top_dest>\n"
-           "\n"
-           "    --half              Write full-float channel depth images\n"
-           "                        (otherwise writes half-float)\n"
-           "\n"
-           "    -h,--help           Display this help\n\n"
-           "\n");
+    printf(
+"Usage image-pre-processor [options] <top_src> <top_dest>\n"
+"\n"
+"    -f,--full                  Write full-float channel depth images (otherwise\n"
+"                               writes half-float)\n"
+"    -g,--grey                  Write greyscale not palletized label PNGs\n"
+"    --variance=<mm>            The randomized variance in mm of the final depth\n"
+"                               values (%.0fmm by default)\n"
+"    -b,--background=<m>        Depth in meters of background pixels\n"
+"                               (default = %.0fm)\n"
+"    --min-body-size=<px>       Minimum size of body in pixels\n"
+"                               (default = %dpx)\n"
+"    --min-body-change=<%%>      Minimum percentage of changed body pixels\n"
+"                               between sequential frames\n"
+"                               (default = %.3f%%)\n"
+"\n"
+"    -h,--help                  Display this help\n\n"
+"\n",
+    depth_variance_mm,
+    background_depth_m,
+    min_body_size_px,
+    min_body_change_percent);
+
     exit(1);
 }
 
@@ -1064,25 +1087,62 @@ main(int argc, char **argv)
 {
     int opt;
 
+#define VAR_OPT                 (CHAR_MAX + 1)
+#define MIN_BODY_PX_OPT         (CHAR_MAX + 2)
+#define MIN_BODY_CHNG_PC_OPT    (CHAR_MAX + 3)
+
     /* N.B. The initial '+' means that getopt will stop looking for options
      * after the first non-option argument...
      */
-    const char *short_options="+hf";
+    const char *short_options="+hfgv:b:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
+        {"grey",            no_argument,        0, 'g'},
+        {"variance",        required_argument,  0, VAR_OPT},
+        {"background",      required_argument,  0, 'b'},
+        {"min-body-size",   required_argument,  0, MIN_BODY_PX_OPT},
+        {"min-body-change", required_argument,  0, MIN_BODY_CHNG_PC_OPT},
         {0, 0, 0, 0}
     };
 
     while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
            != -1)
     {
+        char *end;
+
         switch (opt) {
             case 'h':
                 usage();
                 return 0;
             case 'f':
                 write_half_float = false;
+                break;
+            case 'g':
+                write_palettized_pngs = false;
+                break;
+            case VAR_OPT:
+                depth_variance_mm = strtod(optarg, &end);
+                if (*optarg == '\0' || *end != '\0')
+                    usage();
+                break;
+            case 'b':
+                background_depth_m = strtod(optarg, &end);
+                if (*optarg == '\0' || *end != '\0')
+                    usage();
+                break;
+            case MIN_BODY_PX_OPT:
+                min_body_size_px = strtoul(optarg, &end, 10);
+                if (*optarg == '\0' || *end != '\0')
+                    usage();
+                break;
+            case MIN_BODY_CHNG_PC_OPT:
+                min_body_change_percent = strtod(optarg, &end);
+                if (*optarg == '\0' || *end != '\0')
+                    usage();
+                break;
+           default:
+                usage();
                 break;
         }
     }
