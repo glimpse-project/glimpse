@@ -684,8 +684,12 @@ frame_add_noise(const struct image *__restrict__ labels,
     memcpy(noisy_labels->data_u8, labels->data_u8, labels->stride);
     memcpy(noisy_depth->data_float, depth->data_float, depth->stride);
 
-    for (int y = 1; y < height - 2; y++) {
-        for (int x = 1; x < width - 2; x++) {
+    for (int y = 1; y < height - 1; y++) {
+
+        out_label_at(0, y) = in_label_at(0, y);
+        out_depth_at(0, y) = in_depth_at(0, y);
+
+        for (int x = 1; x < width - 1; x++) {
 
             if (in_label_at(x, y) != BACKGROUND_ID) {
                 bool edge = false;
@@ -723,6 +727,9 @@ frame_add_noise(const struct image *__restrict__ labels,
             }
 
         }
+
+        out_label_at(width - 1, y) = in_label_at(width - 1, y);
+        out_depth_at(width - 1, y) = in_depth_at(width - 1, y);
     }
 
     memcpy(noisy_labels->data_u8 + (height - 1) * width,
