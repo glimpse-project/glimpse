@@ -109,7 +109,7 @@ static bool write_half_float = true;
 static bool write_palettized_pngs = true;
 static float depth_variance_mm = 20;
 static float background_depth_m = 1000;
-static int min_body_size_px = 5000;
+static int min_body_size_px = 3000;
 static float min_body_change_percent = 0.1f;
 static int n_threads_override = 0;
 
