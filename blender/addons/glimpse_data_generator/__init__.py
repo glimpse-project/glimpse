@@ -272,6 +272,19 @@ class AddClothingLibraryOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class RigGeneratorInfoOperator(bpy.types.Operator):
+    """Print summary information about our data generation state"""
+
+    bl_idname = "glimpse.generator_info"
+    bl_label = "Print Glimpse Generator Info"
+
+    def execute(self, context):
+
+        print("Number of indexed motion capture files = %d" % len(bvh_index))
+
+        return {'FINISHED'}
+
+
 class RigGeneratorOperator(bpy.types.Operator):
     """Generates Glimpse training data"""
 
@@ -323,7 +336,7 @@ class RigGeneratorOperator(bpy.types.Operator):
 
         z_forward = mathutils.Vector((0, 0, 1))
 
-        self.report({'INFO'}, "Rendering MoCap indices from " + str(bpy.context.scene.GlimpseBvhGenFrom) + " to " + str(bpy.context.scene.GlimpseBvhGenTo))
+        self.report({'INFO'}, "Rendering MoCap indices from " + str(context.scene.GlimpseBvhGenFrom) + " to " + str(context.scene.GlimpseBvhGenTo))
         for idx in range(bpy.context.scene.GlimpseBvhGenFrom, bpy.context.scene.GlimpseBvhGenTo):
             bvh = bvh_index[idx]
 
@@ -987,7 +1000,7 @@ def register():
     bpy.types.Scene.GlimpseDebug = BoolProperty(
             name="Debug",
             description="Enable Debugging",
-            default=True,
+            default=False,
             )
 
     bpy.types.Scene.GlimpseMoCapBlacklist = BoolProperty(
