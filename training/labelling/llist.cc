@@ -41,13 +41,16 @@ llist_free(LList* list, LListIterCallback free_cb, void* userdata)
 LList*
 llist_insert_before(LList* before, LList* node)
 {
-  if (before && before->prev)
+  if (before)
     {
-      before->prev->next = node;
-      node->prev = before->prev;
+      if (before->prev)
+        {
+          before->prev->next = node;
+          node->prev = before->prev;
+        }
+      before->prev = node;
     }
   node->next = before;
-  before->prev = node;
 
   return node;
 }
