@@ -42,6 +42,7 @@
 #include <ImfMatrixAttribute.h>
 #include <ImfArray.h>
 #include <ImfChannelList.h>
+#include <ImfIO.h>
 
 #include <ImathBox.h>
 
@@ -54,8 +55,7 @@
 
 using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
-
-static int indent = 0;
+using namespace IEX_NAMESPACE;
 
 enum image_format {
     IMAGE_FORMAT_XFLOAT,
@@ -99,10 +99,156 @@ exr_pixel_type_name(enum PixelType type)
     return "FAIL";
 }
 
-static struct image *
-load_exr_file(const char *filename)
+class MemIStream: public IStream
 {
-    InputFile in_file(filename);
+    public:
+        MemIStream(char *data, Int64 len):
+            IStream("memory")
+        {
+            data_  = data;
+            len_ = len;
+            pos_ = 0;
+        }
+
+        bool isMemoryMapped() { return true; }
+
+        bool read (char c[/*n*/], int n)
+        {
+            Int64 remainder = len_ - pos_;
+            Int64 count = 0;
+
+            if (n < 0) {
+                throw IEX_NAMESPACE::InputExc("Attempted to read() with negative count");
+            }
+
+            count = (Int64)n;
+
+            // ImfIO.h says:
+            //  "If the stream contains less than n bytes, or if an I/O error
+            //   occurs, read(c,n) throws an exception."
+            if (count > remainder) {
+                throw IEX_NAMESPACE::InputExc("Attempted to read() beyond end of stream. Bug in OpenEXR?");
+            }
+
+            memcpy(c, data_ + pos_, count);
+            pos_ += count;
+
+            // ImfIO.h says:
+            //  "If read(c,n) reads the last byte from the file it returns false,
+            //   otherwise it returns true"
+            return !(count && count == remainder);
+        }
+
+        char *readMemoryMapped(int n)
+        {
+            Int64 remainder = len_ - pos_;
+            Int64 count = 0;
+
+            if (n < 0) {
+                throw IEX_NAMESPACE::InputExc("Attempted to readMemoryMapped() with negative count");
+            }
+
+            count = (Int64)n;
+
+            // ImfIO.h says:
+            // "If there are less than n byte left to read in the stream or if
+            //  the stream is not memory-mapped, readMemoryMapped(n) throws an
+            //  exception."
+            if (count > remainder) {
+                throw IEX_NAMESPACE::InputExc("Attempted to readMemoryMapped() beyond end of file. Bug in OpenEXR? I don't know!");
+            }
+
+            char *ret = data_ + pos_;
+
+            pos_ += count;
+
+            return ret;
+        }
+
+        Int64 tellg()
+        {
+            return pos_;
+        }
+
+        /* OpenEXR doesn't say how to handle seeking past the end of the buffer.
+         * We throw an exception.
+         */
+        void seekg(Int64 pos)
+        {
+            if (pos < 0) {
+                pos_ = 0;
+                throw IEX_NAMESPACE::InputExc("Attempted to seek with negative offset");
+            }
+
+            if (pos >= len_) {
+                pos_ = len_ - 1;
+                throw IEX_NAMESPACE::InputExc("Attempted to seek beyond end of file");
+            }
+
+            pos_ = pos;
+        }
+
+        // "Clear error conditions after an operation has failed"
+        // ... OK?
+        void clear () {}
+
+    private:
+        Int64 len_;
+        Int64 pos_;
+        char *data_;
+};
+
+static char *
+read_file(const char *filename, int *len)
+{
+    int fd;
+    struct stat st;
+    char *buf;
+    int n = 0;
+
+    *len = 0;
+
+    fd = open(filename, O_RDONLY|O_CLOEXEC);
+    if (fd < 0)
+        return NULL;
+
+    if (fstat(fd, &st) < 0)
+        return NULL;
+
+    // N.B. st_size may be zero for special files like /proc/ files so we
+    // speculate
+    if (st.st_size == 0)
+        st.st_size = 1024;
+
+    buf = (char *)xmalloc(st.st_size);
+
+    while (n < st.st_size) {
+        int ret = read(fd, buf + n, st.st_size - n);
+        if (ret == -1) {
+            if (errno == EINTR)
+                continue;
+            else {
+                free(buf);
+                return NULL;
+            }
+        } else if (ret == 0)
+            break;
+        else
+            n += ret;
+    }
+
+    close(fd);
+
+    *len = n;
+
+    return buf;
+}
+
+static struct image *
+decode_exr_file(char *file, int len)
+{
+    MemIStream mem_stream(file, len);
+    InputFile in_file(mem_stream);
 
     Box2i dw = in_file.header().dataWindow();
 
@@ -177,8 +323,6 @@ load_exr_file(const char *filename)
         }
     }
 
-    debug("%*sread %s (%dx%d) OK\n", indent, "", filename, width, height);
-
     debug("Keeping \"%s\" %s channel\n",
           channel_name, exr_pixel_type_name(channel->type));
     return ret;
@@ -245,7 +389,22 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    struct image *img = load_exr_file(argv[1]);
+    int len;
+    char *file = read_file(argv[1], &len);
+    if (!file) {
+        fprintf(stderr, "Failed to read file %s: %m\n", argv[1]);
+        exit(1);
+    }
+    debug("read %s OK\n", argv[1]);
+
+    struct image *img = decode_exr_file(file, len);
+    if (!img)
+        exit(1);
+
+    debug("decoded %s OK (%dx%d)\n", argv[1], img->width, img->height);
+
+    free(file);
+    file = NULL;
 
     write_pfm_file(img, argv[2]);
 
