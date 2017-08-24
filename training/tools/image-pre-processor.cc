@@ -706,7 +706,7 @@ frame_add_noise(const struct image *__restrict__ labels,
                 };
 
                 for (int i = 0; i < 8; i++) {
-                    if (neighbour_label[i] != BACKGROUND_ID) {
+                    if (neighbour_label[i] == BACKGROUND_ID) {
                         edge = true;
                         break;
                     }
