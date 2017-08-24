@@ -25,6 +25,7 @@ typedef struct {
   float**  inferred;      // Inferred label probabilities
 
   uint8_t  n_joints;      // Number of joints
+  char**   joint_names;   // Names of joints
   LList**  joint_map;     // Lists of which labels correspond to which joints
   float*   joints;        // List of joint positions for each image
   uint8_t  bg_label;      // Background label
@@ -383,17 +384,17 @@ main (int argc, char** argv)
                     &ctx.n_images, &ctx.n_joints, &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images, &ctx.joints);
 
-  // Note, there's a background label, so there should always be fewer joints
-  // than labels.
+  // Note, there's a background label, so there ought to always be fewer joints
+  // than labels. Maybe there are some situations where this might be desired
+  // though, so just warn about it.
   if (ctx.n_joints >= ctx.forest[0]->header.n_labels)
     {
-      fprintf(stderr, "Joint/label number mistmach (%u/%u)\n",
+      fprintf(stderr, "WARNING: Joints exceeds labels (%u >= %u)\n",
               (uint32_t)ctx.n_joints, (uint32_t)ctx.forest[0]->header.n_labels);
-      return 1;
     }
 
   printf("Loading joint map...\n");
-  ctx.joint_map = (LList**)xmalloc(ctx.n_joints * sizeof(LList*));
+  ctx.joint_map = (LList**)xcalloc(ctx.n_joints, sizeof(LList*));
   FILE* joint_map_file = fopen(joint_map_path, "r");
   if (!joint_map_file)
     {
@@ -401,6 +402,7 @@ main (int argc, char** argv)
       return 1;
     }
 
+  ctx.joint_names = (char**)xmalloc(ctx.n_joints * sizeof(char*));
   for (uint8_t i = 0; i < ctx.n_joints; i++)
     {
       char buffer[256];
@@ -410,8 +412,15 @@ main (int argc, char** argv)
           return 1;
         }
 
-      char* label_string = buffer - 1;
-      while (label_string[0] != '\0')
+      char* label_string = strchr(buffer, ',');
+      if (!label_string || label_string == buffer)
+        {
+          fprintf(stderr, "Error reading joint %u name\n", (uint32_t)i);
+          return 1;
+        }
+      ctx.joint_names[i] = strndup(buffer, label_string - buffer);
+
+      while (label_string[0] != '\0' && label_string[0] != '\n')
         {
           label_string += 1;
 
@@ -437,6 +446,7 @@ main (int argc, char** argv)
 
           ctx.joint_map[i] = llist_insert_before(ctx.joint_map[i],
                                llist_new((void*)((uintptr_t)label)));
+          label_string = new_string;
         }
 
       if (!ctx.joint_map[i])
