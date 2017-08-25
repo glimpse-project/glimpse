@@ -208,7 +208,7 @@ verify_metadata(TrainData* data, char* filename,
           if (data->gather_joints)
             {
               data->joint_data = (float*)
-                xmalloc(n_joints * data->n_images * sizeof(float) * 3);
+                xmalloc(data->n_images * n_joints * 3 * sizeof(float));
             }
         }
       else
@@ -420,7 +420,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
           exit(1);
         }
 
-      float* joints = &data->joint_data[index * sizeof(float) * 3 * n_joints];
+      float* joints = &data->joint_data[index * n_joints * 3];
       if (fread(joints, sizeof(float) * 3, n_joints, fp) != n_joints)
         {
           fprintf(stderr, "%s: Error reading joints\n", joint_path);
