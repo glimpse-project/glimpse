@@ -309,12 +309,16 @@ class RigGeneratorOperator(bpy.types.Operator):
 
     def execute(self, context):
 
+        meta = {}
+
         bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
         bpy.ops.object.select_all(action='DESELECT')
         bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
 
         dt = datetime.datetime.today()
         date_str = "%04u-%02u-%02u-%02u-%02u-%02u" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+
+        meta['date'] = date_str
 
         render_layers = []
         for i in range(0, 20):
@@ -364,6 +368,8 @@ class RigGeneratorOperator(bpy.types.Operator):
             bvh_name = os.path.basename(bvh['file'])
             self.report({'INFO'}, "rendering " + bvh_name)
 
+            meta['bvh'] = bvh_name
+
             randomization_step = 5
 
             # extend the range end beyond the length in case it's not a multiple
@@ -375,22 +381,19 @@ class RigGeneratorOperator(bpy.types.Operator):
             for body in all_bodies:
                 self.report({'INFO'}, "> Rendering for body = " + body)
 
+                meta['body'] = body
+
                 # Hit some errors with the range bounds not being integer and I
                 # guess that comes from the json library loading our mocap index
                 # may make some numeric feilds float so bvh['start'] or bvh['end']
                 # might be float
                 for start_frame in range(int(bvh['start']), int(range_end), randomization_step):
 
-                    meta = {}
                     camera_meta = {}
-
-                    meta['start'] = start_frame
 
                     # NB. the range extends beyond the length of animation in case
                     # it's not a multiple of the randomization step, so clip end here:
                     end_frame = min(start_frame + randomization_step, bvh['end'])
-
-                    meta['end'] = end_frame
 
                     self.report({'INFO'}, "> randomizing " + bvh_name + " render")
 
@@ -523,6 +526,7 @@ class RigGeneratorOperator(bpy.types.Operator):
                         bpy.context.scene.frame_set(frame)
                         context.scene.update()
 
+                        meta['frame'] = frame
                         meta['bones'] = []
                         for bone in body_pose.pose.bones:
                             head_cam = camera_world_inverse_mat4 * bone.head.to_4d()
@@ -555,7 +559,6 @@ class RigGeneratorOperator(bpy.types.Operator):
                         meta_filename = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name[:-4], dirname, 'Image%04u.json' % frame))
                         with open(meta_filename, 'w') as fp:
                             json.dump(meta, fp, indent=2)
-
 
 
         return {'FINISHED'}
