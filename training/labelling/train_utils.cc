@@ -26,7 +26,7 @@ typedef struct {
   LList*   paths;   // List of label, depth and joint file paths,
   int32_t  width;         // Image width
   int32_t  height;        // Image height
-  float*   depth_images;  // Depth image data
+  half*    depth_images;  // Depth image data
   uint8_t* label_images;  // Label image data
   float*   joint_data;    // Joint data
   bool     gather_depth;  // Whether to load depth images
@@ -188,8 +188,8 @@ verify_metadata(TrainData* data, char* filename,
             }
           if (data->gather_depth)
             {
-              data->depth_images = (float*)
-                xmalloc(n_pixels * sizeof(float));
+              data->depth_images = (half*)
+                xmalloc(n_pixels * sizeof(half));
             }
         }
       else
@@ -249,6 +249,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
       if (fread(header, 1, 8, fp) != 8)
         {
           fprintf(stderr, "Error reading header of %s\n", label_path);
+          exit(1);
         }
       if (png_sig_cmp(header, 0, 8))
         {
@@ -288,15 +289,17 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
       verify_metadata(data, label_path, width, height, 0);
 
       // Verify pixel type
-      if (png_get_color_type(png_ptr, info_ptr) != 0)
+      png_byte color_type = png_get_color_type(png_ptr, info_ptr);
+      if (color_type != PNG_COLOR_TYPE_GRAY &&
+          color_type != PNG_COLOR_TYPE_PALETTE)
         {
-          fprintf(stderr, "%s: Expected a grayscale PNG\n", label_path);
+          fprintf(stderr, "%s: Expected an 8-bit color type\n", label_path);
           exit(1);
         }
 
       if (png_get_bit_depth(png_ptr, info_ptr) != 8)
         {
-          fprintf(stderr, "%s: Expected 8-bit grayscale\n", label_path);
+          fprintf(stderr, "%s: Expected 8-bit pixel depth\n", label_path);
           exit(1);
         }
 
@@ -349,7 +352,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   if (depth_path)
     {
       // Read depth file
-      float* dest;
+      half* dest;
       InputFile in_file(depth_path);
       Box2i dw = in_file.header().dataWindow();
 
@@ -372,10 +375,10 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
 
           FrameBuffer frameBuffer;
           frameBuffer.insert("Y",
-                             Slice (FLOAT,
+                             Slice (HALF,
                                     (char *)dest,
-                                    sizeof(float),           // x stride,
-                                    sizeof(float) * width)); // y stride
+                                    sizeof(half),           // x stride,
+                                    sizeof(half) * width)); // y stride
 
           in_file.setFrameBuffer(frameBuffer);
           in_file.readPixels(dw.min.y, dw.max.y);
@@ -443,7 +446,7 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
                   uint32_t limit, uint32_t skip, bool shuffle,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
-                  float** out_depth_images, uint8_t** out_label_images,
+                  half** out_depth_images, uint8_t** out_label_images,
                   float** out_joints)
 {
   TrainData data = {

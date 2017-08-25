@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <half.h>
 
 void gather_train_data(const char* label_dir_path,
                        const char* depth_dir_path,
@@ -15,7 +16,7 @@ void gather_train_data(const char* label_dir_path,
                        uint8_t*    out_n_joints,
                        int32_t*    out_width,
                        int32_t*    out_height,
-                       float**     out_depth_images,
+                       half**      out_depth_images,
                        uint8_t**   out_label_images,
                        float**     out_joints);
 

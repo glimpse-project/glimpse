@@ -35,7 +35,7 @@ typedef struct {
 
   uint32_t n_images;      // Number of training images
   uint8_t* label_images;  // Label images (row-major)
-  float*   depth_images;  // Depth images (row-major)
+  half*    depth_images;  // Depth images (row-major)
 
   uint32_t n_uv;          // Number of combinations of u,v pairs
   float    uv_range;      // Range of u,v combinations to generate
@@ -185,7 +185,7 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
   for (uint32_t i = 0; i < ctx->n_images;
        i++, image_idx += ctx->width * ctx->height)
     {
-      float* depth_image = &ctx->depth_images[image_idx];
+      half* depth_image = &ctx->depth_images[image_idx];
       uint8_t* label_image = &ctx->label_images[image_idx];
 
       for (uint32_t p = data->pixel_base[i]; p < data->pixel_base[i + 1]; p++)
@@ -362,7 +362,7 @@ collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
   uint32_t image_idx = 0;
   for (uint32_t i = 0; i < ctx->n_images; i++)
     {
-      float* depth_image = &ctx->depth_images[image_idx];
+      half* depth_image = &ctx->depth_images[image_idx];
       for (uint32_t p = data->pixel_base[i]; p < data->pixel_base[i + 1]; p++)
         {
           Int2D pixel = data->pixels[p];

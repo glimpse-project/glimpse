@@ -21,7 +21,7 @@ typedef struct {
   int32_t  width;         // Width of training images
   int32_t  height;        // Height of training images
   uint8_t* label_images;  // Label images (row-major)
-  float*   depth_images;  // Depth images (row-major)
+  half*    depth_images;  // Depth images (row-major)
   float**  inferred;      // Inferred label probabilities
 
   uint8_t  n_joints;      // Number of joints

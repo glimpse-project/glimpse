@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <math.h>
+#include <half.h>
 
 #define OUT_VERSION 3
 
@@ -28,7 +29,7 @@ typedef struct __attribute__((__packed__)) {
 } RDTHeader;
 
 inline float
-sample_uv(float* depth_image, uint32_t width, uint32_t height,
+sample_uv(half* depth_image, uint32_t width, uint32_t height,
           Int2D pixel, float depth, UVPair uv)
 {
 #if 0
@@ -56,10 +57,10 @@ sample_uv(float* depth_image, uint32_t width, uint32_t height,
 
   float upixel = (u[0] >= 0 && u[0] < (int32_t)width &&
                   u[1] >= 0 && u[1] < (int32_t)height) ?
-    depth_image[((u[1] * width) + u[0])] : INFINITY;
+    (float)depth_image[((u[1] * width) + u[0])] : 1000.f;
   float vpixel = (v[0] >= 0 && v[0] < (int32_t)width &&
                   v[1] >= 0 && v[1] < (int32_t)height) ?
-    depth_image[((v[1] * width) + v[0])] : INFINITY;
+    (float)depth_image[((v[1] * width) + v[0])] : 1000.f;
 
   return upixel - vpixel;
 #endif
