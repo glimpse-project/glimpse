@@ -1,4 +1,4 @@
-all: image-pre-processor pfm-debug exr-to-pfm pfm-to-exr
+all: pack-training-data image-pre-processor pfm-debug exr-to-pfm pfm-to-exr
 
 #OPT ?= -g3 -O3 -march=native
 OPT ?= -g3 -O0 -DDEBUG
@@ -11,6 +11,9 @@ CXXFLAGS ?= $(OPT)
 CXXFLAGS += -std=c++14 -Wall
 
 LDFLAGS=
+
+pack-training-data: pack-training-data.cc llist.cc xalloc.cc pack.c
+	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs libpng` -lsnappy -lpthread
 
 image-pre-processor: image-pre-processor.cc
 	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng` -lpthread
@@ -25,4 +28,4 @@ pfm-to-exr: pfm-to-exr.cc
 	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR`
 
 clean:
-	rm -f image-pre-processor pfm-debug exr-to-pfm pfm-to-exr
+	rm -f pack-training-data image-pre-processor pfm-debug exr-to-pfm pfm-to-exr
