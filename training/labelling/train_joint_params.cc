@@ -23,6 +23,7 @@ typedef struct {
   uint8_t* label_images;  // Label images (row-major)
   half*    depth_images;  // Depth images (row-major)
   float**  inferred;      // Inferred label probabilities
+  float*   weights;       // Pixel weighting for joint label groups
 
   uint8_t  n_joints;      // Number of joints
   char**   joint_names;   // Names of joints
@@ -84,7 +85,8 @@ thread_body(void* userdata)
 
   uint8_t n_labels = ctx->forest[0]->header.n_labels;
 
-  // Generate probability tables, and possibly calculate inference accuracy
+  // Generate probability tables and pixel weights, and possibly calculate
+  // inference accuracy
   uint32_t images_per_thread = (ctx->n_images + ctx->n_threads - 1) /
                                ctx->n_threads;
   uint32_t i_start = images_per_thread * data->thread;
@@ -95,6 +97,31 @@ thread_body(void* userdata)
       ctx->inferred[i] = infer(ctx->forest, ctx->n_trees,
                                &ctx->depth_images[idx],
                                ctx->width, ctx->height);
+
+      // Calculate pixel weight
+      uint32_t pixel_idx = 0;
+      uint32_t weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
+      for (int32_t y = 0; y < ctx->height; y++)
+        {
+          for (int32_t x = 0; x < ctx->width; x++, pixel_idx++)
+            {
+              float depth_2 =
+                powf((float)ctx->depth_images[idx + pixel_idx], 2);
+
+              for (uint8_t j = 0; j < ctx->n_joints; j++, weight_idx++)
+                {
+                  float pr = 0.f;
+                  for (LList* node = ctx->joint_map[j]; node; node = node->next)
+                    {
+                      uint8_t label = (uint8_t)((uintptr_t)node->data);
+                      pr += ctx->inferred[i][(pixel_idx * n_labels) + label];
+                    }
+                  ctx->weights[weight_idx] = pr * depth_2;
+                }
+            }
+        }
+
+      // Calculate inference accuracy if label images were specified
       if (ctx->label_images)
         {
           uint32_t label_incidence[n_labels] = { 0, };
@@ -481,6 +508,8 @@ main (int argc, char** argv)
     }
 
   ctx.inferred = (float**)xmalloc(ctx.n_images * sizeof(float*));
+  ctx.weights = (float*)xmalloc(ctx.n_images * ctx.width * ctx.height *
+                                ctx.n_joints * sizeof(float));
   float* best_dists = (float*)
     xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
   uint32_t* best_bandwidths = (uint32_t*)
