@@ -128,13 +128,18 @@ thread_body(void* userdata)
                 }
             }
 
+          uint8_t present_labels = 0;
           float accuracy = 0.f;
           for (uint8_t l = 0; l < n_labels; l++)
             {
-              accuracy += correct_label_incidence[l] /
-                          (float)label_incidence[l];
+              if (label_incidence[l] > 0)
+                {
+                  accuracy += correct_label_incidence[l] /
+                              (float)label_incidence[l];
+                  present_labels ++;
+                }
             }
-          accuracy /= (float)n_labels;
+          accuracy /= (float)present_labels;
 
           *data->accuracy += accuracy;
         }
