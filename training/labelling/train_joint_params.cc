@@ -118,10 +118,10 @@ thread_body(void* userdata)
 
   // Generate probability tables and pixel weights, and possibly calculate
   // inference accuracy
-  uint32_t images_per_thread = (ctx->n_images + ctx->n_threads - 1) /
-                               ctx->n_threads;
+  uint32_t images_per_thread = ctx->n_images / ctx->n_threads;
   uint32_t i_start = images_per_thread * data->thread;
-  uint32_t i_end = std::min(i_start + images_per_thread, ctx->n_images);
+  uint32_t i_end = (data->thread == ctx->n_threads - 1) ?
+    ctx->n_images : i_start + images_per_thread;
   for (uint32_t i = i_start, idx = ctx->width * ctx->height * i_start;
        i < i_end; i++, idx += ctx->width * ctx->height)
     {
@@ -218,10 +218,10 @@ thread_body(void* userdata)
   // the body using a range of thresholds/bandwidths/offsets, and record the
   // results
   uint32_t n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
-  uint32_t combos_per_thread = (n_combos + ctx->n_threads - 1) /
-                               ctx->n_threads;
+  uint32_t combos_per_thread = n_combos / ctx->n_threads;
   uint32_t c_start = combos_per_thread * data->thread;
-  uint32_t c_end = std::min(c_start + combos_per_thread, n_combos);
+  uint32_t c_end = (data->thread = ctx->n_threads - 1) ?
+    n_combos : c_start + combos_per_thread;
 
   uint32_t bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
 

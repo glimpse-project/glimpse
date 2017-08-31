@@ -664,7 +664,7 @@ main(int argc, char **argv)
       fprintf(stderr, "Error initialising thread barriers\n");
       return 1;
     }
-  uint32_t n_c = (ctx.n_uv + n_threads - 1) / n_threads;
+  uint32_t n_c = ctx.n_uv / n_threads;
   float* best_gains = (float*)malloc(n_threads * sizeof(float));
   uint32_t* best_uvs = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
   uint32_t* best_ts = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
@@ -675,7 +675,7 @@ main(int argc, char **argv)
       thread_data->ctx = &ctx;
       thread_data->data = &node_data;
       thread_data->c_start = i * n_c;
-      thread_data->c_end = std::min((i + 1) * n_c, ctx.n_uv);
+      thread_data->c_end = (i == n_threads - 1) ? ctx.n_uv : (i + 1) * n_c;
       thread_data->root_nhistogram = (i == 0) ? root_nhistogram : NULL;
       thread_data->best_gain = &best_gains[i];
       thread_data->best_uv = &best_uvs[i];
