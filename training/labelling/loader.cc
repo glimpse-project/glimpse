@@ -23,10 +23,10 @@ read_tree(FILE* file)
       return NULL;
     }
 
-  if (tree->header.version != OUT_VERSION)
+  if (tree->header.version != RDT_VERSION)
     {
       fprintf(stderr, "Incompatible RDT version, expected %u, found %u\n",
-              OUT_VERSION, (uint32_t)tree->header.version);
+              RDT_VERSION, (uint32_t)tree->header.version);
       free_tree(tree);
       return NULL;
     }

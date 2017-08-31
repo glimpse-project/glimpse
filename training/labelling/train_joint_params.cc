@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdbool.h>
+#include <float.h>
 #include <string.h>
 #include <thread>
 #include <pthread.h>
@@ -10,6 +11,10 @@
 #include "train_utils.h"
 #include "loader.h"
 #include "infer.h"
+
+#define N_SHIFTS 5
+#define SHIFT_THRESHOLD 0.001f
+#define PROGRESS_WIDTH 80
 
 static bool verbose = false;
 
@@ -45,9 +50,9 @@ typedef struct {
   TrainContext*      ctx;              // Training context
   uint32_t           thread;           // Thread number
   float*             best_dist;        // Best mean distance from each joint
-  uint32_t*          best_bandwidth;   // Best bandwidth index per joint
-  uint32_t*          best_threshold;   // Best threshold index per joint
-  uint32_t*          best_offset;      // Best offset index per joint
+  float*             best_bandwidth;   // Best bandwidth per joint
+  float*             best_threshold;   // Best threshold per joint
+  float*             best_offset;      // Best offset per joint
   float*             accuracy;         // Accuracy of inference
   pthread_barrier_t* barrier ;         // Barrier to synchronise dependent work
 } TrainThreadData;
@@ -76,6 +81,32 @@ print_usage(FILE* stream)
 "  -v, --verbose               Verbose output\n"
 "  -h, --help                  Display this message\n");
 }
+
+/*static void
+reproject(int32_t x, int32_t y, float depth, int32_t width, int32_t height,
+          float vfov, float* out_point)
+{
+  if (!isnormal(depth))
+    {
+      return;
+    }
+
+  float half_width = width / 2.f;
+  float half_height = height / 2.f;
+  float aspect = half_width / half_height;
+
+  float vfov_rad = vfov * M_PI / 180.f;
+  float tan_half_vfov = tanf(vfov_rad / 2.f);
+  float tan_half_hfov = tan_half_vfov * aspect;
+  //float hfov = atanf(tan_half_hfov) * 2;
+
+  float s = (x / half_width) - 1.f;
+  float t = (y / half_height) - 1.f;
+
+  out_point[0] = (tan_half_hfov * depth) * s;
+  out_point[1] = (tan_half_vfov * depth) * t;
+  out_point[2] = depth;
+}*/
 
 static void*
 thread_body(void* userdata)
@@ -177,9 +208,232 @@ thread_body(void* userdata)
       *data->accuracy /= (float)(i_end - i_start);
     }
 
+  // Wait for all threads to finish
   pthread_barrier_wait(data->barrier);
 
-  // 
+  // Wait for main thread to output progress bar
+  pthread_barrier_wait(data->barrier);
+
+  // Use mean-shift to find the inferred joint positions, set them back into
+  // the body using a range of thresholds/bandwidths/offsets, and record the
+  // results
+  uint32_t n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
+  uint32_t combos_per_thread = (n_combos + ctx->n_threads - 1) /
+                               ctx->n_threads;
+  uint32_t c_start = combos_per_thread * data->thread;
+  uint32_t c_end = std::min(c_start + combos_per_thread, n_combos);
+
+  uint32_t bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
+
+  uint32_t* n_pixels = (uint32_t*)xmalloc(ctx->n_joints * sizeof(uint32_t));
+  float* points = (float*)
+    xmalloc(ctx->n_joints * ctx->width * ctx->height * 3 * sizeof(float));
+  float* weights = (float*)
+    xmalloc(ctx->n_joints * ctx->width * ctx->height * sizeof(float));
+
+  // Variables for reprojection of 2d point + depth
+  float half_width = ctx->width / 2.f;
+  float half_height = ctx->height / 2.f;
+  float aspect = half_width / half_height;
+
+  float vfov_rad = ctx->forest[0]->header.fov * M_PI / 180.f;
+  float tan_half_vfov = tanf(vfov_rad / 2.f);
+  float tan_half_hfov = tan_half_vfov * aspect;
+  //float hfov = atanf(tan_half_hfov) * 2;
+
+  float root_2pi = sqrtf(2 * M_PI);
+
+  float output_acc = 0;
+  float output_freq = (c_end - c_start) /
+    (PROGRESS_WIDTH / (float)ctx->n_threads);
+
+  for (uint32_t c = c_start; c < c_end; c++)
+    {
+      uint32_t bandwidth_idx = c / bandwidth_stride;
+      uint32_t threshold_idx = (c / ctx->n_offsets) % ctx->n_thresholds;
+      uint32_t offset_idx = c % ctx->n_offsets;
+
+      float bandwidth = ctx->bandwidths[bandwidth_idx];
+      float threshold = ctx->thresholds[threshold_idx];
+      float offset = ctx->offsets[offset_idx];
+
+      float acc_distance[ctx->n_joints] = { 0.f };
+
+      for (uint32_t i = 0, idx = 0; i < ctx->n_images; i++)
+        {
+          // Gather pixels above the given threshold
+          memset(n_pixels, 0, ctx->n_joints * sizeof(uint32_t));
+          for (int32_t y = 0; y < ctx->height; y++)
+            {
+              float t = -((y / half_height) - 1.f);
+              for (int32_t x = 0; x < ctx->width; x++, idx++)
+                {
+                  float s = (x / half_width) - 1.f;
+                  float depth = (float)ctx->depth_images[idx];
+                  if (!isnormal(depth))
+                    {
+                      continue;
+                    }
+
+                  for (uint8_t j = 0; j < ctx->n_joints; j++)
+                    {
+                      uint32_t joint_idx = j * ctx->width * ctx->height;
+                      for (LList* node = ctx->joint_map[j]; node;
+                           node = node->next)
+                        {
+                          uint8_t label = (uint8_t)((uintptr_t)node->data);
+                          float label_pr =
+                            ctx->inferred[i][(idx * n_labels) + label];
+                          if (label_pr >= threshold)
+                            {
+                              // Reproject point
+                              points[(joint_idx + n_pixels[j]) * 3] =
+                                (tan_half_hfov * depth) * s;
+                              points[(joint_idx + n_pixels[j]) * 3 + 1] =
+                                (tan_half_vfov * depth) * t;
+                              points[(joint_idx + n_pixels[j]) * 3 + 2] =
+                                depth;
+
+                              // Store pixel weight (density)
+                              weights[joint_idx + n_pixels[j]] =
+                                ctx->weights[(idx * ctx->n_joints) + j];
+
+                              n_pixels[j]++;
+                              break;
+                            }
+                        }
+                    }
+                }
+            }
+
+          // Means shift to find joint modes
+          for (uint8_t j = 0; j < ctx->n_joints; j++)
+            {
+              if (n_pixels[j] == 0)
+                {
+                  continue;
+                }
+
+              uint32_t joint_idx = j * ctx->width * ctx->height;
+              for (uint32_t s = 0; s < N_SHIFTS; s++)
+                {
+                  float new_points[n_pixels[j] * 3];
+                  bool moved = false;
+                  for (uint32_t p = 0; p < n_pixels[j]; p++)
+                    {
+                      float* x = &points[(joint_idx + p) * 3];
+                      float* nx = &new_points[p * 3];
+                      float numerator[3] = { 0.f, };
+                      float denominator = 0.f;
+                      for (uint32_t n = 0; n < n_pixels[j]; n++)
+                        {
+                          float* xi = &points[(joint_idx + n) * 3];
+                          float distance = sqrtf(pow(x[0] - xi[0], 2.f) +
+                                                 pow(x[1] - xi[1], 2.f) +
+                                                 pow(x[2] - xi[2], 2.f));
+
+                          // Weighted gaussian kernel
+                          float weight = weights[joint_idx + n] *
+                            (1.f / (bandwidth * root_2pi)) *
+                            expf(-0.5f * pow(distance / bandwidth, 2.f));
+
+                          numerator[0] += weight * xi[0];
+                          numerator[1] += weight * xi[1];
+                          numerator[2] += weight * xi[2];
+
+                          denominator += weight;
+                        }
+
+                      nx[0] = numerator[0] / denominator;
+                      nx[1] = numerator[1] / denominator;
+                      nx[2] = numerator[2] / denominator;
+
+                      if (!moved &&
+                          (fabs(nx[0] - x[0]) >= SHIFT_THRESHOLD ||
+                           fabs(nx[1] - x[1]) >= SHIFT_THRESHOLD ||
+                           fabs(nx[2] - x[2]) >= SHIFT_THRESHOLD))
+                        {
+                          moved = true;
+                        }
+                    }
+
+                  memcpy((void*)&points[joint_idx * 3], (void*)new_points,
+                         n_pixels[j] * 3 * sizeof(float));
+
+                  if (!moved || s == N_SHIFTS - 1)
+                    {
+                      // Find the mode we're most confident of
+                      float* last_point = &points[joint_idx * 3];
+                      float confidence = 0;
+
+                      float* best_point = last_point;
+                      float best_confidence = 0;
+
+                      //uint32_t unique_points = 1;
+
+                      for (uint32_t p = 0; p < n_pixels[j]; p++)
+                        {
+                          float* point = &points[(joint_idx + p) * 3];
+                          if (fabs(point[0]-last_point[0]) >= SHIFT_THRESHOLD ||
+                              fabs(point[1]-last_point[1]) >= SHIFT_THRESHOLD ||
+                              fabs(point[2]-last_point[2]) >= SHIFT_THRESHOLD)
+                            {
+                              if (confidence > best_confidence)
+                                {
+                                  best_point = last_point;
+                                  best_confidence = confidence;
+                                }
+                              //unique_points++;
+                              last_point = point;
+                              confidence = 0;
+                            }
+                          confidence += weights[joint_idx + p];
+                        }
+
+                      // Offset into the body
+                      best_point[2] += offset;
+
+                      // Calculate distance from expected joint position
+                      float* actual_joint =
+                        &ctx->joints[((i * ctx->n_joints) + j) * 3];
+                      // XXX: Current joint z positions are negated (and off?)
+                      float distance =
+                        sqrtf(pow(best_point[0] - actual_joint[0], 2.f) +
+                              pow(best_point[1] - actual_joint[1], 2.f) +
+                              pow(best_point[2] + actual_joint[2], 2.f));
+
+                      // Accumulate
+                      acc_distance[j] += distance;
+                      break;
+                    }
+                }
+            }
+        }
+
+      // See if this combination is better than the current best for any
+      // particular joint
+      for (uint8_t j = 0; j < ctx->n_joints; j++)
+        {
+          if (acc_distance[j] < data->best_dist[j])
+            {
+              data->best_dist[j] = acc_distance[j];
+              data->best_bandwidth[j] = bandwidth;
+              data->best_threshold[j] = threshold;
+              data->best_offset[j] = offset;
+            }
+        }
+
+      if (++output_acc >= output_freq)
+        {
+          fputc('x', stdout);
+          fflush(stdout);
+          output_acc -= output_freq;
+        }
+    }
+
+  xfree(n_pixels);
+  xfree(points);
+  xfree(weights);
 
   pthread_exit(NULL);
 }
@@ -215,6 +469,12 @@ void
 gen_range(float** data, float min, float max, uint32_t n)
 {
   *data = (float*)xmalloc(n * sizeof(float));
+  if (n == 1)
+    {
+      (*data)[0] = (max + min) / 2.f;
+      return;
+    }
+
   for (uint32_t i = 0; i < n; i++)
     {
       (*data)[i] = min + ((max - min) * i) / (float)(n - 1);
@@ -230,20 +490,26 @@ main (int argc, char** argv)
       return 1;
     }
 
+  // Variables for timing output
+  TimeForDisplay since_begin, since_last;
+  struct timespec begin, last, now;
+  clock_gettime(CLOCK_MONOTONIC, &begin);
+  last = begin;
+
   // Set default parameters
   TrainContext ctx = { 0, };
   uint32_t limit = UINT32_MAX;
   uint32_t skip = 0;
   bool shuffle = false;
-  ctx.n_bandwidths = 50;
-  float min_bandwidth = 0.015f;
-  float max_bandwidth = 0.090f;
-  ctx.n_thresholds = 50;
+  ctx.n_bandwidths = 10;
+  float min_bandwidth = 0.02f;
+  float max_bandwidth = 0.08f;
+  ctx.n_thresholds = 10;
   float min_threshold = 0.1f;
-  float max_threshold = 0.9f;
-  ctx.n_offsets = 50;
-  float min_offset = 0.025f;
-  float max_offset = 0.075f;
+  float max_threshold = 0.5f;
+  ctx.n_offsets = 10;
+  float min_offset = 0.01f;
+  float max_offset = 0.04f;
   ctx.n_threads = std::thread::hardware_concurrency();
 
   // Pass arguments
@@ -495,11 +761,26 @@ main (int argc, char** argv)
     }
 
   printf("Generating test parameters...\n");
+  printf("%u bandwidths from %.3f to %.3f\n",
+         ctx.n_bandwidths, min_bandwidth, max_bandwidth);
+  printf("%u thresholds from %.3f to %.3f\n",
+         ctx.n_thresholds, min_threshold, max_threshold);
+  printf("%u offsets from %.3f to %.3f\n",
+         ctx.n_offsets, min_offset, max_offset);
   gen_range(&ctx.bandwidths, min_bandwidth, max_bandwidth, ctx.n_bandwidths);
   gen_range(&ctx.thresholds, min_threshold, max_threshold, ctx.n_thresholds);
   gen_range(&ctx.offsets, min_offset, max_offset, ctx.n_offsets);
 
-  printf("Beginning with %u threads...\n", ctx.n_threads);
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  since_begin = get_time_for_display(&begin, &now);
+  since_last = get_time_for_display(&last, &now);
+  last = now;
+  printf("(%02d:%02d:%02d / %02d:%02d:%02d) Beginning with %u threads...\n",
+         since_begin.hours, since_begin.minutes, since_begin.seconds,
+         since_last.hours, since_last.minutes, since_last.seconds,
+         ctx.n_threads);
+
   pthread_barrier_t barrier;
   if (pthread_barrier_init(&barrier, NULL, ctx.n_threads + 1) != 0)
     {
@@ -512,13 +793,16 @@ main (int argc, char** argv)
                                 ctx.n_joints * sizeof(float));
   float* best_dists = (float*)
     xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
-  uint32_t* best_bandwidths = (uint32_t*)
-    xmalloc(ctx.n_joints * ctx.n_threads * sizeof(uint32_t));
-  uint32_t* best_thresholds = (uint32_t*)
-    xmalloc(ctx.n_joints * ctx.n_threads * sizeof(uint32_t));
-  uint32_t* best_offsets = (uint32_t*)
-    xmalloc(ctx.n_joints * ctx.n_threads * sizeof(uint32_t));
+  std::fill(best_dists, best_dists + (ctx.n_joints * ctx.n_threads), FLT_MAX);
+  float* best_bandwidths = (float*)
+    xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
+  float* best_thresholds = (float*)
+    xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
+  float* best_offsets = (float*)
+    xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
   float* accuracies = (float*)xcalloc(ctx.n_threads, sizeof(float));
+  pthread_t threads[ctx.n_threads];
+
   for (uint32_t i = 0; i < ctx.n_threads; i++)
     {
       TrainThreadData* thread_data = (TrainThreadData*)
@@ -532,8 +816,8 @@ main (int argc, char** argv)
       thread_data->accuracy = &accuracies[i];
       thread_data->barrier = &barrier;
 
-      pthread_t thread;
-      if (pthread_create(&thread, NULL, thread_body, (void*)thread_data) != 0)
+      if (pthread_create(&threads[i], NULL, thread_body,
+                         (void*)thread_data) != 0)
         {
           fprintf(stderr, "Error creating thread\n");
           return 1;
@@ -544,6 +828,9 @@ main (int argc, char** argv)
 
   if (ctx.label_images)
     {
+      // We no longer need the label images
+      xfree(ctx.label_images);
+
       // Calculate accuracy
       float accuracy = 0.f;
       uint32_t n_accuracies = std::min(ctx.n_threads, ctx.n_images);
@@ -555,6 +842,129 @@ main (int argc, char** argv)
 
       printf("Inference accuracy: %f\n", accuracy);
     }
+  xfree(accuracies);
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  since_begin = get_time_for_display(&begin, &now);
+  since_last = get_time_for_display(&last, &now);
+  last = now;
+  printf("(%02d:%02d:%02d / %02d:%02d:%02d) Waiting for mean shift...\n",
+         since_begin.hours, since_begin.minutes, since_begin.seconds,
+         since_last.hours, since_last.minutes, since_last.seconds);
+
+  for (uint32_t i = 0; i < PROGRESS_WIDTH; i++)
+    {
+      printf("-");
+    }
+  printf("\n");
+
+  // Let threads continue
+  pthread_barrier_wait(&barrier);
+
+  // Destroy barrier
+  pthread_barrier_destroy(&barrier);
+
+  // Wait for threads to finish
+  for (uint32_t i = 0; i < ctx.n_threads; i++)
+    {
+      if (pthread_join(threads[i], NULL) != 0)
+        {
+          fprintf(stderr, "Error joining thread, trying to continue...\n");
+        }
+    }
+  printf("\n");
+
+  // Free memory we no longer need
+  xfree(ctx.depth_images);
+  xfree(ctx.weights);
+  for (uint32_t i = 0; i < ctx.n_images; i++)
+    {
+      xfree(ctx.inferred[i]);
+    }
+  xfree(ctx.inferred);
+
+  // Open output file
+  FILE* output;
+  JIPHeader header = { { 'J', 'I', 'P' }, JIP_VERSION, ctx.n_joints };
+  if (!(output = fopen(out_filename, "wb")))
+    {
+      fprintf(stderr, "Failed to open output file\n");
+    }
+  else
+    {
+      if (fwrite(&header, sizeof(JIPHeader), 1, output) != 1)
+        {
+          fprintf(stderr, "Error writing header\n");
+
+          fclose(output);
+          output = NULL;
+        }
+    }
+
+  // Find the best parameter combination and write to output file
+  for (uint32_t j = 0; j < ctx.n_joints; j++)
+    {
+      for (uint32_t i = 1; i < ctx.n_threads; i++)
+        {
+          uint32_t idx = ctx.n_joints * i + j;
+          if (best_dists[idx] < best_dists[j])
+            {
+              best_dists[j] = best_dists[idx];
+              best_bandwidths[j] = best_bandwidths[idx];
+              best_thresholds[j] = best_thresholds[idx];
+              best_offsets[j] = best_offsets[idx];
+            }
+        }
+
+      if (verbose || !output)
+        {
+          printf("Joint %d (%s): Mean distance: %.3fm\n"
+                 "  Bandwidth: %f\n"
+                 "  Threshold: %f\n"
+                 "  Offset: %f\n",
+                 j, ctx.joint_names[j], best_dists[j] / ctx.n_images,
+                 best_bandwidths[j], best_thresholds[j], best_offsets[j]);
+        }
+
+      if (output)
+        {
+          if (fwrite(&best_bandwidths[j], sizeof(float), 1, output) != 1 ||
+              fwrite(&best_thresholds[j], sizeof(float), 1, output) != 1 ||
+              fwrite(&best_offsets[j], sizeof(float), 1, output) != 1)
+            {
+              fprintf(stderr, "Error writing output\n");
+            }
+        }
+    }
+
+  if (fclose(output) != 0)
+    {
+      fprintf(stderr, "Error closing output file\n");
+    }
+
+  // Free the last of the allocated memory
+  xfree(best_dists);
+  xfree(ctx.bandwidths);
+  xfree(best_bandwidths);
+  xfree(ctx.thresholds);
+  xfree(best_thresholds);
+  xfree(ctx.offsets);
+  xfree(best_offsets);
+  for (uint32_t i = 0; i < ctx.n_joints; i++)
+    {
+      xfree(ctx.joint_names[i]);
+      llist_free(ctx.joint_map[i], NULL, NULL);
+    }
+  xfree(ctx.joint_names);
+  xfree(ctx.joint_map);
+
+  clock_gettime(CLOCK_MONOTONIC, &now);
+  since_begin = get_time_for_display(&begin, &now);
+  since_last = get_time_for_display(&last, &now);
+  last = now;
+  printf("(%02d:%02d:%02d / %02d:%02d:%02d) Done!\n",
+         since_begin.hours, since_begin.minutes, since_begin.seconds,
+         since_last.hours, since_last.minutes, since_last.seconds);
 
   return 0;
 }

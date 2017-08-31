@@ -7,7 +7,8 @@
 #include <math.h>
 #include <half.h>
 
-#define OUT_VERSION 3
+#define RDT_VERSION 3
+#define JIP_VERSION 0
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
@@ -27,6 +28,12 @@ typedef struct __attribute__((__packed__)) {
   uint8_t n_labels;
   float   fov;
 } RDTHeader;
+
+typedef struct __attribute__((__packed__)) {
+  char    tag[3];
+  uint8_t version;
+  uint8_t n_joints;
+} JIPHeader;
 
 inline float
 sample_uv(half* depth_image, uint32_t width, uint32_t height,
@@ -64,6 +71,29 @@ sample_uv(half* depth_image, uint32_t width, uint32_t height,
 
   return upixel - vpixel;
 #endif
+}
+
+typedef struct {
+  int32_t hours;
+  int32_t minutes;
+  int32_t seconds;
+} TimeForDisplay;
+
+inline TimeForDisplay
+get_time_for_display(struct timespec* begin, struct timespec* end)
+{
+  uint32_t elapsed;
+  TimeForDisplay display;
+
+  elapsed = (end->tv_sec - begin->tv_sec);
+  elapsed += (end->tv_nsec - begin->tv_nsec) / 1000000000;
+
+  display.seconds = elapsed % 60;
+  display.minutes = elapsed / 60;
+  display.hours = display.minutes / 60;
+  display.minutes = display.minutes % 60;
+
+  return display;
 }
 
 #endif /* __UTILS__ */

@@ -22,12 +22,6 @@ static bool verbose = false;
 static uint32_t seed = 0;
 
 typedef struct {
-  int32_t hours;
-  int32_t minutes;
-  int32_t seconds;
-} TimeForDisplay;
-
-typedef struct {
   int32_t  width;         // Width of training images
   int32_t  height;        // Height of training images
   float    fov;           // Camera field of view
@@ -435,23 +429,6 @@ print_usage(FILE* stream)
 "  -h, --help                    Display this message.\n");
 }
 
-TimeForDisplay
-get_time_for_display(struct timespec* begin, struct timespec* end)
-{
-  uint32_t elapsed;
-  TimeForDisplay display;
-
-  elapsed = (end->tv_sec - begin->tv_sec);
-  elapsed += (end->tv_nsec - begin->tv_nsec) / 1000000000;
-
-  display.seconds = elapsed % 60;
-  display.minutes = elapsed / 60;
-  display.hours = display.minutes / 60;
-  display.minutes = display.minutes % 60;
-
-  return display;
-}
-
 int
 main(int argc, char **argv)
 {
@@ -855,7 +832,7 @@ main(int argc, char **argv)
          argv[5]);
 
   // Write a header
-  RDTHeader header = { { 'R', 'D', 'T' }, OUT_VERSION, ctx.max_depth, \
+  RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \
                        ctx.n_labels, ctx.fov };
   if (fwrite(&header, sizeof(RDTHeader), 1, output) != 1)
     {
