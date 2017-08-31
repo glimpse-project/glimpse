@@ -199,6 +199,12 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
           // Accumulate root histogram
           ++root_histogram[label];
 
+          // Don't waste processing time if this is the last depth
+          if (data->depth >= (uint32_t)ctx->max_depth - 1)
+            {
+              continue;
+            }
+
           // Accumulate LR branch histograms
 
           // Sample pixels
@@ -278,7 +284,8 @@ thread_body(void* userdata)
       *data->best_gain = 0.f;
 
       // If there's only 1 label, skip all this, gain is zero
-      if (root_n_pixels[1] > 1)
+      if (root_n_pixels[1] > 1 &&
+          (*data->data)->depth < (uint32_t)data->ctx->max_depth - 1)
         {
           // Calculate the shannon entropy for the normalised label histogram
           float entropy = calculate_shannon_entropy(root_nhistogram,
