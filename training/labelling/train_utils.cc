@@ -98,7 +98,9 @@ gather_train_files(const char* label_dir_path,
           exit(1);
         }
 
-      stat(next_label_path, &st);
+      stat(label_dir_path ? next_label_path :
+                            (depth_dir_path ? next_depth_path :
+                                              next_joint_path), &st);
       if (S_ISDIR(st.st_mode))
         {
           cont = gather_train_files(next_label_path, next_depth_path,
@@ -232,7 +234,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   char* joint_path = paths[2];
   TrainData *data = (TrainData*)userdata;
 
-  if (label_path)
+  if (label_path && data->gather_label)
     {
       unsigned char header[8]; // 8 is the maximum size that can be checked
       png_structp png_ptr;
@@ -349,7 +351,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
       png_destroy_read_struct(&png_ptr, NULL, NULL);
     }
 
-  if (depth_path)
+  if (depth_path && data->gather_depth)
     {
       // Read depth file
       half* dest;
@@ -386,7 +388,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
     }
 
   // Read joint data
-  if (joint_path)
+  if (joint_path && data->gather_joints)
     {
       if (!(fp = fopen(joint_path, "rb")))
         {
@@ -450,20 +452,20 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
                   float** out_joints)
 {
   TrainData data = {
-    0,                        // Number of training images
-    0,                        // Number of joints
-    limit,                    // Limit to number of training images
-    skip,                     // Number of images to skip
-    shuffle,                  // Whether to shuffle images
-    NULL,                     // Image paths
-    0,                        // Image width
-    0,                        // Image height
-    NULL,                     // Depth image data
-    NULL,                     // Label image data
-    NULL,                     // Joint data
-    out_depth_images != NULL, // Whether to gather depth images
-    out_label_images != NULL, // Whether to gather label images
-    out_joints != NULL        // Whether to gather joint data
+    0,                                    // Number of training images
+    0,                                    // Number of joints
+    limit,                                // Limit to number of training images
+    skip,                                 // Number of images to skip
+    shuffle,                              // Whether to shuffle images
+    NULL,                                 // Image paths
+    0,                                    // Image width
+    0,                                    // Image height
+    NULL,                                 // Depth image data
+    NULL,                                 // Label image data
+    NULL,                                 // Joint data
+    (depth_dir_path && out_depth_images), // Whether to gather depth images
+    (label_dir_path && out_label_images), // Whether to gather label images
+    (joint_dir_path && out_joints)        // Whether to gather joint data
   };
 
   gather_train_files(label_dir_path, depth_dir_path, joint_dir_path, &data);
