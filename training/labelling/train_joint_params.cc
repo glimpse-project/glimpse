@@ -118,10 +118,12 @@ thread_body(void* userdata)
 
   // Generate probability tables and pixel weights, and possibly calculate
   // inference accuracy
-  uint32_t images_per_thread = ctx->n_images / ctx->n_threads;
+  uint32_t images_per_thread =
+    std::max((uint32_t)1, ctx->n_images / ctx->n_threads);
   uint32_t i_start = images_per_thread * data->thread;
-  uint32_t i_end = (data->thread == ctx->n_threads - 1) ?
-    ctx->n_images : i_start + images_per_thread;
+  uint32_t i_end = std::min(ctx->n_images,
+                            (data->thread == ctx->n_threads - 1) ?
+                              ctx->n_images : i_start + images_per_thread);
   for (uint32_t i = i_start, idx = ctx->width * ctx->height * i_start;
        i < i_end; i++, idx += ctx->width * ctx->height)
     {
@@ -218,10 +220,11 @@ thread_body(void* userdata)
   // the body using a range of thresholds/bandwidths/offsets, and record the
   // results
   uint32_t n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
-  uint32_t combos_per_thread = n_combos / ctx->n_threads;
+  uint32_t combos_per_thread = std::max((uint32_t)1, n_combos / ctx->n_threads);
   uint32_t c_start = combos_per_thread * data->thread;
-  uint32_t c_end = (data->thread = ctx->n_threads - 1) ?
-    n_combos : c_start + combos_per_thread;
+  uint32_t c_end = std::min(n_combos,
+                            (data->thread == ctx->n_threads - 1) ?
+                              n_combos : c_start + combos_per_thread);
 
   uint32_t bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
 
@@ -263,10 +266,10 @@ thread_body(void* userdata)
         {
           // Gather pixels above the given threshold
           memset(n_pixels, 0, ctx->n_joints * sizeof(uint32_t));
-          for (int32_t y = 0; y < ctx->height; y++)
+          for (int32_t y = 0, sidx = 0; y < ctx->height; y++)
             {
               float t = -((y / half_height) - 1.f);
-              for (int32_t x = 0; x < ctx->width; x++, idx++)
+              for (int32_t x = 0; x < ctx->width; x++, idx++, sidx++)
                 {
                   float s = (x / half_width) - 1.f;
                   float depth = (float)ctx->depth_images[idx];
@@ -283,7 +286,7 @@ thread_body(void* userdata)
                         {
                           uint8_t label = (uint8_t)((uintptr_t)node->data);
                           float label_pr =
-                            ctx->inferred[i][(idx * n_labels) + label];
+                            ctx->inferred[i][(sidx * n_labels) + label];
                           if (label_pr >= threshold)
                             {
                               // Reproject point
