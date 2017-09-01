@@ -57,6 +57,7 @@ typedef struct {
   float*             best_gain;          // Best gain achieved
   uint32_t*          best_uv;            // Index of the best uv combination
   uint32_t*          best_t;             // Index of the best threshold
+  uint32_t*          n_lr_pixels;        // Number of pixels in each branch
   pthread_barrier_t* ready_barrier;      // Barrier to wait on to start work
   pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
 } TrainThreadData;
@@ -326,6 +327,8 @@ thread_body(void* userdata)
                       *data->best_gain = gain;
                       *data->best_uv = i;
                       *data->best_t = j;
+                      data->n_lr_pixels[0] = l_n_pixels[0];
+                      data->n_lr_pixels[1] = r_n_pixels[0];
                     }
                 }
             }
@@ -350,15 +353,14 @@ thread_body(void* userdata)
 static void
 collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
                uint32_t** l_pixel_base, Int2D** l_pixels,
-               uint32_t** r_pixel_base, Int2D** r_pixels)
+               uint32_t** r_pixel_base, Int2D** r_pixels,
+               uint32_t* n_lr_pixels)
 {
   *l_pixel_base = (uint32_t*)xcalloc(ctx->n_images + 1, sizeof(uint32_t));
   *r_pixel_base = (uint32_t*)xcalloc(ctx->n_images + 1, sizeof(uint32_t));
 
-  // Start off allocating these as large as they could be, we'll reallocate
-  // after we know the sizes from the loop
-  *l_pixels = (Int2D*)xmalloc(data->pixel_base[ctx->n_images] * sizeof(Int2D));
-  *r_pixels = (Int2D*)xmalloc(data->pixel_base[ctx->n_images] * sizeof(Int2D));
+  *l_pixels = (Int2D*)xmalloc(n_lr_pixels[0] * sizeof(Int2D));
+  *r_pixels = (Int2D*)xmalloc(n_lr_pixels[1] * sizeof(Int2D));
 
   uint32_t image_idx = 0;
   for (uint32_t i = 0; i < ctx->n_images; i++)
@@ -390,12 +392,6 @@ collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
         }
       image_idx += ctx->width * ctx->height;
     }
-
-  // Shrink pixel arrays down to the correct size
-  *l_pixels = (Int2D*)xrealloc((void*)(*l_pixels),
-                               (*l_pixel_base)[ctx->n_images] * sizeof(Int2D));
-  *r_pixels = (Int2D*)xrealloc((void*)(*r_pixels),
-                               (*r_pixel_base)[ctx->n_images] * sizeof(Int2D));
 }
 
 static bool
@@ -675,6 +671,8 @@ main(int argc, char **argv)
   float* best_gains = (float*)malloc(n_threads * sizeof(float));
   uint32_t* best_uvs = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
   uint32_t* best_ts = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
+  uint32_t* all_n_lr_pixels = (uint32_t*)
+    malloc(n_threads * 2 * sizeof(uint32_t));
   pthread_t threads[n_threads];
   for (uint32_t i = 0; i < n_threads; i++)
     {
@@ -688,6 +686,7 @@ main(int argc, char **argv)
       thread_data->best_gain = &best_gains[i];
       thread_data->best_uv = &best_uvs[i];
       thread_data->best_t = &best_ts[i];
+      thread_data->n_lr_pixels = &all_n_lr_pixels[i * 2];
       thread_data->ready_barrier = &ready_barrier;
       thread_data->finished_barrier = &finished_barrier;
 
@@ -705,8 +704,9 @@ main(int argc, char **argv)
   uint32_t last_depth = UINT32_MAX;
   while (train_queue != NULL)
     {
-      uint32_t best_uv;
-      uint32_t best_t;
+      uint32_t best_uv = 0;
+      uint32_t best_t = 0;
+      uint32_t *n_lr_pixels = NULL;
       float best_gain = 0.0;
 
       LList* current = train_queue;
@@ -739,6 +739,7 @@ main(int argc, char **argv)
               best_gain = best_gains[i];
               best_uv = best_uvs[i];
               best_t = best_ts[i];
+              n_lr_pixels = &all_n_lr_pixels[i * 2];
             }
         }
 
@@ -769,7 +770,8 @@ main(int argc, char **argv)
 
           collect_pixels(&ctx, node_data, node->uv, node->t,
                          &l_pixel_base, &l_pixels,
-                         &r_pixel_base, &r_pixels);
+                         &r_pixel_base, &r_pixels,
+                         n_lr_pixels);
 
           uint32_t id = (2 * node_data->id) + 1;
           uint32_t depth = node_data->depth + 1;
@@ -833,6 +835,7 @@ main(int argc, char **argv)
   xfree(best_gains);
   xfree(best_uvs);
   xfree(best_ts);
+  xfree(all_n_lr_pixels);
 
   // Restore tree histograms list pointer
   tree_histograms = llist_first(tree_histograms);
