@@ -675,6 +675,7 @@ main(int argc, char **argv)
   float* best_gains = (float*)malloc(n_threads * sizeof(float));
   uint32_t* best_uvs = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
   uint32_t* best_ts = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
+  pthread_t threads[n_threads];
   for (uint32_t i = 0; i < n_threads; i++)
     {
       TrainThreadData* thread_data = (TrainThreadData*)
@@ -690,8 +691,8 @@ main(int argc, char **argv)
       thread_data->ready_barrier = &ready_barrier;
       thread_data->finished_barrier = &finished_barrier;
 
-      pthread_t thread;
-      if (pthread_create(&thread, NULL, thread_body, (void*)thread_data) != 0)
+      if (pthread_create(&threads[i], NULL, thread_body,
+                         (void*)thread_data) != 0)
         {
           fprintf(stderr, "Error creating thread\n");
           return 1;
@@ -814,6 +815,14 @@ main(int argc, char **argv)
   // Signal threads to free memory and quit
   node_data = NULL;
   pthread_barrier_wait(&ready_barrier);
+
+  for (uint32_t i = 0; i < n_threads; i++)
+    {
+      if (pthread_join(threads[i], NULL) != 0)
+        {
+          fprintf(stderr, "Error joining thread, trying to continue...\n");
+        }
+    }
 
   // Free memory that isn't needed anymore
   xfree(root_nhistogram);
