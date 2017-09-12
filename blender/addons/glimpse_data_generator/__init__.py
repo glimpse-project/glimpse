@@ -61,6 +61,25 @@ from bpy_extras.io_utils import (
 import bmesh
 
 
+all_bodies = [ 'Man0', 'Woman0', 'Man1', 'Woman1' ]
+
+hat_choices = [ 'none', 'knitted_hat_01', 'newsboy_cap', 'patrol_cap' ]
+hat_probabilities = [ 0.4, 0.2, 0.2, 0.2 ]
+
+glasses_choices = [ 'none', 'glasses' ]
+glasses_probabilities = [ 0.7, 0.3 ]
+
+top_choices = [ 'none', 'hooded_cardigan' ]
+top_probabilities = [ 0.8, 0.2 ]
+
+trouser_choices = [ 'none', 'm_trousers_01' ]
+trouser_probabilities = [ 0.5, 0.5 ]
+
+shoe_choices = []
+shoe_probabilities = []
+
+
+
 def add_clothing(op, context, clothing_name):
 
     if clothing_name + "_reference" not in bpy.data.objects:
@@ -146,6 +165,7 @@ class AddHoodieOperator(bpy.types.Operator):
         add_clothing(self, context, "hooded_cardigan")
         return {'FINISHED'}
 
+
 class AddMTrousers01Operator(bpy.types.Operator):
     """Adds m_trousers_01 clothing to the active body"""
 
@@ -189,24 +209,6 @@ class AddGlassesOperator(bpy.types.Operator):
     def execute(self, context):
         add_clothing(self, context, "glasses")
         return {'FINISHED'}
-
-
-all_bodies = [ 'Man0', 'Woman0', 'Man1', 'Woman1' ]
-
-hat_choices = [ 'none', 'knitted_hat_01', 'newsboy_cap', 'patrol_cap' ]
-hat_probabilities = [ 0.4, 0.2, 0.2, 0.2 ]
-
-glasses_choices = [ 'none', 'glasses' ]
-glasses_probabilities = [ 0.7, 0.3 ]
-
-top_choices = [ 'none', 'hooded_cardigan' ]
-top_probabilities = [ 0.8, 0.2 ]
-
-trouser_choices = [ 'none', 'm_trousers_01' ]
-trouser_probabilities = [ 0.5, 0.5 ]
-
-shoe_choices = []
-shoe_probabilities = []
 
 
 # The data generator operator expects that each body has previously had all
@@ -272,7 +274,7 @@ class AddClothingLibraryOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class RigGeneratorInfoOperator(bpy.types.Operator):
+class GeneratorInfoOperator(bpy.types.Operator):
     """Print summary information about our data generation state"""
 
     bl_idname = "glimpse.generator_info"
@@ -282,10 +284,86 @@ class RigGeneratorInfoOperator(bpy.types.Operator):
 
         print("Number of indexed motion capture files = %d" % len(bvh_index))
 
+        print("Pre-loaded actions:");
+        for action in bpy.data.actions:
+            print("> %s" % action.name)
+
+        start = bpy.context.scene.GlimpseBvhGenFrom
+        end = bpy.context.scene.GlimpseBvhGenTo
+        print("start =  %d end = %d" % (start, end))
+
+        for i in range(start, end):
+            bvh = bvh_index[i]
+            bvh_name = bvh['name']
+
+            if 'Base' + bvh_name in bpy.data.actions:
+                print(" > %s: Cached" % bvh_name)
+            else:
+                print(" > %s: Uncached" % bvh_name)
+
         return {'FINISHED'}
 
 
-class RigGeneratorOperator(bpy.types.Operator):
+class GeneratorPurgeActionsOperator(bpy.types.Operator):
+    """Purge preloaded actions"""
+
+    bl_idname = "glimpse.purge_mocap_actions"
+    bl_label = "Purge MoCap Actions"
+
+    def execute(self, context):
+
+        print("Number of indexed motion capture files = %d" % len(bvh_index))
+
+        start = bpy.context.scene.GlimpseBvhGenFrom
+        end = bpy.context.scene.GlimpseBvhGenTo
+
+        for i in range(start, end):
+            bvh = bvh_index[i]
+            bvh_name = bvh['name']
+            action_name = 'Base%s' % bvh_name
+
+            if action_name in bpy.data.actions:
+                action = bpy.data.actions[action_name]
+                print(" > Purging %s" % bvh_name)
+
+        return {'FINISHED'}
+
+
+class GeneratorPreLoadOperator(bpy.types.Operator):
+    """Pre-loads the mocap files as actions before a render run"""
+
+    bl_idname = "glimpse.generator_preload"
+    bl_label = "Preload MoCap Files"
+
+    def execute(self, context):
+
+        print("Number of indexed motion capture files = %d" % len(bvh_index))
+
+        start = bpy.context.scene.GlimpseBvhGenFrom
+        end = bpy.context.scene.GlimpseBvhGenTo
+        print("start =  %d end = %d" % (start, end))
+
+        for i in range(start, end):
+            bvh = bvh_index[i]
+            bvh_name = bvh['name']
+
+            if 'Base' + bvh_name in bpy.data.actions:
+                print(" > %s: Cached" % bvh_name)
+            else:
+                print(" > %s: Loading" % bvh_name)
+
+                # Note we always load the mocap animations with the base the
+                # base mesh, and then associate the animation_data.action with
+                # all the other armatures we have
+                base_pose_obj = bpy.data.objects['BasePoseObject']
+                bpy.context.scene.objects.active = base_pose_obj
+
+                load_bvh_file(bvh)
+
+        return {'FINISHED'}
+
+
+class GeneratorOperator(bpy.types.Operator):
     """Generates Glimpse training data"""
 
     bl_idname = "glimpse.generate_data"
@@ -316,7 +394,8 @@ class RigGeneratorOperator(bpy.types.Operator):
         bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
 
         dt = datetime.datetime.today()
-        date_str = "%04u-%02u-%02u-%02u-%02u-%02u" % (dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
+        date_str = "%04u-%02u-%02u-%02u-%02u-%02u" % (dt.year,
+                dt.month,dt.day, dt.hour, dt.minute, dt.second)
 
         meta['date'] = date_str
 
@@ -351,21 +430,25 @@ class RigGeneratorOperator(bpy.types.Operator):
             numpy.random.seed(0)
             random.seed(0)
 
-            # Note we always load the mocap animations with the base the base
-            # mesh, and then associate the animation_data.action with all the
-            # other armatures we have
-            bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
-            self.report({'INFO'}, "loading")
-            load_bvh_file(bvh, interactive_mode=False)
+            bpy.context.scene.frame_start = bvh_state['start']
+            bpy.context.scene.frame_end = bvh_state['end']
+
+            bvh_name = bvh['name']
+
+            action_name = "Base" + bvh_name
+            if action_name not in bpy.data.actions: 
+                self.report({'ERROR'}, "skipping %s (not preloaded" % bvh_name)
+                continue
+
+            self.report({'INFO'}, "Setting %s action on all body meshes" % action_name)
 
             for body in all_bodies:
                 pose_obj = bpy.data.objects[body + 'PoseObject']
                 if pose_obj.animation_data == None:
                     pose_obj.animation_data_create()
-                pose_obj.animation_data.action = bpy.data.objects['BasePoseObject'].animation_data.action
+                pose_obj.animation_data.action = bpy.data.actions[action_name]
                 bpy.data.armatures[body + 'Pose'].pose_position = 'POSE'
 
-            bvh_name = os.path.basename(bvh['file'])
             self.report({'INFO'}, "rendering " + bvh_name)
 
             meta['bvh'] = bvh_name
@@ -384,11 +467,11 @@ class RigGeneratorOperator(bpy.types.Operator):
                 meta['body'] = body
 
                 # Hit some errors with the range bounds not being integer and I
-                # guess that comes from the json library loading our mocap index
-                # may make some numeric feilds float so bvh['start'] or bvh['end']
-                # might be float
-                for start_frame in range(int(bvh['start']), int(range_end), randomization_step):
-
+                # guess that comes from the json library loading our mocap
+                # index may make some numeric feilds float so bvh['start'] or
+                # bvh['end'] might be float
+                for start_frame in range(int(bvh['start']),
+                                         int(range_end), randomization_step):
                     camera_meta = {}
 
                     # NB. the range extends beyond the length of animation in case
@@ -440,10 +523,15 @@ class RigGeneratorOperator(bpy.types.Operator):
                     spine_x_mm = spine.head.x * 1000
                     spine_y_mm = spine.head.y * 1000
                     spine_z_mm = spine.head.z * 1000
-                    target_x_mm = random.randrange(int(spine_x_mm - target_fuzz_range_mm), int(spine_x_mm + target_fuzz_range_mm))
-                    target_y_mm = random.randrange(int(spine_y_mm - target_fuzz_range_mm), int(spine_y_mm + target_fuzz_range_mm))
-                    target_z_mm = random.randrange(int(spine_z_mm - target_fuzz_range_mm), int(spine_z_mm + target_fuzz_range_mm))
-                    target = mathutils.Vector((target_x_mm / 1000, target_y_mm / 1000, target_z_mm / 1000))
+                    target_x_mm = random.randrange(int(spine_x_mm - target_fuzz_range_mm),
+                                                   int(spine_x_mm + target_fuzz_range_mm))
+                    target_y_mm = random.randrange(int(spine_y_mm - target_fuzz_range_mm),
+                                                   int(spine_y_mm + target_fuzz_range_mm))
+                    target_z_mm = random.randrange(int(spine_z_mm - target_fuzz_range_mm),
+                                                   int(spine_z_mm + target_fuzz_range_mm))
+                    target = mathutils.Vector((target_x_mm / 1000,
+                                               target_y_mm / 1000,
+                                               target_z_mm / 1000))
 
                     direction = target - camera.location
                     rot = direction.to_track_quat('-Z', 'Y')
@@ -508,7 +596,7 @@ class RigGeneratorOperator(bpy.types.Operator):
                         #glasses_obj.layers[0] = True
                         #render_objects.append(glasses_obj)
 
-                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name[:-4], dirname))
+                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name, dirname))
                     #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name[:-4], dirname))
                     
 
@@ -552,11 +640,11 @@ class RigGeneratorOperator(bpy.types.Operator):
                             self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
                             continue
 
-                        context.scene.render.filepath = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name[:-4], dirname, "Image%04u" % frame))
+                        context.scene.render.filepath = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name, dirname, "Image%04u" % frame))
                         self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
                         bpy.ops.render.render(write_still=True)
 
-                        meta_filename = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name[:-4], dirname, 'Image%04u.json' % frame))
+                        meta_filename = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name, dirname, 'Image%04u.json' % frame))
                         with open(meta_filename, 'w') as fp:
                             json.dump(meta, fp, indent=2)
 
@@ -639,94 +727,20 @@ def update_current_bvh_state(ignore_op):
                             'vertical_fov': vertical_fov }
 
 
-def load_bvh_file(bvh_state, interactive_mode=False):
+def load_bvh_file(bvh_state):
 
     pose_obj = bpy.context.scene.objects.active
 
     bpy.context.scene.McpStartFrame = 1
     bpy.context.scene.McpEndFrame = 1000
+    bpy.ops.mcp.load_and_retarget(filepath = bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + ntpath_to_os(bvh_state['file'])))
 
-    # If we've already loaded the .bvh and retargeted before then we may have
-    # an action we can apply to the active object without needing to retarget
-    # again, which can be very slow.
-    #
-    action_name = ntpath.split(bvh_state['file'])[1].split('.')[0]
-    if 'Base' + action_name in bpy.data.actions and bpy.context.scene.objects.active.type == 'ARMATURE':
-        arm = bpy.context.scene.objects.active
-        arm.animation_data.action = bpy.data.actions['Base' + action_name]
-    else:
-        bpy.ops.mcp.load_and_retarget(filepath = bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + ntpath_to_os(bvh_state['file'])))
-
-        # It's a nasty gotcha but the MakeWalk addon will set the fake user
-        # reference on the imported action which makes the .blend file eventually
-        # balloon to ridiculous proportions
-        #
-        # XXX: actually on the other hand loading a .bvh is really slow so it's
-        # beneficial to re-use the actions so we should instead add an operator
-        # to help purge these when we want to compact the size of the .blend
-        # file.
-        #pose_obj.animation_data.action.use_fake_user = False
-
-    bpy.context.scene.frame_start = bvh_state['start']
-    if 'end' in bvh_state:
-        bpy.context.scene.frame_end = bvh_state['end']
-    else:
+    if 'end' not in bvh_state:
         if bpy.context.object.animation_data:
             frame_end = bpy.context.object.animation_data.action.frame_range[1]
         else:
             frame_end = 1000
-        bpy.context.scene.frame_end = frame_end
         bvh_state['end'] = frame_end
-
-    # While interactively reviewing mocap files then it seems more likely than
-    # not that the camera state that was good for the previous file could be
-    # good default for this one if we haven't got camera state in the index.
-    #
-    # We want to make a more deterministic default while running
-    # non-interactively
-    #
-    if not interactive_mode:
-        cam_pos = bpy.data.objects['Camera'].location.xyz
-        cam_rot = bpy.data.objects['Camera'].rotation_quaternion
-    else:
-        cam_pos = [0, -2, 1.4]
-        cam_rot = [1, 0, 0, 0]
-    cam_fov = 83 # (vertical)
-
-    if 'camera' in bvh_state:
-        if 'location' in bvh_state['camera']:
-            cam_pos = bvh_state['camera']['location']
-
-        if 'quaternion' in bvh_state['camera']:
-            cam_rot = bvh_state['camera']['quaternion']
-
-        # Originally it was fixed (part of the .blend file) that the camera
-        # had a vertical fov of 49.13 degrees, but since that doesn't really
-        # match the typical fov of a phone camera well we now track the fov
-        # of the camera as part of the index (at time of writing we switched
-        # to an fov of 83 degrees)
-        #
-        if 'vertical_fov' in bvh_state:
-            cam_fov = bvh_state['camera']['vertical_fov']
-        else:
-            # instead of keeping the old FOV we will instead use the new
-            # default but move the camera closer
-            cam_pos[1] = cam_pos[1] / 2
-    else:
-        bvh_state['camera'] = {}
-
-    #bpy.data.objects['Camera'].location.xyz = cam_pos
-    #bpy.data.objects['Camera'].rotation_quaternion = cam_rot
-    #bpy.data.cameras['Camera'].angle = math.radians(cam_fov)
-
-    bvh_state['camera']['location'] = cam_pos
-    bvh_state['camera']['quaternion'] = cam_rot
-    bvh_state['camera']['vertical_fov'] = cam_fov
-
-    #if 'blacklist' in bvh_state:
-    #    bpy.context.scene.GlimpseMoCapBlacklist = bvh_state['blacklist']
-    #else:
-    #    bpy.context.scene.GlimpseMoCapBlacklist = False
 
 
 # NB: sometimes called with no op
@@ -736,7 +750,7 @@ def load_current_bvh_file(ignore_op):
             op.report({'ERROR'}, "Invalid Mo-cap index")
         return
 
-    load_bvh_file(bvh_index[bvh_index_pos], interactive_mode=True)
+    load_bvh_file(bvh_index[bvh_index_pos])
 
 
 def load_mocap_index():
@@ -759,6 +773,12 @@ def load_mocap_index():
             # normalize so we don't have to consider that it's left unspecified
             if 'blacklist' not in bvh:
                 bvh['blacklist'] = False
+
+            if 'start' not in bvh_state:
+                bvh['start'] = 1
+
+            if 'name' not in bvh:
+                bvh['name'] = ntpath.basename(bvh['file'])[:-4]
 
     except IOError as e:
         self.report({'INFO'}, str(e))
@@ -796,10 +816,12 @@ class VIEW3D_MoCap_OpenBvhIndexButton(bpy.types.Operator):
 
         return {"FINISHED"}
 
+
 # we index bvh files using ntpath conventions
 def ntpath_to_os(path):
     elems = path.split('\\')
     return os.path.join(*elems)
+
 
 class VIEW3D_MoCap_BvhScanButton(bpy.types.Operator):
     bl_idname = "glimpse.scan_bvh_files"
@@ -978,7 +1000,6 @@ class MoCapFilePanel(bpy.types.Panel):
 
         layout.separator()
         layout.prop(scn, "GlimpseMoCapBlacklist")
-
 
 
 def register():
