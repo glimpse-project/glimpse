@@ -1,4 +1,7 @@
 
+#include <stdarg.h>
+#include <stdio.h>
+
 #include "xalloc.h"
 
 #define return_if_valid(x) if (x == NULL) exit(1); return x
@@ -40,3 +43,23 @@ xrealloc(void *ptr, size_t size)
   ptr = realloc(ptr, size);
   return_if_valid(ptr);
 }
+
+void
+xasprintf(char **strp, const char *fmt, ...)
+{
+    va_list ap;
+
+    va_start(ap, fmt);
+
+    if (!fmt) {
+        vfprintf(stderr, fmt, ap);
+        exit(1);
+    } else {
+        if (vasprintf(strp, fmt, ap) < 0)
+            exit(1);
+    }
+
+    va_end(ap);
+}
+
+
