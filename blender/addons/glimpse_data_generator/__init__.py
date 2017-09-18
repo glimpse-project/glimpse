@@ -419,35 +419,38 @@ class GeneratorOperator(bpy.types.Operator):
 
         z_forward = mathutils.Vector((0, 0, 1))
 
-        self.report({'INFO'}, "Rendering MoCap indices from " + str(context.scene.GlimpseBvhGenFrom) + " to " + str(context.scene.GlimpseBvhGenTo))
-        for idx in range(bpy.context.scene.GlimpseBvhGenFrom, bpy.context.scene.GlimpseBvhGenTo):
+        # Nested function for sake of improving cProfile data
+        def render_bvh_index(idx):
             bvh = bvh_index[idx]
 
             if bvh['blacklist']:
                 self.report({'INFO'}, "skipping blacklisted")
-                continue
+                return
 
             numpy.random.seed(0)
             random.seed(0)
 
-            bpy.context.scene.frame_start = bvh_state['start']
-            bpy.context.scene.frame_end = bvh_state['end']
+            bpy.context.scene.frame_start = bvh['start']
+            bpy.context.scene.frame_end = bvh['end']
 
             bvh_name = bvh['name']
 
             action_name = "Base" + bvh_name
             if action_name not in bpy.data.actions: 
                 self.report({'ERROR'}, "skipping %s (not preloaded" % bvh_name)
-                continue
+                return
+
+            # Add function for sake of improved cProfile information
+            def assign_body_poses(action_name):
+                for body in all_bodies:
+                    pose_obj = bpy.data.objects[body + 'PoseObject']
+                    if pose_obj.animation_data == None:
+                        pose_obj.animation_data_create()
+                    pose_obj.animation_data.action = bpy.data.actions[action_name]
+                    bpy.data.armatures[body + 'Pose'].pose_position = 'POSE'
 
             self.report({'INFO'}, "Setting %s action on all body meshes" % action_name)
-
-            for body in all_bodies:
-                pose_obj = bpy.data.objects[body + 'PoseObject']
-                if pose_obj.animation_data == None:
-                    pose_obj.animation_data_create()
-                pose_obj.animation_data.action = bpy.data.actions[action_name]
-                bpy.data.armatures[body + 'Pose'].pose_position = 'POSE'
+            assign_body_poses(action_name)
 
             self.report({'INFO'}, "rendering " + bvh_name)
 
@@ -459,35 +462,35 @@ class GeneratorOperator(bpy.types.Operator):
             # of the randomization_step...
             range_end = bvh['end'] + randomization_step - 1
 
-            # For now we unconditionally render each mocap using all the body
-            # meshes we have, just randomizing the clothing
-            for body in all_bodies:
+            # Nested function for sake of improving cProfile data
+            def render_body(body):
                 self.report({'INFO'}, "> Rendering for body = " + body)
 
                 meta['body'] = body
 
-                # Hit some errors with the range bounds not being integer and I
-                # guess that comes from the json library loading our mocap
-                # index may make some numeric feilds float so bvh['start'] or
-                # bvh['end'] might be float
-                for start_frame in range(int(bvh['start']),
-                                         int(range_end), randomization_step):
-                    camera_meta = {}
+                def hide_body_clothes(body):
+                    pose_obj  = bpy.data.objects[body + "PoseObject"]
+                    for child in pose_obj.children:
+                        if body + "Clothes:" in child.name:
+                            child.hide = True
+                            child.layers = child.parent.layers
 
-                    # NB. the range extends beyond the length of animation in case
-                    # it's not a multiple of the randomization step, so clip end here:
-                    end_frame = min(start_frame + randomization_step, bvh['end'])
+                # Make sure no other bodies are visible on the render layer
+                def hide_bodies_from_render():
+                    for _body in all_bodies:
+                        pose_obj = bpy.data.objects[_body + "PoseObject"]
+                        pose_obj.layers[0] = False
+                        hide_body_clothes(_body)
+
+                hide_bodies_from_render()
+
+                # Nested function for sake of improving cProfile data
+                def render_mocap_section(start_frame, end_frame):
+                    camera_meta = {}
 
                     self.report({'INFO'}, "> randomizing " + bvh_name + " render")
 
-                    for obj in render_objects:
-                        obj.layers[0] = False
-                        if "Clothes:" in obj.name:
-                            obj.hide = True
-                            obj.layers = obj.parent.layers
-                    render_objects = []
-                    #for body in all_bodies:
-                    #    bpy.data.objects[body + "BodyMeshObject"].layers[0] = False
+                    hide_body_clothes(body)
 
                     # randomize the model
                     #body = numpy.random.choice(all_bodies)
@@ -545,56 +548,40 @@ class GeneratorOperator(bpy.types.Operator):
                     clothes_meta = {}
 
                     if hat != 'none':
-                        hat_obj = bpy.data.objects[body + "Clothes:" + hat]
+                        hat_obj = bpy.data.objects["%sClothes:%s" % (body, hat)]
                         if hat_obj:
                             hat_obj.hide = False
                             hat_obj.layers[0] = True
-                            render_objects.append(hat_obj)
 
                             dirname += "_hat_" + hat
                             clothes_meta['hat'] = hat
 
                     if trousers != 'none':
-                        trouser_obj = bpy.data.objects[body + "Clothes:" + trousers]
+                        trouser_obj = bpy.data.objects["%sClothes:%s" % (body, trousers)]
                         if trouser_obj:
                             trouser_obj.hide = False
                             trouser_obj.layers[0] = True
-                            render_objects.append(trouser_obj)
 
                             dirname += "_trousers_" + trousers
                             clothes_meta['trousers'] = trousers
 
-                        #add_clothing(self, context, trousers)
-                        #trouser_obj.layers[0] = True
-                        #render_objects.append(trouser_obj)
-
                     if top != 'none':
-                        top_obj = bpy.data.objects[body + "Clothes:" + top]
+                        top_obj = bpy.data.objects["%sClothes:%s" % (body, top)]
                         if top_obj:
                             top_obj.hide = False
                             top_obj.layers[0] = True
-                            render_objects.append(top_obj)
 
                             dirname += "_top_" + top
                             clothes_meta['top'] = top
 
-                        #add_clothing(self, context, top)
-                        #top_obj.layers[0] = True
-                        #render_objects.append(top_obj)
-
                     if glasses != 'none':
-                        glasses_obj = bpy.data.objects[body + "Clothes:" + glasses]
+                        glasses_obj = bpy.data.objects["%sClothes:%s" % (body, glasses)]
                         if glasses_obj:
                             glasses_obj.hide = False
                             glasses_obj.layers[0] = True
-                            render_objects.append(glasses_obj)
 
                             dirname += "_glasses_" + glasses
                             clothes_meta['glasses'] = glasses
-
-                        #add_clothing(self, context, glasses)
-                        #glasses_obj.layers[0] = True
-                        #render_objects.append(glasses_obj)
 
                     context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name, dirname))
                     #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name[:-4], dirname))
@@ -634,11 +621,11 @@ class GeneratorOperator(bpy.types.Operator):
 
                         if facing < 0:
                             self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": facing back of body")
-                            continue
+                            return
 
                         if pose_cam_vec.length < 1.5:
                             self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
-                            continue
+                            return
 
                         context.scene.render.filepath = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name, dirname, "Image%04u" % frame))
                         self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
@@ -648,6 +635,26 @@ class GeneratorOperator(bpy.types.Operator):
                         with open(meta_filename, 'w') as fp:
                             json.dump(meta, fp, indent=2)
 
+                # Hit some errors with the range bounds not being integer and I
+                # guess that comes from the json library loading our mocap
+                # index may make some numeric fields float so bvh['start'] or
+                # bvh['end'] might be float
+                for start_frame in range(int(bvh['start']),
+                                         int(range_end), randomization_step):
+                    # NB. the range extends beyond the length of animation in case
+                    # it's not a multiple of the randomization step, so clip end here:
+                    end_frame = min(start_frame + randomization_step, bvh['end'])
+                    render_mocap_section(start_frame, end_frame)
+
+            # For now we unconditionally render each mocap using all the body
+            # meshes we have, just randomizing the clothing
+            for body in all_bodies:
+                render_body(body)
+
+
+        self.report({'INFO'}, "Rendering MoCap indices from " + str(context.scene.GlimpseBvhGenFrom) + " to " + str(context.scene.GlimpseBvhGenTo))
+        for idx in range(bpy.context.scene.GlimpseBvhGenFrom, bpy.context.scene.GlimpseBvhGenTo):
+            render_bvh_index(idx)
 
         return {'FINISHED'}
 
@@ -774,7 +781,7 @@ def load_mocap_index():
             if 'blacklist' not in bvh:
                 bvh['blacklist'] = False
 
-            if 'start' not in bvh_state:
+            if 'start' not in bvh:
                 bvh['start'] = 1
 
             if 'name' not in bvh:
