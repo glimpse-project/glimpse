@@ -37,14 +37,15 @@
 #include <libgen.h>
 #include <fcntl.h>
 
-#include <ImfInputFile.h>
-#include <ImfStringAttribute.h>
-#include <ImfMatrixAttribute.h>
-#include <ImfArray.h>
-#include <ImfChannelList.h>
-#include <ImfIO.h>
+/* Note: we very very definitely do *not* use OpenEXR which was a bad
+ * experience in so many ways. The final nail in the coffin being its
+ * surprisingly terrible performance.
+ */
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
 
-#include <ImathBox.h>
+#include "half.hpp"
+
 
 #ifdef DEBUG
 #define PNG_DEBUG 3
@@ -53,12 +54,14 @@
 #define debug(ARGS...) do {} while(0)
 #endif
 
-using namespace OPENEXR_IMF_NAMESPACE;
-using namespace IMATH_NAMESPACE;
-using namespace IEX_NAMESPACE;
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
+
+using half_float::half;
 
 enum image_format {
+    IMAGE_FORMAT_X8,
     IMAGE_FORMAT_XFLOAT,
+    IMAGE_FORMAT_XHALF,
 };
 
 struct image
@@ -66,9 +69,12 @@ struct image
     enum image_format format;
     int width;
     int height;
+    int stride;
 
     union {
+        uint8_t *data_u8;
         float *data_float;
+        half *data_half;
     };
 };
 
@@ -80,123 +86,6 @@ xmalloc(size_t size)
         exit(1);
     return ret;
 }
-
-static const char *
-exr_pixel_type_name(enum PixelType type)
-{
-    switch (type) {
-    case FLOAT:
-        return "FLOAT";
-    case HALF:
-        return "HALF";
-    case UINT:
-        return "UINT";
-    case NUM_PIXELTYPES: //keep compiler happy
-        exit(1);
-        return "FAIL";
-    }
-
-    return "FAIL";
-}
-
-class MemIStream: public IStream
-{
-    public:
-        MemIStream(char *data, Int64 len):
-            IStream("memory")
-        {
-            data_  = data;
-            len_ = len;
-            pos_ = 0;
-        }
-
-        bool isMemoryMapped() { return true; }
-
-        bool read (char c[/*n*/], int n)
-        {
-            Int64 remainder = len_ - pos_;
-            Int64 count = 0;
-
-            if (n < 0) {
-                throw IEX_NAMESPACE::InputExc("Attempted to read() with negative count");
-            }
-
-            count = (Int64)n;
-
-            // ImfIO.h says:
-            //  "If the stream contains less than n bytes, or if an I/O error
-            //   occurs, read(c,n) throws an exception."
-            if (count > remainder) {
-                throw IEX_NAMESPACE::InputExc("Attempted to read() beyond end of stream. Bug in OpenEXR?");
-            }
-
-            memcpy(c, data_ + pos_, count);
-            pos_ += count;
-
-            // ImfIO.h says:
-            //  "If read(c,n) reads the last byte from the file it returns false,
-            //   otherwise it returns true"
-            return !(count && count == remainder);
-        }
-
-        char *readMemoryMapped(int n)
-        {
-            Int64 remainder = len_ - pos_;
-            Int64 count = 0;
-
-            if (n < 0) {
-                throw IEX_NAMESPACE::InputExc("Attempted to readMemoryMapped() with negative count");
-            }
-
-            count = (Int64)n;
-
-            // ImfIO.h says:
-            // "If there are less than n byte left to read in the stream or if
-            //  the stream is not memory-mapped, readMemoryMapped(n) throws an
-            //  exception."
-            if (count > remainder) {
-                throw IEX_NAMESPACE::InputExc("Attempted to readMemoryMapped() beyond end of file. Bug in OpenEXR? I don't know!");
-            }
-
-            char *ret = data_ + pos_;
-
-            pos_ += count;
-
-            return ret;
-        }
-
-        Int64 tellg()
-        {
-            return pos_;
-        }
-
-        /* OpenEXR doesn't say how to handle seeking past the end of the buffer.
-         * We throw an exception.
-         */
-        void seekg(Int64 pos)
-        {
-            if (pos < 0) {
-                pos_ = 0;
-                throw IEX_NAMESPACE::InputExc("Attempted to seek with negative offset");
-            }
-
-            if (pos >= len_) {
-                pos_ = len_ - 1;
-                throw IEX_NAMESPACE::InputExc("Attempted to seek beyond end of file");
-            }
-
-            pos_ = pos;
-        }
-
-        // "Clear error conditions after an operation has failed"
-        // ... OK?
-        void clear () {}
-
-    private:
-        Int64 len_;
-        Int64 pos_;
-        char *data_;
-};
 
 static char *
 read_file(const char *filename, int *len)
@@ -245,87 +134,127 @@ read_file(const char *filename, int *len)
 }
 
 static struct image *
-decode_exr_file(char *file, int len)
+xalloc_image(enum image_format format,
+             int width,
+             int height)
 {
-    MemIStream mem_stream(file, len);
-    InputFile in_file(mem_stream);
+    struct image *img = (struct image *)xmalloc(sizeof(struct image));
+    img->format = format;
+    img->width = width;
+    img->height = height;
 
-    Box2i dw = in_file.header().dataWindow();
+    switch (format) {
+    case IMAGE_FORMAT_X8:
+        img->stride = width;
+        break;
+    case IMAGE_FORMAT_XFLOAT:
+        img->stride = width * sizeof(float);
+        break;
+    case IMAGE_FORMAT_XHALF:
+        img->stride = width * sizeof(half);
+        break;
+    }
+    img->data_u8 = (uint8_t *)xmalloc(img->stride * img->height);
 
-    int width = dw.max.x - dw.min.x + 1;
-    int height = dw.max.y - dw.min.y + 1;
+    return img;
+}
 
-    const Channel *channel;
-    const char *channel_name = NULL;
+static struct image *
+decode_exr(uint8_t *buf, int len, enum image_format fmt)
+{
+    EXRVersion version;
+    EXRHeader header;
+    const char *err = NULL;
+    int ret;
+    int channel;
+    int pixel_type;
 
-    const ChannelList &channels = in_file.header().channels();
-    for (ChannelList::ConstIterator i = channels.begin(); i != channels.end(); i++) {
-        const Channel &channel = i.channel();
-        const char *name = i.name();
-        const char *type_name = exr_pixel_type_name(channel.type);
-
-        debug("EXR: Channel '%s': type %s\n", name, type_name);
+    if (fmt != IMAGE_FORMAT_XHALF && fmt != IMAGE_FORMAT_XFLOAT) {
+        fprintf(stderr, "Can only decode EXR into full or half float image\n");
+        abort();
     }
 
-    channel = channels.findChannel("Y");
-    if (channel) {
-        channel_name = "Y";
-    } else {
-        channel = channels.findChannel("R");
-        if (channel)
-            channel_name = "R";
-        else {
-            fprintf(stderr, "Failed to find 'Y' or 'R' channel\n");
-            return NULL;
-        }
+    ParseEXRVersionFromMemory(&version, (unsigned char *)buf, len);
+
+    if (version.multipart || version.non_image) {
+        fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
+        return NULL;
     }
 
-    struct image *ret =
-        (struct image *)xmalloc(sizeof(*ret) + sizeof(float) * width * height);
-    ret->format = IMAGE_FORMAT_XFLOAT;
-    ret->width = width;
-    ret->height = height;
-    ret->data_float = (float *)(ret + 1);
+    ret = ParseEXRHeaderFromMemory(&header, &version, (unsigned char *)buf, len, &err);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to parse EXR header: %s\n", err);
+        return NULL;
+    }
 
-    FrameBuffer frameBuffer;
-
-    if (channel->type == FLOAT) {
-        frameBuffer.insert(channel_name,
-                           Slice(FLOAT,
-                                 (char *)ret->data_float,
-                                 sizeof(float), // x stride,
-                                 sizeof(float) * width)); // y stride
-
-        in_file.setFrameBuffer(frameBuffer);
-        in_file.readPixels(dw.min.y, dw.max.y);
-    } else {
-        Array2D<half> depth;
-        depth.resizeErase(height, width);
-
-        frameBuffer.insert(channel_name,
-                           Slice(HALF,
-                                 (char *)&depth[0][0],
-                                 sizeof(half), // x stride,
-                                 sizeof(half) * width)); // y stride
-
-        in_file.setFrameBuffer(frameBuffer);
-        in_file.readPixels(dw.min.y, dw.max.y);
-
-        for (int y = 0; y < height; y++) {
-            half *exr_row = &depth[y][0];
-            float *out_row = ret->data_float + y * width;
-
-            for (int x = 0; x < width; x++) {
-                out_row[x] = exr_row[x];
-                //printf("%f ", exr_row[x]);
+    channel = -1;
+    for (int i = 0; i < header.num_channels; i++) {
+        const char *names[] = { "Y", "R", "G", "B" };
+        for (unsigned j = 0; j < ARRAY_LEN(names); j++) {
+            if (strcmp(names[j], header.channels[i].name) == 0) {
+                channel = i;
+                break;
             }
-            //printf("\n");
+        }
+        if (channel > 0)
+            break;
+    }
+    if (channel == -1) {
+        fprintf(stderr, "Failed to find R, G, B or Y channel in EXR file\n");
+        return NULL;
+    }
+
+    pixel_type = header.channels[channel].pixel_type;
+    if (pixel_type != TINYEXR_PIXELTYPE_HALF && pixel_type != TINYEXR_PIXELTYPE_FLOAT) {
+        fprintf(stderr, "Can only decode EXR images with FLOAT or HALF data\n");
+        return NULL;
+    }
+
+    EXRImage exr_image;
+    InitEXRImage(&exr_image);
+
+    ret = LoadEXRImageFromMemory(&exr_image, &header, (const unsigned char *)buf, len, &err);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to load EXR file: %s\n", err);
+    }
+
+    struct image *img = xalloc_image(fmt, exr_image.width, exr_image.height);
+
+    enum image_format exr_fmt = (pixel_type == TINYEXR_PIXELTYPE_HALF ?
+                                 IMAGE_FORMAT_XHALF :
+                                 IMAGE_FORMAT_XFLOAT);
+    if (exr_fmt == fmt) {
+        memcpy(img->data_u8, &exr_image.images[channel][0],
+               img->stride * img->height);
+    } else {
+        /* Need to handle format conversion... */
+
+        if (exr_fmt == IMAGE_FORMAT_XHALF) {
+            const half *half_pixels = (half *)(exr_image.images[channel]);
+
+            for (int y = 0; y < exr_image.height; y++) {
+                const half *exr_row = half_pixels + y * exr_image.width;
+                float *out_row = img->data_float + y * exr_image.width;
+
+                for (int x = 0; x < exr_image.width; x++)
+                    out_row[x] = exr_row[x];
+            }
+        } else {
+            const float *float_pixels = (float *)(exr_image.images[channel]);
+
+            for (int y = 0; y < exr_image.height; y++) {
+                const float *exr_row = float_pixels + y * exr_image.width;
+                half *out_row = img->data_half + y * exr_image.width;
+
+                for (int x = 0; x < exr_image.width; x++)
+                    out_row[x] = exr_row[x];
+            }
         }
     }
 
-    debug("Keeping \"%s\" %s channel\n",
-          channel_name, exr_pixel_type_name(channel->type));
-    return ret;
+    FreeEXRImage(&exr_image);
+
+    return img;
 }
 
 static bool
@@ -397,7 +326,7 @@ main(int argc, char **argv)
     }
     debug("read %s OK\n", argv[1]);
 
-    struct image *img = decode_exr_file(file, len);
+    struct image *img = decode_exr((uint8_t *)file, len, IMAGE_FORMAT_XFLOAT);
     if (!img)
         exit(1);
 
