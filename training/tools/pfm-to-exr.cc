@@ -14,13 +14,14 @@
 #include <libgen.h>
 #include <getopt.h>
 
-#include <ImfOutputFile.h>
-#include <ImfStringAttribute.h>
-#include <ImfMatrixAttribute.h>
-#include <ImfArray.h>
-#include <ImfChannelList.h>
+/* Note: we very very definitely do *not* use OpenEXR which was a bad
+ * experience in so many ways. The final nail in the coffin being its
+ * surprisingly terrible performance.
+ */
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
 
-#include <ImathBox.h>
+#include "half.hpp"
 
 #ifdef DEBUG
 #define debug(ARGS...) printf(ARGS)
@@ -28,8 +29,7 @@
 #define debug(ARGS...) do {} while(0)
 #endif
 
-using namespace OPENEXR_IMF_NAMESPACE;
-using namespace IMATH_NAMESPACE;
+using half_float::half;
 
 static bool write_half_float = false;
 
@@ -45,6 +45,7 @@ xmalloc(size_t size)
 enum image_format {
     IMAGE_FORMAT_X8,
     IMAGE_FORMAT_XFLOAT,
+    IMAGE_FORMAT_XHALF,
 };
 
 struct image
@@ -57,9 +58,9 @@ struct image
     union {
         uint8_t *data_u8;
         float *data_float;
+        half *data_half;
     };
 };
-
 
 static struct image *
 load_pfm(const char *filename)
@@ -175,55 +176,42 @@ error_mmap:
     return ret;
 }
 
-
-static void
-write_exr(struct image *image, const char *filename)
+static bool
+write_exr(const char *filename,
+          struct image *image,
+          enum image_format format)
 {
-    int width = image->width;
-    int height = image->height;
-    Header header(width, height);
+    EXRHeader header;
+    InitEXRHeader(&header);
 
-    if (write_half_float) {
-        Array2D<half> pixels;
+    EXRImage exr_image;
+    InitEXRImage(&exr_image);
 
-        pixels.resizeErase(height, width);
+    exr_image.num_channels = 1;
+    exr_image.width = image->width;
+    exr_image.height = image->height;
 
-        for (int y = 0; y < height; y++) {
-            float *row = image->data_float + y * width;
-            for (int x = 0; x < width; x++) {
-                pixels[y][x] = row[x];
-            }
-        }
+    unsigned char *image_ptr = (unsigned char *)image->data_u8;
+    exr_image.images = &image_ptr;
 
-        header.channels().insert("Y", Channel(HALF));
-        OutputFile out_file(filename, header);
+    header.num_channels = 1;
+    EXRChannelInfo channel_info;
+    header.channels = &channel_info;
+    strcpy(channel_info.name, "Y");
 
-        FrameBuffer outFrameBuffer;
-        outFrameBuffer.insert("Y",
-                              Slice(HALF,
-                                    (char *)&pixels[0][0],
-                                    sizeof(half), // x stride,
-                                    sizeof(half) * width)); // y stride
+    int input_format = (image->format == IMAGE_FORMAT_XFLOAT ?
+                        TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
+    int final_format = (format == IMAGE_FORMAT_XFLOAT ?
+                        TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
+    header.pixel_types = &input_format;
+    header.requested_pixel_types = &final_format;
 
-        out_file.setFrameBuffer(outFrameBuffer);
-        out_file.writePixels(height);
-    } else {
-        header.channels().insert ("Y", Channel(FLOAT));
-        OutputFile out_file(filename, header);
-
-        FrameBuffer outFrameBuffer;
-        outFrameBuffer.insert("Y",
-                              Slice(FLOAT,
-                                    (char *)image->data_float,
-                                    sizeof(float), // x stride,
-                                    sizeof(float) * image->width)); // y stride
-
-        out_file.setFrameBuffer(outFrameBuffer);
-        out_file.writePixels(height);
-    }
-
-    debug("wrote EXR %s (%dx%d:'Y'=%s) OK\n",
-          filename, width, height, write_half_float ? "HALF" : "FLOAT");
+    const char *err = NULL;
+    if (SaveEXRImageToFile(&exr_image, &header, filename, &err) != TINYEXR_SUCCESS) {
+        fprintf(stderr, "Failed to save EXR: %s\n", err);
+        return false;
+    } else
+        return true;
 }
 
 static void
@@ -274,7 +262,9 @@ main(int argc, char **argv)
 
     struct image *img = load_pfm(argv[optind]);
 
-    write_exr(img, argv[optind + 1]);
-
+    if (write_half_float)
+        write_exr(argv[optind + 1], img, IMAGE_FORMAT_XHALF);
+    else
+        write_exr(argv[optind + 1], img, IMAGE_FORMAT_XFLOAT);
     return 0;
 }
