@@ -39,18 +39,21 @@
 #include <pthread.h>
 #include <getopt.h>
 
+#include <cmath>
+
 #include <type_traits>
 #include <queue>
 #include <random>
 
-#include <ImfInputFile.h>
-#include <ImfOutputFile.h>
-#include <ImfStringAttribute.h>
-#include <ImfMatrixAttribute.h>
-#include <ImfArray.h>
-#include <ImfChannelList.h>
+/* Note: we very very definitely do *not* use OpenEXR which was a bad
+ * experience in so many ways. The final nail in the coffin being its
+ * surprisingly terrible performance.
+ */
+#define TINYEXR_IMPLEMENTATION
+#include "tinyexr.h"
 
-#include <ImathBox.h>
+#include "half.hpp"
+
 
 #ifdef DEBUG
 #define PNG_DEBUG 3
@@ -65,9 +68,12 @@
 
 #define BACKGROUND_ID 33
 
+using half_float::half;
+
 enum image_format {
     IMAGE_FORMAT_X8,
     IMAGE_FORMAT_XFLOAT,
+    IMAGE_FORMAT_XHALF,
 };
 
 struct image
@@ -80,6 +86,7 @@ struct image
     union {
         uint8_t *data_u8;
         float *data_float;
+        half *data_half;
     };
 };
 
@@ -99,8 +106,6 @@ struct worker_state
     pthread_t thread;
 };
 
-using namespace OPENEXR_IMF_NAMESPACE;
-using namespace IMATH_NAMESPACE;
 
 static const char *top_src_dir;
 static const char *top_out_dir;
@@ -235,6 +240,9 @@ xalloc_image(enum image_format format,
         break;
     case IMAGE_FORMAT_XFLOAT:
         img->stride = width * sizeof(float);
+        break;
+    case IMAGE_FORMAT_XHALF:
+        img->stride = width * sizeof(half);
         break;
     }
     img->data_u8 = (uint8_t *)xmalloc(img->stride * img->height);
@@ -381,7 +389,6 @@ error_create_write:
     return ret;
 }
 
-
 /* Using EXR is a nightmare. If we try and only add an 'R' channel then
  * e.g. Krita will be able to open the file and it looks reasonable,
  * but OpenCV will end up creating an image with the G and B containing
@@ -390,57 +397,43 @@ error_create_write:
  * image but Krita will bork and warn that it's not supported. We choose
  * the version that works with OpenCV...
  */
-static void
+static bool
 write_exr(const char *filename,
-          struct image *image)
+          struct image *image,
+          enum image_format format)
 {
-    int width = image->width;
-    int height = image->height;
-    Header header(width, height);
+    EXRHeader header;
+    InitEXRHeader(&header);
 
-    if (write_half_float) {
-        Array2D<half> half_image;
+    EXRImage exr_image;
+    InitEXRImage(&exr_image);
 
-        half_image.resizeErase(height, width);
+    exr_image.num_channels = 1;
+    exr_image.width = image->width;
+    exr_image.height = image->height;
 
-        for (int y = 0; y < height; y++) {
-            float *float_row = image->data_float + width * y;
-            half *half_row = &half_image[y][0];
+    unsigned char *image_ptr = (unsigned char *)image->data_u8;
+    exr_image.images = &image_ptr;
 
-            for (int x = 0; x < width; x++)
-                half_row[x] = float_row[x];
-        }
+    header.num_channels = 1;
+    EXRChannelInfo channel_info;
+    header.channels = &channel_info;
+    strcpy(channel_info.name, "Y");
 
-        header.channels().insert("Y", Channel(HALF));
+    int input_format = (image->format == IMAGE_FORMAT_XFLOAT ?
+                        TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
+    int final_format = (format == IMAGE_FORMAT_XFLOAT ?
+                        TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
+    header.pixel_types = &input_format;
+    header.requested_pixel_types = &final_format;
 
-        OutputFile out_file(filename, header);
-
-        FrameBuffer outFrameBuffer;
-        outFrameBuffer.insert("Y",
-                              Slice(HALF,
-                                    (char *)&half_image[0][0],
-                                    sizeof(half_image[0][0]), // x stride,
-                                    sizeof(half_image[0][0]) * width)); // y stride
-
-        out_file.setFrameBuffer(outFrameBuffer);
-        out_file.writePixels(height);
-    } else {
-        header.channels().insert("Y", Channel(FLOAT));
-
-        OutputFile out_file(filename, header);
-
-        FrameBuffer outFrameBuffer;
-        outFrameBuffer.insert("Y",
-                              Slice(FLOAT,
-                                    (char *)image->data_float,
-                                    sizeof(float), // x stride,
-                                    sizeof(float) * width)); // y stride
-
-        out_file.setFrameBuffer(outFrameBuffer);
-        out_file.writePixels(height);
-    }
+    const char *err = NULL;
+    if (SaveEXRImageToFile(&exr_image, &header, filename, &err) != TINYEXR_SUCCESS) {
+        fprintf(stderr, "Failed to save EXR: %s\n", err);
+        return false;
+    } else
+        return true;
 }
-
 
 static struct image *
 load_frame_labels(const char *dir,
@@ -758,6 +751,13 @@ frame_add_noise(const struct image *__restrict__ labels,
                 } else {
                     out_depth_at(x, y) = background_depth_m;
                 }
+
+                /* just a paranoid sanity check that we aren't */
+                if (std::isinf(out_depth_at(x, y)) ||
+                    std::isnan(out_depth_at(x, y))) {
+                    fprintf(stderr, "Invalid INF value in depth image");
+                    exit(1);
+                }
             }
         }
     }
@@ -782,7 +782,10 @@ save_frame_depth(const char *dir, const char *filename,
         return;
     }
 
-    write_exr(output_filename, depth);
+    if (write_half_float)
+        write_exr(output_filename, depth, IMAGE_FORMAT_XHALF);
+    else
+        write_exr(output_filename, depth, IMAGE_FORMAT_XFLOAT);
     debug("wrote %s\n", output_filename);
 }
 
@@ -822,61 +825,118 @@ save_frame_labels(const char *dir, const char *filename,
 }
 
 static struct image *
+decode_exr(uint8_t *buf, int len, enum image_format fmt)
+{
+    EXRVersion version;
+    EXRHeader header;
+    const char *err = NULL;
+    int ret;
+    int channel;
+    int pixel_type;
+
+    if (fmt != IMAGE_FORMAT_XHALF && fmt != IMAGE_FORMAT_XFLOAT) {
+        fprintf(stderr, "Can only decode EXR into full or half float image\n");
+        abort();
+    }
+
+    ParseEXRVersionFromMemory(&version, (unsigned char *)buf, len);
+
+    if (version.multipart || version.non_image) {
+        fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
+        return NULL;
+    }
+
+    ret = ParseEXRHeaderFromMemory(&header, &version, (unsigned char *)buf, len, &err);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to parse EXR header: %s\n", err);
+        return NULL;
+    }
+
+    channel = -1;
+    for (int i = 0; i < header.num_channels; i++) {
+        const char *names[] = { "Y", "R", "G", "B" };
+        for (unsigned j = 0; j < ARRAY_LEN(names); j++) {
+            if (strcmp(names[j], header.channels[i].name) == 0) {
+                channel = i;
+                break;
+            }
+        }
+        if (channel > 0)
+            break;
+    }
+    if (channel == -1) {
+        fprintf(stderr, "Failed to find R, G, B or Y channel in EXR file\n");
+        return NULL;
+    }
+
+    pixel_type = header.channels[channel].pixel_type;
+    if (pixel_type != TINYEXR_PIXELTYPE_HALF && pixel_type != TINYEXR_PIXELTYPE_FLOAT) {
+        fprintf(stderr, "Can only decode EXR images with FLOAT or HALF data\n");
+        return NULL;
+    }
+
+    EXRImage exr_image;
+    InitEXRImage(&exr_image);
+
+    ret = LoadEXRImageFromMemory(&exr_image, &header, (const unsigned char *)buf, len, &err);
+    if (ret != 0) {
+        fprintf(stderr, "Failed to load EXR file: %s\n", err);
+    }
+
+    struct image *img = xalloc_image(fmt, exr_image.width, exr_image.height);
+
+    enum image_format exr_fmt = (pixel_type == TINYEXR_PIXELTYPE_HALF ?
+                                 IMAGE_FORMAT_XHALF :
+                                 IMAGE_FORMAT_XFLOAT);
+    if (exr_fmt == fmt) {
+        memcpy(img->data_u8, &exr_image.images[channel][0],
+               img->stride * img->height);
+    } else {
+        /* Need to handle format conversion... */
+
+        if (exr_fmt == IMAGE_FORMAT_XHALF) {
+            const half *half_pixels = (half *)(exr_image.images[channel]);
+
+            for (int y = 0; y < exr_image.height; y++) {
+                const half *exr_row = half_pixels + y * exr_image.width;
+                float *out_row = img->data_float + y * exr_image.width;
+
+                for (int x = 0; x < exr_image.width; x++)
+                    out_row[x] = exr_row[x];
+            }
+        } else {
+            const float *float_pixels = (float *)(exr_image.images[channel]);
+
+            for (int y = 0; y < exr_image.height; y++) {
+                const float *exr_row = float_pixels + y * exr_image.width;
+                half *out_row = img->data_half + y * exr_image.width;
+
+                for (int x = 0; x < exr_image.width; x++)
+                    out_row[x] = exr_row[x];
+            }
+        }
+    }
+
+    FreeEXRImage(&exr_image);
+
+    return img;
+}
+
+static struct image *
 load_frame_depth(const char *dir, const char *filename)
 {
     char input_filename[1024];
 
     xsnprintf(input_filename, "%s/depth/%s/%s", top_src_dir, dir, filename);
 
-    /* Just for posterity and to vent frustration within comments, the
-     * RgbaInputFile and Rgba struct that the openexr documentation recommends
-     * for reading typical RGBA EXR images is only good for half float
-     * components.
-     *
-     * We noticed this after seeing lots of 'inf' float values due to out of
-     * range floats.
-     */
-    InputFile in_file(input_filename);
+    int exr_file_len;
+    uint8_t *exr_file = read_file(input_filename, &exr_file_len);
+    struct image *depth = decode_exr(exr_file, exr_file_len, IMAGE_FORMAT_XFLOAT);
 
-    Box2i dw = in_file.header().dataWindow();
-
-    int width = dw.max.x - dw.min.x + 1;
-    int height = dw.max.y - dw.min.y + 1;
-
-    struct image *depth = xalloc_image(IMAGE_FORMAT_XFLOAT, width, height);
-
-    /* We assume the green and blue channels are redundant and arbitrarily
-     * just pick the red channel to read...
-     *
-     * We're also assuming the channels aren't interleaved (does EXA support
-     * that?)
-     */
-    FrameBuffer framebuffer;
-    framebuffer.insert("R",
-                       Slice(FLOAT,
-                             (char *)depth->data_float,
-                             sizeof(float), // x stride,
-                             sizeof(float) * width)); // y stride
-
-    in_file.setFrameBuffer(framebuffer);
-
-#if 0 // uncomment to debug / check the channels available
-    const ChannelList &channels = in_file.header().channels();
-    for (ChannelList::ConstIterator i = channels.begin(); i != channels.end(); ++i) {
-        const Channel &channel = i.channel();
-        const char *name = i.name();
-
-        debug("EXR: Channel '%s': type %s\n", name, channel.type == FLOAT ? "== FLOAT" : "!= FLOAT");
-    }
-#endif
-
-    in_file.readPixels(dw.min.y, dw.max.y);
-
-    debug("read %s/%s (%dx%d) OK\n", dir, filename, width, height);
+    debug("read %s/%s (%dx%d) OK\n", dir, filename, depth->width, depth->height);
 
     return depth;
 }
-
 
 static void
 ensure_directory(const char *path)
