@@ -1,0 +1,74 @@
+  <!--
+      1st serve e.g. via http_server .
+      (npm install -g http_server)
+
+      2nd go to:
+
+        http://127.0.0.1:8080/glimpse-viewer.html?dir=foo&frame=0
+
+        @dir = subdirectory with training data
+        @frame = frame number to look at
+  -->
+
+<html lang="en">
+    <head>
+        <meta charset="utf-8">
+
+        <!-- 
+            Note: the following png.js is generated via:
+
+              $ npm install pngjs
+              $ browserify node_modules/pngjs/lib/png.js -s png > png.js 
+
+            The -s png means to export this api underneath a global variable
+            named 'png'.
+        -->
+        <script src="png.js"></script>
+        <script src="node_modules/three/build/three.min.js"></script>
+        <script src="node_modules/three/examples/js/controls/TrackballControls.js"></script>
+        <script src="node_modules/jquery/dist/jquery.min.js"></script>
+
+        <!-- npm install jquery-ui-dist (not jquery-ui)-->
+        <link rel="stylesheet" type="text/css" href="node_modules/jquery-ui-dist/jquery-ui.min.css" />
+        <script src="node_modules/jquery-ui-dist/jquery-ui.min.js"></script>
+
+    </head>
+    <body>
+        <div id="index-info">Index Loading...</div>
+        <div style="display:flex;flex-direction:row;height:100%;">
+            <div id="training-view" style="display:flex;flex-direction:column;flex:1;">
+                <div id="training-view-info" style="position: fixed; top:3em; left:1em;">
+                    <div id="training-frame-description"></div>
+                    <div id="training-frame-no"></div>
+                </div>
+                <div id="training-frame-slider" style="flex:0 0 1em;"></div>
+                <canvas id="training-canvas" style="flex:1;"></canvas>
+            </div>
+            <div style="display:flex;flex-direction:column;flex:1;">
+                <canvas id="device-canvas" style="flex:1;"></canvas>
+            </div>
+        </div>
+
+        <script type="x-shader/x-vertex" id="vertexshader">
+        attribute vec3 color_in;
+        varying vec3 color_var;
+
+        void main() {
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = 1.0;
+            gl_Position = projectionMatrix * mvPosition;
+            color_var = color_in;
+        }
+        </script>
+
+        <script type="x-shader/x-fragment" id="fragmentshader">
+        varying vec3 color_var;
+        void main() {
+            gl_FragColor = vec4(color_var, 1.0);
+        }
+        </script>
+
+    </body>
+
+    <script src="glimpse-viewer.js"></script>
+</html>
