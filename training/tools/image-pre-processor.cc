@@ -111,6 +111,8 @@ struct worker_state
 static const char *top_src_dir;
 static const char *top_out_dir;
 
+static FILE *index_fp;
+
 static bool write_half_float = true;
 static bool write_palettized_pngs = true;
 static bool write_pfm_depth = false;
@@ -1194,6 +1196,13 @@ worker_thread_cb(void *data)
             save_frame_labels(work.dir, work.files[i], noisy_labels);
             save_frame_depth(work.dir, filename, noisy_depth);
 
+            char index_name[512];
+            xsnprintf(index_name, "%s/%.*s\n",
+                      work.dir,
+                      (int)strlen(work.files[i]) - 4,
+                      work.files[i]);
+            fwrite(index_name, strlen(index_name), 1, index_fp);
+
             flip_frame_labels(labels, flipped_labels);
             flip_frame_depth(depth, flipped_depth);
             frame_add_noise(flipped_labels, flipped_depth, noisy_labels, noisy_depth);
@@ -1207,6 +1216,12 @@ worker_thread_cb(void *data)
                       (int)strlen(work.files[i]) - 4,
                       work.files[i]);
             save_frame_depth(work.dir, filename, noisy_depth);
+
+            xsnprintf(index_name, "%s/%.*s-flipped\n",
+                      work.dir,
+                      (int)strlen(work.files[i]) - 4,
+                      work.files[i]);
+            fwrite(index_name, strlen(index_name), 1, index_fp);
 
             // Note: we don't free the labels here because they are preserved
             // for comparing with the next frame
@@ -1497,6 +1512,10 @@ static_assert(BACKGROUND_ID == 33, "");
            get_duration_ns_print_scale(duration_ns),
            get_duration_ns_print_scale_suffix(duration_ns));
 
+    char index_filename[512];
+    xsnprintf(index_filename, "%s/index", top_out_dir);
+    index_fp = fopen(index_filename, "w");
+
     int n_threads;
 
     if (!n_threads_override) {
@@ -1530,6 +1549,9 @@ static_assert(BACKGROUND_ID == 33, "");
 
     end = get_time();
     duration_ns = end - start;
+
+    fclose(index_fp);
+    printf("index written\n");
 
     printf("Finished processing all frames in %.3f%s\n",
            get_duration_ns_print_scale(duration_ns),
