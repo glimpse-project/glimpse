@@ -15,7 +15,7 @@ LDFLAGS=
 pack-training-data: pack-training-data.cc llist.cc xalloc.cc pack.c
 	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs libpng` -lsnappy -lpthread
 
-image-pre-processor: image-pre-processor.cc
+image-pre-processor: image-pre-processor.cc parson.c
 	$(CXX) -o $(@) $(^) $(CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs libpng` -lpthread
 
 pfm-debug: pfm-debug.c

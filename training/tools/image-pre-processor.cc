@@ -55,6 +55,7 @@
 
 #include "half.hpp"
 
+#include "parson.h"
 
 #ifdef DEBUG
 #define PNG_DEBUG 3
@@ -1237,6 +1238,7 @@ worker_thread_cb(void *data)
                       work.dir,
                       (int)strlen(work.files[i]) - 4,
                       work.files[i]);
+
             int len = 0;
             uint8_t *json_data = read_file(filename, &len);
             if (!json_data) {
@@ -1255,17 +1257,41 @@ worker_thread_cb(void *data)
                             filename);
                 }
 
+                /* For the -flipped frame we have to flip the x position of
+                 * the associated bones...
+                 */
+                JSON_Value *root_value = json_parse_string((char *)json_data);
+                JSON_Object *root = json_object(root_value);
+                JSON_Array *bones = json_object_get_array(root, "bones");
+                int n_bones = json_array_get_count(bones);
+
+                for (int b = 0; b < n_bones; b++) {
+                    JSON_Object *bone = json_array_get_object(bones, b);
+                    //const char *name = json_object_get_string(bone, "name");
+                    json_object_set_string(bone, "debug", "foo");
+                    float x;
+
+                    JSON_Array *head = json_object_get_array(bone, "head");
+                    x = json_array_get_number(head, 0);
+                    json_array_replace_number(head, 0, -x);
+
+                    JSON_Array *tail = json_object_get_array(bone, "tail");
+                    x = json_array_get_number(tail, 0);
+                    json_array_replace_number(tail, 0, -x);
+                }
+
                 /* For consistency... */
                 xsnprintf(filename, "%s/labels/%s/%.*s-flipped.json",
                           top_out_dir,
                           work.dir,
                           (int)strlen(work.files[i]) - 4,
                           work.files[i]);
-                if (!write_file(filename, json_data, len)) {
-                    fprintf(stderr, "WARNING: Failed to copy frame's meta data to %s: %m\n",
+                if (json_serialize_to_file_pretty(root_value, filename) != JSONSuccess) {
+                    fprintf(stderr, "WARNING: Failed to serialize flipped frame's json meta data to %s: %m\n",
                             filename);
                 }
 
+                json_value_free(root_value);
                 free(json_data);
             }
         }
