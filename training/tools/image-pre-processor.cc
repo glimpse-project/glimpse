@@ -24,6 +24,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -112,6 +113,7 @@ static const char *top_out_dir;
 
 static bool write_half_float = true;
 static bool write_palettized_pngs = true;
+static bool write_pfm_depth = false;
 static float depth_variance_mm = 20;
 static float background_depth_m = 1000;
 static int min_body_size_px = 3000;
@@ -433,6 +435,59 @@ write_exr(const char *filename,
         return false;
     } else
         return true;
+}
+
+static bool
+write_pfm(struct image *image, const char *filename)
+{
+    int fd;
+    char header[128];
+    size_t header_len;
+    int file_len;
+    char *buf;
+
+    fd = open(filename, O_RDWR|O_CREAT, 0600);
+    if (fd < 0) {
+        fprintf(stderr, "Failed to open output %s: %m\n", filename);
+        return false;
+    }
+
+    header_len = snprintf(header, sizeof(header), "Pf\n%u %u\n%f\n",
+                          image->width, image->height, -1.0);
+    if (header_len >= sizeof(header)) {
+        fprintf(stderr, "Failed to describe PFN header for %s\n", filename);
+        close(fd);
+        return false;
+    }
+
+    file_len = header_len + sizeof(float) * image->width * image->height;
+
+    if (ftruncate(fd, file_len) < 0) {
+        fprintf(stderr, "Failed to set file (%s) size: %m\n", filename);
+        close(fd);
+        return false;
+    }
+
+    buf = (char *)mmap(NULL, file_len, PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+    if (buf != (void *)-1) {
+        debug("Mapped PFM %p, len = %d\n", buf, file_len);
+    } else {
+        fprintf(stderr, "Failed to mmap PFN output: %m\n");
+        close(fd);
+        return false;
+    }
+
+    memcpy(buf, header, header_len);
+    memcpy(buf + header_len,
+           image->data_float,
+           sizeof(float) * image->width * image->height);
+
+    munmap(buf, file_len);
+    close(fd);
+
+    debug("Wrote %s PFM file OK\n", filename);
+
+    return true;
 }
 
 static struct image *
@@ -777,16 +832,36 @@ save_frame_depth(const char *dir, const char *filename,
 
     xsnprintf(output_filename, "%s/depth/%s/%s", top_out_dir, dir, filename);
 
-    if (stat(output_filename, &st) != -1) {
-        fprintf(stderr, "Skipping EXR file %s as output already exist\n", output_filename);
-        return;
-    }
+    if (write_pfm_depth) {
+        char pfm_filename[1024];
 
-    if (write_half_float)
-        write_exr(output_filename, depth, IMAGE_FORMAT_XHALF);
-    else
-        write_exr(output_filename, depth, IMAGE_FORMAT_XFLOAT);
-    debug("wrote %s\n", output_filename);
+        xsnprintf(pfm_filename, "%.*s.pfm",
+                  (int)strlen(output_filename) - 4,
+                  output_filename);
+
+        if (stat(pfm_filename, &st) != -1) {
+            fprintf(stderr, "Skipping PFM file %s as output already exist\n",
+                    pfm_filename);
+            return;
+        }
+
+        write_pfm(depth, pfm_filename);
+
+        debug("wrote %s\n", pfm_filename);
+    } else {
+        if (stat(output_filename, &st) != -1) {
+            fprintf(stderr, "Skipping EXR file %s as output already exist\n",
+                    output_filename);
+            return;
+        }
+
+        if (write_half_float)
+            write_exr(output_filename, depth, IMAGE_FORMAT_XHALF);
+        else
+            write_exr(output_filename, depth, IMAGE_FORMAT_XFLOAT);
+
+        debug("wrote %s\n", output_filename);
+    }
 }
 
 static bool
@@ -1230,6 +1305,8 @@ usage(void)
 "    -f,--full                  Write full-float channel depth images (otherwise\n"
 "                               writes half-float)\n"
 "    -g,--grey                  Write greyscale not palletized label PNGs\n"
+"    -p,--pfm                   Write depth data as PFM files\n"
+"                               (otherwise depth data is written in EXR format)\n"
 "    --variance=<mm>            The randomized variance in mm of the final depth\n"
 "                               values (%.0fmm by default)\n"
 "    -b,--background=<m>        Depth in meters of background pixels\n"
@@ -1264,11 +1341,12 @@ main(int argc, char **argv)
     /* N.B. The initial '+' means that getopt will stop looking for options
      * after the first non-option argument...
      */
-    const char *short_options="+hfgv:b:t:";
+    const char *short_options="+hfgpv:b:t:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
         {"grey",            no_argument,        0, 'g'},
+        {"pfm",             no_argument,        0, 'p'},
         {"variance",        required_argument,  0, VAR_OPT},
         {"background",      required_argument,  0, 'b'},
         {"min-body-size",   required_argument,  0, MIN_BODY_PX_OPT},
@@ -1291,6 +1369,9 @@ main(int argc, char **argv)
                 break;
             case 'g':
                 write_palettized_pngs = false;
+                break;
+            case 'p':
+                write_pfm_depth = true;
                 break;
             case VAR_OPT:
                 depth_variance_mm = strtod(optarg, &end);
@@ -1325,6 +1406,11 @@ main(int argc, char **argv)
 
     if (optind != argc - 2)
         usage();
+
+    if (write_pfm_depth && write_half_float) {
+        fprintf(stderr, "Not possible to write half float data to PFM files\n");
+        exit(1);
+    }
 
     grey_to_id_map[0x07] = 0; // head left
     grey_to_id_map[0x0f] = 1; // head right
