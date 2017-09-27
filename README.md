@@ -82,13 +82,106 @@ sdks*
 
 ## libpng
 *Note: zlib (which libpng depends on) is provided by the NDK itself)*
+
 ```
-git clone https://github.com/glennrp/libpng
+git clone https://github.com/glennrp/libpng -b libpng16
 mkdir build-release
 cd build-release
-cmake -GNinja -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/libpng -DCMAKE_INSTALL_LIBDIR=lib/arm64-v8a -DANDROID_ABI=arm64-v8a -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake $@ ../
-cmake --build .
-cmake --build . --target install
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/libpng -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -Dld-version-script=OFF -DPNG_ARM_NEON=on ../
+make -j8
+make install
+```
+
+
+## Boost
+
+libpcl depends on a number of Boost libraries...
+
+Note: I had to avoid using the latest Boost because the FindBoost.cmake script
+that was shipped with the latest cmake packaged for Ubuntu didn't know about
+Boost versions > 1.61
+
+```
+git clone --recursive https://github.com/boostorg/boost.git -b boost-1.61.0
+cd boost
+./bootstrap.sh
+PATH=`/path/to/standalone/android-toolchain/bin`:$PATH ./b2 install -j8 -q \
+    toolset=clang \
+    link=static \
+    target-os=android \
+    --prefix=$GLIMPSE_ROOT/third_party/boost \
+    --with-system \
+    --with-filesystem \
+    --with-date_time \
+    --with-thread \
+    --with-iostreams \
+    --with-serialization \
+    -sNO_BZIP2=1
+```
+
+## libflann
+
+```
+git clone git://github.com/mariusmuja/flann.git
+cd flann
+mkdir build-release
+cd build-release
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/libflann -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DBUILD_PYTHON_BINDINGS=OFF -DBUILD_MATLAB_BINDINGS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_DOC=OFF -DBUILD_TESTS=OFF -DUSE_OPENMP=OFF ../
+make
+make install
+```
+
+## Eigen
+
+```
+hg clone https://bitbucket.org/eigen/eigen/
+cd eigen
+mkdir build-release
+cd build-release
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/eigen -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake ../
+make
+make install
+```
+
+## QHull
+
+The upstream qhull project has broken a cmake build which is fixed by this branch...
+```
+git clone https://github.com/jamiesnape/qhull -b cmake
+cd qhull
+mkdir build-release
+cd build-release
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/libqhull -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake ../
+make
+make install
+```
+
+## libpcl
+
+Note: libpcl itself depends on Boost, libeigen, libflann, libqhull and libpng
+
+If building on Ubuntu for development, you can build libpcl without visualization support like:
+```
+# apt-get install libflann-dev libqhull-dev libboost-all-dev
+$ git clone https://github.com/PointCloudLibrary/pcl
+$ cd pcl
+$ mkdir build && cd build
+$ cmake ../ -DWITH_OPENGL=OFF -DWITH_PCAP=OFF
+$ make -j8
+```
+
+For an Android build (assuming the prerequisities have been built as above) do:
+
+```
+git clone https://github.com/PointCloudLibrary/pcl
+cd pcl
+mkdir build-release
+cd build-release
+cmake -DCMAKE_INSTALL_PREFIX=$GLIMPSE_ROOT/third_party/libpcl -DCMAKE_INSTALL_LIBDIR=lib/arm64-v8a -DANDROID_ABI=arm64-v8a -DANDROID_ARM_NEON=ON -DANDROID_NATIVE_API_LEVEL=21 -DANDROID_NDK=$ANDROID_NDK_HOME -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DCMAKE_FIND_ROOT_PATH="$GLIMPSE_ROOT/third_party/eigen;$GLIMPSE_ROOT/third_party/libflann;$GLIMPSE_ROOT/third_party/boost;$GLIMPSE_ROOT/third_party/libqhull;$GLIMPSE_ROOT/third_party/libpng" -DWITH_OPENGL=OFF -DWITH_PCAP=OFF -DWITH_OPENNI2=OFF ../
+make -j8
+make install
+cd $GLIMPSE_ROOT/third_party/libpcl/lib
+ln -s . arm64-v8a
 ```
 
 # Misc Android development notes / reminders
