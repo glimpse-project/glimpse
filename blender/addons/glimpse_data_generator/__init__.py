@@ -478,8 +478,8 @@ class GeneratorOperator(bpy.types.Operator):
                 # Make sure no other bodies are visible on the render layer
                 def hide_bodies_from_render():
                     for _body in all_bodies:
-                        pose_obj = bpy.data.objects[_body + "PoseObject"]
-                        pose_obj.layers[0] = False
+                        mesh_obj = bpy.data.objects[_body + "BodyMeshObject"]
+                        mesh_obj.layers[0] = False
                         hide_body_clothes(_body)
 
                 hide_bodies_from_render()
