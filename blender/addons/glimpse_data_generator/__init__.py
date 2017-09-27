@@ -541,6 +541,8 @@ class GeneratorOperator(bpy.types.Operator):
 
                     camera.rotation_mode = 'QUATERNION'
                     camera.rotation_quaternion = rot
+
+                    context.scene.update() # update camera.matrix_world
                     camera_world_inverse_mat4 = camera.matrix_world.inverted()
 
                     dirname =  str(start_frame) + "_" + str(end_frame-1) + "_" + body
