@@ -449,23 +449,32 @@ function color_point_cloud_with_stops(point_cloud, color_stops) {
 }
 
 var color_stops = init_color_stops();
-var data_dir = getURLParameter("dir");
+var training_dir = getURLParameter("training");
+var device_dir = getURLParameter("device");
 var controllers = [];
 var views = [];
 var obj_world_scale = 100;
 var initial_frame_no = getURLParameter("frame");
 
-var index = httpGetSync(data_dir + "/index");
-index = index.split('\n');
+var training_index = httpGetSync(training_dir + "/index");
+training_index = training_index.split('\n');
 
-$("#index-info").html(index.length + " frames indexed");
+$("#training-index-info").html(training_index.length + " training frames indexed");
 
+var device_index = httpGetSync(device_dir + "/index");
+device_index = device_index.split('\n');
 
-function init_view() {
+$("#device-index-info").html(device_index.length + " device frames indexed");
 
+var device_meta_json = httpGetSync(device_dir + "/meta.json");
+var device_meta = JSON.parse(device_meta_json);
+
+var device_depth_vfov = device_meta.depth_camera.vfov;
+
+function init_view(canvas_element) {
     var view = {};
 
-    var renderer = new THREE.WebGLRenderer({canvas: $("#training-canvas")[0]});
+    var renderer = new THREE.WebGLRenderer({canvas: canvas_element});
     view.renderer = renderer;
 
     var scene = new THREE.Scene();
@@ -520,24 +529,22 @@ function init_view() {
     }
     */
 
-
     return view;
 }
 
 function load_training_frame(view, frame_no) {
-    var frame_path = index[frame_no];
-
+    var frame_path = training_index[frame_no];
 
     console.log("Loading frame " + frame_path);
 
-    var frame_meta_json = httpGetSync(data_dir + "/labels" + frame_path + ".json");
+    var frame_meta_json = httpGetSync(training_dir + "/labels" + frame_path + ".json");
     var frame_meta = JSON.parse(frame_meta_json);
 
-    var render_vfov = frame_meta.camera.vertical_fov;
+    var training_vfov = frame_meta.camera.vertical_fov;
 
-    $("#training-frame-description").html("Frame: " + frame_path + " (" + frame_no + ")<br>Camera fov:" + render_vfov);
+    $("#training-frame-description").html("Frame: " + frame_path + " (" + frame_no + ")<br>Camera fov:" + training_vfov);
 
-    var req = LoadPNG(data_dir + "/labels" + frame_path + ".png");
+    var req = LoadPNG(training_dir + "/labels" + frame_path + ".png");
     req.on('load', (ev) => {
         console.log("loaded PNG " + ev.data.width + "x" + ev.data.height);
 
@@ -570,7 +577,7 @@ function load_training_frame(view, frame_no) {
     });
 
 
-    req = LoadPFM(data_dir + "/depth" + frame_path + ".pfm");
+    req = LoadPFM(training_dir + "/depth" + frame_path + ".pfm");
     req.on('load', (ev) => {
         console.log("loaded PFM " + ev.data.width + "x" + ev.data.height);
         var img = colorize_depth(ev.data, color_stops);
@@ -595,7 +602,7 @@ function load_training_frame(view, frame_no) {
         mesh.position.y = 0;
         mesh.position.z = ev.data.width / 10;
 
-        var camera = new THREE.PerspectiveCamera(render_vfov,
+        var camera = new THREE.PerspectiveCamera(training_vfov,
                                 ev.data.width / ev.data.height,
                                 0.1, ev.data.width / 10);
         var helper = new THREE.CameraHelper(camera);
@@ -634,7 +641,7 @@ function load_training_frame(view, frame_no) {
             }
         }
 
-        var point_cloud = depth_image_to_point_cloud(ev.data, render_vfov);
+        var point_cloud = depth_image_to_point_cloud(ev.data, training_vfov);
         var n_points = point_cloud.length / 3;
         var geometry = new THREE.BufferGeometry();
         geometry.addAttribute('position', new THREE.BufferAttribute(point_cloud, 3));
@@ -718,6 +725,141 @@ function load_training_frame(view, frame_no) {
     }
 }
 
+function load_device_frame(view, frame_no) {
+    var frame_path = device_index[frame_no];
+
+    console.log("Loading device frame " + frame_path);
+
+    req = LoadPFM(device_dir + frame_path + "-depth.pfm");
+    req.on('load', (ev) => {
+        console.log("loaded PFM " + ev.data.width + "x" + ev.data.height);
+        var img = colorize_depth(ev.data, color_stops);
+
+        //var canvas = document.getElementsByTagName('canvas')[0];
+        //var ctx = canvas.getContext('2d');
+        
+        //var id = new ImageData(img.data, img.width, img.height);
+        //ctx.putImageData(id, 0, 0);
+
+        var depth_tex = new THREE.DataTexture(img.data,
+            ev.data.width, ev.data.height, THREE.RGBAFormat, THREE.UnsignedByteType);
+        depth_tex.needsUpdate = true;
+        depth_tex.flipY = true;
+        //var material = new THREE.Material({map: label_tex});
+        var material = new THREE.MeshPhongMaterial( { map: depth_tex } );
+        material.side = THREE.DoubleSide;
+        var rect = new THREE.PlaneGeometry(ev.data.width/10, ev.data.height/10);
+        var mesh = new THREE.Mesh(rect, material);
+
+        mesh.position.x = 0;
+        mesh.position.y = 0;
+        mesh.position.z = ev.data.width / 10;
+
+        var camera = new THREE.PerspectiveCamera(device_depth_vfov,
+                                ev.data.width / ev.data.height,
+                                0.1, ev.data.width / 10);
+        var helper = new THREE.CameraHelper(camera);
+
+        helper.scale.z = -1;
+        helper.updateMatrix();
+        helper.matrixAutoUpdate = false;
+        view.scene.add(helper);
+
+        view.scene.add(mesh);
+
+        for (var i = 0; i < 5; i++) {
+            var marker = new THREE.PlaneGeometry(10, 10);
+            var material = new THREE.MeshPhongMaterial( {
+                ambient: 0x050505, color: 0x000000,
+                specular: 0x555555, shininess: 30  } );
+            material.side = THREE.DoubleSide;
+            var mesh = new THREE.Mesh(marker, material);
+            mesh.position.x = 10;
+            mesh.position.z = i * obj_world_scale;
+
+            view.scene.add(mesh);
+
+            for (var j = 1; j < 10; j++) {
+                var material = new THREE.MeshPhongMaterial( {
+                    ambient: 0x050505, color: 0x000000,
+                    specular: 0x555555, shininess: 30  } );
+                material.side = THREE.DoubleSide;
+                var mesh = new THREE.Mesh(marker, material);
+                mesh.position.z = (i + (j / 10)) * obj_world_scale;
+                mesh.position.x = 10;
+                mesh.scale.x = 0.5;
+                mesh.scale.y = 0.5;
+                mesh.scale.z = 0.5;
+                view.scene.add(mesh);
+            }
+        }
+
+        var point_cloud = depth_image_to_point_cloud(ev.data, device_depth_vfov);
+        var n_points = point_cloud.length / 3;
+        var geometry = new THREE.BufferGeometry();
+        geometry.addAttribute('position', new THREE.BufferAttribute(point_cloud, 3));
+
+        var point_colors = color_point_cloud_with_stops(point_cloud, color_stops);
+        geometry.addAttribute('color_in', new THREE.BufferAttribute(point_colors, 3));
+
+
+/*
+        for (var i = 0; i < point_cloud.length; i += 3) {
+            var x = point_cloud[i];
+            var y = point_cloud[i+1];
+            var z = point_cloud[i+2];
+
+            var point = new THREE.PlaneGeometry(1, 1);
+            var material = new THREE.MeshPhongMaterial( {
+                ambient: 0x050505, color: 0x0033ff,
+                specular: 0x555555, shininess: 30  } );
+            material.side = THREE.DoubleSide;
+            var mesh = new THREE.Mesh(point, material);
+
+            point.position.x = x;
+            point.position.y = y;
+            point.position.z = z;
+
+            view.scene.add(mesh);
+        }
+        */
+
+        uniforms = {
+        };
+        var shaderMaterial = new THREE.ShaderMaterial( {
+
+            uniforms:       uniforms,
+            vertexShader:   document.getElementById( 'vertexshader' ).textContent,
+            fragmentShader: document.getElementById( 'fragmentshader' ).textContent,
+
+            blending:       THREE.AdditiveBlending,
+            depthTest:      false,
+            transparent:    false
+        });
+
+        //var material = new THREE.MeshPhongMaterial( {
+        //    ambient: 0x050505, color: 0x0033ff,
+        //    specular: 0x555555, shininess: 30  } );
+        //material.side = THREE.DoubleSide;
+        var particles = new THREE.Points(geometry, shaderMaterial);
+        particles.scale.x = obj_world_scale;
+        particles.scale.y = -obj_world_scale;
+        particles.scale.z = obj_world_scale;
+
+        particles.updateMatrix();
+        particles.matrixAutoUpdate = false;
+
+        //var mesh = new THREE.Mesh(point, material);
+        view.scene.add(particles);
+
+        render();
+    });
+    req.on('error', (ev) => {
+        console.error("Failed to load PFM: " +  ev.message);
+    });
+
+}
+
 function animate() {
     requestAnimationFrame(animate);
 
@@ -735,25 +877,43 @@ function render() {
 }
 
 
-var training_view = init_view();
+var training_view = init_view($("#training-canvas")[0]);
 $("#training-view").append(training_view.renderer.domElement);
 views.push(training_view);
 
 $("#training-frame-slider").slider({
     range: "max",
     min: 0,
-    max: index.length - 1,
+    max: training_index.length - 1,
     value: 0,
     slide: function( event, ui ) {
         //$("#current-frame-no").html(ui.value);
         load_training_frame(training_view, ui.value);
     }
 });
-if (initial_frame_no < index.length)
+if (initial_frame_no < training_index.length)
     load_training_frame(training_view, initial_frame_no);
 else
     load_training_frame(training_view, 0);
 
+var device_view = init_view($("#device-canvas")[0]);
+$("#device-view").append(device_view.renderer.domElement);
+views.push(device_view);
+
+$("#device-frame-slider").slider({
+    range: "max",
+    min: 0,
+    max: device_index.length - 1,
+    value: 0,
+    slide: function( event, ui ) {
+        //$("#current-frame-no").html(ui.value);
+        load_device_frame(device_view, ui.value);
+    }
+});
+if (initial_frame_no < device_index.length)
+    load_device_frame(device_view, initial_frame_no);
+else
+    load_device_frame(device_view, 0);
 
 function onWindowResize() {
     for (var i = 0; i < views.length; i++) {

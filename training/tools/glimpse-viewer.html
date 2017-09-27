@@ -34,17 +34,23 @@
 
     </head>
     <body>
-        <div id="index-info">Index Loading...</div>
-        <div style="display:flex;flex-direction:row;height:100%;">
-            <div id="training-view" style="display:flex;flex-direction:column;flex:1;">
-                <div id="training-view-info" style="position: fixed; top:3em; left:1em;">
+        <div id="training-index-info">Training index Loading...</div>
+        <div id="device-index-info">Device index Loading...</div>
+        <div style="display:flex;flex-direction:row;height:100%;margin:1em;">
+            <div id="training-view" style="position:relative;display:flex;flex-direction:column;flex:1;margin:1em;">
+                <div id="training-view-info" style="position: absolute; top:4em; left:1em;">
                     <div id="training-frame-description"></div>
                     <div id="training-frame-no"></div>
                 </div>
                 <div id="training-frame-slider" style="flex:0 0 1em;"></div>
                 <canvas id="training-canvas" style="flex:1;"></canvas>
             </div>
-            <div style="display:flex;flex-direction:column;flex:1;">
+            <div id="device-view" style="position:relative;display:flex;flex-direction:column;flex:1;margin:1em;">
+                <div id="device-view-info" style="position: absolute; top:4em; left:1em;">
+                    <div id="device-frame-description">fooooo</div>
+                    <div id="device-frame-no"></div>
+                </div>
+                <div id="device-frame-slider" style="flex:0 0 1em;"></div>
                 <canvas id="device-canvas" style="flex:1;"></canvas>
             </div>
         </div>
