@@ -40,28 +40,28 @@ train_rdt 54.5 34 path-to-label-imgs path-to-depth-imgs output.rdt -l 1000 -s
 Creating a joint map
 ====================
 
-To know what to do with the bones files, these tools need a joint-map file.
-This is a human-readable plain text file that describes what bones map to which
-labels.
+To know which bones from the training data are of interest, and what body
+labels they are associated with, these tools need a joint-map file.  This is a
+human-readable plain text file that describes what bones map to which labels.
 
-When mapping bones to joints, it's possible to map the centre-point of the bone
-by referring to the name without a '.head' or '.tail' suffix.
+Each line specifies a bone name and which end of the bone to reference like
+`thigh_l.head` followed by a comma separated list of labels that are associated
+with that end of the named bone. For example:
 
-For example, suppose there are five bones in the JSON data, called 'head',
-'left_arm', 'right_arm', 'left_leg' and 'right_leg'. Suppose we want to map
-them to nine joints that correspond to the head, left and right shoulders,
-left and right wrists, left and right hips and left and right ankles. We may
-write a joint map like so (where labels have been picked arbitrarily):
-
-head, 0, 1, 2, 3
-left_arm.head, 4
-left_arm.tail, 5
-right_arm.head, 6
-right_arm.tail, 7
-left_leg.head, 8
-left_leg.tail, 9
-right_leg.head, 10
-right_leg.tail, 11
+    head.tail, 2, 3
+    neck_01.head, 4
+    upperarm_l.head, 7
+    upperarm_r.head, 9
+    lowerarm_l.head, 11
+    lowerarm_l.tail, 15
+    lowerarm_r.head, 13
+    lowerarm_r.tail, 17
+    thigh_l.head, 19
+    thigh_l.tail, 23
+    thigh_r.head, 21
+    thigh_r.tail, 25
+    foot_l.head, 27
+    foot_r.head, 29
 
 Generating joint files
 ======================

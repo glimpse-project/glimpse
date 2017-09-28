@@ -28,24 +28,32 @@ def json_to_jnt(filename, joint_map):
     bones = joints['bones']
     for joint in joint_map:
         name = joint['name'].split('.')
-        points = name[1:]
+
+        if len(name) != 2:
+            print("Bad bone name \"" + joint['name'] + "\", expected map " +
+                  "names to all be in the form: bone_name.head or bone_name.tail");
+            sys.exit(1)
+
+        end = name[1]
         name = name[0]
 
+        found = False
         for bone in bones:
             if bone['name'] != name:
                 continue
 
-            n_points = 0
-            point = np.zeros((3), dtype=np.float32)
-            for key, value in bone.items():
-                if key == 'name':
-                    continue
-                if len(points) == 0 or key in points:
-                    n_points += 1
-                    point += value
-            jnt_data.append(point / n_points)
+            found = True
 
+            if end in bone:
+                point = np.array(bone[end], dtype=np.float32)
+                jnt_data.append(point)
+            else:
+                print("Specified bone end \"%s.%s\" not found in " % (name, end, filename))
+                sys.exit(1)
             break
+        if found == False:
+            print("Failed to find \"%s.%s\" bone in json file %s" % (name, end, filename))
+            sys.exit(1)
 
     assert(len(jnt_data) == len(joint_map)), \
         '%d != %d' % (len(jnt_data), len(joint_map))
