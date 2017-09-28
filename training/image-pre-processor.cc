@@ -1032,7 +1032,7 @@ ensure_directory(const char *path)
         ensure_directory(parent);
     }
 
-    free(parent);
+    free(dirname_copy);
 
     ret = stat(path, &st);
     if (ret == -1) {
