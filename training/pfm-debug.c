@@ -134,10 +134,10 @@ load_pfm(const char *filename)
         fprintf(stderr, "Nothing expected after PFM scale");
         goto error_check_header;
     }
-    //if (scale >= 0) {
-    //    fprintf(stderr, "Only support loading little endian PFM files\n");
-    //    goto error_check_header;
-    // }
+    if (scale >= 0) {
+        fprintf(stderr, "Only support loading little endian PFM files\n");
+        goto error_check_header;
+    }
 
     pfm_data_start = scale_end + 1;
     pfm_data_len = sizeof(float) * width * height;
@@ -155,7 +155,6 @@ load_pfm(const char *filename)
 
 error_check_header:
     munmap((void *)asset_buf, asset_buf_len);
-error_mmap:
     close(fd);
 
     return ret;
