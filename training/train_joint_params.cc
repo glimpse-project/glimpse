@@ -5,6 +5,8 @@
 #include <thread>
 #include <pthread.h>
 
+#include <cmath>
+
 #include "xalloc.h"
 #include "llist.h"
 #include "utils.h"
@@ -86,7 +88,7 @@ print_usage(FILE* stream)
 reproject(int32_t x, int32_t y, float depth, int32_t width, int32_t height,
           float vfov, float* out_point)
 {
-  if (!isnormal(depth))
+  if (!std::isnormal(depth))
     {
       return;
     }
@@ -273,7 +275,7 @@ thread_body(void* userdata)
                 {
                   float s = (x / half_width) - 1.f;
                   float depth = (float)ctx->depth_images[idx];
-                  if (!isnormal(depth))
+                  if (!std::isnormal(depth))
                     {
                       continue;
                     }
