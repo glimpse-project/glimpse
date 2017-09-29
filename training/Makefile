@@ -1,9 +1,9 @@
-ifndef OPT
+E=$(if $(V),,@)
+
 ifeq ($(RELEASE), 1)
-OPT = -g3 -O3 -march=native -mtune=native
+OPT ?= -g3 -O3 -march=native -mtune=native
 else
-OPT = -g3 -O0 -DDEBUG
-endif
+OPT ?= -g3 -O0 -DDEBUG
 endif
 
 CC ?= gcc
@@ -13,8 +13,11 @@ CXXFLAGS ?= $(OPT)
 
 LDFLAGS ?=
 
-_CFLAGS = $(CFLAGS) -Wall
+_CFLAGS = $(CFLAGS) -Wall -std=c11
 _CXXFLAGS = $(CXXFLAGS) -std=c++14 -Wall
+
+
+INCLUDES = `pkg-config --cflags OpenEXR libpng`
 
 TOOLS = image-pre-processor \
 	train_rdt \
@@ -27,29 +30,55 @@ TOOLS = image-pre-processor \
 
 all: $(TOOLS)
 
-image-pre-processor: image-pre-processor.cc parson.c half.hpp
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs libpng` -lpthread
+image-pre-processor: image-pre-processor.o parson.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-train_rdt: train_rdt.cc xalloc.cc llist.cc utils.h train_utils.cc
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
+train_rdt: train_rdt.o xalloc.o llist.o train_utils.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs OpenEXR libpng` -lpthread
 
-train_joint_params: train_joint_params.cc infer.cc xalloc.cc llist.cc utils.h train_utils.cc loader.cc
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
+train_joint_params: train_joint_params.o infer.o train_utils.o loader.o llist.o xalloc.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs OpenEXR libpng` -lpthread
 
-depth2labels: depth2labels.cc infer.cc xalloc.cc utils.h loader.cc loader.h
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
+depth2labels: depth2labels.o infer.o loader.o xalloc.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs OpenEXR libpng`
 
-exr-to-pfm: exr-to-pfm.cc half.hpp
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs libpng`
+exr-to-pfm: exr-to-pfm.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
 
-pfm-to-exr: pfm-to-exr.cc half.hpp
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
+pfm-to-exr: pfm-to-exr.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
 
-pfm-debug: pfm-debug.c
-	$(CC) -o $(@) $(^) $(_CFLAGS) $(LDFLAGS)
+pfm-debug: pfm-debug.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CC) -o $(@) $(^) $(_CFLAGS) $(LDFLAGS)
 
-pack-training-data: pack-training-data.cc llist.cc xalloc.cc pack.c half.hpp
-	$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs libpng` -lsnappy -lpthread
+pack-training-data: pack-training-data.o pack.o llist.o xalloc.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lsnappy -lpthread -lc
+
+
+%.o: %.c Makefile | dirs
+	$(E)echo "(CC)      $(@)"
+	$(E)$(CC) $(filter %.c,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CFLAGS) $(INCLUDES) -c
+
+%.o: %.cc Makefile | dirs
+	$(E)echo "(CXX)     $(@)"
+	$(E)$(CXX) $(filter %.cc,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CXXFLAGS) $(INCLUDES) -c
+
+-include .deps/*.rules
+
+dirs:
+	$(E)mkdir -p .deps
 
 clean:
 	-rm -f $(TOOLS)
+	-rm -f *.o
+	-rm -fr .deps
+
+.PHONY: all clean dirs
