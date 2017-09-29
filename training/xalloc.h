@@ -1,8 +1,11 @@
 
-#ifndef __XALLOC__
-#define __XALLOC__
+#pragma once
 
 #include <stdlib.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 void* xmalloc(size_t size);
 void* xaligned_alloc(size_t alignment, size_t size);
@@ -11,4 +14,6 @@ void* xcalloc(size_t nmemb, size_t size);
 void* xrealloc(void *ptr, size_t size);
 void xasprintf(char **strp, const char *fmt, ...);
 
-#endif /* __XALLOC__ */
+#ifdef __cplusplus
+};
+#endif
