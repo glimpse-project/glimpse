@@ -11,10 +11,11 @@ typedef struct {
   float* label_pr_tables;
 } RDTree;
 
-RDTree* read_tree(FILE* file);
+RDTree* load_tree(uint8_t *tree, unsigned len);
 void free_tree(RDTree* tree);
 
-RDTree** read_forest(char** files, uint8_t n_files);
-void free_forest(RDTree** forest, uint8_t n_trees);
+RDTree ** read_forest(char **files, unsigned n_files);
+RDTree** load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees);
+void free_forest(RDTree** forest, int n_trees);
 
 #endif /* __LOADER */

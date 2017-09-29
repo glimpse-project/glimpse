@@ -36,7 +36,7 @@ train_rdt: train_rdt.cc xalloc.cc llist.cc utils.h train_utils.cc
 train_joint_params: train_joint_params.cc infer.cc xalloc.cc llist.cc utils.h train_utils.cc loader.cc
 	$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
 
-depth2labels: depth2labels.cc infer.cc xalloc.cc utils.h loader.cc
+depth2labels: depth2labels.cc infer.cc xalloc.cc utils.h loader.cc loader.h
 	$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --cflags --libs OpenEXR libpng`
 
 exr-to-pfm: exr-to-pfm.cc half.hpp

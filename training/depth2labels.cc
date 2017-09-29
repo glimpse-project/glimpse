@@ -1,3 +1,5 @@
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <unistd.h>
 #include <stdlib.h>
@@ -300,7 +302,7 @@ main(int argc, char **argv)
       load_palette_from_png(palette_file);
 
   // Do inference
-  uint8_t n_trees = argc - optind - 2;
+  unsigned n_trees = argc - optind - 2;
   RDTree** forest = read_forest(&argv[optind+2], n_trees);
   if (!forest)
     {

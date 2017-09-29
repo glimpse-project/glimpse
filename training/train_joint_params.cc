@@ -19,7 +19,7 @@
 static bool verbose = false;
 
 typedef struct {
-  uint8_t  n_trees;       // Number of decision trees
+  unsigned n_trees;       // Number of decision trees
   RDTree** forest;        // Decision trees
 
   uint32_t n_images;      // Number of training images
