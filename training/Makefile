@@ -1,5 +1,10 @@
-#OPT ?= -g3 -O3 -march=native -mtune=native
-OPT ?= -g3 -O0 -DDEBUG
+ifndef OPT
+ifeq ($(RELEASE), 1)
+OPT = -g3 -O3 -march=native -mtune=native
+else
+OPT = -g3 -O0 -DDEBUG
+endif
+endif
 
 CC ?= gcc
 CFLAGS ?= $(OPT)
