@@ -5,7 +5,8 @@
 #include <stdint.h>
 #include <sys/types.h>
 #include <math.h>
-#include <half.h>
+
+#include "half.hpp"
 
 #define RDT_VERSION 3
 #define JIP_VERSION 0
@@ -36,7 +37,7 @@ typedef struct __attribute__((__packed__)) {
 } JIPHeader;
 
 inline float
-sample_uv(half* depth_image, uint32_t width, uint32_t height,
+sample_uv(half_float::half* depth_image, uint32_t width, uint32_t height,
           Int2D pixel, float depth, UVPair uv)
 {
 #if 0

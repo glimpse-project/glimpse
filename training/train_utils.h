@@ -1,10 +1,10 @@
 
-#ifndef __TRAIN_UTILS__
-#define __TRAIN_UTILS__
+#pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
-#include <half.h>
+
+#include "half.hpp"
 
 void gather_train_data(const char* label_dir_path,
                        const char* depth_dir_path,
@@ -16,9 +16,7 @@ void gather_train_data(const char* label_dir_path,
                        uint8_t*    out_n_joints,
                        int32_t*    out_width,
                        int32_t*    out_height,
-                       half**      out_depth_images,
+                       half_float::half** out_depth_images,
                        uint8_t**   out_label_images,
                        float**     out_joints);
-
-#endif /* __TRAIN_UTILS__ */
 

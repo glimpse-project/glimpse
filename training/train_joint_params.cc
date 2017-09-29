@@ -14,9 +14,15 @@
 #include "loader.h"
 #include "infer.h"
 
+#include "half.hpp"
+
+
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.001f
 #define PROGRESS_WIDTH 80
+
+using half_float::half;
+
 
 static bool verbose = false;
 

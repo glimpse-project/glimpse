@@ -13,10 +13,14 @@
 #include <pthread.h>
 #include <time.h>
 
+#include "half.hpp"
+
 #include "xalloc.h"
 #include "llist.h"
 #include "utils.h"
 #include "train_utils.h"
+
+using half_float::half;
 
 static bool verbose = false;
 static uint32_t seed = 0;

@@ -14,6 +14,8 @@
 #include "xalloc.h"
 #include "llist.h"
 
+#include "half.hpp"
+
 using namespace OPENEXR_IMF_NAMESPACE;
 using namespace IMATH_NAMESPACE;
 
@@ -26,7 +28,7 @@ typedef struct {
   LList*   paths;   // List of label, depth and joint file paths,
   int32_t  width;         // Image width
   int32_t  height;        // Image height
-  half*    depth_images;  // Depth image data
+  half_float::half* depth_images;  // Depth image data
   uint8_t* label_images;  // Label image data
   float*   joint_data;    // Joint data
   bool     gather_depth;  // Whether to load depth images
@@ -190,8 +192,8 @@ verify_metadata(TrainData* data, char* filename,
             }
           if (data->gather_depth)
             {
-              data->depth_images = (half*)
-                xmalloc(n_pixels * sizeof(half));
+              data->depth_images = (half_float::half*)
+                xmalloc(n_pixels * sizeof(half_float::half));
             }
         }
       else
@@ -354,7 +356,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   if (depth_path && data->gather_depth)
     {
       // Read depth file
-      half* dest;
+      half_float::half* dest;
       InputFile in_file(depth_path);
       Box2i dw = in_file.header().dataWindow();
 
@@ -379,8 +381,8 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
           frameBuffer.insert("Y",
                              Slice (HALF,
                                     (char *)dest,
-                                    sizeof(half),           // x stride,
-                                    sizeof(half) * width)); // y stride
+                                    sizeof(half_float::half), // x stride,
+                                    sizeof(half_float::half) * width)); // y stride
 
           in_file.setFrameBuffer(frameBuffer);
           in_file.readPixels(dw.min.y, dw.max.y);
@@ -448,7 +450,7 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
                   uint32_t limit, uint32_t skip, bool shuffle,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
-                  half** out_depth_images, uint8_t** out_label_images,
+                  half_float::half** out_depth_images, uint8_t** out_label_images,
                   float** out_joints)
 {
   TrainData data = {

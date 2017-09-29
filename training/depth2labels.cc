@@ -10,10 +10,11 @@
 
 #include <png.h>
 
-#include <half.h>
 #include <ImfInputFile.h>
 #include <ImfChannelList.h>
 #include <ImathBox.h>
+
+#include "half.hpp"
 
 #include "xalloc.h"
 #include "utils.h"
@@ -286,14 +287,15 @@ main(int argc, char **argv)
       return 1;
     }
 
-  half* depth_image = (half*)xmalloc(width * height * sizeof(half));
+  half_float::half* depth_image =
+      (half_float::half*)xmalloc(width * height * sizeof(half_float::half));
 
   FrameBuffer frameBuffer;
   frameBuffer.insert("Y",
                      Slice (HALF,
                             (char *)depth_image,
-                            sizeof(half), // x stride,
-                            sizeof(half) * width)); // y stride
+                            sizeof(half_float::half), // x stride,
+                            sizeof(half_float::half) * width)); // y stride
 
   in_file.setFrameBuffer(frameBuffer);
   in_file.readPixels(dw.min.y, dw.max.y);
