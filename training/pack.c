@@ -22,6 +22,8 @@
  * SOFTWARE.
  */
 
+#define _BSD_SOURCE 1 // for strdup
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <unistd.h>
