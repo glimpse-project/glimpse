@@ -1,6 +1,5 @@
 
-#ifndef __LLIST__
-#define __LLIST__
+#pragma once
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -16,6 +15,10 @@ struct _LList {
 typedef bool (*LListIterCallback)(LList*   node,
                                   uint32_t index,
                                   void*    userdata);
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 LList*   llist_new(void* data);
 
@@ -57,4 +60,6 @@ LList*   llist_slice(LList*            node,
                      LListIterCallback free_cb,
                      void*             userdata);
 
-#endif /* __LLIST__ */
+#ifdef __cplusplus
+};
+#endif
