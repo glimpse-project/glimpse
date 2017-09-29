@@ -1011,6 +1011,8 @@ load_frame_depth(const char *dir, const char *filename)
     uint8_t *exr_file = read_file(input_filename, &exr_file_len);
     struct image *depth = decode_exr(exr_file, exr_file_len, IMAGE_FORMAT_XFLOAT);
 
+    free(exr_file);
+
     debug("read %s/%s (%dx%d) OK\n", dir, filename, depth->width, depth->height);
 
     return depth;
