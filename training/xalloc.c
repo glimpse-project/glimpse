@@ -1,4 +1,7 @@
+#define _GNU_SOURCE         // vasprintf
+#define _XOPEN_SOURCE 600   // posix_memalign
 
+#include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 
@@ -16,7 +19,10 @@ xmalloc(size_t size)
 void*
 xaligned_alloc(size_t alignment, size_t size)
 {
-  void* mem = aligned_alloc(alignment, size);
+  void* mem = NULL;
+
+  posix_memalign(&mem, alignment, size);
+
   return_if_valid(mem);
 }
 
