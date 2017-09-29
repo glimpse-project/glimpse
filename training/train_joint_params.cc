@@ -165,9 +165,16 @@ thread_body(void* userdata)
       // Calculate inference accuracy if label images were specified
       if (ctx->label_images)
         {
-          uint32_t label_incidence[n_labels] = { 0, };
-          uint32_t correct_label_incidence[n_labels] = { 0, };
+          uint32_t label_incidence[n_labels];
+          uint32_t correct_label_incidence[n_labels];
           uint32_t label_idx = idx;
+
+          /* NB: clang doesn't allow using an = {0} initializer with dynamic
+           * sized arrays...
+           */
+          memset(label_incidence, 0, n_labels * sizeof(label_incidence[0]));
+          memset(correct_label_incidence, 0,
+                 n_labels * sizeof(correct_label_incidence[0]));
 
           for (int32_t y = 0; y < ctx->height; y++)
             {
@@ -268,7 +275,11 @@ thread_body(void* userdata)
       float threshold = ctx->thresholds[threshold_idx];
       float offset = ctx->offsets[offset_idx];
 
-      float acc_distance[ctx->n_joints] = { 0.f };
+      /* NB: clang doesn't allow using an = {0} initializer with dynamic
+       * sized arrays...
+       */
+      float acc_distance[ctx->n_joints];
+      memset(acc_distance, 0, ctx->n_joints * sizeof(acc_distance[0]));
 
       for (uint32_t i = 0, idx = 0; i < ctx->n_images; i++)
         {
