@@ -46,7 +46,6 @@
 #include <random>
 #include <atomic>
 
-#define TINYEXR_IMPLEMENTATION
 #include "tinyexr.h"
 
 #include "half.hpp"

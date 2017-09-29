@@ -30,11 +30,11 @@ TOOLS = image-pre-processor \
 
 all: $(TOOLS)
 
-image-pre-processor: image-pre-processor.o parson.o
+image-pre-processor: image-pre-processor.o tinyexr.o parson.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-train_rdt: train_rdt.o xalloc.o llist.o train_utils.o
+train_rdt: train_rdt.o train_utils.o llist.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs OpenEXR libpng` -lpthread
 
@@ -46,11 +46,11 @@ depth2labels: depth2labels.o infer.o loader.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs OpenEXR libpng`
 
-exr-to-pfm: exr-to-pfm.o
+exr-to-pfm: exr-to-pfm.o tinyexr.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
 
-pfm-to-exr: pfm-to-exr.o
+pfm-to-exr: pfm-to-exr.o tinyexr.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
 
@@ -58,7 +58,7 @@ pfm-debug: pfm-debug.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CC) -o $(@) $(^) $(_CFLAGS) $(LDFLAGS)
 
-pack-training-data: pack-training-data.o pack.o llist.o xalloc.o
+pack-training-data: pack-training-data.o pack.o tinyexr.o llist.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lsnappy -lpthread -lc
 

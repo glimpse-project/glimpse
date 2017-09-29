@@ -14,11 +14,6 @@
 #include <libgen.h>
 #include <getopt.h>
 
-/* Note: we very very definitely do *not* use OpenEXR which was a bad
- * experience in so many ways. The final nail in the coffin being its
- * surprisingly terrible performance.
- */
-#define TINYEXR_IMPLEMENTATION
 #include "tinyexr.h"
 
 #include "half.hpp"
