@@ -135,8 +135,8 @@ struct property {
     union {
         double double_val;
         int64_t i64_val;
-        uint8_t blob[];
     };
+    uint8_t blob[];
 };
 
 /* This will always be the first structure found at the beginning of the file
@@ -234,6 +234,10 @@ struct pack_frame {
 
 
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Opens a pack file and decodes the header
  */
 struct pack_file *pack_open(const char *filename, char **err);
@@ -297,3 +301,7 @@ uint8_t *pack_frame_get_section(struct pack_frame *frame,
                                 char **err);
 
 void pack_frame_free(struct pack_frame *frame);
+
+#ifdef __cplusplus
+}; // "C"
+#endif
