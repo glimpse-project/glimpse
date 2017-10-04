@@ -361,6 +361,8 @@ class GeneratorPreLoadOperator(bpy.types.Operator):
 
         return {'FINISHED'}
 
+def mkdir_p(path):
+    os.makedirs(path, exist_ok=True)
 
 class GeneratorOperator(bpy.types.Operator):
     """Generates Glimpse training data"""
@@ -386,15 +388,23 @@ class GeneratorOperator(bpy.types.Operator):
 
     def execute(self, context):
 
+        top_meta = {}
         meta = {}
+
+        dt = datetime.datetime.today()
+        date_str = "%04u-%02u-%02u-%02u-%02u-%02u" % (dt.year,
+                dt.month, dt.day, dt.hour, dt.minute, dt.second)
+
+        if bpy.context.scene.GlimpseDataRoot and bpy.context.scene.GlimpseDataRoot != "":
+            gen_dir = bpy.context.scene.GlimpseGenDir
+        else:
+            gen_dir = date_str
+
+        mkdir_p(bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir)))
 
         bpy.ops.object.mode_set(mode='OBJECT', toggle=False)
         bpy.ops.object.select_all(action='DESELECT')
         bpy.context.scene.objects.active = bpy.data.objects['BasePoseObject']
-
-        dt = datetime.datetime.today()
-        date_str = "%04u-%02u-%02u-%02u-%02u-%02u" % (dt.year,
-                dt.month,dt.day, dt.hour, dt.minute, dt.second)
 
         meta['date'] = date_str
 
@@ -417,6 +427,18 @@ class GeneratorOperator(bpy.types.Operator):
         camera = bpy.data.objects['Camera']
 
         z_forward = mathutils.Vector((0, 0, 1))
+
+        camera_meta = {}
+        camera_meta['width'] = bpy.context.scene.render.resolution_x
+        camera_meta['height'] = bpy.context.scene.render.resolution_y
+        camera_meta['vertical_fov'] = math.degrees(bpy.data.cameras['Camera'].angle)
+        meta['camera'] = camera_meta
+
+        top_meta['camera'] = camera_meta
+
+        top_meta_filename = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir, 'meta.json'))
+        with open(top_meta_filename, 'w') as fp:
+            json.dump(top_meta, fp, indent=2)
 
         # Nested function for sake of improving cProfile data
         def render_bvh_index(idx):
@@ -485,7 +507,6 @@ class GeneratorOperator(bpy.types.Operator):
 
                 # Nested function for sake of improving cProfile data
                 def render_mocap_section(start_frame, end_frame):
-                    camera_meta = {}
 
                     self.report({'INFO'}, "> randomizing " + bvh_name + " render")
 
@@ -517,7 +538,7 @@ class GeneratorOperator(bpy.types.Operator):
                     height_mm = random.randrange(1100, 1400)
                     camera.location.z = height_mm / 1000
 
-                    camera_meta['distance'] = dist_m
+                    meta['camera']['distance'] = dist_m
 
                     # We roughly point the camera at the spine_02 bone but randomize
                     # this a little...
@@ -584,18 +605,13 @@ class GeneratorOperator(bpy.types.Operator):
                             dirname += "_glasses_" + glasses
                             clothes_meta['glasses'] = glasses
 
-                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "labels", bvh_name, dirname))
-                    #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "depth", bvh_name[:-4], dirname))
+                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir, "labels", bvh_name, dirname))
+                    #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir, "depth", bvh_name[:-4], dirname))
                     
 
                     context.scene.layers = render_layers
 
                     meta['clothes'] = clothes_meta
-
-                    camera_meta['width'] = bpy.context.scene.render.resolution_x
-                    camera_meta['height'] = bpy.context.scene.render.resolution_y
-                    camera_meta['vertical_fov'] = math.degrees(bpy.data.cameras['Camera'].angle)
-                    meta['camera'] = camera_meta
 
                     for frame in range(int(start_frame), int(end_frame)):
 
@@ -628,11 +644,11 @@ class GeneratorOperator(bpy.types.Operator):
                             self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
                             return
 
-                        context.scene.render.filepath = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "depth", bvh_name, dirname, "Image%04u" % frame))
+                        context.scene.render.filepath = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir, "depth", bvh_name, dirname, "Image%04u" % frame))
                         self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
                         bpy.ops.render.render(write_still=True)
 
-                        meta_filename = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "labels", bvh_name, dirname, 'Image%04u.json' % frame))
+                        meta_filename = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir, "labels", bvh_name, dirname, 'Image%04u.json' % frame))
                         with open(meta_filename, 'w') as fp:
                             json.dump(meta, fp, indent=2)
 
@@ -1026,6 +1042,12 @@ def register():
     bpy.types.Scene.GlimpseBvhRoot = StringProperty(
             name="BVH Directory",
             description="Root directory for .bvh motion capture files",
+            subtype='DIR_PATH',
+            )
+
+    bpy.types.Scene.GlimpseGenDir = StringProperty(
+            name="Dest Directory",
+            description="Destination Directory for Generated Data",
             subtype='DIR_PATH',
             )
 

@@ -21,6 +21,7 @@ parser.add_argument('--purge', help='Purge mocap actions', action='store_true')
 parser.add_argument('--start', type=int, default=0, help='Index of first MoCap to render')
 parser.add_argument('--end', default=0, type=int, help='Index of last MoCap to render')
 parser.add_argument('--dest', default=os.getcwd(), help='Directory to write files too')
+parser.add_argument('--name', default=os.getcwd(), help='Unique name for this render run')
 parser.add_argument('mocaps', help='Directory with motion capture files')
 args = parser.parse_args(argv)
 
@@ -69,12 +70,17 @@ bpy.context.scene.GlimpseDataRoot = args.dest
 
 print("DataRoot: " + args.dest)
 
+if args.name == "":
+    print("--name argument required in this case to find files to preload")
+    bpy.ops.wm.quit_blender()
+bpy.context.scene.GlimpseGenDir = args.name
+
 
 import cProfile
-cProfile.run("bpy.ops.glimpse.generate_data()", "c:\\tmp\\blender.prof")
+cProfile.run("bpy.ops.glimpse.generate_data()", "glimpse-" + args.name + ".prof")
  
 import pstats
-p = pstats.Stats("c:\\tmp\\blender.prof")
+p = pstats.Stats("glimpse-" + args.name + ".prof")
 p.sort_stats("cumulative").print_stats(20)
 
 
