@@ -41,7 +41,6 @@ import numpy
 import time
 import datetime
 import random
-import json
 
 import bpy
 from bpy.props import (
@@ -585,8 +584,8 @@ class GeneratorOperator(bpy.types.Operator):
                             dirname += "_glasses_" + glasses
                             clothes_meta['glasses'] = glasses
 
-                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name, dirname))
-                    #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name[:-4], dirname))
+                    context.scene.node_tree.nodes['LabelOutput'].base_path = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "labels", bvh_name, dirname))
+                    #context.scene.node_tree.nodes['DepthOutput'].base_path = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "depth", bvh_name[:-4], dirname))
                     
 
                     context.scene.layers = render_layers
@@ -629,11 +628,11 @@ class GeneratorOperator(bpy.types.Operator):
                             self.report({'INFO'}, "> skipping " + bvh_name + " frame " + str(frame) + ": pose too close to camera")
                             return
 
-                        context.scene.render.filepath = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "depth", bvh_name, dirname, "Image%04u" % frame))
+                        context.scene.render.filepath = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "depth", bvh_name, dirname, "Image%04u" % frame))
                         self.report({'INFO'}, "> render " + bvh_name + " frame " + str(frame) + "to " + bpy.context.scene.node_tree.nodes['LabelOutput'].base_path)
                         bpy.ops.render.render(write_still=True)
 
-                        meta_filename = bpy.path.abspath(bpy.context.scene.GlimpseDataRoot + os.path.join("generated", date_str, "labels", bvh_name, dirname, 'Image%04u.json' % frame))
+                        meta_filename = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", date_str, "labels", bvh_name, dirname, 'Image%04u.json' % frame))
                         with open(meta_filename, 'w') as fp:
                             json.dump(meta, fp, indent=2)
 
