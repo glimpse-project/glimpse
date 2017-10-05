@@ -4,10 +4,7 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
-#include <png.h>
-#include "tinyexr.h"
 #include "half.hpp"
-
 #include "train_utils.h"
 #include "image_utils.h"
 #include "xalloc.h"
@@ -22,7 +19,8 @@ typedef struct {
   uint32_t skip;          // Number of images to skip
   bool     shuffle;       // Whether to shuffle images
   LList*   paths;         // List of label, depth and joint file paths
-  IUImageSpec spec;       // Image specification
+  IUImageSpec label_spec; // Label image specification
+  IUImageSpec depth_spec; // Depth image specification
   half*    depth_images;  // Depth image data
   uint8_t* label_images;  // Label image data
   float*   joint_data;    // Joint data
@@ -170,34 +168,36 @@ free_train_data_cb(LList* node, uint32_t index, void* userdata)
 }
 
 static void
-verify_metadata(TrainData* data, char* filename,
-                int32_t width, int32_t height, uint8_t n_joints)
+validate_storage(TrainData* data, char* filename, uint8_t n_joints)
 {
-  if (width && height && (data->spec.width != width ||
-                          data->spec.height != height))
+  if ((!data->label_images || !data->depth_images) &&
+      data->gather_label && data->gather_depth &&
+      ((data->label_spec.width && data->depth_spec.width &&
+        data->label_spec.width != data->depth_spec.width) ||
+       (data->label_spec.height && data->depth_spec.height &&
+        data->label_spec.height != data->depth_spec.height)))
     {
-      if (data->spec.width == 0 && data->spec.height == 0)
-        {
-          data->spec.width = width;
-          data->spec.height = height;
-          size_t n_pixels = width * height * data->n_images;
-          if (data->gather_label)
-            {
-              data->label_images = (uint8_t*)
-                xmalloc(n_pixels * sizeof(uint8_t));
-            }
-          if (data->gather_depth)
-            {
-              data->depth_images = (half*)
-                xmalloc(n_pixels * sizeof(half));
-            }
-        }
-      else
-        {
-          fprintf(stderr, "%s: size mismatch (%dx%d), expected (%dx%d)\n",
-                  filename, width, height, data->spec.width, data->spec.height);
-          exit(1);
-        }
+      fprintf(stderr,
+              "%s: Label/Depth image size mismatch (%dx%d) != (%dx%d)\n",
+              filename, data->label_spec.width, data->label_spec.height,
+              data->depth_spec.width, data->depth_spec.height);
+    }
+
+  if (!data->label_images && data->gather_label &&
+      data->label_spec.width && data->label_spec.height)
+    {
+      size_t n_pixels = data->label_spec.width * data->label_spec.height *
+                        data->n_images;
+      data->label_images = (uint8_t*)
+        xmalloc(n_pixels * sizeof(uint8_t));
+    }
+  if (!data->depth_images && data->gather_depth &&
+      data->depth_spec.width && data->depth_spec.height)
+    {
+      size_t n_pixels = data->depth_spec.width * data->depth_spec.height *
+                        data->n_images;
+      data->depth_images = (half*)
+        xmalloc(n_pixels * sizeof(half));
     }
 
   if (n_joints && data->n_joints != n_joints)
@@ -223,104 +223,62 @@ verify_metadata(TrainData* data, char* filename,
 static bool
 train_data_cb(LList* node, uint32_t index, void* userdata)
 {
-  FILE* fp;
-  int width, height;
-
   char** paths = (char**)node->data;
   char* label_path = paths[0];
   char* depth_path = paths[1];
   char* joint_path = paths[2];
   TrainData *data = (TrainData*)userdata;
 
+  // Read label image
   if (label_path && data->gather_label)
     {
-      if (index == 0)
+      if (index == 0 && !data->label_images)
         {
-          if (iu_verify_png_from_file(label_path, &data->spec) != SUCCESS)
+          if (iu_verify_png_from_file(label_path, &data->label_spec) != SUCCESS)
             {
               fprintf(stderr, "Failed to verify image '%s'\n", label_path);
               exit(1);
             }
-          size_t n_pixels =
-            data->spec.width * data->spec.height * data->n_images;
-          data->label_images = (uint8_t*)xmalloc(n_pixels * sizeof(uint8_t));
-          if (data->gather_depth)
-            {
-              data->depth_images = (half*)xmalloc(n_pixels * sizeof(half));
-            }
+          validate_storage(data, label_path, 0);
         }
 
-      char* output = (char*)
-        &data->label_images[index * data->spec.width * data->spec.height];
-      if (iu_read_png_from_file(label_path, &data->spec, &output) != SUCCESS)
+      void* output = &data->label_images[
+        index * data->label_spec.width * data->label_spec.height];
+      if (iu_read_png_from_file(label_path, &data->label_spec, &output) !=
+          SUCCESS)
         {
           fprintf(stderr, "Failed to read image '%s'\n", label_path);
           exit(1);
         }
     }
 
+  // Read depth image
   if (depth_path && data->gather_depth)
     {
-      // Read depth file
-      EXRVersion version;
-      EXRHeader header;
-      int ret;
-      const char *err = NULL;
-
-      ret = ParseEXRVersionFromFile(&version, depth_path);
-
-      if (ret != TINYEXR_SUCCESS)
+      if (index == 0 && !data->depth_images)
         {
-          fprintf(stderr, "Error %02d reading EXR version\n", ret);
-          exit(1);
+          if (iu_verify_exr_from_file(depth_path, &data->depth_spec) != SUCCESS)
+            {
+              fprintf(stderr, "Failed to verify image '%s'\n", depth_path);
+              exit(1);
+            }
+          validate_storage(data, depth_path, 0);
         }
 
-      if (version.multipart || version.non_image)
+      void* output = &data->depth_images[
+        index * data->depth_spec.width * data->depth_spec.height];
+      if (iu_read_exr_from_file(depth_path, &data->depth_spec, &output) !=
+          SUCCESS)
         {
-          fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
+          fprintf(stderr, "Failed to read image '%s'\n", depth_path);
           exit(1);
         }
-
-      ret = ParseEXRHeaderFromFile(&header, &version, depth_path, &err);
-
-      if (ret != TINYEXR_SUCCESS)
-        {
-          fprintf(stderr, "Error %02d reading EXR header: %s\n", ret, err);
-          exit(1);
-        }
-
-      if (header.num_channels != 1 ||
-          header.channels[0].pixel_type != TINYEXR_PIXELTYPE_HALF)
-        {
-          fprintf(stderr, "Expected single-channel half-float EXR\n");
-          exit(1);
-        }
-
-      width = header.data_window[2] - header.data_window[0] + 1;
-      height = header.data_window[3] - header.data_window[1] + 1;
-      verify_metadata(data, depth_path, width, height, 0);
-
-      EXRImage exr_image;
-      InitEXRImage(&exr_image);
-
-      ret = LoadEXRImageFromFile(&exr_image, &header, depth_path, &err);
-
-      if (ret != TINYEXR_SUCCESS)
-        {
-          fprintf(stderr, "Error %02d reading EXT file: %s\n", ret, err);
-          exit(1);
-        }
-
-      memcpy(&data->depth_images[index * width * height],
-             &exr_image.images[0][0],
-             width * height * sizeof(half));
-
-      FreeEXRImage(&exr_image);
     }
 
   // Read joint data
   if (joint_path && data->gather_joints)
     {
+      FILE* fp;
       if (!(fp = fopen(joint_path, "rb")))
         {
           fprintf(stderr, "Error opening joint file '%s'\n", joint_path);
@@ -344,7 +302,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
         }
 
       uint8_t n_joints = (uint8_t)((n_bytes / sizeof(float)) / 3);
-      verify_metadata(data, joint_path, 0, 0, n_joints);
+      validate_storage(data, joint_path, n_joints);
 
       if (fseek(fp, 0, SEEK_SET) == -1)
         {
@@ -389,7 +347,8 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
     skip,                                 // Number of images to skip
     shuffle,                              // Whether to shuffle images
     NULL,                                 // Image paths
-    {0,0,8,1},                            // Image specification
+    {0,0,8,1},                            // Label image specification
+    {0,0,16,1},                           // Depth image specification
     NULL,                                 // Depth image data
     NULL,                                 // Label image data
     NULL,                                 // Joint data
@@ -415,11 +374,13 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
 
   if (out_width)
     {
-      *out_width = data.spec.width;
+      *out_width = data.gather_label ?
+        data.label_spec.width : data.depth_spec.width;
     }
   if (out_height)
     {
-      *out_height = data.spec.height;
+      *out_height = data.gather_label ?
+        data.label_spec.height : data.depth_spec.height;
     }
   if (out_n_joints)
     {

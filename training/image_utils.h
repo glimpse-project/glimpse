@@ -28,10 +28,18 @@ typedef struct {
 // If output points to a non-NULL address, it is assumed to be pre-allocated.
 IUReturnCode iu_read_png_from_file(const char* filename,
                                    IUImageSpec* spec,
-                                   char** output);
+                                   void** output);
 
 IUReturnCode iu_verify_png_from_file(const char* filename,
                                      IUImageSpec* spec);
+
+IUReturnCode iu_read_exr_from_file(const char* filename,
+                                   IUImageSpec* spec,
+                                   void** output);
+
+IUReturnCode iu_verify_exr_from_file(const char* filename,
+                                     IUImageSpec* spec);
+
 
 #ifdef __cplusplus
 };
