@@ -1,0 +1,38 @@
+
+#pragma once
+
+#include <stdlib.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef enum {
+  SUCCESS,
+  BAD_SPEC,
+  NON_CONFORMANT,
+  BAD_FORMAT,
+  IO_ERR,
+  PNG_ERR,
+  EXR_ERR
+} IUReturnCode;
+
+typedef struct {
+  int width;
+  int height;
+  int depth;
+  int channels;
+} IUImageSpec;
+
+// If output points to a non-NULL address, it is assumed to be pre-allocated.
+IUReturnCode iu_read_png_from_file(const char* filename,
+                                   IUImageSpec* spec,
+                                   char** output);
+
+IUReturnCode iu_verify_png_from_file(const char* filename,
+                                     IUImageSpec* spec);
+
+#ifdef __cplusplus
+};
+#endif

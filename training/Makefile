@@ -34,13 +34,13 @@ image-pre-processor: image-pre-processor.o tinyexr.o parson.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-train_rdt: train_rdt.o train_utils.o llist.o xalloc.o
+train_rdt: train_rdt.o image_utils.o train_utils.o llist.o xalloc.o tinyexr.o
 	$(E)echo "(LD)      $(@)"
-	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs OpenEXR libpng` -lpthread
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-train_joint_params: train_joint_params.o infer.o train_utils.o loader.o llist.o xalloc.o
+train_joint_params: train_joint_params.o infer.o image_utils.o train_utils.o loader.o llist.o xalloc.o tinyexr.o
 	$(E)echo "(LD)      $(@)"
-	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs OpenEXR libpng` -lpthread
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
 depth2labels: depth2labels.o infer.o loader.o xalloc.o
 	$(E)echo "(LD)      $(@)"
