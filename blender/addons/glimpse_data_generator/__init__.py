@@ -804,6 +804,18 @@ def load_mocap_index():
             if 'name' not in bvh:
                 bvh['name'] = ntpath.basename(bvh['file'])[:-4]
 
+            if 'end' not in bvh:
+                bvh_name = bvh['name']
+
+                action_name = "Base" + bvh_name
+                if action_name in bpy.data.actions:
+                    action = bpy.data.actions[action_name]
+                    bvh['end'] = action.frame_range[1]
+                    print("WARNING: determined %s frame range based on action since 'end' not found in index" % bvh['name']);
+                else:
+                    print("WARNING: just assuming mocap has < 1000 frames since action wasn't preloaded")
+                    bvh['end'] = 1000
+
     except IOError as e:
         self.report({'INFO'}, str(e))
 
