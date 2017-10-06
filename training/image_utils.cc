@@ -69,6 +69,8 @@ _iu_verify_png(png_structp png_ptr, png_infop info_ptr, IUImageSpec* spec)
       return NON_CONFORMANT;
     }
 
+  spec->depth = 8;
+
   return SUCCESS;
 }
 
@@ -222,7 +224,7 @@ iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output)
       spec = &blank_spec;
     }
 
-  if (spec->depth != 8)
+  if (spec->depth != 0 && spec->depth != 8)
     {
       fprintf(stderr, "Spec requires non-8-bit pixel depth\n");
       return BAD_SPEC;
@@ -266,7 +268,7 @@ iu_verify_png_from_file(const char* filename,
       spec = &blank_spec;
     }
 
-  if (spec->depth != 8)
+  if (spec->depth != 0 && spec->depth != 8)
     {
       fprintf(stderr, "Spec requires non-8-bit pixel depth\n");
       return BAD_SPEC;
@@ -456,14 +458,16 @@ iu_verify_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec)
 static IUReturnCode
 _iu_verify_exr_spec(IUImageSpec* spec)
 {
-  if (spec->channels != 1)
+  // TODO: Handle more than 1 channel
+  if (spec->channels != 0 && spec->channels != 1)
     {
       fprintf(stderr, "Expected single channel in EXR spec, found %d\n",
               spec->channels);
       return BAD_SPEC;
     }
+  spec->channels = 1;
 
-  if (spec->depth != 16 && spec->depth != 32)
+  if (spec->depth != 0 && spec->depth != 16 && spec->depth != 32)
     {
       fprintf(stderr, "Expected 16 or 32-bit depth in EXR spec, found %d\n",
               spec->depth);
@@ -519,6 +523,9 @@ _iu_verify_exr_header(int ret, EXRHeader* header, EXRVersion* version,
           return NON_CONFORMANT;
         }
     }
+
+  spec->depth = (header->channels[0].pixel_type == TINYEXR_PIXELTYPE_HALF) ?
+    16 : 32;
 
   int width = header->data_window[2] - header->data_window[0] + 1;
   int height = header->data_window[3] - header->data_window[1] + 1;
