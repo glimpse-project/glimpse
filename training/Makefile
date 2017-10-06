@@ -30,7 +30,7 @@ TOOLS = image-pre-processor \
 
 all: $(TOOLS)
 
-image-pre-processor: image-pre-processor.o tinyexr.o parson.o
+image-pre-processor: image-pre-processor.o tinyexr.o parson.o image_utils.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 

@@ -281,20 +281,9 @@ iu_verify_png_from_file(const char* filename,
   return (ret == SUCCESS) ? close_ret : ret;
 }
 
-IUReturnCode
-_iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
-                         EXRHeader* header)
+static IUReturnCode
+_iu_verify_exr_spec(IUImageSpec* spec)
 {
-  EXRVersion version;
-  int ret;
-  const char *err = NULL;
-
-  IUImageSpec blank_spec = {0, 0, 32, 1};
-  if (!spec)
-    {
-      spec = &blank_spec;
-    }
-
   if (spec->channels != 1)
     {
       fprintf(stderr, "Expected single channel in EXR spec, found %d\n",
@@ -309,22 +298,31 @@ _iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
       return BAD_SPEC;
     }
 
-  ret = ParseEXRVersionFromFile(&version, filename);
+  return SUCCESS;
+}
 
+static IUReturnCode
+_iu_verify_exr_version(int ret, EXRVersion* version)
+{
   if (ret != TINYEXR_SUCCESS)
     {
       fprintf(stderr, "Error %02d reading EXR version\n", ret);
       return EXR_ERR;
     }
 
-  if (version.multipart || version.non_image)
+  if (version->multipart || version->non_image)
     {
       fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
       return EXR_ERR;
     }
 
-  ret = ParseEXRHeaderFromFile(header, &version, filename, &err);
+  return SUCCESS;
+}
 
+static IUReturnCode
+_iu_verify_exr_header(int ret, EXRHeader* header, EXRVersion* version,
+                      const char* err, IUImageSpec* spec)
+{
   if (ret != TINYEXR_SUCCESS)
     {
       fprintf(stderr, "Error %02d reading EXR header: %s\n", ret, err);
@@ -335,6 +333,7 @@ _iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
     {
       fprintf(stderr, "Expected %d channels, found %d\n",
               spec->channels, header->num_channels);
+      FreeEXRHeader(header);
       return NON_CONFORMANT;
     }
 
@@ -344,6 +343,7 @@ _iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
           header->channels[i].pixel_type != TINYEXR_PIXELTYPE_FLOAT)
         {
           fprintf(stderr, "Expected all floating-point channels\n");
+          FreeEXRHeader(header);
           return NON_CONFORMANT;
         }
     }
@@ -353,10 +353,39 @@ _iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
 
   if (_iu_verify_size(width, height, spec) != SUCCESS)
     {
+      FreeEXRHeader(header);
       return NON_CONFORMANT;
     }
 
   return SUCCESS;
+}
+
+static IUReturnCode
+_iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
+                         EXRHeader* header)
+{
+  IUImageSpec blank_spec = {0, 0, 32, 1};
+  if (!spec)
+    {
+      spec = &blank_spec;
+    }
+  if (_iu_verify_exr_spec(spec) != SUCCESS)
+    {
+      return BAD_SPEC;
+    }
+
+  EXRVersion version;
+  int ret = ParseEXRVersionFromFile(&version, filename);
+
+  if (_iu_verify_exr_version(ret, &version) != SUCCESS)
+    {
+      return EXR_ERR;
+    }
+
+  const char *err = NULL;
+  ret = ParseEXRHeaderFromFile(header, &version, filename, &err);
+
+  return _iu_verify_exr_header(ret, header, &version, err, spec);
 }
 
 IUReturnCode
@@ -402,6 +431,7 @@ iu_read_exr_from_file(const char* filename, IUImageSpec* spec, void** output)
     }
 
   FreeEXRImage(&exr_image);
+  FreeEXRHeader(&header);
 
   return ret;
 }
@@ -410,5 +440,101 @@ IUReturnCode
 iu_verify_exr_from_file(const char* filename, IUImageSpec* spec)
 {
   EXRHeader header;
-  return _iu_verify_exr_from_file(filename, spec, &header);
+  IUReturnCode ret = _iu_verify_exr_from_file(filename, spec, &header);
+  if (ret == SUCCESS)
+    {
+      FreeEXRHeader(&header);
+    }
+  return ret;
+}
+
+static IUReturnCode
+_iu_verify_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
+                           EXRHeader* header)
+{
+  IUImageSpec blank_spec = {0, 0, 32, 1};
+  if (!spec)
+    {
+      spec = &blank_spec;
+    }
+  if (_iu_verify_exr_spec(spec) != SUCCESS)
+    {
+      return BAD_SPEC;
+    }
+
+  EXRVersion version;
+  const unsigned char* memory = (const unsigned char*)buffer;
+  int ret = ParseEXRVersionFromMemory(&version, memory, len);
+
+  if (_iu_verify_exr_version(ret, &version) != SUCCESS)
+    {
+      return EXR_ERR;
+    }
+
+  const char *err = NULL;
+  ret = ParseEXRHeaderFromMemory(header, &version, memory, len, &err);
+
+  return _iu_verify_exr_header(ret, header, &version, err, spec);
+}
+
+IUReturnCode
+iu_read_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
+                        void** output)
+{
+  EXRHeader header;
+
+  const char *err = NULL;
+  IUImageSpec blank_spec = {0, 0, 32, 1};
+
+  if (!spec)
+    {
+      spec = &blank_spec;
+    }
+
+  IUReturnCode ret = _iu_verify_exr_from_memory(buffer, len, spec, &header);
+  if (ret != SUCCESS)
+    {
+      return ret;
+    }
+
+  EXRImage exr_image;
+  InitEXRImage(&exr_image);
+
+  header.requested_pixel_types[0] = (spec->depth == 16) ?
+    TINYEXR_PIXELTYPE_HALF : TINYEXR_PIXELTYPE_FLOAT;
+
+  const unsigned char* memory = (const unsigned char*)buffer;
+  if (LoadEXRImageFromMemory(&exr_image, &header, memory, len, &err) ==
+      TINYEXR_SUCCESS)
+    {
+      if (!(*output))
+        {
+          *output = xmalloc(spec->width * spec->height * (spec->depth / 8));
+        }
+
+      memcpy(*output,
+             &exr_image.images[0][0],
+             spec->width * spec->height * (spec->depth / 8));
+    }
+  else
+    {
+      ret = EXR_ERR;
+    }
+
+  FreeEXRImage(&exr_image);
+  FreeEXRHeader(&header);
+
+  return ret;
+}
+
+IUReturnCode
+iu_verify_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec)
+{
+  EXRHeader header;
+  IUReturnCode ret = _iu_verify_exr_from_memory(buffer, len, spec, &header);
+  if (ret == SUCCESS)
+    {
+      FreeEXRHeader(&header);
+    }
+  return ret;
 }

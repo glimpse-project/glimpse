@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -39,6 +40,15 @@ IUReturnCode iu_read_exr_from_file(const char* filename,
 
 IUReturnCode iu_verify_exr_from_file(const char* filename,
                                      IUImageSpec* spec);
+
+IUReturnCode iu_read_exr_from_memory(uint8_t* buffer,
+                                     size_t len,
+                                     IUImageSpec* spec,
+                                     void** output);
+
+IUReturnCode iu_verify_exr_from_memory(uint8_t* buffer,
+                                       size_t len,
+                                       IUImageSpec* spec);
 
 
 #ifdef __cplusplus

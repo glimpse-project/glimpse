@@ -47,6 +47,7 @@
 #include <random>
 
 #include "tinyexr.h"
+#include "image_utils.h"
 
 #include "half.hpp"
 
@@ -906,102 +907,15 @@ save_frame_labels(const char *dir, const char *filename,
 static struct image *
 decode_exr(uint8_t *buf, int len, enum image_format fmt)
 {
-    EXRVersion version;
-    EXRHeader header;
-    const char *err = NULL;
-    int ret;
-    int channel;
-    int pixel_type;
-
-    if (fmt != IMAGE_FORMAT_XHALF && fmt != IMAGE_FORMAT_XFLOAT) {
-        fprintf(stderr, "Can only decode EXR into full or half float image\n");
+    IUImageSpec spec = { 0, 0, (fmt == IMAGE_FORMAT_XHALF) ? 16 : 32, 1 };
+    if (iu_verify_exr_from_memory(buf, len, &spec) != SUCCESS) {
         abort();
     }
-
-    ParseEXRVersionFromMemory(&version, (unsigned char *)buf, len);
-
-    if (version.multipart || version.non_image) {
-        fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
-        return NULL;
+    struct image *img = xalloc_image(fmt, spec.width, spec.height);
+    if (iu_read_exr_from_memory(buf, len, &spec, (void **)&img->data_u8) !=
+        SUCCESS) {
+        abort();
     }
-
-    ret = ParseEXRHeaderFromMemory(&header, &version, (unsigned char *)buf, len, &err);
-    if (ret != 0) {
-        fprintf(stderr, "Failed to parse EXR header: %s\n", err);
-        return NULL;
-    }
-
-    channel = -1;
-    for (int i = 0; i < header.num_channels; i++) {
-        const char *names[] = { "Y", "R", "G", "B" };
-        for (unsigned j = 0; j < ARRAY_LEN(names); j++) {
-            if (strcmp(names[j], header.channels[i].name) == 0) {
-                channel = i;
-                break;
-            }
-        }
-        if (channel > 0)
-            break;
-    }
-    if (channel == -1) {
-        fprintf(stderr, "Failed to find R, G, B or Y channel in EXR file\n");
-        FreeEXRHeader(&header);
-        return NULL;
-    }
-
-    pixel_type = header.channels[channel].pixel_type;
-    if (pixel_type != TINYEXR_PIXELTYPE_HALF && pixel_type != TINYEXR_PIXELTYPE_FLOAT) {
-        fprintf(stderr, "Can only decode EXR images with FLOAT or HALF data\n");
-        FreeEXRHeader(&header);
-        return NULL;
-    }
-
-    EXRImage exr_image;
-    InitEXRImage(&exr_image);
-
-    ret = LoadEXRImageFromMemory(&exr_image, &header, (const unsigned char *)buf, len, &err);
-    if (ret != 0) {
-        fprintf(stderr, "Failed to load EXR file: %s\n", err);
-        FreeEXRHeader(&header);
-        return NULL;
-    }
-
-    struct image *img = xalloc_image(fmt, exr_image.width, exr_image.height);
-
-    enum image_format exr_fmt = (pixel_type == TINYEXR_PIXELTYPE_HALF ?
-                                 IMAGE_FORMAT_XHALF :
-                                 IMAGE_FORMAT_XFLOAT);
-    if (exr_fmt == fmt) {
-        memcpy(img->data_u8, &exr_image.images[channel][0],
-               img->stride * img->height);
-    } else {
-        /* Need to handle format conversion... */
-
-        if (exr_fmt == IMAGE_FORMAT_XHALF) {
-            const half *half_pixels = (half *)(exr_image.images[channel]);
-
-            for (int y = 0; y < exr_image.height; y++) {
-                const half *exr_row = half_pixels + y * exr_image.width;
-                float *out_row = img->data_float + y * exr_image.width;
-
-                for (int x = 0; x < exr_image.width; x++)
-                    out_row[x] = exr_row[x];
-            }
-        } else {
-            const float *float_pixels = (float *)(exr_image.images[channel]);
-
-            for (int y = 0; y < exr_image.height; y++) {
-                const float *exr_row = float_pixels + y * exr_image.width;
-                half *out_row = img->data_half + y * exr_image.width;
-
-                for (int x = 0; x < exr_image.width; x++)
-                    out_row[x] = exr_row[x];
-            }
-        }
-    }
-
-    FreeEXRHeader(&header);
-    FreeEXRImage(&exr_image);
 
     return img;
 }
