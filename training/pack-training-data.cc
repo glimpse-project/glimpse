@@ -50,6 +50,7 @@
 
 #include "half.hpp"
 
+#include "image_utils.h"
 #include "llist.h"
 #include "xalloc.h"
 #include "pack.h"
@@ -309,109 +310,21 @@ free_image(struct image *image)
     free(image);
 }
 
-struct png_mem_reader
-{
-    int len;
-    int pos;
-    uint8_t *buf;
-};
-
-static void
-png_mem_read_cb(png_structp png_ptr, png_bytep data, png_size_t length)
-{
-    struct png_mem_reader *reader = (struct png_mem_reader *)png_get_io_ptr(png_ptr);
-    int rem = reader->len - reader->pos;
-
-    if (rem < (int)length) {
-        png_error(png_ptr, "Ignoring request to read beyond end of PNG buffer");
-        /* NB png_error() isn't expected to return*/
-    }
-
-    memcpy(data, reader->buf + reader->pos, length);
-    reader->pos += length;
-}
-
 static struct image *
 decode_png(uint8_t *buf, int len)
 {
-    struct png_mem_reader mem_reader;
-    png_structp png_ptr;
-    png_infop info_ptr;
-
-    int width, height;
-
-    png_bytep *rows;
-
-    int row_stride;
-
-    struct image *img = NULL, *ret = NULL;
-
-    debug("decoding png on %d bytes\n", len);
-
-    if (len >= 8 && png_sig_cmp(buf, 0, 8)) {
-        fprintf(stderr, "data was not recognised as a PNG file\n");
-        goto error_check_header;
+    IUImageSpec spec = { 0, 0, 1, 8 };
+    if (iu_verify_png_from_memory(buf, len, &spec) != SUCCESS) {
+        return NULL;
     }
-
-    /* initialize stuff */
-    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr) {
-        fprintf(stderr, "png_create_read_struct failed\n");
-        goto error_create_read;
-    }
-
-    info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        fprintf(stderr, "png_create_info_struct failed\n");
-        goto error_create_info;
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "libpng read info failure\n");
-        goto error_png_setjmp;
-    }
-
-    mem_reader.buf = buf;
-    mem_reader.len = len;
-    mem_reader.pos = 0;
-
-    png_set_read_fn(png_ptr, &mem_reader, png_mem_read_cb);
-
-    png_read_info(png_ptr, info_ptr);
-
-    width = png_get_image_width(png_ptr, info_ptr);
-    height = png_get_image_height(png_ptr, info_ptr);
-
-    png_read_update_info(png_ptr, info_ptr);
-
-    row_stride = png_get_rowbytes(png_ptr, info_ptr);
-
-    img = xalloc_image(IMAGE_FORMAT_X8, width, height);
-    rows = (png_bytep *)alloca(sizeof(png_bytep) * height);
-
-    for (int y = 0; y < height; y++)
-        rows[y] = (png_byte *)(img->data_u8 + row_stride * y);
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "png_read_image_error\n");
-        goto error_read_image;
-    }
-
-    png_read_image(png_ptr, rows);
-
-    ret = img;
-
-error_read_image:
-    if (img && ret == NULL)
+    struct image *img = xalloc_image(IMAGE_FORMAT_X8, spec.width, spec.height);
+    if (iu_read_png_from_memory(buf, len, &spec, (void**)&img->data_u8) !=
+        SUCCESS) {
         free_image(img);
-error_png_setjmp:
-    png_destroy_info_struct(png_ptr, &info_ptr);
-error_create_info:
-    png_destroy_read_struct(&png_ptr, NULL, NULL);
-error_create_read:
-error_check_header:
+        return NULL;
+    }
 
-    return ret;
+    return img;
 }
 
 

@@ -58,7 +58,7 @@ pfm-debug: pfm-debug.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CC) -o $(@) $(^) $(_CFLAGS) $(LDFLAGS)
 
-pack-training-data: pack-training-data.o pack.o tinyexr.o llist.o xalloc.o
+pack-training-data: pack-training-data.o pack.o tinyexr.o llist.o xalloc.o image_utils.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lsnappy -lpthread -lc
 

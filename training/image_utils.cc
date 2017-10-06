@@ -132,6 +132,13 @@ _iu_open_png_from_file(const char* filename, FILE** fp, png_structp* png_ptr,
       goto open_png_from_file_destroy_read_struct;
     }
 
+  // Set error handler
+  if (setjmp(png_jmpbuf(*png_ptr)))
+    {
+      fprintf(stderr, "libpng setjmp failure\n");
+      return PNG_ERR;
+    }
+
   png_init_io(*png_ptr, *fp);
   png_set_sig_bytes(*png_ptr, 8);
 
@@ -155,15 +162,57 @@ open_png_from_file_return:
   return ret;
 }
 
+static IUReturnCode
+_iu_read_png(png_structp* png_ptr, png_infop* info_ptr, IUImageSpec* spec,
+             void** output)
+{
+  // Allocate output if necessary
+  if (!(*output))
+    {
+      *output = xmalloc(spec->width * spec->height);
+    }
+
+  // Set error handler
+  if (setjmp(png_jmpbuf(*png_ptr)))
+    {
+      fprintf(stderr, "libpng setjmp failure\n");
+      return PNG_ERR;
+    }
+
+  // Start reading data
+  int row_stride = png_get_rowbytes(*png_ptr, *info_ptr);
+  png_bytep* input_rows = (png_bytep *)
+    xmalloc(sizeof(png_bytep*) * spec->height);
+  png_bytep input_data = (png_bytep)
+    xmalloc(row_stride * spec->height * sizeof(png_bytep));
+
+  for (int y = 0; y < spec->height; y++)
+    {
+      input_rows[y] = (png_byte*)input_data + row_stride * y;
+    }
+
+  png_read_image(*png_ptr, input_rows);
+
+  // Copy label image data into training context struct
+  for (int y = 0, src_idx = 0, dst_idx = 0;
+       y < spec->height; y++, src_idx += row_stride, dst_idx += spec->width)
+    {
+      memcpy(&(((char *)*output)[dst_idx]), &input_data[src_idx], spec->width);
+    }
+
+  // Free data associated with PNG reading
+  xfree(input_rows);
+  xfree(input_data);
+
+  return SUCCESS;
+}
+
 IUReturnCode
 iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output)
 {
   FILE* fp;
   png_structp png_ptr;
   png_infop info_ptr;
-  int row_stride;
-  png_bytep* input_rows;
-  png_bytep input_data;
 
   IUImageSpec blank_spec = {0, 0, 8, 1};
   IUReturnCode ret = SUCCESS;
@@ -186,13 +235,6 @@ iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output)
       return ret;
     }
 
-  if (setjmp(png_jmpbuf(png_ptr)))
-    {
-      fprintf(stderr, "libpng setjmp failure\n");
-      _iu_close_png_from_file(fp, png_ptr, info_ptr);
-      return PNG_ERR;
-    }
-
   // Verify png file
   ret = _iu_verify_png(png_ptr, info_ptr, spec);
   if (ret != SUCCESS)
@@ -201,38 +243,11 @@ iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output)
       return ret;
     }
 
-  // Allocate output if necessary
-  if (!(*output))
-    {
-      *output = xmalloc(spec->width * spec->height);
-    }
+  ret = _iu_read_png(&png_ptr, &info_ptr, spec, output);
 
-  // Start reading data
-  row_stride = png_get_rowbytes(png_ptr, info_ptr);
-  input_rows = (png_bytep *)
-    xmalloc(sizeof(png_bytep*) * spec->height);
-  input_data = (png_bytep)
-    xmalloc(row_stride * spec->height * sizeof(png_bytep));
+  IUReturnCode close_ret = _iu_close_png_from_file(fp, png_ptr, info_ptr);
 
-  for (int y = 0; y < spec->height; y++)
-    {
-      input_rows[y] = (png_byte*)input_data + row_stride * y;
-    }
-
-  png_read_image(png_ptr, input_rows);
-
-  // Copy label image data into training context struct
-  for (int y = 0, src_idx = 0, dst_idx = 0;
-       y < spec->height; y++, src_idx += row_stride, dst_idx += spec->width)
-    {
-      memcpy(&(((char *)*output)[dst_idx]), &input_data[src_idx], spec->width);
-    }
-
-  // Free data associated with PNG reading
-  xfree(input_rows);
-  xfree(input_data);
-
-  return _iu_close_png_from_file(fp, png_ptr, info_ptr);
+  return (ret == SUCCESS) ? close_ret : ret;
 }
 
 IUReturnCode
@@ -279,6 +294,163 @@ iu_verify_png_from_file(const char* filename,
   IUReturnCode close_ret = _iu_close_png_from_file(fp, png_ptr, info_ptr);
 
   return (ret == SUCCESS) ? close_ret : ret;
+}
+
+typedef struct {
+  int len;
+  int pos;
+  uint8_t *buf;
+} IUPngMemReadInfo;
+
+static void
+png_mem_read_cb(png_structp png_ptr, png_bytep data, png_size_t length)
+{
+  IUPngMemReadInfo *reader = (IUPngMemReadInfo *)png_get_io_ptr(png_ptr);
+  int rem = reader->len - reader->pos;
+
+  if (rem < (int)length)
+    {
+      png_error(png_ptr, "Ignoring request to read beyond end of PNG buffer");
+      /* NB png_error() isn't expected to return*/
+    }
+
+  memcpy(data, reader->buf + reader->pos, length);
+  reader->pos += length;
+}
+
+static IUReturnCode
+_iu_verify_png_from_memory(IUPngMemReadInfo* readinfo, IUImageSpec* spec,
+                           png_structp* png_ptr, png_infop* info_ptr)
+{
+  int width, height;
+  png_byte color_type;
+
+  IUReturnCode ret = SUCCESS;
+
+  if (readinfo->len <= 8)
+    {
+      fprintf(stderr, "Expected size of at least 8 bytes for PNG\n");
+      return IO_ERR;
+    }
+
+  if (png_sig_cmp(readinfo->buf, 0, 8))
+    {
+      fprintf(stderr, "Error reading header\n");
+      return IO_ERR;
+    }
+
+  *png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+  if (!(*png_ptr))
+    {
+      fprintf(stderr, "png_create_read_struct failed\n");
+      return PNG_ERR;
+    }
+
+  *info_ptr = png_create_info_struct(*png_ptr);
+  if (!(*info_ptr))
+    {
+      fprintf(stderr, "png_create_info_struct failed\n");
+      ret = PNG_ERR;
+      goto verify_png_from_memory_destroy_read_struct;
+    }
+
+  if (setjmp(png_jmpbuf(*png_ptr)))
+    {
+      fprintf(stderr, "libpng setjmp failure\n");
+      ret = PNG_ERR;
+      goto verify_png_from_memory_destroy_info_struct;
+    }
+
+  png_set_read_fn(*png_ptr, readinfo, png_mem_read_cb);
+
+  // Skip the header we've already verified
+  readinfo->pos = 8;
+  png_set_sig_bytes(*png_ptr, 8);
+
+  png_read_info(*png_ptr, *info_ptr);
+
+  width = png_get_image_width(*png_ptr, *info_ptr);
+  height = png_get_image_height(*png_ptr, *info_ptr);
+
+  if (_iu_verify_size(width, height, spec) != SUCCESS)
+    {
+      ret = NON_CONFORMANT;
+      goto verify_png_from_memory_destroy_info_struct;
+    }
+
+  // Verify this is an 8-bit png we're reading
+  color_type = png_get_color_type(*png_ptr, *info_ptr);
+  if (color_type != PNG_COLOR_TYPE_GRAY &&
+      color_type != PNG_COLOR_TYPE_PALETTE)
+    {
+      fprintf(stderr, "Expected an 8-bit color type\n");
+      ret = NON_CONFORMANT;
+      goto verify_png_from_memory_destroy_info_struct;
+    }
+
+  if (png_get_bit_depth(*png_ptr, *info_ptr) != 8)
+    {
+      fprintf(stderr, "Expected 8-bit pixel depth\n");
+      ret = NON_CONFORMANT;
+      goto verify_png_from_memory_destroy_info_struct;
+    }
+
+  return SUCCESS;
+
+verify_png_from_memory_destroy_info_struct:
+  png_destroy_info_struct(*png_ptr, info_ptr);
+verify_png_from_memory_destroy_read_struct:
+  png_destroy_read_struct(png_ptr, NULL, NULL);
+
+  return ret;
+}
+
+IUReturnCode
+iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
+                        void** output)
+{
+  png_structp png_ptr;
+  png_infop info_ptr;
+
+  IUPngMemReadInfo readinfo = { (int)len, 0, buffer };
+  IUImageSpec blank_spec = {0, 0, 8, 1};
+
+  if (!spec)
+    {
+      spec = &blank_spec;
+    }
+
+  // Verify png file
+  IUReturnCode ret = _iu_verify_png_from_memory(&readinfo, spec,
+                                                &png_ptr, &info_ptr);
+  if (ret != SUCCESS)
+    {
+      return ret;
+    }
+
+  ret = _iu_read_png(&png_ptr, &info_ptr, spec, output);
+
+  png_destroy_info_struct(png_ptr, &info_ptr);
+  png_destroy_read_struct(&png_ptr, NULL, NULL);
+
+  return ret;
+}
+
+IUReturnCode
+iu_verify_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec)
+{
+  png_structp png_ptr;
+  png_infop info_ptr;
+
+  IUPngMemReadInfo readinfo = { (int)len, 0, buffer };
+  IUReturnCode ret = _iu_verify_png_from_memory(&readinfo, spec,
+                                                &png_ptr, &info_ptr);
+  if (ret == SUCCESS)
+    {
+      png_destroy_info_struct(png_ptr, &info_ptr);
+      png_destroy_read_struct(&png_ptr, NULL, NULL);
+    }
+  return ret;
 }
 
 static IUReturnCode

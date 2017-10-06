@@ -27,27 +27,36 @@ typedef struct {
 } IUImageSpec;
 
 // If output points to a non-NULL address, it is assumed to be pre-allocated.
-IUReturnCode iu_read_png_from_file(const char* filename,
+IUReturnCode iu_read_png_from_file(const char*  filename,
                                    IUImageSpec* spec,
-                                   void** output);
+                                   void**       output);
 
-IUReturnCode iu_verify_png_from_file(const char* filename,
+IUReturnCode iu_verify_png_from_file(const char*  filename,
                                      IUImageSpec* spec);
 
-IUReturnCode iu_read_exr_from_file(const char* filename,
-                                   IUImageSpec* spec,
-                                   void** output);
-
-IUReturnCode iu_verify_exr_from_file(const char* filename,
-                                     IUImageSpec* spec);
-
-IUReturnCode iu_read_exr_from_memory(uint8_t* buffer,
-                                     size_t len,
+IUReturnCode iu_read_png_from_memory(uint8_t*     buffer,
+                                     size_t       len,
                                      IUImageSpec* spec,
-                                     void** output);
+                                     void**       output);
 
-IUReturnCode iu_verify_exr_from_memory(uint8_t* buffer,
-                                       size_t len,
+IUReturnCode iu_verify_png_from_memory(uint8_t*     buffer,
+                                       size_t       len,
+                                       IUImageSpec* spec);
+
+IUReturnCode iu_read_exr_from_file(const char*  filename,
+                                   IUImageSpec* spec,
+                                   void**       output);
+
+IUReturnCode iu_verify_exr_from_file(const char*  filename,
+                                     IUImageSpec* spec);
+
+IUReturnCode iu_read_exr_from_memory(uint8_t*     buffer,
+                                     size_t       len,
+                                     IUImageSpec* spec,
+                                     void**       output);
+
+IUReturnCode iu_verify_exr_from_memory(uint8_t*     buffer,
+                                       size_t       len,
                                        IUImageSpec* spec);
 
 
