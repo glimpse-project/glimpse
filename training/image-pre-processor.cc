@@ -264,8 +264,11 @@ read_file(const char *filename, int *len)
     if (fd < 0)
         return NULL;
 
-    if (fstat(fd, &st) < 0)
+    if (fstat(fd, &st) < 0) {
+        fprintf(stderr, "Failed to stat with file descriptor for %s\n", filename);
+        exit(1);
         return NULL;
+    }
 
     // N.B. st_size may be zero for special files like /proc/ files so we
     // speculate
@@ -280,7 +283,10 @@ read_file(const char *filename, int *len)
             if (errno == EINTR)
                 continue;
             else {
+                fprintf(stderr, "Error reading %s: %m\n", filename);
                 free(buf);
+                close(fd);
+                exit(1);
                 return NULL;
             }
         } else if (ret == 0)
@@ -939,12 +945,14 @@ decode_exr(uint8_t *buf, int len, enum image_format fmt)
     }
     if (channel == -1) {
         fprintf(stderr, "Failed to find R, G, B or Y channel in EXR file\n");
+        FreeEXRHeader(&header);
         return NULL;
     }
 
     pixel_type = header.channels[channel].pixel_type;
     if (pixel_type != TINYEXR_PIXELTYPE_HALF && pixel_type != TINYEXR_PIXELTYPE_FLOAT) {
         fprintf(stderr, "Can only decode EXR images with FLOAT or HALF data\n");
+        FreeEXRHeader(&header);
         return NULL;
     }
 
@@ -954,6 +962,8 @@ decode_exr(uint8_t *buf, int len, enum image_format fmt)
     ret = LoadEXRImageFromMemory(&exr_image, &header, (const unsigned char *)buf, len, &err);
     if (ret != 0) {
         fprintf(stderr, "Failed to load EXR file: %s\n", err);
+        FreeEXRHeader(&header);
+        return NULL;
     }
 
     struct image *img = xalloc_image(fmt, exr_image.width, exr_image.height);
@@ -990,6 +1000,7 @@ decode_exr(uint8_t *buf, int len, enum image_format fmt)
         }
     }
 
+    FreeEXRHeader(&header);
     FreeEXRImage(&exr_image);
 
     return img;
@@ -1126,7 +1137,7 @@ worker_thread_cb(void *data)
         } else {
             pthread_mutex_unlock(&work_queue_lock);
             debug("Worker thread finished\n");
-            return NULL;
+            break;
         }
         pthread_mutex_unlock(&work_queue_lock);
 
@@ -1223,7 +1234,7 @@ worker_thread_cb(void *data)
 
             // Note: we don't free the labels here because they are preserved
             // for comparing with the next frame
-            free(depth);
+            free_image(depth);
 
 
             /*
@@ -1297,6 +1308,15 @@ worker_thread_cb(void *data)
             free_image(prev_frame_labels);
             prev_frame_labels = NULL;
         }
+    }
+
+    if (noisy_labels) {
+        free_image(noisy_labels);
+        free_image(noisy_depth);
+    }
+    if (flipped_labels) {
+        free_image(flipped_labels);
+        free_image(flipped_depth);
     }
 
     return NULL;
