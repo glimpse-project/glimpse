@@ -1543,7 +1543,7 @@ static_assert(BACKGROUND_ID == 33, "");
 
     if (!n_threads_override) {
         int n_cpus = cpu_count();
-        n_threads = n_cpus * 32;
+        n_threads = n_cpus * 2;
     } else {
         n_threads = n_threads_override;
     }
