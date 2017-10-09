@@ -505,6 +505,91 @@ iu_verify_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec)
   return ret;
 }
 
+IUReturnCode
+iu_write_png_to_file(const char* filename, IUImageSpec* spec, void* data,
+                     void* pal, int pal_size)
+{
+  png_structp png_ptr;
+  png_infop info_ptr;
+  png_byte color_type;
+  png_bytep* rows;
+  IUReturnCode ret = PNG_ERR;
+
+  if (!spec)
+    {
+      fprintf(stderr, "Can't write image with no spec\n");
+      return BAD_SPEC;
+    }
+  if (spec->depth != 8 || spec->channels != 1)
+    {
+      fprintf(stderr, "Only 8-bit, single-channel pngs are supported\n");
+      return BAD_SPEC;
+    }
+
+  FILE *fp = fopen(filename, "wb");
+  if (!fp)
+    {
+      fprintf(stderr, "Failed to open %s for writing\n", filename);
+      return IO_ERR;
+    }
+
+  png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
+  if (!png_ptr)
+    {
+      fprintf(stderr, "png_create_write_struct failed\n");
+      goto iu_write_png_to_file_close;
+    }
+
+  info_ptr = png_create_info_struct(png_ptr);
+  if (!info_ptr)
+    {
+      fprintf(stderr, "png_create_info_struct failed\n");
+      goto iu_write_png_to_file_destroy_write_struct;
+    }
+
+  if (setjmp(png_jmpbuf(png_ptr)))
+    {
+      fprintf(stderr, "PNG write failure\n");
+      goto iu_write_png_to_file_destroy_info_struct;
+    }
+
+  png_init_io(png_ptr, fp);
+
+  color_type = pal ? PNG_COLOR_TYPE_PALETTE : PNG_COLOR_TYPE_GRAY;
+
+  png_set_IHDR(png_ptr, info_ptr, spec->width, spec->height,
+               8, color_type, PNG_INTERLACE_NONE,
+               PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
+
+  if (pal)
+    {
+      png_set_PLTE(png_ptr, info_ptr, (png_color*)pal, pal_size);
+    }
+
+  png_write_info(png_ptr, info_ptr);
+
+  rows = (png_bytep*)xmalloc(spec->height * sizeof(png_bytep));
+  for (int y = 0; y < spec->height; y++)
+    {
+      rows[y] = (png_byte*)pal + spec->width * y;
+    }
+  png_write_image(png_ptr, rows);
+  xfree(rows);
+
+  png_write_end(png_ptr, NULL);
+
+  ret = SUCCESS;
+
+iu_write_png_to_file_destroy_info_struct:
+  png_destroy_info_struct(png_ptr, &info_ptr);
+iu_write_png_to_file_destroy_write_struct:
+  png_destroy_write_struct(&png_ptr, NULL);
+iu_write_png_to_file_close:
+  fclose(fp);
+
+  return ret;
+}
+
 static IUReturnCode
 _iu_verify_exr_spec(IUImageSpec* spec)
 {

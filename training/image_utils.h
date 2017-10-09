@@ -52,6 +52,12 @@ IUReturnCode iu_verify_png_from_memory(uint8_t*     buffer,
                                        size_t       len,
                                        IUImageSpec* spec);
 
+IUReturnCode iu_write_png_to_file(const char*  filename,
+                                  IUImageSpec* spec,
+                                  void*        data,
+                                  void*        pal = NULL,
+                                  int          pal_size = 0);
+
 IUReturnCode iu_read_exr_from_file(const char*  filename,
                                    IUImageSpec* spec,
                                    void**       output);
