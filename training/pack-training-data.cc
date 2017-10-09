@@ -40,6 +40,7 @@
 #include <pthread.h>
 #include <getopt.h>
 #include <inttypes.h>
+#include <signal.h>
 
 #include <type_traits>
 #include <queue>
@@ -555,7 +556,10 @@ try_to_queue_n_frame_reads(int epollfd, int n_frames)
 
                 ev.events = EPOLLIN;
                 ev.data.ptr = file;
-                epoll_ctl(epollfd, EPOLL_CTL_ADD, file->fd, &ev);
+                if (epoll_ctl(epollfd, EPOLL_CTL_ADD, file->fd, &ev) < 0) {
+                    fprintf(stderr, "Failed to add fd (%d) for file %s to epoll fd (%d): %m\n",
+                            file->fd, file->filename, epollfd);
+                }
             }
             if (j != ARRAY_LEN(frame->files)) {
                 for (j--; j >= 0; j--) {
@@ -646,6 +650,10 @@ read_io_thread_cb(void *data)
     debug("Running read IO thread\n");
 
     int epollfd = epoll_create1(0);
+    if (epollfd < 0) {
+        fprintf(stderr, "Failed to create an epoll file descriptor: %m\n");
+        exit(1);
+    }
 
     int max_pending_frames = 333;
     int n_pending_frames = 0;
@@ -682,7 +690,15 @@ read_io_thread_cb(void *data)
         int max_events = n_pending_frames * N_FRAME_FILES;
         struct epoll_event events[max_events];
 
-        int n_ev = epoll_wait(epollfd, events, max_events, -1);
+        int n_ev;
+        while ((n_ev = epoll_wait(epollfd, events, max_events, -1)) < 0 &&
+                errno == SIGINT)
+            ;
+
+        if (n_ev < 0) {
+            fprintf(stderr, "IO Error: Failed to wait for any epoll events: %m\n");
+            exit(1);
+        }
 
         for (int i = 0; i < n_ev; i++) {
             struct pending_file *file = (struct pending_file *)events[i].data.ptr;
