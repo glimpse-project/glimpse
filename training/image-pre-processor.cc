@@ -228,7 +228,8 @@ get_duration_ns_print_scale(uint64_t duration_ns)
 static struct image *
 xalloc_image(enum image_format format,
              int width,
-             int height)
+             int height,
+             uint8_t *memory = NULL)
 {
     struct image *img = (struct image *)xmalloc(sizeof(struct image));
     img->format = format;
@@ -246,7 +247,8 @@ xalloc_image(enum image_format format,
         img->stride = width * sizeof(half);
         break;
     }
-    img->data_u8 = (uint8_t *)xmalloc(img->stride * img->height);
+    img->data_u8 = memory ? memory :
+                            (uint8_t *)xmalloc(img->stride * img->height);
 
     return img;
 }
@@ -337,63 +339,12 @@ free_image(struct image *image)
 static bool
 write_png_file(const char *filename,
                 int width, int height,
-                png_bytep *row_pointers,
-                png_byte color_type,
-                png_byte bit_depth)
+                uint8_t* data)
 {
-    png_structp png_ptr;
-    png_infop info_ptr;
-    bool ret = false;
-
-    /* create file */
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        fprintf(stderr, "Failed to open %s for writing\n", filename);
-        return false;
-    }
-
-    png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr) {
-        fprintf(stderr, "png_create_write_struct faile\nd");
-        goto error_create_write;
-    }
-
-    info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        fprintf(stderr, "png_create_info_struct failed");
-        goto error_create_info;
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "PNG write failure");
-        goto error_write;
-    }
-
-    png_init_io(png_ptr, fp);
-
-    png_set_IHDR(png_ptr, info_ptr, width, height,
-                 bit_depth, color_type, PNG_INTERLACE_NONE,
-                 PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
-
-    if (color_type == PNG_COLOR_TYPE_PALETTE)
-        png_set_PLTE(png_ptr, info_ptr, palette, ARRAY_LEN(palette));
-
-    png_write_info(png_ptr, info_ptr);
-
-    png_write_image(png_ptr, row_pointers);
-
-    png_write_end(png_ptr, NULL);
-
-    ret = true;
-
-error_write:
-    png_destroy_info_struct(png_ptr, &info_ptr);
-error_create_info:
-    png_destroy_write_struct(&png_ptr, NULL);
-error_create_write:
-    fclose(fp);
-
-    return ret;
+    IUImageSpec spec = { width, height, 8, 1 };
+    return iu_write_png_to_file(filename, &spec, (void*)data,
+                                write_palettized_pngs ? palette : NULL,
+                                ARRAY_LEN(palette)) == SUCCESS;
 }
 
 /* Using EXR is a nightmare. If we try and only add an 'R' channel then
@@ -501,122 +452,37 @@ load_frame_labels(const char *dir,
 {
     char input_filename[1024];
 
-    FILE *fp;
-
-    unsigned char header[8]; // 8 is the maximum size that can be checked
-    png_structp png_ptr;
-    png_infop info_ptr;
-
-    int width, height;
-
-    png_bytep *rows;
-
-    int row_stride;
-
-    struct image *img = NULL, *ret = NULL;
-
     xsnprintf(input_filename, "%s/labels/%s/%s", top_src_dir, dir, filename);
 
-    /* open file and test for it being a png */
-    fp = fopen(input_filename, "rb");
-    if (!fp) {
-        fprintf(stderr, "Failed to open %s for reading\n", input_filename);
-        goto error_open;
+    IUImageSpec spec = { 0, 0, 8, 1 };
+    uint8_t *data = NULL;
+    if (iu_read_png_from_file(input_filename, &spec, (void**)&data) != SUCCESS) {
+        return NULL;
     }
+    int width = spec.width;
+    int height = spec.height;
 
-    if (fread(header, 1, 8, fp) != 8) {
-        fprintf(stderr, "IO error reading %s file\n", input_filename);
-        goto error_check_header;
-    }
-    if (png_sig_cmp(header, 0, 8)) {
-        fprintf(stderr, "%s was not recognised as a PNG file\n", input_filename);
-        goto error_check_header;
-    }
-
-    /* initialize stuff */
-    png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr) {
-        fprintf(stderr, "png_create_read_struct failed\n");
-        goto error_create_read;
-    }
-
-    info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr) {
-        fprintf(stderr, "png_create_info_struct failed\n");
-        goto error_create_info;
-    }
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "libpng setjmp failure\n");
-        goto error_png_setjmp;
-    }
-
-    png_init_io(png_ptr, fp);
-    png_set_sig_bytes(png_ptr, 8);
-
-    png_read_info(png_ptr, info_ptr);
-
-    width = png_get_image_width(png_ptr, info_ptr);
-    height = png_get_image_height(png_ptr, info_ptr);
-
-    if (labels_width) {
-        if (width != labels_width || height != labels_height) {
-            fprintf(stderr, "Inconsistent size for %s (%dx%d) of label image (expected %dx%d)\n",
-                    input_filename, width, height, labels_width, labels_height);
-            exit(1);
-        }
-    }
-
-    png_read_update_info(png_ptr, info_ptr);
-
-    row_stride = png_get_rowbytes(png_ptr, info_ptr);
-
-    img = xalloc_image(IMAGE_FORMAT_X8, width, height);
-    rows = (png_bytep *)alloca(sizeof(png_bytep) * height);
-
-    for (int y = 0; y < height; y++)
-        rows[y] = (png_byte *)(img->data_u8 + row_stride * y);
-
-    if (setjmp(png_jmpbuf(png_ptr))) {
-        fprintf(stderr, "png_read_image_error\n");
-        goto error_read_image;
-    }
-
-    png_read_image(png_ptr, rows);
     debug("read %s/%s (%dx%d) OK\n", dir, filename, width, height);
 
+    struct image *img = xalloc_image(IMAGE_FORMAT_X8, width, height, data);
+
     for (int y = 0; y < height; y++) {
-        uint8_t *row = img->data_u8 + row_stride * y;
+        uint8_t *row = img->data_u8 + width * y;
 
         for (int x = 0; x < width; x++) {
-            row[x] = grey_to_id_map[row[x]];
-
             if (row[x] > MAX_PACKED_INDEX) {
                 fprintf(stderr, "Failed to map a label value of 0x%x/%d in image %s\n",
                         row[x], row[x],
                         input_filename);
-                goto error_read_image;
+                free_image(img);
+                return NULL;
             }
+
+            row[x] = grey_to_id_map[row[x]];
         }
     }
 
-    ret = img;
-
-error_read_image:
-    if (img && ret == NULL)
-        free_image(img);
-error_png_setjmp:
-    png_destroy_info_struct(png_ptr, &info_ptr);
-error_create_info:
-    png_destroy_read_struct(&png_ptr, NULL, NULL);
-error_create_read:
-
-error_check_header:
-    fclose(fp);
-
-error_open:
-
-    return ret;
+    return img;
 }
 
 
@@ -873,25 +739,16 @@ static bool
 save_frame_labels(const char *dir, const char *filename,
                   struct image *labels)
 {
-    int width = labels->width;
-    int height = labels->height;
-    int row_stride = labels->stride;
     char output_filename[1024];
-    png_bytep rows[height];
 
     xsnprintf(output_filename, "%s/labels/%s/%s", top_out_dir, dir, filename);
-
-    for (int y = 0; y < height; y++)
-        rows[y] = (png_byte *)(labels->data_u8 + row_stride * y);
 
     struct stat st;
 
     if (stat(output_filename, &st) == -1) {
         if (!write_png_file(output_filename,
-                            width, height,
-                            rows,
-                            write_palettized_pngs ? PNG_COLOR_TYPE_PALETTE : PNG_COLOR_TYPE_GRAY,
-                            8)) { /* bit depth */
+                            labels->width, labels->height,
+                            labels->data_u8)) { /* bit depth */
             return false;
         }
         debug("wrote %s\n", output_filename);
@@ -907,15 +764,13 @@ save_frame_labels(const char *dir, const char *filename,
 static struct image *
 decode_exr(uint8_t *buf, int len, enum image_format fmt)
 {
+    uint8_t *data = NULL;
     IUImageSpec spec = { 0, 0, (fmt == IMAGE_FORMAT_XHALF) ? 16 : 32, 1 };
-    if (iu_verify_exr_from_memory(buf, len, &spec) != SUCCESS) {
-        abort();
-    }
-    struct image *img = xalloc_image(fmt, spec.width, spec.height);
-    if (iu_read_exr_from_memory(buf, len, &spec, (void **)&img->data_u8) !=
+    if (iu_read_exr_from_memory(buf, len, &spec, (void **)&data) !=
         SUCCESS) {
         abort();
     }
+    struct image *img = xalloc_image(fmt, spec.width, spec.height, data);
 
     return img;
 }
