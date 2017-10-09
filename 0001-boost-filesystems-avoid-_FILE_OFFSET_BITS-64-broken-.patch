@@ -1,0 +1,39 @@
+From 0f13fd403388fe3444ce739e0c6571d63aaff3de Mon Sep 17 00:00:00 2001
+From: Robert Bragg <robert@impossible.com>
+Date: Mon, 16 Oct 2017 13:54:35 +0000
+Subject: [PATCH] boost/filesystems: avoid _FILE_OFFSET_BITS=64 broken in
+ Android NDK
+
+---
+ src/operations.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/src/operations.cpp b/src/operations.cpp
+index b5e0f66..1aabac1 100644
+--- a/src/operations.cpp
++++ b/src/operations.cpp
+@@ -12,10 +12,10 @@
+ 
+ //  define 64-bit offset macros BEFORE including boost/config.hpp (see ticket #5355) 
+ #if !(defined(__HP_aCC) && defined(_ILP32) && !defined(_STATVFS_ACPP_PROBLEMS_FIXED))
+-#define _FILE_OFFSET_BITS 64 // at worst, these defines may have no effect,
++//#define _FILE_OFFSET_BITS 64 // at worst, these defines may have no effect,
+ #endif
+ #if !defined(__PGI)
+-#define __USE_FILE_OFFSET64 // but that is harmless on Windows and on POSIX
++//#define __USE_FILE_OFFSET64 // but that is harmless on Windows and on POSIX
+       // 64-bit systems or on 32-bit systems which don't have files larger 
+       // than can be represented by a traditional POSIX/UNIX off_t type. 
+       // OTOH, defining them should kick in 64-bit off_t's (and thus 
+@@ -26,7 +26,7 @@
+       // That is required at least on Solaris, and possibly on other
+       // systems as well.
+ #else
+-#define _FILE_OFFSET_BITS 64
++//#define _FILE_OFFSET_BITS 64
+ #endif
+ 
+ // define BOOST_FILESYSTEM_SOURCE so that <boost/filesystem/config.hpp> knows
+-- 
+2.7.4
+
