@@ -165,9 +165,15 @@ open_png_from_file_return:
 }
 
 static IUReturnCode
-_iu_read_png(png_structp* png_ptr, png_infop* info_ptr, IUImageSpec* spec,
+_iu_read_png(png_structp png_ptr, png_infop info_ptr, IUImageSpec* spec,
              void** output)
 {
+  // Read out image, if applicable
+  if (!output)
+    {
+      return SUCCESS;
+    }
+
   // Allocate output if necessary
   if (!(*output))
     {
@@ -175,14 +181,14 @@ _iu_read_png(png_structp* png_ptr, png_infop* info_ptr, IUImageSpec* spec,
     }
 
   // Set error handler
-  if (setjmp(png_jmpbuf(*png_ptr)))
+  if (setjmp(png_jmpbuf(png_ptr)))
     {
       fprintf(stderr, "libpng setjmp failure\n");
       return PNG_ERR;
     }
 
   // Start reading data
-  int row_stride = png_get_rowbytes(*png_ptr, *info_ptr);
+  int row_stride = png_get_rowbytes(png_ptr, info_ptr);
   png_bytep* input_rows = (png_bytep *)
     xmalloc(sizeof(png_bytep*) * spec->height);
   png_bytep input_data = (png_bytep)
@@ -193,7 +199,7 @@ _iu_read_png(png_structp* png_ptr, png_infop* info_ptr, IUImageSpec* spec,
       input_rows[y] = (png_byte*)input_data + row_stride * y;
     }
 
-  png_read_image(*png_ptr, input_rows);
+  png_read_image(png_ptr, input_rows);
 
   // Copy label image data into training context struct
   for (int y = 0, src_idx = 0, dst_idx = 0;
@@ -209,8 +215,44 @@ _iu_read_png(png_structp* png_ptr, png_infop* info_ptr, IUImageSpec* spec,
   return SUCCESS;
 }
 
+static IUReturnCode
+_iu_read_png_pal(png_structp png_ptr, png_infop info_ptr, void** output,
+                 int* output_size)
+{
+  // Read out palette, if applicable
+  if (!output ||
+      png_get_color_type(png_ptr, info_ptr) != PNG_COLOR_TYPE_PALETTE)
+    {
+      return SUCCESS;
+    }
+
+  png_colorp palette;
+  int palette_size;
+
+  if (!png_get_PLTE(png_ptr, info_ptr, &palette, &palette_size))
+    {
+      fprintf(stderr, "Error reading palette\n");
+      return PNG_ERR;
+    }
+
+  if (output_size)
+    {
+      *output_size = palette_size;
+    }
+
+  if (!(*output))
+    {
+      *output = xmalloc(palette_size * sizeof(png_color));
+    }
+
+  memcpy(*output, palette, palette_size * sizeof(png_color));
+
+  return SUCCESS;
+}
+
 IUReturnCode
-iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output)
+iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output,
+                      void** pal_output, int* pal_size)
 {
   FILE* fp;
   png_structp png_ptr;
@@ -245,7 +287,11 @@ iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output)
       return ret;
     }
 
-  ret = _iu_read_png(&png_ptr, &info_ptr, spec, output);
+  ret = _iu_read_png(png_ptr, info_ptr, spec, output);
+  if (ret == SUCCESS)
+    {
+      ret = _iu_read_png_pal(png_ptr, info_ptr, pal_output, pal_size);
+    }
 
   IUReturnCode close_ret = _iu_close_png_from_file(fp, png_ptr, info_ptr);
 
@@ -409,7 +455,7 @@ verify_png_from_memory_destroy_read_struct:
 
 IUReturnCode
 iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
-                        void** output)
+                        void** output, void** pal_output, int* pal_size)
 {
   png_structp png_ptr;
   png_infop info_ptr;
@@ -430,7 +476,11 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
       return ret;
     }
 
-  ret = _iu_read_png(&png_ptr, &info_ptr, spec, output);
+  ret = _iu_read_png(png_ptr, info_ptr, spec, output);
+  if (ret == SUCCESS)
+    {
+      ret = _iu_read_png_pal(png_ptr, info_ptr, pal_output, pal_size);
+    }
 
   png_destroy_info_struct(png_ptr, &info_ptr);
   png_destroy_read_struct(&png_ptr, NULL, NULL);

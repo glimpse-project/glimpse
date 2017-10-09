@@ -34,7 +34,9 @@ typedef struct {
 
 IUReturnCode iu_read_png_from_file(const char*  filename,
                                    IUImageSpec* spec,
-                                   void**       output);
+                                   void**       output,
+                                   void**       pal_output = NULL,
+                                   int*         pal_size = NULL);
 
 IUReturnCode iu_verify_png_from_file(const char*  filename,
                                      IUImageSpec* spec);
@@ -42,7 +44,9 @@ IUReturnCode iu_verify_png_from_file(const char*  filename,
 IUReturnCode iu_read_png_from_memory(uint8_t*     buffer,
                                      size_t       len,
                                      IUImageSpec* spec,
-                                     void**       output);
+                                     void**       output,
+                                     void**       pal_output = NULL,
+                                     int*         pal_size = NULL);
 
 IUReturnCode iu_verify_png_from_memory(uint8_t*     buffer,
                                        size_t       len,
