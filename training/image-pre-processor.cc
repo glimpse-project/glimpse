@@ -46,7 +46,6 @@
 #include <queue>
 #include <random>
 
-#include "tinyexr.h"
 #include "image_utils.h"
 
 #include "half.hpp"
@@ -360,37 +359,16 @@ write_exr(const char *filename,
           struct image *image,
           enum image_format format)
 {
-    EXRHeader header;
-    InitEXRHeader(&header);
-
-    EXRImage exr_image;
-    InitEXRImage(&exr_image);
-
-    exr_image.num_channels = 1;
-    exr_image.width = image->width;
-    exr_image.height = image->height;
-
-    unsigned char *image_ptr = (unsigned char *)image->data_u8;
-    exr_image.images = &image_ptr;
-
-    header.num_channels = 1;
-    EXRChannelInfo channel_info;
-    header.channels = &channel_info;
-    strcpy(channel_info.name, "Y");
-
-    int input_format = (image->format == IMAGE_FORMAT_XFLOAT ?
-                        TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
-    int final_format = (format == IMAGE_FORMAT_XFLOAT ?
-                        TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
-    header.pixel_types = &input_format;
-    header.requested_pixel_types = &final_format;
-
-    const char *err = NULL;
-    if (SaveEXRImageToFile(&exr_image, &header, filename, &err) != TINYEXR_SUCCESS) {
-        fprintf(stderr, "Failed to save EXR: %s\n", err);
-        return false;
-    } else
-        return true;
+    IUImageSpec spec = {
+        image->width,
+        image->height,
+        format == IMAGE_FORMAT_XFLOAT ? 32 : 16,
+        1
+    };
+    const char *channel_names[] = { "Y" };
+    int channel_depth = (image->format == IMAGE_FORMAT_XFLOAT) ? 32 : 16;
+    return iu_write_exr_to_file(filename, &spec, (void*)image->data_u8,
+                                channel_names, &channel_depth) == SUCCESS;
 }
 
 static bool

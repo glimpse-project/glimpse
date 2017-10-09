@@ -852,3 +852,73 @@ iu_verify_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec)
     }
   return ret;
 }
+
+IUReturnCode
+iu_write_exr_to_file(const char* filename, IUImageSpec* spec, void* data,
+                     const char** channels, int *channel_depth)
+{
+  const char* default_cn1[] = { "Y" };
+
+  if (!spec)
+    {
+      fprintf(stderr, "Can't write image with no spec\n");
+      return BAD_SPEC;
+    }
+  if ((spec->depth != 16 && spec->depth != 32) || spec->channels != 1)
+    {
+      fprintf(stderr,
+              "Only float/half-float, single-channel exrs are supported\n");
+      return BAD_SPEC;
+    }
+
+  if (!channels)
+    {
+      switch (spec->channels)
+        {
+        case 1:
+          channels = default_cn1;
+          break;
+
+        default:
+          fprintf(stderr, "Unusual number of channels with no channel "
+                  "names specified");
+          return BAD_SPEC;
+        }
+    }
+
+  EXRHeader header;
+  InitEXRHeader(&header);
+
+  EXRImage exr_image;
+  InitEXRImage(&exr_image);
+
+  exr_image.num_channels = spec->channels;
+  exr_image.width = spec->width;
+  exr_image.height = spec->height;
+  exr_image.images = (unsigned char**)(&data);
+
+  header.num_channels = spec->channels;
+  EXRChannelInfo channel_info[spec->channels];
+  for (int i = 0; i < spec->channels; i++)
+    {
+      header.channels = &channel_info[i];
+      strcpy(channel_info[i].name, channels[i]);
+    }
+
+  int output_format = spec->depth == 16 ? TINYEXR_PIXELTYPE_HALF :
+                                          TINYEXR_PIXELTYPE_FLOAT;
+  int input_format = channel_depth ? channel_depth[0] : input_format;
+  header.pixel_types = &input_format;
+  header.requested_pixel_types = &output_format;
+
+  const char *err = NULL;
+  if (SaveEXRImageToFile(&exr_image, &header, filename, &err) !=
+      TINYEXR_SUCCESS)
+    {
+      fprintf(stderr, "Failed to save EXR: %s\n", err);
+      return EXR_ERR;
+    }
+
+  return SUCCESS;
+}
+

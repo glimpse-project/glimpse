@@ -74,6 +74,11 @@ IUReturnCode iu_verify_exr_from_memory(uint8_t*     buffer,
                                        size_t       len,
                                        IUImageSpec* spec);
 
+IUReturnCode iu_write_exr_to_file(const char*  filename,
+                                  IUImageSpec* spec,
+                                  void*        data,
+                                  const char** channels = NULL,
+                                  int*         channel_depth = NULL);
 
 #ifdef __cplusplus
 };
