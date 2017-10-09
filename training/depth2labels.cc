@@ -10,12 +10,9 @@
 
 #include <png.h>
 
-#include <ImfInputFile.h>
-#include <ImfChannelList.h>
-#include <ImathBox.h>
-
 #include "half.hpp"
 
+#include "image_utils.h"
 #include "xalloc.h"
 #include "utils.h"
 #include "loader.h"
@@ -23,8 +20,7 @@
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
-using namespace OPENEXR_IMF_NAMESPACE;
-using namespace IMATH_NAMESPACE;
+using half_float::half;
 
 static png_color default_palette[] = {
     { 0xff, 0x5d, 0xaa },
@@ -65,156 +61,6 @@ static png_color default_palette[] = {
 
 static png_color *palette = default_palette;
 static int palette_size = ARRAY_LEN(default_palette);
-
-static void
-load_palette_from_png(const char *palette_png)
-{
-    FILE* pal_fp;
-    unsigned char header[8]; // 8 is the maximum size that can be checked
-    png_structp pal_png_ptr;
-    png_infop pal_info_ptr;
-
-    // Open palette png file
-    if (!(pal_fp = fopen(palette_png, "rb")))
-      {
-        fprintf(stderr, "Failed to open palette image\n");
-        exit(1);
-      }
-
-    // Load palette png file
-    if (fread(header, 1, 8, pal_fp) != 8)
-      {
-        fprintf(stderr, "Error reading header of palette image\n");
-        exit(1);
-      }
-    if (png_sig_cmp(header, 0, 8))
-      {
-        fprintf(stderr, "Palette png was not recognised as a PNG file\n");
-        exit(1);
-      }
-
-    // Start reading palette png
-    pal_png_ptr = png_create_read_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!pal_png_ptr)
-      {
-        fprintf(stderr, "png_create_read_struct failed\n");
-        exit(1);
-      }
-
-    pal_info_ptr = png_create_info_struct(pal_png_ptr);
-    if (!pal_info_ptr)
-      {
-        fprintf(stderr, "png_create_info_struct failed\n");
-        exit(1);
-      }
-
-    if (setjmp(png_jmpbuf(pal_png_ptr)))
-      {
-        fprintf(stderr, "libpng setjmp failure\n");
-        exit(1);
-      }
-
-    png_init_io(pal_png_ptr, pal_fp);
-    png_set_sig_bytes(pal_png_ptr, 8);
-
-    png_read_info(pal_png_ptr, pal_info_ptr);
-
-    // Verify pixel type
-    png_byte color_type = png_get_color_type(pal_png_ptr, pal_info_ptr);
-    if (color_type != PNG_COLOR_TYPE_PALETTE)
-      {
-        fprintf(stderr, "Palette file does not have a palette\n");
-        exit(1);
-      }
-
-    if (png_get_bit_depth(pal_png_ptr, pal_info_ptr) != 8)
-      {
-        fprintf(stderr, "Palette file is not 8bpp\n");
-        exit(1);
-      }
-
-    // Read out palette data
-    if (!png_get_PLTE(pal_png_ptr, pal_info_ptr, &palette, &palette_size))
-      {
-        fprintf(stderr, "Error reading palette from palette png\n");
-        exit(1);
-      }
-
-    // Close the palette file
-    if (fclose(pal_fp) != 0)
-      {
-        fprintf(stderr, "Error closing palette file\n");
-        exit(1);
-      }
-
-    // Free data associated with PNG reading
-    png_destroy_info_struct(pal_png_ptr, &pal_info_ptr);
-    png_destroy_read_struct(&pal_png_ptr, NULL, NULL);
-}
-
-static bool
-write_png_file(const char *filename,
-               int width, int height,
-               png_bytep *row_pointers,
-               png_byte color_type)
-{
-    png_structp png_ptr;
-    png_infop info_ptr;
-    bool ret = false;
-
-    /* create file */
-    FILE *fp = fopen(filename, "wb");
-    if (!fp) {
-        fprintf(stderr, "Failed to open %s for writing\n", filename);
-        return false;
-    }
-
-    png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
-    if (!png_ptr)
-      {
-        fprintf(stderr, "png_create_write_struct failed\n");
-        goto error_create_write;
-      }
-
-    info_ptr = png_create_info_struct(png_ptr);
-    if (!info_ptr)
-      {
-        fprintf(stderr, "png_create_info_struct failed\n");
-        goto error_create_info;
-      }
-
-    if (setjmp(png_jmpbuf(png_ptr)))
-      {
-        fprintf(stderr, "PNG write failure\n");
-        goto error_write;
-      }
-
-    png_init_io(png_ptr, fp);
-
-    png_set_IHDR(png_ptr, info_ptr, width, height,
-                 8, color_type, PNG_INTERLACE_NONE,
-                 PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
-
-    if (color_type == PNG_COLOR_TYPE_PALETTE)
-        png_set_PLTE(png_ptr, info_ptr, palette, palette_size);
-
-    png_write_info(png_ptr, info_ptr);
-
-    png_write_image(png_ptr, row_pointers);
-
-    png_write_end(png_ptr, NULL);
-
-    ret = true;
-
-error_write:
-    png_destroy_info_struct(png_ptr, &info_ptr);
-error_create_info:
-    png_destroy_write_struct(&png_ptr, NULL);
-error_create_write:
-    fclose(fp);
-
-    return ret;
-}
 
 static void
 print_usage(FILE* stream)
@@ -273,35 +119,31 @@ main(int argc, char **argv)
     }
 
   // Read depth file
-  InputFile in_file(argv[optind]);
-  Box2i dw = in_file.header().dataWindow();
-
-  int32_t width = dw.max.x - dw.min.x + 1;
-  int32_t height = dw.max.y - dw.min.y + 1;
-
-  const ChannelList& channels = in_file.header().channels();
-  if (!channels.findChannel("Y"))
+  half* depth_image = NULL;
+  IUImageSpec exr_spec = { 0, 0, 16, 1 };
+  if (iu_read_exr_from_file(argv[optind], &exr_spec,
+                            (void**)(&depth_image)) != SUCCESS)
     {
-      fprintf(stderr, "Only expected to load greyscale EXR files "
-              "with a single 'Y' channel\n");
+      fprintf(stderr, "Error loading depth image\n");
       return 1;
     }
+  int width = exr_spec.width;
+  int height = exr_spec.height;
 
-  half_float::half* depth_image =
-      (half_float::half*)xmalloc(width * height * sizeof(half_float::half));
-
-  FrameBuffer frameBuffer;
-  frameBuffer.insert("Y",
-                     Slice (HALF,
-                            (char *)depth_image,
-                            sizeof(half_float::half), // x stride,
-                            sizeof(half_float::half) * width)); // y stride
-
-  in_file.setFrameBuffer(frameBuffer);
-  in_file.readPixels(dw.min.y, dw.max.y);
-
-  if (palette_file)
-      load_palette_from_png(palette_file);
+  if (!write_palettized_pngs)
+    {
+      palette = NULL;
+    }
+  else if (palette_file)
+    {
+      palette = NULL;
+      if (iu_read_png_from_file(palette_file, NULL, NULL,
+                                (void**)(&palette), &palette_size) != SUCCESS)
+        {
+          fprintf(stderr, "Failed to read palette\n");
+          return 1;
+        }
+    }
 
   // Do inference
   unsigned n_trees = argc - optind - 2;
@@ -315,11 +157,9 @@ main(int argc, char **argv)
   free_forest(forest, n_trees);
 
   // Write out png of most likely labels
-  png_bytep* rows = (png_bytep*)xmalloc(height * sizeof(png_bytep));
   png_bytep out_labels = (png_bytep)xmalloc(width * height);
   for (int y = 0; y < height; y++)
     {
-      rows[y] = (png_byte*)out_labels + width * y;
       for (int x = 0; x < width; x++)
         {
           uint8_t label = 0;
@@ -339,12 +179,14 @@ main(int argc, char **argv)
         }
     }
 
-  write_png_file(argv[optind+1], width, height, rows,
-                 write_palettized_pngs ? PNG_COLOR_TYPE_PALETTE :
-                 PNG_COLOR_TYPE_GRAY);
+  IUImageSpec output_spec = { width, height, 8, 1 };
+  if (iu_write_png_to_file(argv[optind+1], &output_spec,
+                           out_labels, palette, palette_size) != SUCCESS)
+    {
+      fprintf(stderr, "Error writing output PNG\n");
+    }
 
   // Clean-up
-  xfree(rows);
   xfree(out_labels);
   xfree(output_pr);
   xfree(depth_image);

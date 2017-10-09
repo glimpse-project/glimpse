@@ -42,7 +42,7 @@ train_joint_params: train_joint_params.o infer.o image_utils.o train_utils.o loa
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-depth2labels: depth2labels.o infer.o loader.o xalloc.o
+depth2labels: depth2labels.o infer.o loader.o xalloc.o tinyexr.o image_utils.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs OpenEXR libpng`
 
