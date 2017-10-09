@@ -571,7 +571,7 @@ iu_write_png_to_file(const char* filename, IUImageSpec* spec, void* data,
   rows = (png_bytep*)xmalloc(spec->height * sizeof(png_bytep));
   for (int y = 0; y < spec->height; y++)
     {
-      rows[y] = (png_byte*)pal + spec->width * y;
+      rows[y] = (png_byte*)data + spec->width * y;
     }
   png_write_image(png_ptr, rows);
   xfree(rows);
