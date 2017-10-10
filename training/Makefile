@@ -28,7 +28,9 @@ TOOLS = image-pre-processor \
 	pfm-debug \
 	pack-training-data
 
-all: $(TOOLS)
+LIBS = libglimpse.so
+
+all: $(TOOLS) $(LIBS)
 
 image-pre-processor: image-pre-processor.o tinyexr.o parson.o image_utils.o xalloc.o
 	$(E)echo "(LD)      $(@)"
@@ -62,14 +64,18 @@ pack-training-data: pack-training-data.o pack.o tinyexr.o llist.o xalloc.o image
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lsnappy -lpthread -lc
 
+libglimpse.so: xalloc.o tinyexr.o loader.o infer.o image_utils.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -shared -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
+
 
 %.o: %.c Makefile | dirs
 	$(E)echo "(CC)      $(@)"
-	$(E)$(CC) $(filter %.c,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CFLAGS) $(INCLUDES) -c
+	$(E)$(CC) $(filter %.c,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CFLAGS) $(INCLUDES) -c -fPIC
 
 %.o: %.cc Makefile | dirs
 	$(E)echo "(CXX)     $(@)"
-	$(E)$(CXX) $(filter %.cc,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CXXFLAGS) $(INCLUDES) -c
+	$(E)$(CXX) $(filter %.cc,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CXXFLAGS) $(INCLUDES) -c -fPIC
 
 -include .deps/*.rules
 
