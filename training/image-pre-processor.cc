@@ -45,6 +45,7 @@
 #include <type_traits>
 #include <queue>
 #include <random>
+#include <atomic>
 
 #include "image_utils.h"
 
@@ -137,6 +138,10 @@ static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
 static int n_cpus = 0;
 
 static std::default_random_engine rand_generator;
+
+static uint64_t max_frame_count = UINT64_MAX;
+static std::atomic<std::uint64_t> frame_count;
+static std::atomic_bool finished;
 
 static png_color palette[] = {
     { 0xff, 0x5d, 0xaa },
@@ -1049,12 +1054,22 @@ worker_thread_cb(void *data)
                 json_value_free(root_value);
                 free(json_data);
             }
+
+            frame_count++;
+
+            if (frame_count >= max_frame_count) {
+                finished = true;
+                break;
+            }
         }
 
         if (prev_frame_labels) {
             free_image(prev_frame_labels);
             prev_frame_labels = NULL;
         }
+
+        if (finished)
+            break;
     }
 
     if (noisy_labels) {
@@ -1122,6 +1137,7 @@ usage(void)
 "                               between sequential frames\n"
 "                               (default = %.3f%%)\n"
 "    -t,--threads=<n>           Override how many worker threads are run\n"
+"    -m,--max-frames=<n>        Don't pre-process more than this many frames\n"
 "\n"
 "    -h,--help                  Display this help\n\n"
 "\n",
@@ -1146,7 +1162,7 @@ main(int argc, char **argv)
     /* N.B. The initial '+' means that getopt will stop looking for options
      * after the first non-option argument...
      */
-    const char *short_options="+hfgpv:b:t:";
+    const char *short_options="+hfgpv:b:t:m:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
@@ -1157,6 +1173,7 @@ main(int argc, char **argv)
         {"min-body-size",   required_argument,  0, MIN_BODY_PX_OPT},
         {"min-body-change", required_argument,  0, MIN_BODY_CHNG_PC_OPT},
         {"threads",         required_argument,  0, 't'},
+        {"max-frames",      required_argument,  0, 'm'},
         {0, 0, 0, 0}
     };
 
@@ -1203,7 +1220,12 @@ main(int argc, char **argv)
                 if (*optarg == '\0' || *end != '\0')
                     usage();
                 break;
-           default:
+            case 'm':
+                max_frame_count = strtoul(optarg, &end, 10);
+                if (*optarg == '\0' || *end != '\0')
+                    usage();
+                break;
+            default:
                 usage();
                 break;
         }
