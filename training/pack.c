@@ -22,7 +22,7 @@
  * SOFTWARE.
  */
 
-#define _BSD_SOURCE 1 // for strdup
+#define _DEFAULT_SOURCE 1 // for strdup
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -37,7 +37,6 @@
 #include "llist.h"
 #include "pack.h"
 
-#define MAGIC_STRING "pack"
 
 static struct property *
 lookup_property(LList *properties, const char *name)
@@ -76,12 +75,12 @@ remove_property(LList *properties, const char *name)
 static LList *
 _set_i64(LList *properties, const char *name, int64_t val)
 {
-    struct property *prop;
+    struct int64_property *prop;
 
     remove_property(properties, name);
 
     uint32_t byte_len = sizeof(*prop);
-    prop = (struct property *)xcalloc(1, byte_len);
+    prop = (struct int64_property *)xcalloc(1, byte_len);
 
     assert(strlen(name) < sizeof(prop->name));
 
@@ -108,12 +107,12 @@ pack_frame_set_i64(struct pack_frame *frame, const char *name, int64_t val)
 static LList *
 _set_double(LList *properties, const char *name, double val)
 {
-    struct property *prop;
+    struct double_property *prop;
 
     remove_property(properties, name);
 
     uint32_t byte_len = sizeof(*prop);
-    prop = (struct property *)xcalloc(1, byte_len);
+    prop = (struct double_property *)xcalloc(1, byte_len);
 
     assert(strlen(name) < sizeof(prop->name));
 
@@ -143,14 +142,14 @@ _set_blob(LList *properties,
           const uint8_t *data,
           uint32_t len)
 {
-    struct property *prop;
+    struct blob_property *prop;
 
     assert(strlen(name) < sizeof(prop->name));
 
     remove_property(properties, name);
 
     uint32_t byte_len = sizeof(*prop) + len;
-    prop = (struct property *)xcalloc(1, byte_len);
+    prop = (struct blob_property *)xcalloc(1, byte_len);
 
     strncpy(prop->name, name, sizeof(prop->name));
     prop->type = PROP_BLOB;
@@ -183,19 +182,20 @@ _set_string(LList *properties,
             const char *name,
             const char *string)
 {
-    struct property *prop;
+    struct string_property *prop;
 
     assert(strlen(name) < sizeof(prop->name));
 
     remove_property(properties, name);
 
     uint32_t len = strlen(string) + 1;
+
     uint32_t byte_len = sizeof(*prop) + len;
-    prop = (struct property *)xcalloc(1, byte_len);
+    prop = (struct string_property *)xcalloc(1, byte_len);
 
     strncpy(prop->name, name, sizeof(prop->name));
     prop->type = PROP_STRING;
-    memcpy(prop->blob, string, len);
+    memcpy(prop->string, string, len);
     prop->byte_len = byte_len;
 
     return llist_insert_before(properties, llist_new(prop));
@@ -216,7 +216,8 @@ pack_frame_set_string(struct pack_frame *frame, const char *name, const char *va
 static int64_t
 _get_i64(LList *properties, const char *name, char **err)
 {
-    struct property *prop = get_property(properties, name, err);
+    struct int64_property *prop =
+        (struct int64_property *)get_property(properties, name, err);
 
     if (prop) {
         if (prop->type != PROP_INT64) {
@@ -244,7 +245,8 @@ pack_frame_get_i64(struct pack_frame *frame, const char *name, char **err)
 static double
 _get_double(LList *properties, const char *name, char **err)
 {
-    struct property *prop = get_property(properties, name, err);
+    struct double_property *prop =
+        (struct double_property *)get_property(properties, name, err);
 
     if (prop) {
         if (prop->type != PROP_DOUBLE) {
@@ -272,15 +274,16 @@ pack_frame_get_double(struct pack_frame *frame, const char *name, char **err)
 static const char *
 _get_string(LList *properties, const char *name, char **err)
 {
-    struct property *prop = get_property(properties, name, err);
+    struct string_property *prop =
+        (struct string_property *)get_property(properties, name, err);
 
     if (prop) {
-        if (prop->type != PROP_BLOB) {
+        if (prop->type != PROP_STRING) {
             xasprintf(err, "property type mismatch");
             return NULL;
         }
 
-        return (const char *)prop->blob;
+        return (const char *)prop->string;
     } else
         return NULL;
 }
@@ -295,6 +298,43 @@ const char *
 pack_frame_get_string(struct pack_frame *frame, const char *name, char **err)
 {
     return _get_string(frame->properties, name, err);
+}
+
+static const uint8_t *
+_get_blob(LList *properties, const char *name, uint32_t *len, char **err)
+{
+    struct blob_property *prop =
+        (struct blob_property *)get_property(properties, name, err);
+
+    if (prop) {
+        if (prop->type != PROP_BLOB) {
+            xasprintf(err, "property type mismatch");
+            return NULL;
+        }
+
+        *len = (prop->byte_len - offsetof(struct blob_property, blob));
+
+        return (const uint8_t *)prop->blob;
+    } else
+        return NULL;
+}
+
+const uint8_t *
+pack_get_blob(struct pack_file *pack,
+              const char *name,
+              uint32_t *len,
+              char **err)
+{
+    return _get_blob(pack->properties, name, len, err);
+}
+
+const uint8_t *
+pack_frame_get_blob(struct pack_frame *frame,
+                    const char *name,
+                    uint32_t *len,
+                    char **err)
+{
+    return _get_blob(frame->properties, name, len, err);
 }
 
 /* The order of calls determines the in-file order of sections */
@@ -337,7 +377,8 @@ pack_open(const char *filename, char **err)
     FILE *fp = NULL;
 
     if (preexists) {
-        char magic[sizeof(MAGIC_STRING)];
+        char magic[4] = { 0 };
+        uint32_t frames_offset = 0;
         uint32_t compressed_header_size = 0;
         struct file_header_part0 *part0;
 
@@ -351,6 +392,16 @@ pack_open(const char *filename, char **err)
 
         if (fread(magic, sizeof(magic), 1, fp) != 1) {
             xasprintf(err, "Failed to read pack magic marker");
+            goto error;
+        }
+
+        if (strncmp(magic, "P4cK", 4) != 0) {
+            xasprintf(err, "Invalid pack magic marker");
+            goto error;
+        }
+
+        if (fread(&frames_offset, 4, 1, fp) != 1) {
+            xasprintf(err, "Failed to read frames offset");
             goto error;
         }
 
@@ -388,7 +439,7 @@ pack_open(const char *filename, char **err)
 
         pack = (struct pack_file *)xcalloc(1, sizeof(*pack));
         pack->fp = fp;
-        pack->guard_band = part0->frames_offset;
+        pack->guard_band = frames_offset;
 
         for (unsigned i = 0; i < part0->n_sections; i++)
             pack_declare_frame_section(pack, part0->section_names[i]);
@@ -397,20 +448,20 @@ pack_open(const char *filename, char **err)
         for (unsigned i = 0; i < part0->n_properties; i++) {
             switch (prop->type) {
             case PROP_INT64:
-                pack_set_i64(pack, prop->name, prop->i64_val);
+                pack_set_i64(pack, prop->name, ((struct int64_property *)prop)->i64_val);
                 break;
             case PROP_DOUBLE:
-                pack_set_double(pack, prop->name, prop->double_val);
+                pack_set_double(pack, prop->name, ((struct double_property *)prop)->double_val);
                 break;
             case PROP_STRING:
-                pack_set_string(pack, prop->name, (char *)prop->blob);
+                pack_set_string(pack, prop->name, (char *)((struct string_property *)prop)->string);
                 break;
             case PROP_BLOB:
                 {
                     unsigned blob_len =
-                        prop->byte_len - offsetof(struct property, blob);
+                        prop->byte_len - offsetof(struct blob_property, blob);
 
-                    pack_set_blob(pack, prop->name, prop->blob, blob_len);
+                    pack_set_blob(pack, prop->name, ((struct blob_property *)prop)->blob, blob_len);
                     break;
                 }
             };
@@ -504,6 +555,7 @@ pack_write_header(struct pack_file *pack, char **err)
     uint32_t props_len = get_properties_pack_size(pack->properties);
     uint32_t uncompressed_header_size = part0_size + props_len;
     uint8_t *uncompressed_header = (uint8_t *)xcalloc(1, uncompressed_header_size);
+    char magic[] = { 'P', '4', 'c', 'K' };
 
     uint32_t size;
 
@@ -513,7 +565,6 @@ pack_write_header(struct pack_file *pack, char **err)
     part0->major_version = 1;
     part0->minor_version = 0;
     part0->part0_size = part0_size;
-    part0->frames_offset = pack->guard_band;
     part0->n_properties = llist_length(pack->properties);
 
     part0->n_sections = pack->n_sections;
@@ -539,7 +590,7 @@ pack_write_header(struct pack_file *pack, char **err)
         goto error;
     }
 
-    if (sizeof(MAGIC_STRING) + 4 + compressed_size > pack->guard_band) {
+    if (sizeof(magic) + 4 + compressed_size > pack->guard_band) {
         xasprintf(err, "Header doesn't fit in pack file guard band (%u bytes)",
                   (unsigned)pack->guard_band);
         goto error;
@@ -547,10 +598,12 @@ pack_write_header(struct pack_file *pack, char **err)
 
     guard_band = (uint8_t *)xcalloc(1, pack->guard_band);
 
-    memcpy(guard_band, MAGIC_STRING, sizeof(MAGIC_STRING));
+    memcpy(guard_band, magic, sizeof(magic));
+    size = pack->guard_band;
+    memcpy(guard_band + sizeof(magic), &size, 4);
     size = compressed_size;
-    memcpy(guard_band + sizeof(MAGIC_STRING), &size, 4);
-    memcpy(guard_band + sizeof(MAGIC_STRING) + 4, compressed_header, size);
+    memcpy(guard_band + sizeof(magic) + 4, &size, 4);
+    memcpy(guard_band + sizeof(magic) + 8, compressed_header, size);
 
     fseek(pack->fp, 0, 0);
 
@@ -811,20 +864,20 @@ pack_read_frame(struct pack_file *pack, int n, char **err)
     while ((uint8_t *)prop < (header + header_size)) {
         switch (prop->type) {
         case PROP_INT64:
-            pack_set_i64(pack, prop->name, prop->i64_val);
+            pack_set_i64(pack, prop->name, ((struct int64_property *)prop)->i64_val);
             break;
         case PROP_DOUBLE:
-            pack_set_double(pack, prop->name, prop->double_val);
+            pack_set_double(pack, prop->name, ((struct double_property *)prop)->double_val);
             break;
         case PROP_STRING:
-            pack_set_string(pack, prop->name, (char *)prop->blob);
+            pack_set_string(pack, prop->name, (char *)((struct string_property *)prop)->string);
             break;
         case PROP_BLOB:
             {
                 unsigned blob_len =
-                    prop->byte_len - offsetof(struct property, blob);
+                    prop->byte_len - offsetof(struct blob_property, blob);
 
-                pack_set_blob(pack, prop->name, prop->blob, blob_len);
+                pack_set_blob(pack, prop->name, ((struct blob_property *)prop)->blob, blob_len);
                 break;
             }
         };

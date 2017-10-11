@@ -89,21 +89,25 @@
 /*
  * At a glance a pack file is laid out like this:
  *
- * "pack-stream"
- * u32 compressed_data_len
+ * char magic[4]: "P4cK" (not nul terminated)
+ * u32 frames_offset
+ * u32 compressed_header_len
  * snappy compressed {
  *      file_header_part0 {
+ *          major
+ *          minor
+ *          part0_size
  *          n_properties
  *          n_sections
  *          section_names[][64] {
  *          }
  *      }
- *      properties[] {
+ *      properties[n_properties] {
  *      }
  * }
  *
- * (By default the above has to fit within 16MB, whereby the header can
- *  be edited so long as it doesn't exceed 16MB.)
+ * (By default the above (after compression) has to fit within 16MB, whereby
+ * the header can be edited so long as it doesn't exceed 16MB.)
  *
  * frames[] {
  *      frame_len
@@ -124,18 +128,28 @@ enum property_type {
     PROP_BLOB
 };
 
-struct property {
-    char name[16];
-    uint32_t type;
+#define BASE_PROPERTY \
+    char name[16]; \
+    uint32_t type; \
+    uint32_t byte_len
 
-    /* To easily skip over unknown properties, considering that strings can
-     * have varied lengths.
-     */
-    uint32_t byte_len;
-    union {
-        double double_val;
-        int64_t i64_val;
-    };
+struct property {
+    BASE_PROPERTY;
+};
+struct double_property {
+    BASE_PROPERTY;
+    double double_val;
+};
+struct int64_property {
+    BASE_PROPERTY;
+    int64_t i64_val;
+};
+struct string_property {
+    BASE_PROPERTY;
+    uint8_t string[];
+};
+struct blob_property {
+    BASE_PROPERTY;
     uint8_t blob[];
 };
 
@@ -155,12 +169,6 @@ struct file_header_part0
 
     /* For skipping ahead to the properties that follow this structure */
     uint32_t part0_size;
-
-    /* File offset to the start of the first frame. Note the header is
-     * reserved a buffer of space at the start of the file (default 16M)
-     * so that the header can be edited without rewriting the frames.
-     */
-    uint32_t frames_offset;
 
     /* After this header part0 and the section names there is an array of
      * properties
@@ -260,6 +268,10 @@ void pack_set_string(struct pack_file *file, const char *name, const char *val);
 int64_t pack_get_i64(struct pack_file *pack, const char *name, char **err);
 double pack_get_double(struct pack_file *pack, const char *name, char **err);
 const char *pack_get_string(struct pack_file *pack, const char *name, char **err);
+const uint8_t *pack_get_blob(struct pack_file *pack,
+                             const char *name,
+                             uint32_t *len,
+                             char **err);
 
 bool pack_write_header(struct pack_file *pack, char **err);
 
