@@ -80,6 +80,8 @@ IUReturnCode iu_write_exr_to_file(const char*  filename,
                                   const char** channels = NULL,
                                   int*         channel_depth = NULL);
 
+const char *iu_code_to_string(IUReturnCode code);
+
 #ifdef __cplusplus
 };
 #endif

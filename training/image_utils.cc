@@ -922,3 +922,29 @@ iu_write_exr_to_file(const char* filename, IUImageSpec* spec, void* data,
   return SUCCESS;
 }
 
+const char *
+iu_code_to_string(IUReturnCode code)
+{
+  switch (code)
+    {
+    case SUCCESS:
+      return "OK";
+    case BAD_SPEC:
+      return "Bad Specification";
+    case NON_CONFORMANT:
+      return "Non Conformant";
+    case BAD_FORMAT:
+      return "Bad Format";
+    case IO_ERR:
+      return "File IO error";
+    case PNG_ERR:
+      return "libpng error";
+    case EXR_ERR:
+      return "TinyEXR error";
+
+    // default intentionally omitted so we get a compiler
+    // warning for not handling new error codes
+    }
+
+    return "Unknown";
+}
