@@ -749,9 +749,10 @@ decode_exr(uint8_t *buf, int len, enum image_format fmt)
 {
     uint8_t *data = NULL;
     IUImageSpec spec = { 0, 0, (fmt == IMAGE_FORMAT_XHALF) ? 16 : 32, 1 };
-    if (iu_read_exr_from_memory(buf, len, &spec, (void **)&data) !=
-        SUCCESS) {
-        abort();
+    IUReturnCode ret = iu_read_exr_from_memory(buf, len, &spec, (void **)&data);
+    if (ret != SUCCESS) {
+        fprintf(stderr, "Failed to read EXR from memory: %s\n", iu_code_to_string(ret));
+        return NULL;
     }
     struct image *img = xalloc_image(fmt, spec.width, spec.height, data);
 
