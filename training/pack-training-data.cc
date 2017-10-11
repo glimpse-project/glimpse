@@ -116,10 +116,8 @@ struct pending_file {
     char filename[1024];
 
     /* handled by the read thread before handing over to the decode threads */
-    int fd;
     uint8_t *buf;
     int len;
-    int pos;
 
     /* handled by the decode thread */
     uint32_t compressed_size;
@@ -482,140 +480,6 @@ directory_recurse(const char *rel_path)
     closedir(label_dir);
 }
 
-static int
-try_to_queue_n_frame_reads(int epollfd, int n_frames)
-{
-    int n = 0;
-
-    debug("Checking to open more fds\n");
-    while (n < n_frames) {
-        struct mocap_section mocap_section;
-
-        pthread_mutex_lock(&read_queue_lock);
-        if (!read_queue.empty()) {
-            mocap_section = read_queue.front();
-            read_queue.pop();
-        } else {
-            pthread_mutex_unlock(&read_queue_lock);
-            return n;
-        }
-        pthread_mutex_unlock(&read_queue_lock);
-
-        for (unsigned i = 0; i < mocap_section.files.size(); i++) {
-            debug("Read thread processing %s/%s\n", mocap_section.dir, mocap_section.files[i]);
-
-            struct pending_frame *frame =
-                (struct pending_frame *)xmalloc(sizeof(*frame));
-
-            memset(frame, 0, sizeof(*frame));
-            for (unsigned j = 0; j < ARRAY_LEN(frame->files); j++)
-                frame->files[j].fd = -1;
-
-            frame->mocap_section = mocap_section;
-
-            xsnprintf(frame->files[FILE_DEPTH].filename, "%s/depth/%s/%.*s.exr",
-                      top_src_dir,
-                      mocap_section.dir,
-                      (int)strlen(mocap_section.files[i]) - 4,
-                      mocap_section.files[i]);
-            xsnprintf(frame->files[FILE_LABELS].filename, "%s/labels/%s/%.*s.png",
-                      top_src_dir,
-                      mocap_section.dir,
-                      (int)strlen(mocap_section.files[i]) - 4,
-                      mocap_section.files[i]);
-            xsnprintf(frame->files[FILE_JSON].filename, "%s/labels/%s/%.*s.json",
-                      top_src_dir,
-                      mocap_section.dir,
-                      (int)strlen(mocap_section.files[i]) - 4,
-                      mocap_section.files[i]);
-
-
-            unsigned j;
-            for (j = 0; j < ARRAY_LEN(frame->files); j++) {
-                struct pending_file *file = frame->files + j;
-                struct stat st;
-                struct epoll_event ev;
-
-                file->frame = frame;
-
-                if (stat(file->filename, &st) < 0) {
-                    fprintf(stderr, "SKIP FRAME: Failed to stat %s: %m\n", file->filename);
-                    break;
-                }
-
-                frame->mtime = st.st_mtim.tv_sec;
-
-                file->len = st.st_size;
-                file->buf = (uint8_t *)xmalloc(st.st_size);
-
-                file->fd = open(file->filename, O_RDONLY|O_NONBLOCK|O_CLOEXEC);
-                if (file->fd < 0) {
-                    fprintf(stderr, "SKIP FRAME: Failed to open depth buffer file %s: %m\n", file->filename);
-                    continue;
-                }
-
-                ev.events = EPOLLIN;
-                ev.data.ptr = file;
-                if (epoll_ctl(epollfd, EPOLL_CTL_ADD, file->fd, &ev) < 0) {
-                    fprintf(stderr, "Failed to add fd (%d) for file %s to epoll fd (%d): %m\n",
-                            file->fd, file->filename, epollfd);
-                }
-            }
-            if (j != ARRAY_LEN(frame->files)) {
-                for (j--; j >= 0; j--) {
-                    close(frame->files[j].fd);
-                    free(frame->files[j].buf);
-                }
-                free(frame);
-                continue;
-            }
-
-            n++;
-        }
-    }
-
-    return n;
-}
-
-static int
-read_until_eagain(struct pending_file *file)
-{
-    int n_bytes = 0;
-    int rem;
-
-    while ((rem = file->len - file->pos)) {
-        int ret = read(file->fd, file->buf + file->pos, rem);
-        if (ret == -1) {
-            if (errno == EAGAIN)
-                return n_bytes;
-            else if (errno == EINTR)
-                continue;
-            else {
-                fprintf(stderr, "IO error reading %s: %m\n", file->filename);
-                exit(1);
-            }
-        } else if (ret == 0) {
-            /* We only read in response to a POLLIN and we also pre-determine
-             * the length of the file and request to read up to that length
-             * so shouldn't ever reach EOF
-             */
-            fprintf(stderr, "Spurious EOF reading %s, with remainder = %d\n", file->filename, rem);
-            exit(1);
-        }
-
-        debug("read some of %s\n", file->filename);
-        file->pos += ret;
-        n_bytes += ret;
-    }
-
-    /* We only read in response to a POLLIN so don't expect to see an EAGAIN
-     * before reading something
-     */
-    assert(n_bytes);
-
-    return n_bytes;
-}
-
 static const char *
 get_bandwidth_units_suffix(uint64_t duration_ns, uint64_t byte_count)
 {
@@ -649,103 +513,95 @@ read_io_thread_cb(void *data)
 {
     debug("Running read IO thread\n");
 
-    int epollfd = epoll_create1(0);
-    if (epollfd < 0) {
-        fprintf(stderr, "Failed to create an epoll file descriptor: %m\n");
-        exit(1);
-    }
+    while (1) {
+        struct mocap_section mocap_section;
 
-    int max_pending_frames = 333;
-    int n_pending_frames = 0;
-
-    uint64_t last_timestamp = get_time();
-    uint64_t thread_bytes_read = 0;
-    uint64_t last_io_bytes = 0;
-
-    while (1)
-    {
-        if (n_pending_frames < max_pending_frames) {
-            int request = max_pending_frames - n_pending_frames;
-
-            debug("Trying to queue more %d more frame reads (n_pending_frames = %d)\n",
-                  request, n_pending_frames);
-            n_pending_frames += try_to_queue_n_frame_reads(epollfd, request);
-        }
-
-        if (n_pending_frames == 0) {
-            bool is_empty;
-
-            debug("Read thread has no pending reads after attempt to queue\n");
-
-            pthread_mutex_lock(&read_queue_lock);
-            is_empty = read_queue.empty();
+        pthread_mutex_lock(&read_queue_lock);
+        if (!read_queue.empty()) {
+            mocap_section = read_queue.front();
+            read_queue.pop();
+        } else {
             pthread_mutex_unlock(&read_queue_lock);
-
-            if (is_empty) {
-                debug("Thread confirmed read queue is empty\n");
-                break;
-            }
+            break;
         }
+        pthread_mutex_unlock(&read_queue_lock);
 
-        int max_events = n_pending_frames * N_FRAME_FILES;
-        struct epoll_event events[max_events];
 
-        int n_ev;
-        while ((n_ev = epoll_wait(epollfd, events, max_events, -1)) < 0 &&
-                errno == SIGINT)
-            ;
+        for (unsigned i = 0; i < mocap_section.files.size(); i++) {
+            debug("Read thread processing %s/%s\n",
+                  mocap_section.dir, mocap_section.files[i]);
 
-        if (n_ev < 0) {
-            fprintf(stderr, "IO Error: Failed to wait for any epoll events: %m\n");
-            exit(1);
-        }
+            struct pending_frame *frame =
+                (struct pending_frame *)xcalloc(1, sizeof(*frame));
 
-        for (int i = 0; i < n_ev; i++) {
-            struct pending_file *file = (struct pending_file *)events[i].data.ptr;
+            frame->mocap_section = mocap_section;
 
-            int n_bytes = read_until_eagain(file);
+            xsnprintf(frame->files[FILE_DEPTH].filename, "%s/depth/%s/%.*s.exr",
+                      top_src_dir,
+                      mocap_section.dir,
+                      (int)strlen(mocap_section.files[i]) - 4,
+                      mocap_section.files[i]);
+            xsnprintf(frame->files[FILE_LABELS].filename, "%s/labels/%s/%.*s.png",
+                      top_src_dir,
+                      mocap_section.dir,
+                      (int)strlen(mocap_section.files[i]) - 4,
+                      mocap_section.files[i]);
+            xsnprintf(frame->files[FILE_JSON].filename, "%s/labels/%s/%.*s.json",
+                      top_src_dir,
+                      mocap_section.dir,
+                      (int)strlen(mocap_section.files[i]) - 4,
+                      mocap_section.files[i]);
 
-            read_io_bytes += n_bytes;
-            thread_bytes_read += n_bytes;
+            bool ok = true;
+            for (unsigned j = 0; j < ARRAY_LEN(frame->files); j++) {
+                struct pending_file *file = frame->files + j;
+                struct stat st;
+                FILE *fp;
 
-            if (file->pos == file->len) {
-                debug("finished reading %s (closing)\n", file->filename);
-                close(file->fd);
-                file->fd = -1;
+                file->frame = frame;
 
-                struct pending_frame *frame = file->frame;
-
-                bool still_pending = false;
-                for (int j = 0; j < N_FRAME_FILES; j++) {
-                    if (frame->files[j].fd != -1)
-                        still_pending = true;
+                if (stat(file->filename, &st) < 0) {
+                    fprintf(stderr, "SKIP FRAME: Failed to stat %s: %m\n", file->filename);
+                    break;
                 }
-                if (!still_pending) {
-                    debug("Read frame, queuing for write: %s\n", frame->files[0].filename);
-                    n_pending_frames--;
 
-                    read_io_frames++;
+                frame->mtime = st.st_mtim.tv_sec;
 
-                    pthread_mutex_lock(&decode_queue_lock);
-                    decode_queue.push(frame);
-                    pthread_cond_signal(&decode_append_cond);
-                    pthread_mutex_unlock(&decode_queue_lock);
+                file->len = st.st_size;
+                file->buf = (uint8_t *)xmalloc(st.st_size);
+
+                fp = fopen(file->filename, "r");
+                if (!fp) {
+                    fprintf(stderr, "SKIP FRAME: Failed to open file %s: %m\n", file->filename);
+                    ok = false;
+                    break;
                 }
+
+                if (fread(file->buf, file->len, 1, fp) != 1) {
+                    fprintf(stderr, "Failed to read %s\n", file->filename);
+                    ok = false;
+                    break;
+                }
+                fclose(fp);
+
+                read_io_bytes += file->len;
             }
-        }
 
-        uint64_t timestamp = get_time();
-        uint64_t elapsed = timestamp - last_timestamp;
+            if (ok) {
+                read_io_frames++;
 
-        if (elapsed > 1000000000) {
-            uint64_t byte_count = thread_bytes_read - last_io_bytes;
-
-            debug("Thread read bandwidth = %.3f%s\n",
-                  get_bandwidth(elapsed, byte_count),
-                  get_bandwidth_units_suffix(elapsed, byte_count));
-
-            last_timestamp = timestamp;
-            last_io_bytes = thread_bytes_read;
+                pthread_mutex_lock(&decode_queue_lock);
+                decode_queue.push(frame);
+                pthread_cond_signal(&decode_append_cond);
+                pthread_mutex_unlock(&decode_queue_lock);
+            } else {
+                for (unsigned j = 0; j < ARRAY_LEN(frame->files); j++) {
+                    struct pending_file *file = frame->files + j;
+                    free(file->buf);
+                    file->buf = NULL;
+                }
+                free(frame);
+            }
         }
     }
 
@@ -1168,23 +1024,27 @@ main(int argc, char **argv)
 
     //n_threads = 1;
 
-    printf("Spawning a read, write and %d decode threads\n", n_threads);
+    printf("Spawning %d read theads, % d decode threads and one write thread\n",
+           n_threads, n_threads);
 
     start = get_time();
 
     read_io_start = get_time();
     reading = true;
-
-    pthread_t read_thread;
-    pthread_create(&read_thread,
-                   NULL, //attributes
-                   read_io_thread_cb,
-                   &read_thread); //data
-    pthread_setname_np(read_thread, "reader");
+    struct thread_state *read_threads = (struct thread_state *)
+        xcalloc(n_threads, sizeof(read_threads[0]));
+    for (int i = 0; i < n_threads; i++) {
+        read_threads[i].pack = pack;
+        pthread_create(&read_threads[i].thread,
+                       NULL, //attributes
+                       read_io_thread_cb,
+                       &read_threads[i]); //data
+        pthread_setname_np(read_threads[i].thread, "reader");
+    }
 
     decoding = true;
     struct thread_state *decode_threads = (struct thread_state *)
-        xcalloc(n_threads_override, sizeof(decode_threads[0]));
+        xcalloc(n_threads, sizeof(decode_threads[0]));
     for (int i = 0; i < n_threads; i++) {
         decode_threads[i].pack = pack;
         pthread_create(&decode_threads[i].thread,
@@ -1218,10 +1078,19 @@ main(int argc, char **argv)
         void *thread_ret;
 
         if (reading) {
-            if (pthread_tryjoin_np(read_thread, &thread_ret) == 0) {
+            bool finished = true;
+
+            for (int i = 0; i < n_threads; i++) {
+                pthread_t tid = read_threads[i].thread;
+                if (tid && pthread_tryjoin_np(tid, &thread_ret) == 0)
+                    read_threads[i].thread = 0;
+                else if (tid)
+                    finished = false;
+            }
+            if (finished) {
                 read_io_end = get_time();
 
-                debug("Reading finished\n");
+                debug("All reading threads finished\n");
                 reading = false;
 
                 /* wake decoders to be sure they know reading has finished so they
