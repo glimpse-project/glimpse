@@ -60,8 +60,8 @@ Forest::inferLabels(DepthImage* aDepthImage, float** aLabelPr,
       return;
     }
 
-  *aLabelPr = infer(mForest, mNTrees, aDepthImage->mDepthImage,
-                    aDepthImage->mWidth, aDepthImage->mHeight);
+  *aLabelPr = infer_labels(mForest, mNTrees, aDepthImage->mDepthImage,
+                           aDepthImage->mWidth, aDepthImage->mHeight);
   *aOutWidth = aDepthImage->mWidth;
   *aOutHeight = aDepthImage->mHeight;
   *aNLabels = mForest[0]->header.n_labels;

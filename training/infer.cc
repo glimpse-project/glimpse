@@ -7,8 +7,8 @@
 #include "loader.h"
 
 float*
-infer(RDTree** forest, uint8_t n_trees, half_float::half* depth_image,
-      uint32_t width, uint32_t height)
+infer_labels(RDTree** forest, uint8_t n_trees, half_float::half* depth_image,
+             uint32_t width, uint32_t height)
 {
   uint8_t n_labels = forest[0]->header.n_labels;
   float* output_pr = (float*)
