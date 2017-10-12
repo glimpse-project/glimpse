@@ -1,3 +1,52 @@
+Rendering training data
+=======================
+
+Requirements
+============
+
+* glimpse-training.blend
+  - This .blend file is pre-loaded with lots of mocap data and a set
+    of makehuman models and clothing.
+* Glimpse/Make{human,clothes} addons set up
+  - You must have followed the instructions in glimpse-sdk/blender/README.md
+    to set up Blender so it knows where to find the Glimpse addon when it
+    loads as well as the makehuman and makeclothes addons
+* mocap data
+  - We're using mocap data from Carnegie Mellon university converted to
+    .bvh files which Blender understands and then indexed so we can
+    potentially blacklist or tweak rendering parameters per-file
+
+To render a new data set with blender we have a glimpse-cli.py script that
+provides a basic command line interface to glimpse-training.blend
+
+Unfortunately --help as an argument name clashes with another addon but
+you can see an overview of the interface with --glimpse-help like:
+
+```
+blender -b \                            # run in the background
+    /path/to/glimpse-training.blend \   # .blend file *before* .py script
+    -P blender/glimpse-cmd.py \         # command line interface script
+    -- \                                # remaining args for script
+    --glimpse-help
+```
+
+The amount to render is measured in terms of indexed motion capture files
+(re: index.json in the directory of mocap files)
+
+To render mocap files from 0 to 100 you could run:
+
+```
+blender -b \
+    /path/to/glimpse-training.blend \
+    -P blender/glimpse-cmd.py \
+    -- \
+    --start 0 \
+    --end 100 \
+    --dest /path/to/render \
+    --name "test-render" \
+    /path/to/mocap/files/
+```
+
 Training a decision forest and joint inference parameters
 =========================================================
 
