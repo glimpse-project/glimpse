@@ -234,7 +234,13 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
     {
       if (index == 0 && !data->label_images)
         {
-          if (iu_verify_png_from_file(label_path, &data->label_spec) != SUCCESS)
+          uint8_t* tmp_output = NULL;
+
+          /* We load and throw away the first image just to know the image sizes
+           * we expect so we can pre-allocate storage for all our data.
+           */
+          if (iu_read_png_from_file(label_path, &data->label_spec, &tmp_output) !=
+              SUCCESS)
             {
               fprintf(stderr, "Failed to verify image '%s'\n", label_path);
               exit(1);
@@ -242,7 +248,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
           validate_storage(data, label_path, 0);
         }
 
-      void* output = &data->label_images[
+      uint8_t* output = &data->label_images[
         index * data->label_spec.width * data->label_spec.height];
       if (iu_read_png_from_file(label_path, &data->label_spec, &output) !=
           SUCCESS)
