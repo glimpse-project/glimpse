@@ -313,7 +313,7 @@ free_image(struct image *image)
 static struct image *
 decode_png(uint8_t *buf, int len)
 {
-    IUImageSpec spec = { 0, 0, 1, 8 };
+    IUImageSpec spec = { 0, 0, IU_FORMAT_U8 };
     if (iu_verify_png_from_memory(buf, len, &spec) != SUCCESS) {
         return NULL;
     }

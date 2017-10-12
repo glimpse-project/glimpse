@@ -1,12 +1,17 @@
-
-#include "image_utils.h"
-
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <string.h>
+
 #include <png.h>
 
 #include "tinyexr.h"
 #include "half.hpp"
 #include "xalloc.h"
+
+#include "image_utils.h"
+
+#define ARRAY_LEN(ARRAY) (sizeof(ARRAY)/sizeof(ARRAY[0]))
 
 using half_float::half;
 
@@ -68,8 +73,6 @@ _iu_verify_png(png_structp png_ptr, png_infop info_ptr, IUImageSpec* spec)
       fprintf(stderr, "Expected 8-bit pixel depth\n");
       return NON_CONFORMANT;
     }
-
-  spec->depth = 8;
 
   return SUCCESS;
 }
@@ -250,6 +253,22 @@ _iu_read_png_pal(png_structp png_ptr, png_infop info_ptr, void** output,
   return SUCCESS;
 }
 
+static bool
+_check_spec_and_output(IUImageSpec *spec, void **output)
+{
+  if (*output)
+    {
+      if (!spec || spec->width == 0 || spec->height == 0 ||
+          spec->format == IU_FORMAT_ANY)
+        {
+          fprintf(stderr, "Can't give output buffer without explicit spec\n");
+          return false;
+        }
+    }
+
+  return true;
+}
+
 IUReturnCode
 iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output,
                       void** pal_output, int* pal_size)
@@ -258,17 +277,20 @@ iu_read_png_from_file(const char* filename, IUImageSpec* spec, void** output,
   png_structp png_ptr;
   png_infop info_ptr;
 
-  IUImageSpec blank_spec = {0, 0, 8, 1};
+  IUImageSpec default_spec = {0, 0, IU_FORMAT_U8 };
   IUReturnCode ret = SUCCESS;
+
+  if (!_check_spec_and_output(spec, output) != SUCCESS)
+    return BAD_SPEC;
 
   if (!spec)
     {
-      spec = &blank_spec;
+      spec = &default_spec;
     }
 
-  if (spec->depth != 0 && spec->depth != 8)
+  if (spec->format != IU_FORMAT_U8)
     {
-      fprintf(stderr, "Spec requires non-8-bit pixel depth\n");
+      fprintf(stderr, "Requested non-8-bit png load: unsupported by image_utils\n");
       return BAD_SPEC;
     }
 
@@ -306,20 +328,19 @@ iu_verify_png_from_file(const char* filename,
   png_structp png_ptr;
   png_infop info_ptr;
 
-  IUImageSpec blank_spec = {0, 0, 8, 1};
+  IUImageSpec default_spec = {0, 0, IU_FORMAT_U8};
   IUReturnCode ret = SUCCESS;
 
   if (!spec)
     {
-      spec = &blank_spec;
+      spec = &default_spec;
     }
 
-  if (spec->depth != 0 && spec->depth != 8)
+  if (spec->format != IU_FORMAT_U8)
     {
-      fprintf(stderr, "Spec requires non-8-bit pixel depth\n");
+      fprintf(stderr, "Requested non-8-bit png load: unsupported by image_utils\n");
       return BAD_SPEC;
     }
-
 
   // Open png file
   ret = _iu_open_png_from_file(filename, &fp, &png_ptr, &info_ptr);
@@ -461,11 +482,14 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
   png_infop info_ptr;
 
   IUPngMemReadInfo readinfo = { (int)len, 0, buffer };
-  IUImageSpec blank_spec = {0, 0, 8, 1};
+  IUImageSpec default_spec = {0, 0, IU_FORMAT_U8};
+
+  if (!_check_spec_and_output(spec, output) != SUCCESS)
+    return BAD_SPEC;
 
   if (!spec)
     {
-      spec = &blank_spec;
+      spec = &default_spec;
     }
 
   // Verify png file
@@ -520,9 +544,10 @@ iu_write_png_to_file(const char* filename, IUImageSpec* spec, void* data,
       fprintf(stderr, "Can't write image with no spec\n");
       return BAD_SPEC;
     }
-  if (spec->depth != 8 || spec->channels != 1)
+
+  if (spec->format != IU_FORMAT_U8)
     {
-      fprintf(stderr, "Only 8-bit, single-channel pngs are supported\n");
+      fprintf(stderr, "Only IU_FORMAT_U8 pngs are supported\n");
       return BAD_SPEC;
     }
 
@@ -590,300 +615,183 @@ iu_write_png_to_file_close:
   return ret;
 }
 
-static IUReturnCode
-_iu_verify_exr_spec(IUImageSpec* spec)
-{
-  // TODO: Handle more than 1 channel
-  if (spec->channels != 0 && spec->channels != 1)
-    {
-      fprintf(stderr, "Expected single channel in EXR spec, found %d\n",
-              spec->channels);
-      return BAD_SPEC;
-    }
-  spec->channels = 1;
-
-  if (spec->depth != 0 && spec->depth != 16 && spec->depth != 32)
-    {
-      fprintf(stderr, "Expected 16 or 32-bit depth in EXR spec, found %d\n",
-              spec->depth);
-      return BAD_SPEC;
-    }
-
-  return SUCCESS;
-}
-
-static IUReturnCode
-_iu_verify_exr_version(int ret, EXRVersion* version)
-{
-  if (ret != TINYEXR_SUCCESS)
-    {
-      fprintf(stderr, "Error %02d reading EXR version\n", ret);
-      return EXR_ERR;
-    }
-
-  if (version->multipart || version->non_image)
-    {
-      fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
-      return EXR_ERR;
-    }
-
-  return SUCCESS;
-}
-
-static IUReturnCode
-_iu_verify_exr_header(int ret, EXRHeader* header, EXRVersion* version,
-                      const char* err, IUImageSpec* spec)
-{
-  if (ret != TINYEXR_SUCCESS)
-    {
-      fprintf(stderr, "Error %02d reading EXR header: %s\n", ret, err);
-      return EXR_ERR;
-    }
-
-  if (spec->channels > 0 && header->num_channels != spec->channels)
-    {
-      fprintf(stderr, "Expected %d channels, found %d\n",
-              spec->channels, header->num_channels);
-      FreeEXRHeader(header);
-      return NON_CONFORMANT;
-    }
-
-  for (int i = 0; i < header->num_channels; i++)
-    {
-      if (header->channels[i].pixel_type != TINYEXR_PIXELTYPE_HALF &&
-          header->channels[i].pixel_type != TINYEXR_PIXELTYPE_FLOAT)
-        {
-          fprintf(stderr, "Expected all floating-point channels\n");
-          FreeEXRHeader(header);
-          return NON_CONFORMANT;
-        }
-    }
-
-  spec->depth = (header->channels[0].pixel_type == TINYEXR_PIXELTYPE_HALF) ?
-    16 : 32;
-
-  int width = header->data_window[2] - header->data_window[0] + 1;
-  int height = header->data_window[3] - header->data_window[1] + 1;
-
-  if (_iu_verify_size(width, height, spec) != SUCCESS)
-    {
-      FreeEXRHeader(header);
-      return NON_CONFORMANT;
-    }
-
-  return SUCCESS;
-}
-
-static IUReturnCode
-_iu_verify_exr_from_file(const char* filename, IUImageSpec* spec,
-                         EXRHeader* header)
-{
-  IUImageSpec blank_spec = {0, 0, 32, 1};
-  if (!spec)
-    {
-      spec = &blank_spec;
-    }
-  if (_iu_verify_exr_spec(spec) != SUCCESS)
-    {
-      return BAD_SPEC;
-    }
-
-  EXRVersion version;
-  int ret = ParseEXRVersionFromFile(&version, filename);
-
-  if (_iu_verify_exr_version(ret, &version) != SUCCESS)
-    {
-      return EXR_ERR;
-    }
-
-  const char *err = NULL;
-  ret = ParseEXRHeaderFromFile(header, &version, filename, &err);
-
-  return _iu_verify_exr_header(ret, header, &version, err, spec);
-}
-
 IUReturnCode
 iu_read_exr_from_file(const char* filename, IUImageSpec* spec, void** output)
 {
-  EXRHeader header;
+  struct stat sb;
 
-  const char *err = NULL;
-  IUImageSpec blank_spec = {0, 0, 32, 1};
-
-  if (!spec)
+  if (stat(filename, &sb) < 0)
     {
-      spec = &blank_spec;
+      fprintf(stderr, "Failed to stat %s\n", filename);
+      return IO_ERR;
     }
 
-  IUReturnCode ret = _iu_verify_exr_from_file(filename, spec, &header);
-  if (ret != SUCCESS)
+  FILE *fp = fopen(filename, "rb");
+  if (!fp)
     {
-      return ret;
+      fprintf(stderr, "Failed to open %s\n", filename);
+      return IO_ERR;
     }
 
-  EXRImage exr_image;
-  InitEXRImage(&exr_image);
-
-  header.requested_pixel_types[0] = (spec->depth == 16) ?
-    TINYEXR_PIXELTYPE_HALF : TINYEXR_PIXELTYPE_FLOAT;
-
-  if (LoadEXRImageFromFile(&exr_image, &header, filename, &err) ==
-      TINYEXR_SUCCESS)
+  uint8_t *buf = (uint8_t *)xmalloc(sb.st_size);
+  if (fread(buf, sb.st_size, 1, fp) != 1)
     {
-      if (!(*output))
-        {
-          *output = xmalloc(spec->width * spec->height * (spec->depth / 8));
-        }
-
-      memcpy(*output,
-             &exr_image.images[0][0],
-             spec->width * spec->height * (spec->depth / 8));
-    }
-  else
-    {
-      ret = EXR_ERR;
+      fprintf(stderr, "Failed to read %s\n", filename);
+      return IO_ERR;
     }
 
-  FreeEXRImage(&exr_image);
-  FreeEXRHeader(&header);
+  IUReturnCode ret = iu_read_exr_from_memory(buf, sb.st_size, spec, output);
+  
+  free(buf);
 
   return ret;
-}
-
-IUReturnCode
-iu_verify_exr_from_file(const char* filename, IUImageSpec* spec)
-{
-  EXRHeader header;
-  IUReturnCode ret = _iu_verify_exr_from_file(filename, spec, &header);
-  if (ret == SUCCESS)
-    {
-      FreeEXRHeader(&header);
-    }
-  return ret;
-}
-
-static IUReturnCode
-_iu_verify_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
-                           EXRHeader* header)
-{
-  IUImageSpec blank_spec = {0, 0, 32, 1};
-  if (!spec)
-    {
-      spec = &blank_spec;
-    }
-  if (_iu_verify_exr_spec(spec) != SUCCESS)
-    {
-      return BAD_SPEC;
-    }
-
-  EXRVersion version;
-  const unsigned char* memory = (const unsigned char*)buffer;
-  int ret = ParseEXRVersionFromMemory(&version, memory, len);
-
-  if (_iu_verify_exr_version(ret, &version) != SUCCESS)
-    {
-      return EXR_ERR;
-    }
-
-  const char *err = NULL;
-  ret = ParseEXRHeaderFromMemory(header, &version, memory, len, &err);
-
-  return _iu_verify_exr_header(ret, header, &version, err, spec);
 }
 
 IUReturnCode
 iu_read_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
                         void** output)
 {
+  const unsigned char* memory = (const unsigned char*)buffer;
   EXRHeader header;
 
   const char *err = NULL;
-  IUImageSpec blank_spec = {0, 0, 32, 1};
+  IUImageSpec blank_spec = {0, 0, IU_FORMAT_ANY};
 
   if (!spec)
+    spec = &blank_spec;
+
+  if (!_check_spec_and_output(spec, output) != SUCCESS)
+    return BAD_SPEC;
+
+  if (spec->format != IU_FORMAT_HALF &&
+      spec->format != IU_FORMAT_FLOAT &&
+      spec->format != IU_FORMAT_ANY)
     {
-      spec = &blank_spec;
+      fprintf(stderr, "Only support IU_FORMAT_HALF or IU_FORMAT_FLOAT spec format for EXR images");
+      return BAD_SPEC;
     }
 
-  IUReturnCode ret = _iu_verify_exr_from_memory(buffer, len, spec, &header);
-  if (ret != SUCCESS)
+  EXRVersion version;
+  int ret = ParseEXRVersionFromMemory(&version, memory, len);
+  if (ret != TINYEXR_SUCCESS)
     {
-      return ret;
+      fprintf(stderr, "Error %02d reading EXR version\n", ret);
+      return EXR_ERR;
+    }
+
+  if (version.multipart || version.non_image)
+    {
+      fprintf(stderr, "Can't load multipart or DeepImage EXR image\n");
+      return EXR_ERR;
+    }
+
+  ret = ParseEXRHeaderFromMemory(&header, &version, memory, len, &err);
+
+  if (ret != TINYEXR_SUCCESS)
+    {
+      fprintf(stderr, "Error %02d reading EXR header: %s\n", ret, err);
+      return EXR_ERR;
+    }
+
+  int width = header.data_window[2] - header.data_window[0] + 1;
+  int height = header.data_window[3] - header.data_window[1] + 1;
+
+  if (_iu_verify_size(width, height, spec) != SUCCESS)
+    {
+      FreeEXRHeader(&header);
+      return NON_CONFORMANT;
+    }
+
+  int channel = -1;
+  for (int i = 0; i < header.num_channels; i++)
+    {
+      const char *names[] = { "Y", "R", "G", "B" };
+      for (unsigned j = 0; j < ARRAY_LEN(names); j++) {
+          if (strcmp(names[j], header.channels[i].name) == 0) {
+              channel = i;
+              break;
+          }
+      }
+      if (channel > 0)
+          break;
+    }
+
+  if (channel == -1)
+    {
+      fprintf(stderr, "Failed to find R, G, B or Y channel in EXR file\n");
+      FreeEXRHeader(&header);
+      return NON_CONFORMANT;
+    }
+
+  int pixel_type = header.channels[channel].pixel_type;
+  if (pixel_type != TINYEXR_PIXELTYPE_HALF && pixel_type != TINYEXR_PIXELTYPE_FLOAT)
+    {
+      fprintf(stderr, "Can only decode EXR images with FLOAT or HALF data\n");
+      FreeEXRHeader(&header);
+      return NON_CONFORMANT;
     }
 
   EXRImage exr_image;
   InitEXRImage(&exr_image);
 
-  header.requested_pixel_types[0] = (spec->depth == 16) ?
-    TINYEXR_PIXELTYPE_HALF : TINYEXR_PIXELTYPE_FLOAT;
-
-  const unsigned char* memory = (const unsigned char*)buffer;
-  if (LoadEXRImageFromMemory(&exr_image, &header, memory, len, &err) ==
-      TINYEXR_SUCCESS)
+  if (spec->format == IU_FORMAT_ANY)
     {
-      if (!(*output))
-        {
-          *output = xmalloc(spec->width * spec->height * (spec->depth / 8));
-        }
-
-      memcpy(*output,
-             &exr_image.images[0][0],
-             spec->width * spec->height * (spec->depth / 8));
+      spec->format = pixel_type == TINYEXR_PIXELTYPE_HALF ?
+        IU_FORMAT_HALF : IU_FORMAT_FLOAT;
     }
   else
     {
-      ret = EXR_ERR;
+      header.requested_pixel_types[channel] = spec->format == IU_FORMAT_HALF ?
+        TINYEXR_PIXELTYPE_HALF : TINYEXR_PIXELTYPE_FLOAT;
     }
+
+  if (LoadEXRImageFromMemory(&exr_image, &header, memory, len, &err) !=
+      TINYEXR_SUCCESS)
+    {
+      fprintf(stderr, "TinyEXR failed to load EXR from memory: %s\n", err);
+      FreeEXRHeader(&header);
+      return BAD_FORMAT;
+    }
+
+  int bpp = spec->format == IU_FORMAT_HALF ? 2 : 4;
+
+  if (!(*output))
+    {
+      *output = xmalloc(spec->width * spec->height * bpp);
+    }
+
+  memcpy(*output,
+         &exr_image.images[channel][0],
+         spec->width * spec->height * bpp);
 
   FreeEXRImage(&exr_image);
   FreeEXRHeader(&header);
 
-  return ret;
+  return SUCCESS;
 }
 
 IUReturnCode
-iu_verify_exr_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec)
+iu_write_exr_to_file(const char* filename,
+                     IUImageSpec* spec,
+                     void* data,
+                     IUImageFormat format)
 {
-  EXRHeader header;
-  IUReturnCode ret = _iu_verify_exr_from_memory(buffer, len, spec, &header);
-  if (ret == SUCCESS)
-    {
-      FreeEXRHeader(&header);
-    }
-  return ret;
-}
-
-IUReturnCode
-iu_write_exr_to_file(const char* filename, IUImageSpec* spec, void* data,
-                     const char** channels, int *channel_depth)
-{
-  const char* default_cn1[] = { "Y" };
-
   if (!spec)
     {
       fprintf(stderr, "Can't write image with no spec\n");
       return BAD_SPEC;
     }
-  if ((spec->depth != 16 && spec->depth != 32) || spec->channels != 1)
+
+  if (spec->format != IU_FORMAT_HALF && spec->format != IU_FORMAT_FLOAT)
     {
-      fprintf(stderr,
-              "Only float/half-float, single-channel exrs are supported\n");
+      fprintf(stderr, "Must specify IU_FORMAT_HALF or IU_FORMAT_FLOAT format in spec to write EXR\n");
       return BAD_SPEC;
     }
 
-  if (!channels)
+  if (spec->width == 0 || spec->height == 0)
     {
-      switch (spec->channels)
-        {
-        case 1:
-          channels = default_cn1;
-          break;
-
-        default:
-          fprintf(stderr, "Unusual number of channels with no channel "
-                  "names specified");
-          return BAD_SPEC;
-        }
+      fprintf(stderr, "Must specify width/height when writing EXR\n");
+      return BAD_SPEC;
     }
 
   EXRHeader header;
@@ -892,24 +800,22 @@ iu_write_exr_to_file(const char* filename, IUImageSpec* spec, void* data,
   EXRImage exr_image;
   InitEXRImage(&exr_image);
 
-  exr_image.num_channels = spec->channels;
+  exr_image.num_channels = 1;
   exr_image.width = spec->width;
   exr_image.height = spec->height;
   exr_image.images = (unsigned char**)(&data);
 
-  header.num_channels = spec->channels;
-  EXRChannelInfo channel_info[spec->channels];
-  for (int i = 0; i < spec->channels; i++)
-    {
-      header.channels = &channel_info[i];
-      strcpy(channel_info[i].name, channels[i]);
-    }
+  header.num_channels = 1;
+  EXRChannelInfo channel_info;
+  header.channels = &channel_info;
+  strcpy(channel_info.name, "Y");
 
-  int output_format = spec->depth == 16 ? TINYEXR_PIXELTYPE_HALF :
-                                          TINYEXR_PIXELTYPE_FLOAT;
-  int input_format = channel_depth ? channel_depth[0] : input_format;
+  int input_format = (spec->format == IU_FORMAT_FLOAT ?
+                      TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
+  int final_format = (format == IU_FORMAT_FLOAT ?
+                      TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
   header.pixel_types = &input_format;
-  header.requested_pixel_types = &output_format;
+  header.requested_pixel_types = &final_format;
 
   const char *err = NULL;
   if (SaveEXRImageToFile(&exr_image, &header, filename, &err) !=

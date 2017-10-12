@@ -345,20 +345,12 @@ write_png_file(const char *filename,
                 int width, int height,
                 uint8_t* data)
 {
-    IUImageSpec spec = { width, height, 8, 1 };
+    IUImageSpec spec = { width, height, IU_FORMAT_U8 };
     return iu_write_png_to_file(filename, &spec, (void*)data,
                                 write_palettized_pngs ? palette : NULL,
                                 ARRAY_LEN(palette)) == SUCCESS;
 }
 
-/* Using EXR is a nightmare. If we try and only add an 'R' channel then
- * e.g. Krita will be able to open the file and it looks reasonable,
- * but OpenCV will end up creating an image with the G and B containing
- * uninitialized garbage. If instead we create a 'Y' only image then
- * OpenCV has special handling for that case and loads it as a greyscale
- * image but Krita will bork and warn that it's not supported. We choose
- * the version that works with OpenCV...
- */
 static bool
 write_exr(const char *filename,
           struct image *image,
@@ -367,13 +359,11 @@ write_exr(const char *filename,
     IUImageSpec spec = {
         image->width,
         image->height,
-        format == IMAGE_FORMAT_XFLOAT ? 32 : 16,
-        1
+        image->format == IMAGE_FORMAT_XFLOAT ? IU_FORMAT_FLOAT : IU_FORMAT_HALF,
     };
-    const char *channel_names[] = { "Y" };
-    int channel_depth = (image->format == IMAGE_FORMAT_XFLOAT) ? 32 : 16;
     return iu_write_exr_to_file(filename, &spec, (void*)image->data_u8,
-                                channel_names, &channel_depth) == SUCCESS;
+                                (format == IMAGE_FORMAT_XFLOAT ?
+                                 IU_FORMAT_FLOAT : IU_FORMAT_HALF)) == SUCCESS;
 }
 
 static bool
@@ -437,7 +427,7 @@ load_frame_labels(const char *dir,
 
     xsnprintf(input_filename, "%s/labels/%s/%s", top_src_dir, dir, filename);
 
-    IUImageSpec spec = { 0, 0, 8, 1 };
+    IUImageSpec spec = { 0, 0, IU_FORMAT_U8 };
     uint8_t *data = NULL;
     if (iu_read_png_from_file(input_filename, &spec, (void**)&data) != SUCCESS) {
         return NULL;
@@ -748,7 +738,8 @@ static struct image *
 decode_exr(uint8_t *buf, int len, enum image_format fmt)
 {
     uint8_t *data = NULL;
-    IUImageSpec spec = { 0, 0, (fmt == IMAGE_FORMAT_XHALF) ? 16 : 32, 1 };
+    IUImageSpec spec = { 0, 0, (fmt == IMAGE_FORMAT_XHALF) ?
+                                IU_FORMAT_HALF : IU_FORMAT_FLOAT };
     IUReturnCode ret = iu_read_exr_from_memory(buf, len, &spec, (void **)&data);
     if (ret != SUCCESS) {
         fprintf(stderr, "Failed to read EXR from memory: %s\n", iu_code_to_string(ret));

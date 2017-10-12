@@ -120,7 +120,7 @@ main(int argc, char **argv)
 
   // Read depth file
   half* depth_image = NULL;
-  IUImageSpec exr_spec = { 0, 0, 16, 1 };
+  IUImageSpec exr_spec = { 0, 0, IU_FORMAT_HALF };
   if (iu_read_exr_from_file(argv[optind], &exr_spec,
                             (void**)(&depth_image)) != SUCCESS)
     {
@@ -179,7 +179,7 @@ main(int argc, char **argv)
         }
     }
 
-  IUImageSpec output_spec = { width, height, 8, 1 };
+  IUImageSpec output_spec = { width, height, IU_FORMAT_U8 };
   if (iu_write_png_to_file(argv[optind+1], &output_spec,
                            out_labels, palette, palette_size) != SUCCESS)
     {

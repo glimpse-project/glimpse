@@ -257,12 +257,19 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
     {
       if (index == 0 && !data->depth_images)
         {
-          if (iu_verify_exr_from_file(depth_path, &data->depth_spec) != SUCCESS)
+          void *tmp_output = NULL;
+
+          /* We load and throw away the first image just to know the image sizes
+           * we expect so we can pre-allocate storage for all our data.
+           */
+          if (iu_read_exr_from_file(depth_path, &data->depth_spec, &tmp_output) !=
+              SUCCESS)
             {
-              fprintf(stderr, "Failed to verify image '%s'\n", depth_path);
+              fprintf(stderr, "Failed to load first depth image '%s'\n", depth_path);
               exit(1);
             }
           validate_storage(data, depth_path, 0);
+          free(tmp_output);
         }
 
       void* output = &data->depth_images[
@@ -347,8 +354,8 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
     skip,                                 // Number of images to skip
     shuffle,                              // Whether to shuffle images
     NULL,                                 // Image paths
-    {0,0,8,1},                            // Label image specification
-    {0,0,16,1},                           // Depth image specification
+    {0,0,IU_FORMAT_U8},                   // Label image specification
+    {0,0,IU_FORMAT_HALF},                 // Depth image specification
     NULL,                                 // Depth image data
     NULL,                                 // Label image data
     NULL,                                 // Joint data
