@@ -443,6 +443,8 @@ load_frame_labels(const char *dir,
         uint8_t *row = img->data_u8 + width * y;
 
         for (int x = 0; x < width; x++) {
+            row[x] = grey_to_id_map[row[x]];
+
             if (row[x] > MAX_PACKED_INDEX) {
                 fprintf(stderr, "Failed to map a label value of 0x%x/%d in image %s\n",
                         row[x], row[x],
@@ -450,14 +452,11 @@ load_frame_labels(const char *dir,
                 free_image(img);
                 return NULL;
             }
-
-            row[x] = grey_to_id_map[row[x]];
         }
     }
 
     return img;
 }
-
 
 static void
 flip_frame_depth(struct image *__restrict__ depth,
