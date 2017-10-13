@@ -61,9 +61,13 @@ Requirements
     a particular body-part label.
 * Bone position JSON files
   - See 'example-bones.json'
-
-Training data can be contained in separate directories, but must have the same
-names and directory structure inside those directories.
+* A top-level training data meta.json
+  - For determing the camera properties used to render the training data and
+    looks like { 'camera': { 'width': 172, 'height':224, 'vertical_fov':60 }}
+* An index.xyz file
+  - For specifying which frames to train with, an index should be created
+    with the training/indexer.py script.
+    E.g. `./indexer.py -i tree0 100000 path/to/training-data`
 
 Building
 ========
@@ -71,7 +75,7 @@ Building
 The default make target will build all tools, but you likely want to build with
 optimisations enabled:
 
-CFLAGS="-O3 -mtune=native -march=native -g -Wall" make
+make RELEASE=1
 
 Training a decision tree
 ========================
@@ -80,11 +84,12 @@ Run the tool 'train_rdt' to train a tree. Running it with no parameters, or
 with the -h/--help parameter will print usage details, with details about the
 default parameters.
 
-For example, to train a decision tree using a shuffled set of 1000 training
-images with 34 body-part labels, and generated from a camera with a vertical
-FOV of 54.5 degrees:
+For example, if you have an index.tree0 file at the top of your training data
+and images have 34 body-part labels you can train a decision tree like:
 
-train_rdt 54.5 34 path-to-label-imgs path-to-depth-imgs output.rdt -l 1000 -s
+```
+train_rdt 34 path-training-data tree0 output.rdt
+```
 
 Creating a joint map
 ====================
