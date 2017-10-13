@@ -39,6 +39,7 @@
 #include <assert.h>
 #include <pthread.h>
 #include <getopt.h>
+#include <inttypes.h>
 
 #include <cmath>
 
@@ -138,6 +139,8 @@ static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
 static int n_cpus = 0;
 
 static std::default_random_engine rand_generator;
+
+static std::atomic<std::uint64_t> input_frame_count;
 
 static uint64_t max_frame_count = UINT64_MAX;
 static std::atomic<std::uint64_t> frame_count;
@@ -851,6 +854,8 @@ directory_recurse(const char *rel_path)
             }
 
             work->files.push_back(strdup(label_entry->d_name));
+
+            input_frame_count++;
         }
     }
 
@@ -1364,10 +1369,32 @@ static_assert(BACKGROUND_ID == 33, "");
                        &workers[i]); //data
     }
 
-    for (int i = 0; i < n_threads; i++) {
-        void *ret;
+    while (true) {
+        uint64_t target_frame_count;
+        bool finished = true;
 
-        pthread_join(workers[i].thread, &ret);
+        for (int i = 0; i < n_threads; i++) {
+            void *thread_ret;
+
+            pthread_t tid = workers[i].thread;
+            if (tid && pthread_tryjoin_np(tid, &thread_ret) == 0)
+                workers[i].thread = 0;
+            else if (tid)
+                finished = false;
+        }
+        if (finished)
+            break;
+
+        if (max_frame_count != UINT64_MAX)
+            target_frame_count = max_frame_count;
+        else
+            target_frame_count = input_frame_count * 2;
+
+        int progress = 100.0 * ((double)frame_count / (double)target_frame_count);
+        printf("\nProgress = %3d%%: %10" PRIu64 " / %-10" PRIu64 "\n\n",
+               progress, (uint64_t)frame_count, (uint64_t)target_frame_count);
+
+        sleep(1);
     }
 
     end = get_time();
