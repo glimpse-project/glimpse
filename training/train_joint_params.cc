@@ -42,7 +42,6 @@ typedef struct {
   char**   joint_names;   // Names of joints
   LList**  joint_map;     // Lists of which labels correspond to which joints
   float*   joints;        // List of joint positions for each image
-  uint8_t  bg_label;      // Background label
 
   uint32_t n_bandwidths;  // Number of bandwidth values
   float*   bandwidths;    // Bandwidth values to test
@@ -84,7 +83,6 @@ print_usage(FILE* stream)
 "  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
 "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
 "  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
-"  -g, --background=NUMBER     Background label id (default: 0)\n"
 "  -m, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
 "  -a, --accuracy              Report accuracy of joint inference\n"
 "  -v, --verbose               Verbose output\n"
@@ -141,27 +139,11 @@ thread_body(void* userdata)
                                ctx->width, ctx->height);
 
       // Calculate pixel weight
-      uint32_t pixel_idx = 0;
       uint32_t weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
-      for (int32_t y = 0; y < ctx->height; y++)
-        {
-          for (int32_t x = 0; x < ctx->width; x++, pixel_idx++)
-            {
-              float depth_2 =
-                powf((float)ctx->depth_images[idx + pixel_idx], 2);
-
-              for (uint8_t j = 0; j < ctx->n_joints; j++, weight_idx++)
-                {
-                  float pr = 0.f;
-                  for (LList* node = ctx->joint_map[j]; node; node = node->next)
-                    {
-                      uint8_t label = (uint8_t)((uintptr_t)node->data);
-                      pr += ctx->inferred[i][(pixel_idx * n_labels) + label];
-                    }
-                  ctx->weights[weight_idx] = pr * depth_2;
-                }
-            }
-        }
+      calc_pixel_weights(&ctx->depth_images[idx], ctx->inferred[i],
+                         ctx->width, ctx->height, n_labels,
+                         ctx->joint_map, ctx->n_joints,
+                         &ctx->weights[weight_idx]);
 
       // Calculate inference accuracy if label images were specified
       if (ctx->check_accuracy)
@@ -232,9 +214,8 @@ thread_body(void* userdata)
   // Wait for main thread to output progress bar
   pthread_barrier_wait(data->barrier);
 
-  // Use mean-shift to find the inferred joint positions, set them back into
-  // the body using a range of thresholds/bandwidths/offsets, and record the
-  // results
+  // Loop over each bandwidth/threshold/offset combination and test to see
+  // which combination gives the best results for inference on each joint.
   uint32_t n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
   uint32_t combos_per_thread = std::max((uint32_t)1, n_combos / ctx->n_threads);
   uint32_t c_start = combos_per_thread * data->thread;
@@ -243,24 +224,6 @@ thread_body(void* userdata)
                               n_combos : c_start + combos_per_thread);
 
   uint32_t bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
-
-  uint32_t* n_pixels = (uint32_t*)xmalloc(ctx->n_joints * sizeof(uint32_t));
-  float* points = (float*)
-    xmalloc(ctx->n_joints * ctx->width * ctx->height * 3 * sizeof(float));
-  float* weights = (float*)
-    xmalloc(ctx->n_joints * ctx->width * ctx->height * sizeof(float));
-
-  // Variables for reprojection of 2d point + depth
-  float half_width = ctx->width / 2.f;
-  float half_height = ctx->height / 2.f;
-  float aspect = half_width / half_height;
-
-  float vfov_rad = ctx->forest[0]->header.fov * M_PI / 180.f;
-  float tan_half_vfov = tanf(vfov_rad / 2.f);
-  float tan_half_hfov = tan_half_vfov * aspect;
-  //float hfov = atanf(tan_half_hfov) * 2;
-
-  float root_2pi = sqrtf(2 * M_PI);
 
   float output_acc = 0;
   float output_freq = (c_end - c_start) /
@@ -282,155 +245,40 @@ thread_body(void* userdata)
       float acc_distance[ctx->n_joints];
       memset(acc_distance, 0, ctx->n_joints * sizeof(acc_distance[0]));
 
-      for (uint32_t i = 0, idx = 0; i < ctx->n_images; i++)
+      for (uint32_t i = 0; i < ctx->n_images; i++)
         {
-          // Gather pixels above the given threshold
-          memset(n_pixels, 0, ctx->n_joints * sizeof(uint32_t));
-          for (int32_t y = 0, sidx = 0; y < ctx->height; y++)
-            {
-              float t = -((y / half_height) - 1.f);
-              for (int32_t x = 0; x < ctx->width; x++, idx++, sidx++)
-                {
-                  float s = (x / half_width) - 1.f;
-                  float depth = (float)ctx->depth_images[idx];
-                  if (!std::isnormal(depth))
-                    {
-                      continue;
-                    }
+          uint32_t depth_idx = i * ctx->width * ctx->height;
+          uint32_t weight_idx = depth_idx * ctx->n_joints;
 
-                  for (uint8_t j = 0; j < ctx->n_joints; j++)
-                    {
-                      uint32_t joint_idx = j * ctx->width * ctx->height;
-                      for (LList* node = ctx->joint_map[j]; node;
-                           node = node->next)
-                        {
-                          uint8_t label = (uint8_t)((uintptr_t)node->data);
-                          float label_pr =
-                            ctx->inferred[i][(sidx * n_labels) + label];
-                          if (label_pr >= threshold)
-                            {
-                              // Reproject point
-                              points[(joint_idx + n_pixels[j]) * 3] =
-                                (tan_half_hfov * depth) * s;
-                              points[(joint_idx + n_pixels[j]) * 3 + 1] =
-                                (tan_half_vfov * depth) * t;
-                              points[(joint_idx + n_pixels[j]) * 3 + 2] =
-                                depth;
+          half* depth_image = &ctx->depth_images[depth_idx];
+          float* pr_table = ctx->inferred[i];
+          float* weights = &ctx->weights[weight_idx];
 
-                              // Store pixel weight (density)
-                              weights[joint_idx + n_pixels[j]] =
-                                ctx->weights[(idx * ctx->n_joints) + j];
+          // Get joint positions
+          float* joints = infer_joints(depth_image, pr_table, weights,
+                                       ctx->width, ctx->height, n_labels,
+                                       ctx->joint_map, ctx->n_joints,
+                                       ctx->forest[0]->header.fov,
+                                       bandwidth, threshold, offset);
 
-                              n_pixels[j]++;
-                              break;
-                            }
-                        }
-                    }
-                }
-            }
-
-          // Means shift to find joint modes
+          // Calculate distance from expected joint position and accumulate
           for (uint8_t j = 0; j < ctx->n_joints; j++)
             {
-              if (n_pixels[j] == 0)
-                {
-                  continue;
-                }
+              float* inferred_joint = &joints[j * 3];
+              float* actual_joint =
+                &ctx->joints[((i * ctx->n_joints) + j) * 3];
+              // XXX: Current joint z positions are negated
+              float distance =
+                sqrtf(pow(inferred_joint[0] - actual_joint[0], 2.f) +
+                      pow(inferred_joint[1] - actual_joint[1], 2.f) +
+                      pow(inferred_joint[2] + actual_joint[2], 2.f));
 
-              uint32_t joint_idx = j * ctx->width * ctx->height;
-              for (uint32_t s = 0; s < N_SHIFTS; s++)
-                {
-                  float new_points[n_pixels[j] * 3];
-                  bool moved = false;
-                  for (uint32_t p = 0; p < n_pixels[j]; p++)
-                    {
-                      float* x = &points[(joint_idx + p) * 3];
-                      float* nx = &new_points[p * 3];
-                      float numerator[3] = { 0.f, };
-                      float denominator = 0.f;
-                      for (uint32_t n = 0; n < n_pixels[j]; n++)
-                        {
-                          float* xi = &points[(joint_idx + n) * 3];
-                          float distance = sqrtf(pow(x[0] - xi[0], 2.f) +
-                                                 pow(x[1] - xi[1], 2.f) +
-                                                 pow(x[2] - xi[2], 2.f));
-
-                          // Weighted gaussian kernel
-                          float weight = weights[joint_idx + n] *
-                            (1.f / (bandwidth * root_2pi)) *
-                            expf(-0.5f * pow(distance / bandwidth, 2.f));
-
-                          numerator[0] += weight * xi[0];
-                          numerator[1] += weight * xi[1];
-                          numerator[2] += weight * xi[2];
-
-                          denominator += weight;
-                        }
-
-                      nx[0] = numerator[0] / denominator;
-                      nx[1] = numerator[1] / denominator;
-                      nx[2] = numerator[2] / denominator;
-
-                      if (!moved &&
-                          (fabs(nx[0] - x[0]) >= SHIFT_THRESHOLD ||
-                           fabs(nx[1] - x[1]) >= SHIFT_THRESHOLD ||
-                           fabs(nx[2] - x[2]) >= SHIFT_THRESHOLD))
-                        {
-                          moved = true;
-                        }
-                    }
-
-                  memcpy((void*)&points[joint_idx * 3], (void*)new_points,
-                         n_pixels[j] * 3 * sizeof(float));
-
-                  if (!moved || s == N_SHIFTS - 1)
-                    {
-                      // Find the mode we're most confident of
-                      float* last_point = &points[joint_idx * 3];
-                      float confidence = 0;
-
-                      float* best_point = last_point;
-                      float best_confidence = 0;
-
-                      //uint32_t unique_points = 1;
-
-                      for (uint32_t p = 0; p < n_pixels[j]; p++)
-                        {
-                          float* point = &points[(joint_idx + p) * 3];
-                          if (fabs(point[0]-last_point[0]) >= SHIFT_THRESHOLD ||
-                              fabs(point[1]-last_point[1]) >= SHIFT_THRESHOLD ||
-                              fabs(point[2]-last_point[2]) >= SHIFT_THRESHOLD)
-                            {
-                              if (confidence > best_confidence)
-                                {
-                                  best_point = last_point;
-                                  best_confidence = confidence;
-                                }
-                              //unique_points++;
-                              last_point = point;
-                              confidence = 0;
-                            }
-                          confidence += weights[joint_idx + p];
-                        }
-
-                      // Offset into the body
-                      best_point[2] += offset;
-
-                      // Calculate distance from expected joint position
-                      float* actual_joint =
-                        &ctx->joints[((i * ctx->n_joints) + j) * 3];
-                      // XXX: Current joint z positions are negated (and off?)
-                      float distance =
-                        sqrtf(pow(best_point[0] - actual_joint[0], 2.f) +
-                              pow(best_point[1] - actual_joint[1], 2.f) +
-                              pow(best_point[2] + actual_joint[2], 2.f));
-
-                      // Accumulate
-                      acc_distance[j] += distance;
-                      break;
-                    }
-                }
+              // Accumulate
+              acc_distance[j] += distance;
             }
+
+          // Free joint positions
+          xfree(joints);
         }
 
       // See if this combination is better than the current best for any
@@ -454,10 +302,7 @@ thread_body(void* userdata)
         }
     }
 
-  xfree(n_pixels);
-  xfree(points);
-  xfree(weights);
-
+  xfree(data);
   pthread_exit(NULL);
 }
 
@@ -599,10 +444,6 @@ main (int argc, char** argv)
             {
               param = 'a';
             }
-          else if (strstr(arg, "background="))
-            {
-              param = 'g';
-            }
           else if (strstr(arg, "threads="))
             {
               param = 'm';
@@ -676,9 +517,6 @@ main (int argc, char** argv)
         case 'a':
           ctx.check_accuracy = true;
           break;
-        case 'g':
-          ctx.bg_label = (uint8_t)atoi(value);
-          break;
         case 'm':
           ctx.n_threads = (uint32_t)atoi(value);
           break;
@@ -717,71 +555,9 @@ main (int argc, char** argv)
     }
 
   printf("Loading joint map...\n");
-  ctx.joint_map = (LList**)xcalloc(ctx.n_joints, sizeof(LList*));
-  FILE* joint_map_file = fopen(joint_map_path, "r");
-  if (!joint_map_file)
+  ctx.joint_map = read_jointmap(joint_map_path, ctx.n_joints, &ctx.joint_names);
+  if (!ctx.joint_map)
     {
-      fprintf(stderr, "Error opening joint map\n");
-      return 1;
-    }
-
-  ctx.joint_names = (char**)xmalloc(ctx.n_joints * sizeof(char*));
-  for (uint8_t i = 0; i < ctx.n_joints; i++)
-    {
-      char buffer[256];
-      if (!fgets(buffer, 256, joint_map_file))
-        {
-          fprintf(stderr, "Error reading joint %u\n", (uint32_t)i);
-          return 1;
-        }
-
-      char* label_string = strchr(buffer, ',');
-      if (!label_string || label_string == buffer)
-        {
-          fprintf(stderr, "Error reading joint %u name\n", (uint32_t)i);
-          return 1;
-        }
-      ctx.joint_names[i] = strndup(buffer, label_string - buffer);
-
-      while (label_string[0] != '\0' && label_string[0] != '\n')
-        {
-          label_string += 1;
-
-          char* new_string;
-          uint8_t label = strtol(label_string, &new_string, 10);
-          if (new_string == label_string)
-            {
-              fprintf(stderr, "Error interpreting joint %u\n", (uint32_t)i);
-              return 1;
-            }
-
-          if (label == ctx.bg_label)
-            {
-              fprintf(stderr, "Background label found in joint %u\n",
-                      (uint32_t)i);
-              return 1;
-            }
-          if (label >= ctx.forest[0]->header.n_labels)
-            {
-              fprintf(stderr, "Label out of range in joint %u\n", (uint32_t)i);
-              return 1;
-            }
-
-          ctx.joint_map[i] = llist_insert_before(ctx.joint_map[i],
-                               llist_new((void*)((uintptr_t)label)));
-          label_string = new_string;
-        }
-
-      if (!ctx.joint_map[i])
-        {
-          fprintf(stderr, "No labels found for joint %u\n", (uint32_t)i);
-          return 1;
-        }
-    }
-
-  if (fclose(joint_map_file) != 0)
-    {
-      fprintf(stderr, "Error closing joint map file\n");
       return 1;
     }
 
@@ -975,13 +751,9 @@ main (int argc, char** argv)
   xfree(best_thresholds);
   xfree(ctx.offsets);
   xfree(best_offsets);
-  for (uint32_t i = 0; i < ctx.n_joints; i++)
-    {
-      xfree(ctx.joint_names[i]);
-      llist_free(ctx.joint_map[i], NULL, NULL);
-    }
-  xfree(ctx.joint_names);
-  xfree(ctx.joint_map);
+  free_jointmap(ctx.joint_map, ctx.n_joints, ctx.joint_names);
+  xfree(ctx.joints);
+  free_forest(ctx.forest, ctx.n_trees);
 
   clock_gettime(CLOCK_MONOTONIC, &now);
   since_begin = get_time_for_display(&begin, &now);

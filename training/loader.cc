@@ -172,3 +172,102 @@ free_forest(RDTree** forest, int n_trees)
     }
   xfree(forest);
 }
+
+LList**
+read_jointmap(char* filename, uint8_t n_joints, char*** joint_names)
+{
+  LList** joint_map = (LList**)xcalloc(n_joints, sizeof(LList*));
+  if (joint_names)
+    {
+      *joint_names = (char**)xcalloc(n_joints, sizeof(char*));
+    }
+
+  FILE* joint_map_file = fopen(filename, "r");
+  if (!joint_map_file)
+    {
+      fprintf(stderr, "Error opening joint map\n");
+      return NULL;
+    }
+
+  for (uint8_t i = 0; i < n_joints; i++)
+    {
+      char buffer[256];
+      if (!fgets(buffer, 256, joint_map_file))
+        {
+          fprintf(stderr, "Error reading joint %u\n", (uint32_t)i);
+          goto read_jointmap_error;
+        }
+
+      char* label_string = strchr(buffer, ',');
+      if (!label_string || label_string == buffer)
+        {
+          fprintf(stderr, "Error reading joint %u name\n", (uint32_t)i);
+          goto read_jointmap_error;
+        }
+      if (joint_names)
+        {
+          (*joint_names)[i] = strndup(buffer, label_string - buffer);
+        }
+
+      while (label_string[0] != '\0' && label_string[0] != '\n')
+        {
+          label_string += 1;
+
+          char* new_string;
+          uint8_t label = strtol(label_string, &new_string, 10);
+          if (new_string == label_string)
+            {
+              fprintf(stderr, "Error interpreting joint %u\n", (uint32_t)i);
+              goto read_jointmap_error;
+            }
+
+          joint_map[i] = llist_insert_before(joint_map[i],
+                           llist_new((void*)((uintptr_t)label)));
+          label_string = new_string;
+        }
+
+      if (!joint_map[i])
+        {
+          fprintf(stderr, "No labels found for joint %u\n", (uint32_t)i);
+          goto read_jointmap_error;
+        }
+    }
+
+  if (fclose(joint_map_file) != 0)
+    {
+      fprintf(stderr, "Error closing joint map file\n");
+    }
+
+  return joint_map;
+
+read_jointmap_error:
+  free_jointmap(joint_map, n_joints, joint_names ? *joint_names : NULL);
+  if (joint_names)
+    {
+      *joint_names = NULL;
+    }
+  fclose(joint_map_file);
+
+  return NULL;
+}
+
+void
+free_jointmap(LList** jointmap, uint8_t n_joints, char** joint_names)
+{
+  for (uint32_t i = 0; i < n_joints; i++)
+    {
+      if (joint_names && joint_names[i])
+        {
+          xfree(joint_names[i]);
+        }
+      if (jointmap[i])
+        {
+          llist_free(jointmap[i], NULL, NULL);
+        }
+    }
+  if (joint_names)
+    {
+      xfree(joint_names);
+    }
+  xfree(jointmap);
+}

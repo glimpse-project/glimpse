@@ -69,8 +69,9 @@ with open(sys.argv[1], 'r') as f:
         labels = [int(x.strip()) for x in parts[1:]]
         joint_map.append({ 'name': parts[0].strip(), 'labels': labels });
 
+    print('Processing...')
     for json_file in find_files(sys.argv[2], ['json']):
-        print('Processing %s' % json_file)
+        #print('Processing %s' % json_file)
         jnt_data = json_to_jnt(json_file, joint_map)
         jnt_file = os.path.splitext(json_file)[0] + '.jnt'
         with open(jnt_file, 'wb') as o:
