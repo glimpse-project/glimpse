@@ -7,6 +7,7 @@
 #include "half.hpp"
 
 void gather_train_data(const char* data_dir,
+                       const char* index_name,
                        uint32_t    limit,
                        uint32_t    skip,
                        bool        shuffle,

@@ -9,6 +9,7 @@
 #include "image_utils.h"
 #include "xalloc.h"
 #include "llist.h"
+#include "parson.h"
 
 using half_float::half;
 
@@ -18,6 +19,7 @@ using half_float::half;
     } while(0)
 
 typedef struct {
+  double   vertical_fov;  // Field of view used to render depth images
   uint32_t n_images;      // Number of training images
   uint8_t  n_joints;      // Number of joints
   uint32_t limit;         // Limit to number of training images
@@ -127,7 +129,7 @@ free_train_data_cb(LList* node, uint32_t index, void* userdata)
 }
 
 static void
-validate_storage(TrainData* data, char* filename, uint8_t n_joints)
+validate_storage(TrainData* data, const char* filename, uint8_t n_joints)
 {
   if ((!data->label_images || !data->depth_images) &&
       data->gather_label && data->gather_depth &&
@@ -191,24 +193,6 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   // Read label image
   if (label_path && data->gather_label)
     {
-      if (index == 0 && !data->label_images)
-        {
-          uint8_t* tmp_output = NULL;
-
-          /* We load and throw away the first image just to know the image sizes
-           * we expect so we can pre-allocate storage for all our data.
-           */
-          if (iu_read_png_from_file(label_path, &data->label_spec, &tmp_output,
-                                    NULL, // palette output
-                                    NULL) // palette size
-              != SUCCESS)
-            {
-              fprintf(stderr, "Failed to verify image '%s'\n", label_path);
-              exit(1);
-            }
-          validate_storage(data, label_path, 0);
-        }
-
       uint8_t* output = &data->label_images[
         index * data->label_spec.width * data->label_spec.height];
       if (iu_read_png_from_file(label_path, &data->label_spec, &output,
@@ -224,23 +208,6 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   // Read depth image
   if (depth_path && data->gather_depth)
     {
-      if (index == 0 && !data->depth_images)
-        {
-          void *tmp_output = NULL;
-
-          /* We load and throw away the first image just to know the image sizes
-           * we expect so we can pre-allocate storage for all our data.
-           */
-          if (iu_read_exr_from_file(depth_path, &data->depth_spec, &tmp_output) !=
-              SUCCESS)
-            {
-              fprintf(stderr, "Failed to load first depth image '%s'\n", depth_path);
-              exit(1);
-            }
-          validate_storage(data, depth_path, 0);
-          free(tmp_output);
-        }
-
       void* output = &data->depth_images[
         index * data->depth_spec.width * data->depth_spec.height];
       if (iu_read_exr_from_file(depth_path, &data->depth_spec, &output) !=
@@ -307,15 +274,48 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   return true;
 }
 
+static char *
+read_file(const char* filename)
+{
+  FILE* fp = fopen(filename, "r");
+  if (!fp)
+    {
+      fprintf(stderr, "Failed to open %s\n", filename);
+      exit(1);
+    }
+
+  struct stat sb;
+  if (fstat(fileno(fp), &sb) < 0)
+    {
+      fprintf(stderr, "Failed to stat %s file descriptor: %m\n", filename);
+      exit(1);
+    }
+
+  char* data = (char*)xmalloc(sb.st_size);
+  if (fread(data, sb.st_size, 1, fp) != 1)
+    {
+      fprintf(stderr, "Failed to read %s\n", filename);
+      exit(1);
+    }
+
+  fclose(fp);
+
+  return data;
+}
+
 void
 gather_train_data(const char* data_dir,
+                  const char* index_name,
                   uint32_t limit, uint32_t skip, bool shuffle,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
                   half** out_depth_images, uint8_t** out_label_images,
                   float** out_joints)
 {
+  char meta_filename[1024];
+
   TrainData data = {
+    0,                                    // Field of view used to render depth
     0,                                    // Number of training images
     0,                                    // Number of joints
     limit,                                // Limit to number of training images
@@ -331,6 +331,29 @@ gather_train_data(const char* data_dir,
     !!out_label_images,                   // Whether to gather label images
     !!out_joints                          // Whether to gather joint data
   };
+
+  xsnprintf(meta_filename, "%s/meta.json", data_dir);
+
+  char* json_data = read_file(meta_filename);
+
+  JSON_Value* root_value = json_parse_string((char *)json_data);
+  JSON_Object* root = json_object(root_value);
+  JSON_Object* camera = json_object_get_object(root, "camera");
+
+  data.vertical_fov = json_object_get_number(camera, "vertical_fov");
+
+  int width = json_object_get_number(camera, "width");
+  int height = json_object_get_number(camera, "height");
+
+  json_value_free(root_value);
+  free(json_data);
+
+  data.label_spec.width = width;
+  data.label_spec.height = height;
+  data.depth_spec.width = width;
+  data.depth_spec.height = height;
+
+  validate_storage(&data, "meta.json", 0);
 
   gather_train_files(data_dir, "", &data);
   data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
