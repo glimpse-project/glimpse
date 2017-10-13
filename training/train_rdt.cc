@@ -409,7 +409,7 @@ static void
 print_usage(FILE* stream)
 {
   fprintf(stream,
-"Usage: train_rdt <fov> <n labels> <data dir> <out file> [OPTIONS]\n"
+"Usage: train_rdt <n labels> <data dir> <index name> <out file> [OPTIONS]\n"
 "Train a randomised decision tree to infer n_labels from depth and label images\n"
 "with a given camera FOV. Default values assume depth data to be in meters.\n"
 "\n"
@@ -444,11 +444,16 @@ main(int argc, char **argv)
   struct timespec begin, last, now;
   uint32_t n_threads = std::thread::hardware_concurrency();
 
-  if (argc < 6)
+  if (argc < 5)
     {
       print_usage(stderr);
       exit(1);
     }
+
+  const char *n_labels_arg = argv[1];
+  const char *data_dir = argv[2];
+  const char *index_name = argv[3];
+  const char *out_filename = argv[4];
 
   // Set default parameters
   ctx.n_uv = 2000;
@@ -612,21 +617,23 @@ main(int argc, char **argv)
         }
     }
 
-  ctx.fov = strtof(argv[1], NULL);
-  ctx.n_labels = (uint8_t)atoi(argv[2]);
+  ctx.n_labels = (uint8_t)atoi(n_labels_arg);
 
   printf("Opening output file...\n");
   FILE* output;
-  if (!(output = fopen(argv[4], "wb")))
+  if (!(output = fopen(out_filename, "wb")))
     {
-      fprintf(stderr, "Failed to open output file '%s'\n", argv[4]);
+      fprintf(stderr, "Failed to open output file '%s'\n", out_filename);
       exit(1);
     }
 
   printf("Scanning training directories...\n");
-  gather_train_data(argv[3], limit, skip, shuffle,
+  gather_train_data(data_dir,
+                    index_name,
+                    limit, skip, shuffle,
                     &ctx.n_images, NULL, &ctx.width, &ctx.height,
-                    &ctx.depth_images, &ctx.label_images, NULL);
+                    &ctx.depth_images, &ctx.label_images, NULL,
+                    &ctx.fov);
 
   // Work out pixels per meter and adjust uv range accordingly
   float ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
@@ -852,7 +859,7 @@ main(int argc, char **argv)
   printf("(%02d:%02d:%02d / %02d:%02d:%02d) Writing output to '%s'...\n",
          since_begin.hours, since_begin.minutes, since_begin.seconds,
          since_last.hours, since_last.minutes, since_last.seconds,
-         argv[4]);
+         out_filename);
 
   // Write a header
   RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \

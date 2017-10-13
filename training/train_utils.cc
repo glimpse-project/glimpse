@@ -54,56 +54,40 @@ gather_cb(const char* label_path, const char* depth_path,
 
 static bool
 gather_train_files(const char* top_src_dir,
-                   const char* rel_path,
+                   const char *index_name,
                    TrainData* data)
 {
-  char labels_path[1024];
-  DIR *labels_dir;
-  struct dirent *label_entry;
-  char *ext;
+  char index_filename[1024];
   bool cont = true;
 
-  xsnprintf(labels_path, "%s/labels/%s", top_src_dir, rel_path);
-  labels_dir = opendir(labels_path);
+  xsnprintf(index_filename, "%s/index.%s", top_src_dir, index_name);
 
-  while (cont && (label_entry = readdir(labels_dir)) != NULL)
+  FILE *fp = fopen(index_filename, "r");
+  if (!fp)
     {
-      char next_labels_path[1024];
-      char next_rel_path[1024];
-      struct stat st;
-
-      if (strcmp(label_entry->d_name, ".") == 0 ||
-          strcmp(label_entry->d_name, "..") == 0)
-          continue;
-
-      xsnprintf(next_labels_path, "%s/labels/%s/%s",
-                top_src_dir, next_rel_path, label_entry->d_name);
-      xsnprintf(next_rel_path, "%s/%s", rel_path, label_entry->d_name);
-
-      stat(next_labels_path, &st);
-      if (S_ISDIR(st.st_mode))
-        {
-          gather_train_files(top_src_dir, next_rel_path, data);
-        }
-      else if ((ext = strstr(label_entry->d_name, ".png")) && ext[4] == '\0')
-        {
-          char next_depth_path[1024];
-          char next_jnt_path[1024];
-
-          xsnprintf(next_depth_path, "%s/depth/%s/%.*s.exr",
-                    top_src_dir, next_rel_path,
-                    (int)strlen(label_entry->d_name) - 4,
-                    label_entry->d_name);
-          xsnprintf(next_jnt_path, "%s/labels/%s/%.*s.jnt",
-                    top_src_dir, next_rel_path,
-                    (int)strlen(label_entry->d_name) - 4,
-                    label_entry->d_name);
-          cont =
-            gather_cb(next_labels_path, next_depth_path, next_jnt_path, data);
-        }
+      fprintf(stderr, "Failed to open index %s\n", index_filename);
+      exit(1);
     }
 
-  closedir(labels_dir);
+  char *line = NULL;
+  size_t line_buf_len = 0;
+  int line_len;
+  while (cont && (line_len = getline(&line, &line_buf_len, fp)) != -1)
+    {
+      char next_labels_path[1024];
+      char next_depth_path[1024];
+      char next_jnt_path[1024];
+
+      xsnprintf(next_labels_path, "%s/labels/%s.png", top_src_dir, line);
+      xsnprintf(next_depth_path, "%s/depth/%s.exr", top_src_dir, line);
+      xsnprintf(next_jnt_path, "%s/labels/%s.jnt", top_src_dir, line);
+
+      cont = gather_cb(next_labels_path, next_depth_path, next_jnt_path, data);
+    }
+
+  free(line);
+
+  fclose(fp);
 
   return cont;
 }
@@ -310,7 +294,8 @@ gather_train_data(const char* data_dir,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
                   half** out_depth_images, uint8_t** out_label_images,
-                  float** out_joints)
+                  float** out_joints,
+                  float* out_fov)
 {
   char meta_filename[1024];
 
@@ -355,7 +340,7 @@ gather_train_data(const char* data_dir,
 
   validate_storage(&data, "meta.json", 0);
 
-  gather_train_files(data_dir, "", &data);
+  gather_train_files(data_dir, index_name, &data);
   data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
 
   *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
@@ -395,6 +380,10 @@ gather_train_data(const char* data_dir,
   if (out_joints)
     {
       *out_joints = data.joint_data;
+    }
+  if (out_fov)
+    {
+      *out_fov = data.vertical_fov;
     }
 }
 

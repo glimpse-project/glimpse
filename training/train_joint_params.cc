@@ -27,6 +27,8 @@ using half_float::half;
 static bool verbose = false;
 
 typedef struct {
+  float    fov;           // Camera field of view
+
   unsigned n_trees;       // Number of decision trees
   RDTree** forest;        // Decision trees
 
@@ -71,6 +73,7 @@ print_usage(FILE* stream)
 {
   fprintf(stream,
 "Usage: train_joint_params <data dir> \\\n"
+"                          <index name> \\\n"
 "                          <joint map> \\\n"
 "                          <out_file> \\\n"
 "                          [OPTIONS] \\\n"
@@ -352,7 +355,7 @@ gen_range(float** data, float min, float max, uint32_t n)
 int
 main (int argc, char** argv)
 {
-  if (argc < 7)
+  if (argc < 5)
     {
       print_usage(stderr);
       return 1;
@@ -382,8 +385,9 @@ main (int argc, char** argv)
 
   // Pass arguments
   char* data_dir = argv[1];
-  char* joint_map_path = argv[2];
-  char* out_filename = argv[3];
+  char* index_name = argv[2];
+  char* joint_map_path = argv[3];
+  char* out_filename = argv[4];
 
   char** tree_paths = NULL;
   for (int i = 5; i < argc; i++)
@@ -537,13 +541,16 @@ main (int argc, char** argv)
   ctx.forest = read_forest(tree_paths, ctx.n_trees);
 
   printf("Scanning training directories...\n");
-  gather_train_data(data_dir, limit, skip, shuffle,
+  gather_train_data(data_dir,
+                    index_name,
+                    limit, skip, shuffle,
                     &ctx.n_images,
                     &ctx.n_joints,
                     &ctx.width, &ctx.height,
                     &ctx.depth_images,
                     ctx.check_accuracy ? &ctx.label_images : NULL,
-                    &ctx.joints);
+                    &ctx.joints,
+                    &ctx.fov);
 
   // Note, there's a background label, so there ought to always be fewer joints
   // than labels. Maybe there are some situations where this might be desired
