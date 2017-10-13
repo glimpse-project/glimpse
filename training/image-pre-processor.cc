@@ -922,6 +922,16 @@ worker_thread_cb(void *data)
                 }
             }
 
+            /* Check the frame count after checking whether we would skip the
+             * frame but before we write anything so we can limit writes
+             * according to the max_frame_count threshold
+             */
+            if (frame_count >= max_frame_count) {
+                finished = true;
+                break;
+            }
+            frame_count += 2;
+
             if (prev_frame_labels)
                 free_image(prev_frame_labels);
             prev_frame_labels = labels;
@@ -958,6 +968,7 @@ worker_thread_cb(void *data)
             flip_frame_labels(labels, flipped_labels);
             flip_frame_depth(depth, flipped_depth);
             frame_add_noise(flipped_labels, flipped_depth, noisy_labels, noisy_depth);
+
 
             xsnprintf(filename, "%.*s-flipped.png",
                       (int)strlen(work.files[i]) - 4,
@@ -1044,13 +1055,6 @@ worker_thread_cb(void *data)
 
                 json_value_free(root_value);
                 free(json_data);
-            }
-
-            frame_count++;
-
-            if (frame_count >= max_frame_count) {
-                finished = true;
-                break;
             }
         }
 
