@@ -78,6 +78,12 @@ gather_train_files(const char* top_src_dir,
       char next_depth_path[1024];
       char next_jnt_path[1024];
 
+      if (line_len <= 1)
+        continue;
+
+      /* remove the trailing newline from the line */
+      line[line_len - 1] = '\0';
+
       xsnprintf(next_labels_path, "%s/labels/%s.png", top_src_dir, line);
       xsnprintf(next_depth_path, "%s/depth/%s.exr", top_src_dir, line);
       xsnprintf(next_jnt_path, "%s/labels/%s.jnt", top_src_dir, line);
