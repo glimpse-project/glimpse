@@ -344,10 +344,15 @@ gather_train_data(const char* data_dir,
   data.depth_spec.width = width;
   data.depth_spec.height = height;
 
-  validate_storage(&data, "meta.json", 0);
-
   gather_train_files(data_dir, index_name, &data);
+
   data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
+
+  /* This will allocate memory for all our image data based on the camera size
+   * read from meta.json, and the number of frames found in the index loaded by
+   * gather_train_failes...
+   */
+  validate_storage(&data, "meta.json", 0);
 
   *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
   printf("Processing %d training images...\n", *out_n_images);
