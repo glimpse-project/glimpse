@@ -429,7 +429,11 @@ load_frame_labels(const char *dir,
 
     IUImageSpec spec = { 0, 0, IU_FORMAT_U8 };
     uint8_t *data = NULL;
-    if (iu_read_png_from_file(input_filename, &spec, &data) != SUCCESS) {
+    if (iu_read_png_from_file(input_filename, &spec, &data,
+                              NULL, // palette output
+                              NULL) // palette size
+        != SUCCESS)
+    {
         return NULL;
     }
     int width = spec.width;

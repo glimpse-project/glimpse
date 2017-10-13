@@ -314,8 +314,11 @@ decode_png(uint8_t *buf, int len)
 {
     IUImageSpec spec = { 0, 0, IU_FORMAT_U8 };
     struct image *img = xalloc_image(IMAGE_FORMAT_X8, spec.width, spec.height);
-    if (iu_read_png_from_memory(buf, len, &spec, &img->data_u8) !=
-        SUCCESS) {
+    if (iu_read_png_from_memory(buf, len, &spec, &img->data_u8,
+                                NULL, // palette output
+                                NULL) // palette size
+        != SUCCESS)
+    {
         free_image(img);
         return NULL;
     }

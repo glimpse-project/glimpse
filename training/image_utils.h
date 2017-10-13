@@ -42,15 +42,15 @@ typedef struct {
 IUReturnCode iu_read_png_from_file(const char*  filename,
                                    IUImageSpec* spec,
                                    uint8_t**    output,
-                                   void**       pal_output = NULL,
-                                   int*         pal_size = NULL);
+                                   void**       pal_output,
+                                   int*         pal_size);
 
 IUReturnCode iu_read_png_from_memory(uint8_t*     buffer,
                                      size_t       len,
                                      IUImageSpec* spec,
                                      uint8_t**    output,
-                                     void**       pal_output = NULL,
-                                     int*         pal_size = NULL);
+                                     void**       pal_output,
+                                     int*         pal_size);
 
 IUReturnCode iu_verify_png_from_memory(uint8_t*     buffer,
                                        size_t       len,
@@ -59,8 +59,8 @@ IUReturnCode iu_verify_png_from_memory(uint8_t*     buffer,
 IUReturnCode iu_write_png_to_file(const char*  filename,
                                   IUImageSpec* spec,
                                   void*        data,
-                                  void*        pal = NULL,
-                                  int          pal_size = 0);
+                                  void*        pal,
+                                  int          pal_size);
 
 IUReturnCode iu_read_exr_from_file(const char*  filename,
                                    IUImageSpec* spec,
