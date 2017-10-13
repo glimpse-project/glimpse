@@ -160,7 +160,14 @@ read_forest(char **files, unsigned n_files)
         tree_buf_lengths[i] = sb.st_size;
     }
 
-  return load_forest(tree_bufs, tree_buf_lengths, n_trees);
+  RDTree** forest = load_forest(tree_bufs, tree_buf_lengths, n_trees);
+
+  for (unsigned i = 0; i < n_files; i++)
+    {
+      xfree(tree_bufs[i]);
+    }
+
+  return forest;
 }
 
 void
