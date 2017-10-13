@@ -26,7 +26,7 @@ DepthImage*
 ReadEXR(const char* aFileName)
 {
   half* output = NULL;
-  IUImageSpec spec = { 0, 0, 16, 1 };
+  IUImageSpec spec = { 0, 0, IU_FORMAT_HALF };
   if (iu_read_exr_from_file(aFileName, &spec, (void**)&output) == SUCCESS)
     {
       return new DepthImage(output, spec.width, spec.height);
