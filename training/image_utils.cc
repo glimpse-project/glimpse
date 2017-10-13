@@ -563,6 +563,8 @@ iu_write_exr_to_file(const char* filename,
   header.channels = &channel_info;
   strcpy(channel_info.name, "Y");
 
+  header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+
   int input_format = (spec->format == IU_FORMAT_FLOAT ?
                       TINYEXR_PIXELTYPE_FLOAT : TINYEXR_PIXELTYPE_HALF);
   int final_format = (format == IU_FORMAT_FLOAT ?
