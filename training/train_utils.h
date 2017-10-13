@@ -6,9 +6,7 @@
 
 #include "half.hpp"
 
-void gather_train_data(const char* label_dir_path,
-                       const char* depth_dir_path,
-                       const char* joint_dir_path,
+void gather_train_data(const char* data_dir,
                        uint32_t    limit,
                        uint32_t    skip,
                        bool        shuffle,

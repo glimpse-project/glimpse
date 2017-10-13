@@ -409,7 +409,7 @@ static void
 print_usage(FILE* stream)
 {
   fprintf(stream,
-"Usage: train_rdt <fov> <n labels> <label dir> <depth dir> <out file> [OPTIONS]\n"
+"Usage: train_rdt <fov> <n labels> <data dir> <out file> [OPTIONS]\n"
 "Train a randomised decision tree to infer n_labels from depth and label images\n"
 "with a given camera FOV. Default values assume depth data to be in meters.\n"
 "\n"
@@ -617,14 +617,14 @@ main(int argc, char **argv)
 
   printf("Opening output file...\n");
   FILE* output;
-  if (!(output = fopen(argv[5], "wb")))
+  if (!(output = fopen(argv[4], "wb")))
     {
-      fprintf(stderr, "Failed to open output file '%s'\n", argv[5]);
+      fprintf(stderr, "Failed to open output file '%s'\n", argv[4]);
       exit(1);
     }
 
   printf("Scanning training directories...\n");
-  gather_train_data(argv[3], argv[4], NULL, limit, skip, shuffle,
+  gather_train_data(argv[3], limit, skip, shuffle,
                     &ctx.n_images, NULL, &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images, NULL);
 
@@ -852,7 +852,7 @@ main(int argc, char **argv)
   printf("(%02d:%02d:%02d / %02d:%02d:%02d) Writing output to '%s'...\n",
          since_begin.hours, since_begin.minutes, since_begin.seconds,
          since_last.hours, since_last.minutes, since_last.seconds,
-         argv[5]);
+         argv[4]);
 
   // Write a header
   RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \

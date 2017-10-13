@@ -12,6 +12,11 @@
 
 using half_float::half;
 
+#define xsnprintf(dest, fmt, ...) do { \
+        if (snprintf(dest, sizeof(dest), fmt,  __VA_ARGS__) >= (int)sizeof(dest)) \
+            exit(1); \
+    } while(0)
+
 typedef struct {
   uint32_t n_images;      // Number of training images
   uint8_t  n_joints;      // Number of joints
@@ -46,103 +51,57 @@ gather_cb(const char* label_path, const char* depth_path,
 }
 
 static bool
-gather_train_files(const char* label_dir_path,
-                   const char* depth_dir_path,
-                   const char* joint_dir_path,
-                   TrainData*  data)
+gather_train_files(const char* top_src_dir,
+                   const char* rel_path,
+                   TrainData* data)
 {
-  struct stat st;
-  DIR *dir;
-  struct dirent *entry;
-  const char* dir_path;
+  char labels_path[1024];
+  DIR *labels_dir;
+  struct dirent *label_entry;
   char *ext;
-  bool cont;
+  bool cont = true;
 
-  if (!label_dir_path && !depth_dir_path && !joint_dir_path)
+  xsnprintf(labels_path, "%s/labels/%s", top_src_dir, rel_path);
+  labels_dir = opendir(labels_path);
+
+  while (cont && (label_entry = readdir(labels_dir)) != NULL)
     {
-      return true;
-    }
+      char next_labels_path[1024];
+      char next_rel_path[1024];
+      struct stat st;
 
-  cont = true;
-  dir_path = label_dir_path ? label_dir_path :
-                              (depth_dir_path ? depth_dir_path :
-                                                joint_dir_path);
-  dir = opendir(dir_path);
-
-  while (cont && (entry = readdir(dir)) != NULL)
-    {
-      char *next_label_path = NULL;
-      char *next_depth_path = NULL;
-      char *next_joint_path = NULL;
-
-      if (strcmp(entry->d_name, ".") == 0 ||
-          strcmp(entry->d_name, "..") == 0)
+      if (strcmp(label_entry->d_name, ".") == 0 ||
+          strcmp(label_entry->d_name, "..") == 0)
           continue;
 
-      if ((label_dir_path &&
-           asprintf(&next_label_path, "%s/%s",
-                    label_dir_path, entry->d_name) == -1) ||
-          (depth_dir_path &&
-           asprintf(&next_depth_path, "%s/%s",
-                    depth_dir_path, entry->d_name) == -1) ||
-          (joint_dir_path &&
-           asprintf(&next_joint_path, "%s/%s",
-                    joint_dir_path, entry->d_name) == -1))
-        {
-          fprintf(stderr, "Error creating file paths\n");
-          exit(1);
-        }
+      xsnprintf(next_labels_path, "%s/labels/%s/%s",
+                top_src_dir, next_rel_path, label_entry->d_name);
+      xsnprintf(next_rel_path, "%s/%s", rel_path, label_entry->d_name);
 
-      stat(label_dir_path ? next_label_path :
-                            (depth_dir_path ? next_depth_path :
-                                              next_joint_path), &st);
+      stat(next_labels_path, &st);
       if (S_ISDIR(st.st_mode))
         {
-          cont = gather_train_files(next_label_path, next_depth_path,
-                                    next_joint_path, data);
+          gather_train_files(top_src_dir, next_rel_path, data);
         }
-      else if ((dir_path == label_dir_path &&
-                (ext = strstr(entry->d_name, ".png")) && ext[4] == '\0') ||
-               (dir_path == depth_dir_path &&
-                (ext = strstr(entry->d_name, ".exr")) && ext[4] == '\0') ||
-               (dir_path == joint_dir_path &&
-                (ext = strstr(entry->d_name, ".jnt")) && ext[4] == '\0'))
+      else if ((ext = strstr(label_entry->d_name, ".png")) && ext[4] == '\0')
         {
-          if (label_dir_path)
-            {
-              if (depth_dir_path)
-                {
-                  strcpy(next_depth_path + strlen(next_depth_path) - 4, ".exr");
-                }
-              if (joint_dir_path)
-                {
-                  strcpy(next_joint_path + strlen(next_joint_path) - 4, ".jnt");
-                }
-            }
-          else if (depth_dir_path && joint_dir_path)
-            {
-              strcpy(next_joint_path + strlen(next_joint_path) - 4, ".jnt");
-            }
+          char next_depth_path[1024];
+          char next_jnt_path[1024];
 
+          xsnprintf(next_depth_path, "%s/depth/%s/%.*s.exr",
+                    top_src_dir, next_rel_path,
+                    (int)strlen(label_entry->d_name) - 4,
+                    label_entry->d_name);
+          xsnprintf(next_jnt_path, "%s/labels/%s/%.*s.jnt",
+                    top_src_dir, next_rel_path,
+                    (int)strlen(label_entry->d_name) - 4,
+                    label_entry->d_name);
           cont =
-            gather_cb(next_label_path, next_depth_path, next_joint_path, data);
-        }
-
-      if (label_dir_path)
-        {
-          free(next_label_path);
-        }
-      if (depth_dir_path)
-        {
-          free(next_depth_path);
-        }
-      if (joint_dir_path)
-        {
-          free(next_joint_path);
+            gather_cb(next_labels_path, next_depth_path, next_jnt_path, data);
         }
     }
 
-  closedir(dir);
+  closedir(labels_dir);
 
   return cont;
 }
@@ -345,8 +304,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
 }
 
 void
-gather_train_data(const char* label_dir_path, const char* depth_dir_path,
-                  const char* joint_dir_path,
+gather_train_data(const char* data_dir,
                   uint32_t limit, uint32_t skip, bool shuffle,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
@@ -365,12 +323,12 @@ gather_train_data(const char* label_dir_path, const char* depth_dir_path,
     NULL,                                 // Depth image data
     NULL,                                 // Label image data
     NULL,                                 // Joint data
-    (depth_dir_path && out_depth_images), // Whether to gather depth images
-    (label_dir_path && out_label_images), // Whether to gather label images
-    (joint_dir_path && out_joints)        // Whether to gather joint data
+    !!out_depth_images,                   // Whether to gather depth images
+    !!out_label_images,                   // Whether to gather label images
+    !!out_joints                          // Whether to gather joint data
   };
 
-  gather_train_files(label_dir_path, depth_dir_path, joint_dir_path, &data);
+  gather_train_files(data_dir, "", &data);
   data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
 
   *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;

@@ -52,6 +52,8 @@ typedef struct {
   float*   offsets;       // Z offsets to test
 
   uint32_t n_threads;     // Number of threads to use for work
+
+  bool check_accuracy;    // Test the accuracy of joint inferrence
 } TrainContext;
 
 typedef struct {
@@ -69,8 +71,7 @@ static void
 print_usage(FILE* stream)
 {
   fprintf(stream,
-"Usage: train_joint_params <depth dir> \\\n"
-"                          <joint dir> \\\n"
+"Usage: train_joint_params <data dir> \\\n"
 "                          <joint map> \\\n"
 "                          <out_file> \\\n"
 "                          [OPTIONS] \\\n"
@@ -83,9 +84,9 @@ print_usage(FILE* stream)
 "  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
 "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
 "  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
-"  -c, --labeldir=DIR          Label image directory\n"
 "  -g, --background=NUMBER     Background label id (default: 0)\n"
 "  -m, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
+"  -a, --accuracy              Report accuracy of joint inference\n"
 "  -v, --verbose               Verbose output\n"
 "  -h, --help                  Display this message\n");
 }
@@ -163,7 +164,7 @@ thread_body(void* userdata)
         }
 
       // Calculate inference accuracy if label images were specified
-      if (ctx->label_images)
+      if (ctx->check_accuracy)
         {
           uint32_t label_incidence[n_labels];
           uint32_t correct_label_incidence[n_labels];
@@ -220,7 +221,7 @@ thread_body(void* userdata)
         }
     }
 
-  if (ctx->label_images)
+  if (ctx->check_accuracy)
     {
       *data->accuracy /= (float)(i_end - i_start);
     }
@@ -535,11 +536,9 @@ main (int argc, char** argv)
   ctx.n_threads = std::thread::hardware_concurrency();
 
   // Pass arguments
-  char* label_dir = NULL;
-  char* depth_dir = argv[1];
-  char* joint_dir = argv[2];
-  char* joint_map_path = argv[3];
-  char* out_filename = argv[4];
+  char* data_dir = argv[1];
+  char* joint_map_path = argv[2];
+  char* out_filename = argv[3];
 
   char** tree_paths = NULL;
   for (int i = 5; i < argc; i++)
@@ -596,9 +595,9 @@ main (int argc, char** argv)
             {
               param = 'z';
             }
-          else if (strstr(arg, "labeldir="))
+          else if (strstr(arg, "accuracy"))
             {
-              param = 'c';
+              param = 'a';
             }
           else if (strstr(arg, "background="))
             {
@@ -674,8 +673,8 @@ main (int argc, char** argv)
         case 'z':
           read_three(value, &min_offset, &max_offset, &ctx.n_offsets);
           break;
-        case 'c':
-          label_dir = value;
+        case 'a':
+          ctx.check_accuracy = true;
           break;
         case 'g':
           ctx.bg_label = (uint8_t)atoi(value);
@@ -700,9 +699,13 @@ main (int argc, char** argv)
   ctx.forest = read_forest(tree_paths, ctx.n_trees);
 
   printf("Scanning training directories...\n");
-  gather_train_data(label_dir, depth_dir, joint_dir, limit, skip, shuffle,
-                    &ctx.n_images, &ctx.n_joints, &ctx.width, &ctx.height,
-                    &ctx.depth_images, &ctx.label_images, &ctx.joints);
+  gather_train_data(data_dir, limit, skip, shuffle,
+                    &ctx.n_images,
+                    &ctx.n_joints,
+                    &ctx.width, &ctx.height,
+                    &ctx.depth_images,
+                    ctx.check_accuracy ? &ctx.label_images : NULL,
+                    &ctx.joints);
 
   // Note, there's a background label, so there ought to always be fewer joints
   // than labels. Maybe there are some situations where this might be desired
@@ -848,7 +851,7 @@ main (int argc, char** argv)
 
   pthread_barrier_wait(&barrier);
 
-  if (ctx.label_images)
+  if (ctx.check_accuracy)
     {
       // We no longer need the label images
       xfree(ctx.label_images);
