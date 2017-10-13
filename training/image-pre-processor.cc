@@ -788,7 +788,7 @@ ensure_directory(const char *path)
     ret = stat(path, &st);
     if (ret == -1) {
         int ret = mkdir(path, 0777);
-        if (ret < 0) {
+        if (ret < 0 && errno != EEXIST) {
             fprintf(stderr, "Failed to create destination directory %s: %m\n", path);
             exit(1);
         }
@@ -814,9 +814,6 @@ directory_recurse(const char *rel_path)
     //xsnprintf(depth_src_path, "%s/depth/%s", top_src_dir, rel_path);
     xsnprintf(label_dst_path, "%s/labels/%s", top_out_dir, rel_path);
     xsnprintf(depth_dst_path, "%s/depth/%s", top_out_dir, rel_path);
-
-    ensure_directory(label_dst_path);
-    ensure_directory(depth_dst_path);
 
     label_dir = opendir(label_src_path);
 
@@ -870,8 +867,12 @@ worker_thread_cb(void *data)
         struct work work;
 
         char label_dir_path[1024];
+        char label_dst_path[1024];
+        char depth_dst_path[1024];
 
         struct image *prev_frame_labels = NULL;
+
+        bool ensure_dir_done = false;
 
         pthread_mutex_lock(&work_queue_lock);
         if (!work_queue.empty()) {
@@ -885,6 +886,9 @@ worker_thread_cb(void *data)
         pthread_mutex_unlock(&work_queue_lock);
 
         xsnprintf(label_dir_path, "%s/labels/%s", top_src_dir, work.dir);
+
+        xsnprintf(label_dst_path, "%s/labels/%s", top_out_dir, work.dir);
+        xsnprintf(depth_dst_path, "%s/depth/%s", top_out_dir, work.dir);
 
         for (unsigned i = 0; i < work.files.size(); i++) {
             debug("Thread %d: processing %s/%s\n", state->idx, work.dir, work.files[i]);
@@ -935,6 +939,12 @@ worker_thread_cb(void *data)
             if (prev_frame_labels)
                 free_image(prev_frame_labels);
             prev_frame_labels = labels;
+
+            if (!ensure_dir_done) {
+                ensure_directory(label_dst_path);
+                ensure_directory(depth_dst_path);
+                ensure_dir_done = true;
+            }
 
             xsnprintf(filename, "%.*s.exr",
                       (int)strlen(work.files[i]) - 4,
@@ -1318,6 +1328,8 @@ static_assert(BACKGROUND_ID == 33, "");
            (int)work_queue.size(),
            get_duration_ns_print_scale(duration_ns),
            get_duration_ns_print_scale_suffix(duration_ns));
+
+    ensure_directory(top_out_dir);
 
     char index_filename[512];
     xsnprintf(index_filename, "%s/index", top_out_dir);
