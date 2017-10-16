@@ -17,6 +17,11 @@ typedef vector(int32_t, 2) Int2D;
 typedef vector(float, 4) UVPair;
 
 typedef struct {
+  Int2D xy;
+  uint32_t i;
+} Int3D;
+
+typedef struct {
   UVPair uv;              // U and V parameters
   float t;                // Threshold
   uint32_t label_pr_idx;  // Index into label probability table (1-based)

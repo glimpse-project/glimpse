@@ -48,8 +48,8 @@ typedef struct {
 typedef struct {
   uint32_t  id;              // Unique id to place the node a tree.
   uint32_t  depth;           // Tree depth at which this node sits.
-  uint32_t* pixel_base;      // Index at which a particular image's pixels starts
-  Int2D*    pixels;          // A list of pixel pairs.
+  uint32_t  n_pixels;        // Number of pixels that have reached this node.
+  Int3D*    pixels;          // A list of pixel pairs and image indices.
 } NodeTrainData;
 
 typedef struct {
@@ -68,46 +68,36 @@ typedef struct {
 
 static NodeTrainData*
 create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
-                       uint32_t* pixel_base, Int2D* pixels)
+                       uint32_t n_pixels, Int3D* pixels)
 {
   NodeTrainData* data = (NodeTrainData*)xcalloc(1, sizeof(NodeTrainData));
 
   data->id = id;
   data->depth = depth;
 
-  if (pixel_base)
-    {
-      data->pixel_base = pixel_base;
-    }
-  else
-    {
-      // Assume this is the root node and each image has n_pixels
-      size_t size_pixel_base = (ctx->n_images + 1) * sizeof(uint32_t);
-      data->pixel_base = (uint32_t*)xmalloc(size_pixel_base);
-      for (uint32_t i = 0; i <= ctx->n_images; i++)
-        {
-          data->pixel_base[i] = i * ctx->n_pixels;
-        }
-    }
-
   if (pixels)
     {
       data->pixels = pixels;
+      data->n_pixels = n_pixels;
     }
   else
     {
       // Assume this is the root node and generate random coordinates
-      uint32_t total_pixels = ctx->n_images * ctx->n_pixels;
-      data->pixels = (Int2D*)xmalloc(total_pixels * sizeof(Int2D));
+      data->n_pixels = ctx->n_images * ctx->n_pixels;
+      data->pixels = (Int3D*)xmalloc(data->n_pixels * sizeof(Int3D));
 
       //std::random_device rd;
       std::mt19937 rng(seed);
       std::uniform_int_distribution<int> rand_x(0, ctx->width - 1);
       std::uniform_int_distribution<int> rand_y(0, ctx->height - 1);
-      for (uint32_t i = 0; i < total_pixels; i++)
+      for (uint32_t i = 0, idx = 0; i < ctx->n_images; i++)
         {
-          data->pixels[i][0] = rand_x(rng);
-          data->pixels[i][1] = rand_y(rng);
+          for (uint32_t j = 0; j < ctx->n_pixels; j++, idx++)
+            {
+              data->pixels[idx].xy[0] = rand_x(rng);
+              data->pixels[idx].xy[1] = rand_y(rng);
+              data->pixels[idx].i = i;
+            }
         }
     }
 
@@ -118,7 +108,6 @@ static void
 destroy_node_train_data(NodeTrainData* data)
 {
   xfree(data->pixels);
-  xfree(data->pixel_base);
   xfree(data);
 }
 
@@ -180,61 +169,59 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
                       uint32_t c_start, uint32_t c_end,
                       uint32_t* root_histogram, uint32_t* lr_histograms)
 {
-  uint32_t image_idx = 0;
-  for (uint32_t i = 0; i < ctx->n_images;
-       i++, image_idx += ctx->width * ctx->height)
+  for (uint32_t p = 0; p < data->n_pixels; p++)
     {
+      Int2D pixel = data->pixels[p].xy;
+      uint32_t i = data->pixels[p].i;
+      uint32_t image_idx = i * ctx->width * ctx->height;
+
       half* depth_image = &ctx->depth_images[image_idx];
       uint8_t* label_image = &ctx->label_images[image_idx];
 
-      for (uint32_t p = data->pixel_base[i]; p < data->pixel_base[i + 1]; p++)
+      uint32_t pixel_idx = (pixel[1] * ctx->width) + pixel[0];
+      uint8_t label = label_image[pixel_idx];
+      float depth = depth_image[pixel_idx];
+
+      if (label >= ctx->n_labels)
         {
-          Int2D pixel = data->pixels[p];
-          uint32_t pixel_idx = (pixel[1] * ctx->width) + pixel[0];
-          uint8_t label = label_image[pixel_idx];
-          float depth = depth_image[pixel_idx];
+          fprintf(stderr, "Label '%u' is bigger than expected (max %u)\n",
+                  (uint32_t)label, (uint32_t)ctx->n_labels - 1);
+          exit(1);
+        }
 
-          if (label >= ctx->n_labels)
+      // Accumulate root histogram
+      ++root_histogram[label];
+
+      // Don't waste processing time if this is the last depth
+      if (data->depth >= (uint32_t)ctx->max_depth - 1)
+        {
+          continue;
+        }
+
+      // Accumulate LR branch histograms
+
+      // Sample pixels
+      float samples[c_end - c_start];
+      for (uint32_t c = c_start; c < c_end; c++)
+        {
+          UVPair uv = ctx->uvs[c];
+          samples[c - c_start] = sample_uv(depth_image,
+                                           ctx->width, ctx->height,
+                                           pixel, depth, uv);
+        }
+
+      // Partition on thresholds
+      for (uint32_t c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
+        {
+          for (uint32_t t = 0; t < ctx->n_t;
+               t++, lr_histogram_idx += ctx->n_labels * 2)
             {
-              fprintf(stderr, "Label '%u' is bigger than expected (max %u)\n",
-                      (uint32_t)label, (uint32_t)ctx->n_labels - 1);
-              exit(1);
-            }
-
-          // Accumulate root histogram
-          ++root_histogram[label];
-
-          // Don't waste processing time if this is the last depth
-          if (data->depth >= (uint32_t)ctx->max_depth - 1)
-            {
-              continue;
-            }
-
-          // Accumulate LR branch histograms
-
-          // Sample pixels
-          float samples[c_end - c_start];
-          for (uint32_t c = c_start; c < c_end; c++)
-            {
-              UVPair uv = ctx->uvs[c];
-              samples[c - c_start] = sample_uv(depth_image,
-                                               ctx->width, ctx->height,
-                                               pixel, depth, uv);
-            }
-
-          // Partition on thresholds
-          for (uint32_t c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
-            {
-              for (uint32_t t = 0; t < ctx->n_t;
-                   t++, lr_histogram_idx += ctx->n_labels * 2)
-                {
-                  // Accumulate histogram for this particular uvt combination
-                  // on both theoretical branches
-                  float threshold = ctx->ts[t];
-                  ++lr_histograms[samples[c] < threshold ?
-                    lr_histogram_idx + label :
-                    lr_histogram_idx + ctx->n_labels + label];
-                }
+              // Accumulate histogram for this particular uvt combination
+              // on both theoretical branches
+              float threshold = ctx->ts[t];
+              ++lr_histograms[samples[c] < threshold ?
+                lr_histogram_idx + label :
+                lr_histogram_idx + ctx->n_labels + label];
             }
         }
     }
@@ -356,45 +343,31 @@ thread_body(void* userdata)
 
 static void
 collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
-               uint32_t** l_pixel_base, Int2D** l_pixels,
-               uint32_t** r_pixel_base, Int2D** r_pixels,
-               uint32_t* n_lr_pixels)
+               Int3D** l_pixels, Int3D** r_pixels, uint32_t* n_lr_pixels)
 {
-  *l_pixel_base = (uint32_t*)xcalloc(ctx->n_images + 1, sizeof(uint32_t));
-  *r_pixel_base = (uint32_t*)xcalloc(ctx->n_images + 1, sizeof(uint32_t));
+  *l_pixels = (Int3D*)xmalloc(n_lr_pixels[0] * sizeof(Int3D));
+  *r_pixels = (Int3D*)xmalloc(n_lr_pixels[1] * sizeof(Int3D));
 
-  *l_pixels = (Int2D*)xmalloc(n_lr_pixels[0] * sizeof(Int2D));
-  *r_pixels = (Int2D*)xmalloc(n_lr_pixels[1] * sizeof(Int2D));
-
-  uint32_t image_idx = 0;
-  for (uint32_t i = 0; i < ctx->n_images; i++)
+  uint32_t l_index = 0;
+  uint32_t r_index = 0;
+  for (uint32_t p = 0; p < data->n_pixels; p++)
     {
+      Int3D* pixel = &data->pixels[p];
+      uint32_t image_idx = pixel->i * ctx->width * ctx->height;
       half* depth_image = &ctx->depth_images[image_idx];
-      for (uint32_t p = data->pixel_base[i]; p < data->pixel_base[i + 1]; p++)
-        {
-          Int2D pixel = data->pixels[p];
-          float depth = depth_image[(pixel[1] * ctx->width) + pixel[0]];
-          float value = sample_uv(depth_image, ctx->width, ctx->height,
-                                  pixel, depth, uv);
 
-          if (value < t)
-            {
-              (*l_pixels)[(*l_pixel_base)[i + 1]] = pixel;
-              ++(*l_pixel_base)[i + 1];
-            }
-          else
-            {
-              (*r_pixels)[(*r_pixel_base)[i + 1]] = pixel;
-              ++(*r_pixel_base)[i + 1];
-            }
-        }
+      float depth = depth_image[(pixel->xy[1] * ctx->width) + pixel->xy[0]];
+      float value = sample_uv(depth_image, ctx->width, ctx->height,
+                              pixel->xy, depth, uv);
 
-      if (i < ctx->n_images - 1)
+      if (value < t)
         {
-          (*l_pixel_base)[i + 2] = (*l_pixel_base)[i + 1];
-          (*r_pixel_base)[i + 2] = (*r_pixel_base)[i + 1];
+          (*l_pixels)[l_index++] = *pixel;
         }
-      image_idx += ctx->width * ctx->height;
+      else
+        {
+          (*r_pixels)[r_index++] = *pixel;
+        }
     }
 }
 
@@ -666,7 +639,7 @@ main(int argc, char **argv)
   uint32_t n_histograms = 0;
 
   LList* train_queue =
-    llist_new(create_node_train_data(&ctx, 0, 0, NULL, NULL));
+    llist_new(create_node_train_data(&ctx, 0, 0, 0, NULL));
   float* root_nhistogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
 
   NodeTrainData* node_data;
@@ -774,22 +747,18 @@ main(int argc, char **argv)
                      node->t);
             }
 
-          uint32_t* l_pixel_base;
-          uint32_t* r_pixel_base;
-          Int2D* l_pixels;
-          Int2D* r_pixels;
+          Int3D* l_pixels;
+          Int3D* r_pixels;
 
           collect_pixels(&ctx, node_data, node->uv, node->t,
-                         &l_pixel_base, &l_pixels,
-                         &r_pixel_base, &r_pixels,
-                         n_lr_pixels);
+                         &l_pixels, &r_pixels, n_lr_pixels);
 
           uint32_t id = (2 * node_data->id) + 1;
           uint32_t depth = node_data->depth + 1;
-          NodeTrainData* ldata =
-            create_node_train_data(&ctx, id, depth, l_pixel_base, l_pixels);
-          NodeTrainData* rdata =
-            create_node_train_data(&ctx, id + 1, depth, r_pixel_base, r_pixels);
+          NodeTrainData* ldata = create_node_train_data(
+            &ctx, id, depth, n_lr_pixels[0], l_pixels);
+          NodeTrainData* rdata = create_node_train_data(
+            &ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
 
           // Insert nodes into the training queue
           llist_insert_after(
