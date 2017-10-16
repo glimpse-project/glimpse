@@ -40,7 +40,16 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
                 {
                   float value = sample_uv(depth_image, width, height, pixel,
                                           depth_value, node->uv);
+
+                  /* NB: The nodes are arranged in breadth-first, left then
+                   * right child order with the root node at index zero.
+                   *
+                   * In this case if you have an index for any particular node
+                   * ('id' here) then 2 * id + 1 is the index for the left
+                   * child and 2 * id + 2 is the index for the right child...
+                   */
                   id = (value < node->t) ? 2 * id + 1 : 2 * id + 2;
+
                   node = &tree->nodes[id];
                 }
 
