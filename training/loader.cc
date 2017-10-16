@@ -3,6 +3,7 @@
 
 #include <unistd.h>
 #include <string.h>
+#include <math.h>
 
 #include "loader.h"
 #include "xalloc.h"

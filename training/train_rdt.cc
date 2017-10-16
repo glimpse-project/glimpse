@@ -18,6 +18,7 @@
 #include "xalloc.h"
 #include "llist.h"
 #include "utils.h"
+#include "loader.h"
 #include "train_utils.h"
 
 using half_float::half;

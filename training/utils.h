@@ -8,7 +8,6 @@
 
 #include "half.hpp"
 
-#define RDT_VERSION 3
 #define JIP_VERSION 0
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
@@ -20,26 +19,6 @@ typedef struct {
   Int2D xy;
   uint32_t i;
 } Int3D;
-
-typedef struct {
-  UVPair uv;              // U and V parameters
-  float t;                // Threshold
-  uint32_t label_pr_idx;  // Index into label probability table (1-based)
-} Node;
-
-typedef struct __attribute__((__packed__)) {
-  char    tag[3];
-  uint8_t version;
-  uint8_t depth;
-  uint8_t n_labels;
-  float   fov;
-} RDTHeader;
-
-typedef struct __attribute__((__packed__)) {
-  char    tag[3];
-  uint8_t version;
-  uint8_t n_joints;
-} JIPHeader;
 
 inline float
 sample_uv(half_float::half* depth_image, uint32_t width, uint32_t height,
