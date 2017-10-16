@@ -10,6 +10,10 @@
 #define RDT_VERSION 3
 
 typedef struct {
+  /* XXX: Note that (at least with gcc) then uv will have a 16 byte
+   * aligment resulting in a total struct size of 32 bytes with 4 bytes
+   * alignment padding at the end
+   */
   vector(float,4) uv;     // U in [0:2] and V in [2:4]
   float t;                // Threshold
   uint32_t label_pr_idx;  // Index into label probability table (1-based)

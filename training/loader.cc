@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
+#include <cstddef>
 
 #include "loader.h"
 #include "xalloc.h"
@@ -12,6 +13,10 @@ RDTree*
 load_tree(uint8_t* tree_buf, unsigned len)
 {
   RDTree* tree = (RDTree*)xcalloc(1, sizeof(RDTree));
+
+  static_assert(sizeof(RDTHeader) == 10, "RDT ABI Breakage");
+  static_assert(sizeof(Node) == 32,      "RDT ABI Breakage");
+  static_assert(offsetof(Node, t) == 16, "RDT ABI Breakage");
 
   if (len < sizeof(RDTHeader)) {
       fprintf(stderr, "Buffer too small to contain tree\n");
