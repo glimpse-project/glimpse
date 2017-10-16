@@ -107,7 +107,7 @@ float*
 infer_joints(half* depth_image, float* pr_table, float* weights,
              int32_t width, int32_t height,
              uint8_t n_labels, LList** joint_map, uint8_t n_joints,
-             float vfov, float bandwidth, float threshold, float offset)
+             float vfov, JIParam* params)
 {
   // Use mean-shift to find the inferred joint positions, set them back into
   // the body using the given offset, and return the results
@@ -143,6 +143,7 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
 
           for (uint8_t j = 0; j < n_joints; j++)
             {
+              float threshold = params[j].threshold;
               uint32_t joint_idx = j * width * height;
               for (LList* node = joint_map[j]; node; node = node->next)
                 {
@@ -179,6 +180,9 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
         {
           continue;
         }
+
+      float bandwidth = params[j].bandwidth;
+      float offset = params[j].offset;
 
       uint32_t joint_idx = j * width * height;
       for (uint32_t s = 0; s < N_SHIFTS; s++)

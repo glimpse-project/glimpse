@@ -30,6 +30,4 @@ float* infer_joints(half_float::half* depth_image,
                     LList** joint_map,
                     uint8_t n_joints,
                     float vfov,
-                    float bandwidth,
-                    float threshold,
-                    float offset);
+                    JIParam* params);

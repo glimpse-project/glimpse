@@ -12,6 +12,17 @@ typedef struct {
   float* label_pr_tables;
 } RDTree;
 
+typedef struct {
+  float bandwidth;
+  float threshold;
+  float offset;
+} JIParam;
+
+typedef struct {
+  JIPHeader header;
+  JIParam*  joint_params;
+} JIParams;
+
 RDTree* load_tree(uint8_t* tree, unsigned len);
 void free_tree(RDTree* tree);
 
@@ -21,5 +32,8 @@ void free_forest(RDTree** forest, int n_trees);
 
 LList** read_jointmap(char* filename, uint8_t n_joints, char*** joint_names);
 void free_jointmap(LList** jointmap, uint8_t n_joints, char** joint_names);
+
+JIParams* read_jip(char* filename);
+void free_jip(JIParams* jip);
 
 #endif /* __LOADER */

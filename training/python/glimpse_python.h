@@ -5,10 +5,10 @@ namespace Glimpse
 {
   class DepthImage {
     friend class Forest;
-
-    friend DepthImage* ReadEXR(const char* aFileName);
+    friend class JointMap;
 
     private:
+      bool              mValid;
       half_float::half* mDepthImage;
       uint32_t          mWidth;
       uint32_t          mHeight;
@@ -18,10 +18,13 @@ namespace Glimpse
                  uint32_t          aHeight);
 
     public:
+      DepthImage(const char* aFileName);
       ~DepthImage();
   };
 
   class Forest {
+    friend class JointMap;
+
     private:
       RDTree**     mForest;
       unsigned int mNTrees;
@@ -38,5 +41,21 @@ namespace Glimpse
                        int*        aNLabels);
   };
 
-  DepthImage* ReadEXR(const char* aFileName);
+  class JointMap {
+    private:
+      bool mValid;
+      JIParams* mParams;
+      LList** mJointMap;
+      char**  mJointNames;
+
+    public:
+      JointMap(char* aJointMap, char* aJointInferenceParams);
+      ~JointMap();
+
+      void inferJoints(Forest*     aForest,
+                       DepthImage* aDepthImage,
+                       float**     aJoints,
+                       int*        aOutNJoints,
+                       int*        aOutNDims);
+  };
 }

@@ -242,6 +242,14 @@ thread_body(void* userdata)
       float threshold = ctx->thresholds[threshold_idx];
       float offset = ctx->offsets[offset_idx];
 
+      JIParam params[ctx->n_joints];
+      for (int i = 0; i < ctx->n_joints; i++)
+        {
+          params[i].bandwidth = bandwidth;
+          params[i].threshold = threshold;
+          params[i].offset = offset;
+        }
+
       /* NB: clang doesn't allow using an = {0} initializer with dynamic
        * sized arrays...
        */
@@ -262,7 +270,7 @@ thread_body(void* userdata)
                                        ctx->width, ctx->height, n_labels,
                                        ctx->joint_map, ctx->n_joints,
                                        ctx->forest[0]->header.fov,
-                                       bandwidth, threshold, offset);
+                                       params);
 
           // Calculate distance from expected joint position and accumulate
           for (uint8_t j = 0; j < ctx->n_joints; j++)

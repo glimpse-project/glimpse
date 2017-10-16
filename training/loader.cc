@@ -278,3 +278,58 @@ free_jointmap(LList** jointmap, uint8_t n_joints, char** joint_names)
     }
   xfree(jointmap);
 }
+
+JIParams*
+read_jip(char* filename)
+{
+  FILE* jip_file = fopen(filename, "r");
+  if (!jip_file)
+    {
+      fprintf(stderr, "Error opening JIP file\n");
+      return NULL;
+    }
+
+  JIParams* jip = (JIParams*)xcalloc(1, sizeof(JIParams));
+  if (fread(&jip->header, sizeof(JIPHeader), 1, jip_file) != 1)
+    {
+      fprintf(stderr, "Error reading header\n");
+      goto read_jip_error;
+    }
+
+  jip->joint_params = (JIParam*)xmalloc(jip->header.n_joints * sizeof(JIParam));
+  for (int i = 0; i < jip->header.n_joints; i++)
+    {
+      float params[3];
+      if (fread(params, sizeof(float), 3, jip_file) != 3)
+        {
+          fprintf(stderr, "Error reading parameters\n");
+          goto read_jip_error;
+        }
+
+      jip->joint_params[i].bandwidth = params[0];
+      jip->joint_params[i].threshold = params[0];
+      jip->joint_params[i].offset = params[0];
+    }
+
+  if (fclose(jip_file) != 0)
+    {
+      fprintf(stderr, "Error closing JIP file\n");
+    }
+
+  return jip;
+
+read_jip_error:
+  free_jip(jip);
+  fclose(jip_file);
+  return NULL;
+}
+
+void
+free_jip(JIParams* jip)
+{
+  if (jip->joint_params)
+    {
+      xfree(jip->joint_params);
+    }
+  xfree(jip);
+}

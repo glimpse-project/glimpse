@@ -11,28 +11,30 @@ DepthImage::DepthImage(half* aDepthImage, uint32_t aWidth, uint32_t aHeight)
   mDepthImage = aDepthImage;
   mWidth = aWidth;
   mHeight = aHeight;
+  mValid = true;
+}
+
+DepthImage::DepthImage(const char* aFileName)
+{
+  mValid = false;
+
+  mDepthImage = NULL;
+  IUImageSpec spec = { 0, 0, IU_FORMAT_HALF };
+  if (iu_read_exr_from_file(aFileName, &spec, (void**)&mDepthImage) == SUCCESS)
+    {
+      mWidth = spec.width;
+      mHeight = spec.height;
+      mValid = true;
+    }
 }
 
 DepthImage::~DepthImage()
 {
-  if (mDepthImage)
+  if (mValid)
     {
       xfree(mDepthImage);
-      mDepthImage = NULL;
+      mValid = false;
     }
-}
-
-DepthImage*
-ReadEXR(const char* aFileName)
-{
-  half* output = NULL;
-  IUImageSpec spec = { 0, 0, IU_FORMAT_HALF };
-  if (iu_read_exr_from_file(aFileName, &spec, (void**)&output) == SUCCESS)
-    {
-      return new DepthImage(output, spec.width, spec.height);
-    }
-
-  return NULL;
 }
 
 Forest::Forest(char** aFiles, unsigned int aNFiles)
@@ -55,7 +57,7 @@ void
 Forest::inferLabels(DepthImage* aDepthImage, float** aLabelPr,
                     int* aOutWidth, int* aOutHeight, int* aNLabels)
 {
-  if (!mForest)
+  if (!mForest || !aDepthImage->mValid)
     {
       return;
     }
@@ -65,6 +67,66 @@ Forest::inferLabels(DepthImage* aDepthImage, float** aLabelPr,
   *aOutWidth = aDepthImage->mWidth;
   *aOutHeight = aDepthImage->mHeight;
   *aNLabels = mForest[0]->header.n_labels;
+}
+
+JointMap::JointMap(char* aJointMap, char* aJointInferenceParams)
+{
+  mValid = false;
+  mParams = read_jip(aJointInferenceParams);
+  if (mParams)
+    {
+      mJointMap =
+        read_jointmap(aJointMap, mParams->header.n_joints, &mJointNames);
+      if (mJointMap)
+        {
+          mValid = true;
+        }
+      else
+        {
+          free_jip(mParams);
+        }
+    }
+}
+
+JointMap::~JointMap()
+{
+  if (mValid)
+    {
+      mValid = false;
+      free_jointmap(mJointMap, mParams->header.n_joints, mJointNames);
+      free_jip(mParams);
+    }
+}
+
+void
+JointMap::inferJoints(Forest* aForest, DepthImage* aDepthImage,
+                      float** aJoints, int* aOutNJoints, int* aOutNDims)
+{
+  if (!mValid || !aForest->mForest || !aDepthImage->mValid)
+    {
+      return;
+    }
+
+  float* pr_table;
+  int width, height, n_labels;
+  aForest->inferLabels(aDepthImage, &pr_table, &width, &height, &n_labels);
+
+  float* weights = calc_pixel_weights(aDepthImage->mDepthImage,
+                                      pr_table, width, height, n_labels,
+                                      mJointMap, mParams->header.n_joints);
+
+  *aJoints = infer_joints(aDepthImage->mDepthImage, pr_table, weights,
+                          aDepthImage->mWidth, aDepthImage->mHeight,
+                          aForest->mForest[0]->header.n_labels,
+                          mJointMap, mParams->header.n_joints,
+                          aForest->mForest[0]->header.fov,
+                          mParams->joint_params);
+
+  xfree(weights);
+  xfree(pr_table);
+
+  *aOutNJoints = mParams->header.n_joints;
+  *aOutNDims = 3;
 }
 
 }

@@ -64,7 +64,7 @@ pack-training-data: pack-training-data.o pack.o tinyexr.o llist.o xalloc.o image
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lsnappy -lpthread -lc
 
-libglimpse.so: xalloc.o tinyexr.o loader.o infer.o image_utils.o
+libglimpse.so: xalloc.o tinyexr.o llist.o loader.o infer.o image_utils.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -shared -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
 
