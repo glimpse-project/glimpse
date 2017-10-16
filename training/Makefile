@@ -25,6 +25,7 @@ TOOLS = image-pre-processor \
 	depth2labels \
 	exr-to-pfm \
 	pfm-to-exr \
+	rdt-to-json \
 	pfm-debug \
 	pack-training-data
 
@@ -53,6 +54,10 @@ exr-to-pfm: exr-to-pfm.o tinyexr.o
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
 
 pfm-to-exr: pfm-to-exr.o tinyexr.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
+
+rdt-to-json: rdt-to-json.o loader.o parson.o llist.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
 
