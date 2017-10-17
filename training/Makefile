@@ -13,8 +13,8 @@ CXXFLAGS ?= $(OPT)
 
 LDFLAGS ?=
 
-_CFLAGS = $(CFLAGS) -Wall -std=c11
-_CXXFLAGS = $(CXXFLAGS) -std=c++14 -Wall
+_CFLAGS = $(CFLAGS) -Wall -std=c11 -fPIC
+_CXXFLAGS = $(CXXFLAGS) -std=c++14 -Wall -fPIC
 
 
 INCLUDES = `pkg-config --cflags OpenEXR libpng`
