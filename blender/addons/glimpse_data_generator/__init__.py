@@ -435,6 +435,7 @@ class GeneratorOperator(bpy.types.Operator):
         meta['camera'] = camera_meta
 
         top_meta['camera'] = camera_meta
+        top_meta['n_labels'] = 34
 
         top_meta_filename = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseDataRoot, "generated", gen_dir, 'meta.json'))
         with open(top_meta_filename, 'w') as fp:
