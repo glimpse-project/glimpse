@@ -53,6 +53,9 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
                   node = &tree->nodes[id];
                 }
 
+              /* NB: node->label_pr_idx is a base-one index since index zero
+               * is reserved to indicate that the node is not a leaf node
+               */
               float* pr_table =
                 &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
               float* out_pr_table = &output_pr[(y * width * n_labels) +

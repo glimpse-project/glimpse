@@ -100,7 +100,9 @@ with open(args.json_file[0], 'r') as json_fp:
             return (count_probability_arrays(node['l']) +
                     count_probability_arrays(node['r']))
 
-        def pack_probability_arrays(buf, node, next_idx=0):
+        # NB: the label_pr_idx should be a base-one index since index zero
+        # is reserved to indicate that a node is not a leaf node
+        def pack_probability_arrays(buf, node, next_idx=1):
             if 'p' in node:
                 node['label_pr_idx'] = next_idx
                 off = next_idx * 4 * n_labels

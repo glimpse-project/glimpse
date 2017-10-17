@@ -84,6 +84,10 @@ recursive_build_tree(RDTree *tree, Node *node, int depth, int id)
     } else {
         JSON_Value *probs_val = json_value_init_array();
         JSON_Array *probs = json_array(probs_val);
+
+        /* NB: node->label_pr_idx is a base-one index since index zero is
+         * reserved to indicate that the node is not a leaf node
+         */
         float *pr_table = &tree->label_pr_tables[(node->label_pr_idx - 1) *
                                                  tree->header.n_labels];
 
