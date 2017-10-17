@@ -1,0 +1,32 @@
+{
+  "name": "glimpse-viewer",
+  "version": "1.0.0",
+  "description": "A graphical viewer for Glimpse training data",
+  "main": "server.js",
+  "scripts": {
+    "prepare": "browserify node_modules/pngjs/lib/png.js -s png > png.js",
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://gitlab.com/impossible/glimpse-sdk.git"
+  },
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://gitlab.com/impossible/glimpse-sdk/issues"
+  },
+  "homepage": "https://gitlab.com/impossible/glimpse-sdk#README",
+  "dependencies": {
+    "connect": "^3.6.5",
+    "jquery": "^3.2.1",
+    "jquery-ui-dist": "^1.12.1",
+    "pngjs": "^3.3.0",
+    "serve-static": "^1.13.1",
+    "three": "^0.87.1"
+  },
+  "devDependencies": {
+    "browserify": "^14.4.0"
+  }
+}
