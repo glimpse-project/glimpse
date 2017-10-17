@@ -109,6 +109,10 @@ struct worker_state
 static const char *top_src_dir;
 static const char *top_out_dir;
 
+static int expected_width;
+static int expected_height;
+static float expected_fov;
+
 static FILE *index_fp;
 
 static bool write_half_float = true;
@@ -232,8 +236,7 @@ get_duration_ns_print_scale(uint64_t duration_ns)
 static struct image *
 xalloc_image(enum image_format format,
              int width,
-             int height,
-             uint8_t *memory = NULL)
+             int height)
 {
     struct image *img = (struct image *)xmalloc(sizeof(struct image));
     img->format = format;
@@ -251,8 +254,7 @@ xalloc_image(enum image_format format,
         img->stride = width * sizeof(half);
         break;
     }
-    img->data_u8 = memory ? memory :
-                            (uint8_t *)xmalloc(img->stride * img->height);
+    img->data_u8 = (uint8_t *)xmalloc(img->stride * img->height);
 
     return img;
 }
@@ -424,29 +426,28 @@ load_frame_labels(const char *dir,
                   const char *filename)
 {
     char input_filename[1024];
-
     xsnprintf(input_filename, "%s/labels/%s/%s", top_src_dir, dir, filename);
 
-    IUImageSpec spec = { 0, 0, IU_FORMAT_U8 };
-    uint8_t *data = NULL;
-    if (iu_read_png_from_file(input_filename, &spec, &data,
-                              NULL, // palette output
-                              NULL) // palette size
-        != SUCCESS)
-    {
-        return NULL;
+    IUImageSpec spec = { expected_width, expected_height, IU_FORMAT_U8 };
+    struct image *img = xalloc_image(IMAGE_FORMAT_X8,
+                                     expected_width, expected_height);
+
+    IUReturnCode code = iu_read_png_from_file(input_filename, &spec,
+                                              &img->data_u8,
+                                              NULL, // palette output
+                                              NULL); // palette size
+    if (code != SUCCESS) {
+        fprintf(stderr, "Failed to read labels PNG: %s\n",
+                iu_code_to_string(code));
+        exit(1);
     }
-    int width = spec.width;
-    int height = spec.height;
 
-    debug("read %s/%s (%dx%d) OK\n", dir, filename, width, height);
+    debug("read %s/%s (%dx%d) OK\n", dir, filename, img->width, img->height);
 
-    struct image *img = xalloc_image(IMAGE_FORMAT_X8, width, height, data);
+    for (int y = 0; y < expected_height; y++) {
+        uint8_t *row = img->data_u8 + expected_width * y;
 
-    for (int y = 0; y < height; y++) {
-        uint8_t *row = img->data_u8 + width * y;
-
-        for (int x = 0; x < width; x++) {
+        for (int x = 0; x < expected_width; x++) {
             row[x] = grey_to_id_map[row[x]];
 
             if (row[x] > MAX_PACKED_INDEX) {
@@ -738,33 +739,22 @@ save_frame_labels(const char *dir, const char *filename,
 }
 
 static struct image *
-decode_exr(uint8_t *buf, int len, enum image_format fmt)
-{
-    uint8_t *data = NULL;
-    IUImageSpec spec = { 0, 0, (fmt == IMAGE_FORMAT_XHALF) ?
-                                IU_FORMAT_HALF : IU_FORMAT_FLOAT };
-    IUReturnCode ret = iu_read_exr_from_memory(buf, len, &spec, (void **)&data);
-    if (ret != SUCCESS) {
-        fprintf(stderr, "Failed to read EXR from memory: %s\n", iu_code_to_string(ret));
-        return NULL;
-    }
-    struct image *img = xalloc_image(fmt, spec.width, spec.height, data);
-
-    return img;
-}
-
-static struct image *
 load_frame_depth(const char *dir, const char *filename)
 {
     char input_filename[1024];
-
     xsnprintf(input_filename, "%s/depth/%s/%s", top_src_dir, dir, filename);
 
-    int exr_file_len;
-    uint8_t *exr_file = read_file(input_filename, &exr_file_len);
-    struct image *depth = decode_exr(exr_file, exr_file_len, IMAGE_FORMAT_XFLOAT);
+    IUImageSpec spec = { expected_width, expected_height, IU_FORMAT_FLOAT };
+    struct image *depth = xalloc_image(IMAGE_FORMAT_XFLOAT,
+                                       expected_width, expected_height);
 
-    free(exr_file);
+    IUReturnCode code = iu_read_exr_from_file(input_filename, &spec,
+                                              (void **)&depth->data_u8);
+    if (code != SUCCESS) {
+        fprintf(stderr, "Failed to read EXR from memory: %s\n",
+                iu_code_to_string(code));
+        exit(1);
+    }
 
     debug("read %s/%s (%dx%d) OK\n", dir, filename, depth->width, depth->height);
 
@@ -1323,6 +1313,26 @@ static_assert(BACKGROUND_ID == 33, "");
     top_src_dir = argv[optind];
     top_out_dir = argv[optind + 1];
 
+    char meta_filename[512];
+    xsnprintf(meta_filename, "%s/meta.json", top_src_dir);
+    JSON_Value *meta = json_parse_file(meta_filename);
+    if (!meta) {
+        fprintf(stderr, "Failed to parse top level meta.json\n");
+    }
+
+    if (json_object_get_number(json_object(meta), "n_labels") != 34) {
+        fprintf(stderr, "Only expecting data sets with 34 labels\n");
+        exit(1);
+    }
+    JSON_Value *cam = json_object_get_value(json_object(meta), "camera");
+    expected_width = json_object_get_number(json_object(cam), "width");
+    expected_height = json_object_get_number(json_object(cam), "width");
+    expected_fov = json_object_get_number(json_object(cam), "width");
+    printf("Data rendered at %dx%d with fov = %.3f\n",
+           expected_width,
+           expected_height,
+           expected_fov);
+
     printf("Queuing frames to process...\n");
 
     uint64_t start = get_time();
@@ -1336,6 +1346,14 @@ static_assert(BACKGROUND_ID == 33, "");
            get_duration_ns_print_scale_suffix(duration_ns));
 
     ensure_directory(top_out_dir);
+
+    xsnprintf(meta_filename, "%s/meta.json", top_out_dir);
+    if (json_serialize_to_file(meta, meta_filename) != JSONSuccess) {
+        fprintf(stderr, "Failed to write %s\n", meta_filename);
+        exit(1);
+    }
+    json_value_free(meta);
+    meta = NULL;
 
     char index_filename[512];
     xsnprintf(index_filename, "%s/index", top_out_dir);
