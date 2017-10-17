@@ -37,8 +37,8 @@ typedef struct {
 } TrainData;
 
 static bool
-gather_cb(const char* label_path, const char* depth_path,
-          const char* joint_path, TrainData* data)
+index_cb(const char* label_path, const char* depth_path,
+         const char* joint_path, TrainData* data)
 {
   if (data->n_images >= data->skip)
     {
@@ -53,9 +53,9 @@ gather_cb(const char* label_path, const char* depth_path,
 }
 
 static bool
-gather_train_files(const char* top_src_dir,
-                   const char* index_name,
-                   TrainData* data)
+load_training_index(const char* top_src_dir,
+                    const char* index_name,
+                    TrainData* data)
 {
   char index_filename[1024];
   bool cont = true;
@@ -88,7 +88,7 @@ gather_train_files(const char* top_src_dir,
       xsnprintf(next_depth_path, "%s/depth/%s.exr", top_src_dir, line);
       xsnprintf(next_jnt_path, "%s/labels/%s.jnt", top_src_dir, line);
 
-      cont = gather_cb(next_labels_path, next_depth_path, next_jnt_path, data);
+      cont = index_cb(next_labels_path, next_depth_path, next_jnt_path, data);
     }
 
   free(line);
