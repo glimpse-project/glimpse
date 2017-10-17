@@ -20,12 +20,6 @@
 # OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 #
-#
-# This script first builds an internal index of all available rendered frames
-# in a given directory and can then split that into multiple sets with no
-# overlap so for example we could create three sets of 300k images out of a
-# large set of 1 million images for training three separate decision trees.
-
 
 import os
 import argparse
@@ -37,22 +31,43 @@ full_index = []
 
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
+    description=textwrap.dedent("""\
+        This script builds an index of all available rendered frames in a given
+        directory and can then split that into multiple sub sets with no
+        overlap. For example you could index three sets of 300k images out of a
+        larger set of 1 million images for training three separate decision
+        trees.
+        """),
     epilog=textwrap.dedent("""\
-        This indexer will firstly write a data/index.full file for all the frames
-        it finds under the given data directory.
+        Firstly if no index.full file can be loaded listing all available
+        frames then one will be created by traversing all the files under the
+        <data> directory looking for frames. --full can be used to override
+        which index is loaded here.
+
+        Then if you need to exclude files from the randomly sampled index files
+        you can pass options like -e <name1> -e <name2> and the frames listed in
+        data/index.<name1> and data/index.<name2> will be loaded as blacklists
+        of frames to not sample.
         
-        For each -i <name> <N> argument given it will create a
+        Finally for each -i <name> <N> argument sequence given it will create a
         data/index.<name> file with <N> randomly sampled frames taken from the
         full index. Each index is created in the order specified and no frames
         will be added to more than one of these name index files.
 
         Importantly the sampling is pseudo random and reproducible for a given
-        directory of data.
+        directory of data. The seed can be explicitly given via --seed=
+
+        Note: Even if the exclusions from passing -e have no effect the act of
+        passing -e options can change the random sampling compared to running
+        with no exclusion due to how the set difference calculations may affect
+        the sorting of the index internally.
         """))
 parser.add_argument("data", nargs=1, help="Data Directory")
 parser.add_argument("-v", "--verbose", action="store_true", help="Display verbose debug information")
 parser.add_argument("-s", "--seed", help="Seed for random sampling")
-parser.add_argument("-i", "--index", action="append", nargs=2, metavar=('name','N'), help="Request a named index with N frames")
+parser.add_argument("-f", "--full", nargs=1, default=['full'], help="An alternative index.<FULL> extension for the full index (default 'full')")
+parser.add_argument("-e", "--exclude", action="append", nargs=1, metavar=('NAME'), help="Load index.<NAME> frames to be excluded from sampling")
+parser.add_argument("-i", "--index", action="append", nargs=2, metavar=('NAME','N'), help="Create an index.<NAME> file with N frames")
 
 args = parser.parse_args()
 
@@ -61,22 +76,56 @@ if args.seed:
     random.seed(int(args.seed))
 
 data_dir = args.data[0]
+full_filename = os.path.join(data_dir, "index.%s" % args.full[0])
 
-for root, dirs, files in os.walk(data_dir):
-    for filename in files:
-        if filename.startswith("Image") and filename.endswith(".json"):
-            frame_name = filename[5:-5]
-            (mocap_path, section) = os.path.split(root)
-            (top_path,mocap) = os.path.split(mocap_path)
 
-            full_index.append("/%s/%s/Image%s\n" % (mocap, section, frame_name))
+# 1. Load the full index
+try:
+    with open(full_filename, 'r') as fp:
+        full_index = fp.readlines()
+except FileNotFoundError as e:
+    for root, dirs, files in os.walk(data_dir):
+        for filename in files:
+            if filename.startswith("Image") and filename.endswith(".json"):
+                frame_name = filename[5:-5]
+                (mocap_path, section) = os.path.split(root)
+                (top_path,mocap) = os.path.split(mocap_path)
 
-            if args.verbose:
-                print("mocap = %s, section = %s, frame = %s" % (mocap, section, frame_name))
+                full_index.append("/%s/%s/Image%s\n" % (mocap, section, frame_name))
 
+                if args.verbose:
+                    print("mocap = %s, section = %s, frame = %s" %
+                            (mocap, section, frame_name))
+
+    with open(full_filename, 'w+') as fp:
+        for frame in full_index:
+            fp.write(frame)
 
 n_frames = len(full_index)
+print("index.%s: %u frames\n" % (args.full[0], n_frames))
 
+
+# 2. Apply exclusions
+if args.exclude:
+    exclusions = []
+    for (name,) in args.exclude:
+        with open(os.path.join(data_dir, 'index.%s' % name), 'r') as fp:
+            lines = fp.readlines()
+            print("index.%s: loaded %u frames to exclude" % (name, len(lines)))
+            exclusions += lines
+
+    full_set = set(full_index)
+    exclusion_set = set(exclusions)
+    difference = full_set.difference(exclusion_set)
+    full_index = list(difference)
+
+    n_frames = len(full_index)
+    print("\n%u frames left after applying exclusions" % n_frames)
+    print("sorting...")
+    full_index.sort()
+
+
+# 3. Create randomly sampled index files
 if args.index:
     names = {}
     total_samples = 0
@@ -99,6 +148,7 @@ if args.index:
             subset = samples[start:start+N]
             print("index %s sample indices: %s" % (name, str(subset)))
 
+    print("")
     start = 0
     for (name, length_str) in args.index:
         N = int(length_str)
@@ -111,7 +161,3 @@ if args.index:
             start += N
             print("index.%s: %u frames" % (name, N))
 
-with open(os.path.join(data_dir, "index.full"), 'w+') as fp:
-    for frame in full_index:
-        fp.write(frame)
-print("index.full: %u frames" % n_frames)
