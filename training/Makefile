@@ -76,7 +76,7 @@ libglimpse.so: xalloc.o tinyexr.o llist.o loader.o infer.o image_utils.o
 
 %.o: %.c Makefile | dirs
 	$(E)echo "(CC)      $(@)"
-	$(E)$(CC) $(filter %.c,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CFLAGS) $(INCLUDES) -c -fPIC
+	$(E)$(CC) $(filter %.c,$(^)) -o $@ -MMD -MF .deps/$(@).rules $(_CFLAGS) $(INCLUDES) -c -fPIC -std=gnu99
 
 %.o: %.cc Makefile | dirs
 	$(E)echo "(CXX)     $(@)"

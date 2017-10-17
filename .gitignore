@@ -11,6 +11,7 @@ training/libglimpse.so
 training/pack-training-data
 training/pfm-debug
 training/pfm-to-exr
+training/rdt-to-json
 training/train_joint_params
 training/train_rdt
 training/python/build

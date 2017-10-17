@@ -120,9 +120,6 @@ static int min_body_size_px = 3000;
 static float min_body_change_percent = 0.1f;
 static int n_threads_override = 0;
 
-static int labels_width = 0;
-static int labels_height = 0;
-
 static std::vector<struct worker_state> workers;
 
 static pthread_mutex_t work_queue_lock = PTHREAD_MUTEX_INITIALIZER;
