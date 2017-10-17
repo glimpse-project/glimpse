@@ -119,38 +119,8 @@ free_train_data_cb(LList* node, uint32_t index, void* userdata)
 }
 
 static void
-validate_storage(TrainData* data, const char* filename, uint8_t n_joints)
+validate_n_joints(TrainData* data, const char* filename, uint8_t n_joints)
 {
-  if ((!data->label_images || !data->depth_images) &&
-      data->gather_label && data->gather_depth &&
-      ((data->label_spec.width && data->depth_spec.width &&
-        data->label_spec.width != data->depth_spec.width) ||
-       (data->label_spec.height && data->depth_spec.height &&
-        data->label_spec.height != data->depth_spec.height)))
-    {
-      fprintf(stderr,
-              "%s: Label/Depth image size mismatch (%dx%d) != (%dx%d)\n",
-              filename, data->label_spec.width, data->label_spec.height,
-              data->depth_spec.width, data->depth_spec.height);
-    }
-
-  if (!data->label_images && data->gather_label &&
-      data->label_spec.width && data->label_spec.height)
-    {
-      size_t n_pixels = data->label_spec.width * data->label_spec.height *
-                        data->n_images;
-      data->label_images = (uint8_t*)
-        xmalloc(n_pixels * sizeof(uint8_t));
-    }
-  if (!data->depth_images && data->gather_depth &&
-      data->depth_spec.width && data->depth_spec.height)
-    {
-      size_t n_pixels = data->depth_spec.width * data->depth_spec.height *
-                        data->n_images;
-      data->depth_images = (half*)
-        xmalloc(n_pixels * sizeof(half));
-    }
-
   if (n_joints && data->n_joints != n_joints)
     {
       if (data->n_joints == 0)
@@ -226,7 +196,8 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
         }
 
       long n_bytes = ftell(fp);
-      if (n_bytes % sizeof(float) != 0 ||
+      if (n_bytes == 0 ||
+          n_bytes % sizeof(float) != 0 ||
           (n_bytes % sizeof(float)) % 3 != 0)
         {
           fprintf(stderr, "Unexpected joint file size in '%s'\n",
@@ -235,7 +206,10 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
         }
 
       uint8_t n_joints = (uint8_t)((n_bytes / sizeof(float)) / 3);
-      validate_storage(data, joint_path, n_joints);
+      /* Note: this will also lazily allocate storage for joints across
+       * all images once we know how many joints there are per-image...
+       */
+      validate_n_joints(data, joint_path, n_joints);
 
       if (fseek(fp, 0, SEEK_SET) == -1)
         {
@@ -317,11 +291,13 @@ gather_train_data(const char* data_dir,
 
   data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
 
-  /* This will allocate memory for all our image data based on the camera size
-   * read from meta.json, and the number of frames found in the index loaded by
-   * gather_train_failes...
-   */
-  validate_storage(&data, "meta.json", 0);
+  size_t n_pixels = width * height * data.n_images;
+
+  if (data.gather_label)
+    data.label_images = (uint8_t*)xmalloc(n_pixels * sizeof(uint8_t));
+
+  if (data.gather_depth)
+    data.depth_images = (half*)xmalloc(n_pixels * sizeof(half));
 
   *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
   printf("Processing %d training images...\n", *out_n_images);
