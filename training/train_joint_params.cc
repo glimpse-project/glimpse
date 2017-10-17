@@ -558,6 +558,7 @@ main (int argc, char** argv)
                     &ctx.depth_images,
                     ctx.check_accuracy ? &ctx.label_images : NULL,
                     &ctx.joints,
+                    NULL, // n labels
                     &ctx.fov);
 
   // Note, there's a background label, so there ought to always be fewer joints

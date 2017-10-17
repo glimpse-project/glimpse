@@ -85,10 +85,10 @@ with the -h/--help parameter will print usage details, with details about the
 default parameters.
 
 For example, if you have an index.tree0 file at the top of your training data
-and images have 34 body-part labels you can train a decision tree like:
+you can train a decision tree like:
 
 ```
-train_rdt 34 path-training-data tree0 output.rdt
+train_rdt path-training-data tree0 tree0.rdt
 ```
 
 Creating a joint map

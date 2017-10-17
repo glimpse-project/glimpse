@@ -383,7 +383,7 @@ static void
 print_usage(FILE* stream)
 {
   fprintf(stream,
-"Usage: train_rdt <n labels> <data dir> <index name> <out file> [OPTIONS]\n"
+"Usage: train_rdt <data dir> <index name> <out file> [OPTIONS]\n"
 "Train a randomised decision tree to infer n_labels from depth and label images\n"
 "with a given camera FOV. Default values assume depth data to be in meters.\n"
 "\n"
@@ -418,16 +418,15 @@ main(int argc, char **argv)
   struct timespec begin, last, now;
   uint32_t n_threads = std::thread::hardware_concurrency();
 
-  if (argc < 5)
+  if (argc < 4)
     {
       print_usage(stderr);
       exit(1);
     }
 
-  const char *n_labels_arg = argv[1];
-  const char *data_dir = argv[2];
-  const char *index_name = argv[3];
-  const char *out_filename = argv[4];
+  const char *data_dir = argv[1];
+  const char *index_name = argv[2];
+  const char *out_filename = argv[3];
 
   // Set default parameters
   ctx.n_uv = 2000;
@@ -591,8 +590,6 @@ main(int argc, char **argv)
         }
     }
 
-  ctx.n_labels = (uint8_t)atoi(n_labels_arg);
-
   printf("Opening output file...\n");
   FILE* output;
   if (!(output = fopen(out_filename, "wb")))
@@ -607,6 +604,7 @@ main(int argc, char **argv)
                     limit, skip, shuffle,
                     &ctx.n_images, NULL, &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images, NULL,
+                    &ctx.n_labels,
                     &ctx.fov);
 
   // Work out pixels per meter and adjust uv range accordingly

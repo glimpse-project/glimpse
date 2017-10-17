@@ -18,5 +18,6 @@ void gather_train_data(const char* data_dir,
                        half_float::half** out_depth_images,
                        uint8_t**   out_label_images,
                        float**     out_joints,
+                       uint8_t*    out_n_labels,
                        float*      out_fov);
 

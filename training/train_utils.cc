@@ -264,35 +264,6 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
   return true;
 }
 
-static char *
-read_file(const char* filename)
-{
-  FILE* fp = fopen(filename, "r");
-  if (!fp)
-    {
-      fprintf(stderr, "Failed to open %s\n", filename);
-      exit(1);
-    }
-
-  struct stat sb;
-  if (fstat(fileno(fp), &sb) < 0)
-    {
-      fprintf(stderr, "Failed to stat %s file descriptor: %m\n", filename);
-      exit(1);
-    }
-
-  char* data = (char*)xmalloc(sb.st_size);
-  if (fread(data, sb.st_size, 1, fp) != 1)
-    {
-      fprintf(stderr, "Failed to read %s\n", filename);
-      exit(1);
-    }
-
-  fclose(fp);
-
-  return data;
-}
-
 void
 gather_train_data(const char* data_dir,
                   const char* index_name,
@@ -301,6 +272,7 @@ gather_train_data(const char* data_dir,
                   int32_t* out_width, int32_t* out_height,
                   half** out_depth_images, uint8_t** out_label_images,
                   float** out_joints,
+                  uint8_t* out_n_labels,
                   float* out_fov)
 {
   char meta_filename[1024];
@@ -325,19 +297,16 @@ gather_train_data(const char* data_dir,
 
   xsnprintf(meta_filename, "%s/meta.json", data_dir);
 
-  char* json_data = read_file(meta_filename);
+  JSON_Value* meta = json_parse_file(meta_filename);
 
-  JSON_Value* root_value = json_parse_string((char *)json_data);
-  JSON_Object* root = json_object(root_value);
-  JSON_Object* camera = json_object_get_object(root, "camera");
+  int n_labels = json_object_get_number(json_object(meta), "n_labels");
+  JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
 
   data.vertical_fov = json_object_get_number(camera, "vertical_fov");
-
   int width = json_object_get_number(camera, "width");
   int height = json_object_get_number(camera, "height");
 
-  json_value_free(root_value);
-  free(json_data);
+  json_value_free(meta);
 
   data.label_spec.width = width;
   data.label_spec.height = height;
@@ -391,6 +360,10 @@ gather_train_data(const char* data_dir,
   if (out_joints)
     {
       *out_joints = data.joint_data;
+    }
+  if (out_n_labels)
+    {
+      *out_n_labels = n_labels;
     }
   if (out_fov)
     {
