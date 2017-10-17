@@ -30,7 +30,7 @@ namespace Glimpse
       unsigned int mNTrees;
 
     public:
-      Forest(char**       aFiles,
+      Forest(const char** aFiles,
              unsigned int aNFiles);
       ~Forest();
 

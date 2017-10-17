@@ -37,7 +37,7 @@ DepthImage::~DepthImage()
     }
 }
 
-Forest::Forest(char** aFiles, unsigned int aNFiles)
+Forest::Forest(const char** aFiles, unsigned int aNFiles)
 {
   RDTree** forest = read_forest(aFiles, aNFiles);
   mForest = forest;
