@@ -54,7 +54,7 @@ gather_cb(const char* label_path, const char* depth_path,
 
 static bool
 gather_train_files(const char* top_src_dir,
-                   const char *index_name,
+                   const char* index_name,
                    TrainData* data)
 {
   char index_filename[1024];
@@ -62,14 +62,14 @@ gather_train_files(const char* top_src_dir,
 
   xsnprintf(index_filename, "%s/index.%s", top_src_dir, index_name);
 
-  FILE *fp = fopen(index_filename, "r");
+  FILE* fp = fopen(index_filename, "r");
   if (!fp)
     {
       fprintf(stderr, "Failed to open index %s\n", index_filename);
       exit(1);
     }
 
-  char *line = NULL;
+  char* line = NULL;
   size_t line_buf_len = 0;
   int line_len;
   while (cont && (line_len = getline(&line, &line_buf_len, fp)) != -1)
