@@ -26,6 +26,7 @@ TOOLS = image-pre-processor \
 	exr-to-pfm \
 	pfm-to-exr \
 	rdt-to-json \
+	jip-to-json \
 	pfm-debug \
 	pack-training-data
 
@@ -58,6 +59,10 @@ pfm-to-exr: pfm-to-exr.o tinyexr.o
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
 
 rdt-to-json: rdt-to-json.o loader.o parson.o llist.o xalloc.o
+	$(E)echo "(LD)      $(@)"
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
+
+jip-to-json: jip-to-json.o loader.o parson.o llist.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS)
 

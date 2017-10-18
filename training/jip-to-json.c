@@ -1,0 +1,97 @@
+#include <sys/types.h>
+#include <sys/stat.h>
+
+#include <unistd.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include <getopt.h>
+
+#include "xalloc.h"
+#include "loader.h"
+#include "parson.h"
+
+
+static void
+usage(void)
+{
+    printf(
+"Usage rdt-to-json [options] <in.rdt> <out.json>\n"
+"\n"
+"    -p,--pretty                Pretty print the JSON output\n"
+"\n"
+"    -h,--help                  Display this help\n\n"
+"\n"
+"This tool converts the binary representation of .jip files output by the\n"
+"train_joint_params tool to a JSON representation which can be convenient\n"
+"for loading the trees in Python or JavaScript tools or inspecting manually.\n"
+"\n"
+"The schema looks like: FIXME\n"
+"\n"
+    );
+
+    exit(1);
+}
+
+int
+main(int argc, char **argv)
+{
+    int opt;
+    bool pretty = false;
+
+    const char *short_options="+hp";
+    const struct option long_options[] = {
+        {"help",            no_argument,        0, 'h'},
+        {"pretty",          no_argument,        0, 'p'},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
+           != -1)
+    {
+        switch (opt) {
+            case 'h':
+                usage();
+                return 0;
+            case 'p':
+                pretty = true;
+                break;
+            default:
+                usage();
+                break;
+        }
+    }
+
+    if (argc - optind != 2)
+        usage();
+
+    JIParams *params = read_jip(argv[optind]);
+
+    JSON_Value *jip = json_value_init_object();
+
+    int n_joints = params->header.n_joints;
+    json_object_set_number(json_object(jip), "n_joints", n_joints);
+
+    JSON_Value *jip_params = json_value_init_array();
+    for (int i = 0; i < n_joints; i++) {
+        JIParam *param = params->joint_params + i;
+        JSON_Value *jip_param = json_value_init_object();
+
+        json_object_set_number(json_object(jip_param), "bandwidth", param->bandwidth);
+        json_object_set_number(json_object(jip_param), "threshold", param->threshold);
+        json_object_set_number(json_object(jip_param), "offset", param->offset);
+
+        json_array_append_value(json_array(jip_params), jip_param);
+    }
+
+    json_object_set_value(json_object(jip), "params", jip_params);
+
+    if (pretty)
+        json_serialize_to_file_pretty(jip, argv[optind+1]);
+    else
+        json_serialize_to_file(jip, argv[optind+1]);
+
+    free_jip(params);
+
+    return 0;
+}
