@@ -8,6 +8,7 @@
 
 void gather_train_data(const char* data_dir,
                        const char* index_name,
+                       const char* joint_map_path,
                        uint32_t    limit,
                        uint32_t    skip,
                        bool        shuffle,

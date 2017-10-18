@@ -41,11 +41,11 @@ train_rdt: train_rdt.o image_utils.o train_utils.o tinyexr.o parson.o llist.o xa
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-train_joint_params: train_joint_params.o infer.o image_utils.o train_utils.o loader.o tinyexr.o parson.o llist.o xalloc.o
+train_joint_params: train_joint_params.o infer.o parson.o image_utils.o train_utils.o loader.o tinyexr.o parson.o llist.o xalloc.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-depth2labels: depth2labels.o infer.o loader.o xalloc.o llist.o tinyexr.o image_utils.o
+depth2labels: depth2labels.o infer.o parson.o loader.o xalloc.o llist.o tinyexr.o image_utils.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs OpenEXR libpng`
 
@@ -69,7 +69,7 @@ pack-training-data: pack-training-data.o pack.o tinyexr.o llist.o xalloc.o image
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lsnappy -lpthread -lc
 
-libglimpse.so: xalloc.o tinyexr.o llist.o loader.o infer.o image_utils.o
+libglimpse.so: xalloc.o tinyexr.o llist.o loader.o infer.o parson.o image_utils.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -shared -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
 

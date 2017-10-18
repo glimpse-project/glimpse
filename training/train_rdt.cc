@@ -601,6 +601,7 @@ main(int argc, char **argv)
   printf("Scanning training directories...\n");
   gather_train_data(data_dir,
                     index_name,
+                    NULL, // no joint map
                     limit, skip, shuffle,
                     &ctx.n_images, NULL, &ctx.width, &ctx.height,
                     &ctx.depth_images, &ctx.label_images, NULL,

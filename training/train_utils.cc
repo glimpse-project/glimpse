@@ -118,29 +118,6 @@ free_train_data_cb(LList* node, uint32_t index, void* userdata)
   return true;
 }
 
-static void
-validate_n_joints(TrainData* data, const char* filename, uint8_t n_joints)
-{
-  if (n_joints && data->n_joints != n_joints)
-    {
-      if (data->n_joints == 0)
-        {
-          data->n_joints = n_joints;
-          if (data->gather_joints)
-            {
-              data->joint_data = (float*)
-                xmalloc(data->n_images * n_joints * 3 * sizeof(float));
-            }
-        }
-      else
-        {
-          fprintf(stderr, "%s: joint number mismatch (%u), expected (%u)\n",
-                  filename, (uint32_t)n_joints, (uint32_t)data->n_joints);
-          exit(1);
-        }
-    }
-}
-
 static bool
 train_data_cb(LList* node, uint32_t index, void* userdata)
 {
@@ -206,10 +183,12 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
         }
 
       uint8_t n_joints = (uint8_t)((n_bytes / sizeof(float)) / 3);
-      /* Note: this will also lazily allocate storage for joints across
-       * all images once we know how many joints there are per-image...
-       */
-      validate_n_joints(data, joint_path, n_joints);
+      if (n_joints != data->n_joints)
+        {
+          fprintf(stderr, "Unexpected number of joints %u (expected %u)\n",
+                  n_joints, data->n_joints);
+          exit(1);
+        }
 
       if (fseek(fp, 0, SEEK_SET) == -1)
         {
@@ -241,6 +220,7 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
 void
 gather_train_data(const char* data_dir,
                   const char* index_name,
+                  const char* joint_map_path,
                   uint32_t limit, uint32_t skip, bool shuffle,
                   uint32_t* out_n_images, uint8_t* out_n_joints,
                   int32_t* out_width, int32_t* out_height,
@@ -266,7 +246,7 @@ gather_train_data(const char* data_dir,
     NULL,                                 // Joint data
     !!out_depth_images,                   // Whether to gather depth images
     !!out_label_images,                   // Whether to gather label images
-    !!out_joints                          // Whether to gather joint data
+    (joint_map_path && out_joints)        // Whether to gather joint data
   };
 
   xsnprintf(meta_filename, "%s/meta.json", data_dir);
@@ -287,7 +267,23 @@ gather_train_data(const char* data_dir,
   data.depth_spec.width = width;
   data.depth_spec.height = height;
 
-  gather_train_files(data_dir, index_name, &data);
+  if (data.gather_joints)
+    {
+      JSON_Value *map = json_parse_file(joint_map_path);
+      if (!map)
+        {
+          fprintf(stderr, "Failed to parse joint map %s\n", joint_map_path);
+          exit(1);
+        }
+
+      /* For now we just care about how many joints there are but maybe
+       * we should be handing the map back to the caller somehow?
+       */
+      data.n_joints = json_array_get_count(json_array(map));
+      json_value_free(map);
+    }
+
+  load_training_index(data_dir, index_name, &data);
 
   data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
 
@@ -298,6 +294,12 @@ gather_train_data(const char* data_dir,
 
   if (data.gather_depth)
     data.depth_images = (half*)xmalloc(n_pixels * sizeof(half));
+
+  if (data.gather_joints)
+    {
+        data.joint_data = (float*)xmalloc(data.n_images * data.n_joints *
+                                          3 * sizeof(float));
+    }
 
   *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
   printf("Processing %d training images...\n", *out_n_images);

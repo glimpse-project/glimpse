@@ -13,6 +13,7 @@
 #include "train_utils.h"
 #include "loader.h"
 #include "infer.h"
+#include "parson.h"
 
 #include "half.hpp"
 
@@ -41,8 +42,7 @@ typedef struct {
   float*   weights;       // Pixel weighting for joint label groups
 
   uint8_t  n_joints;      // Number of joints
-  char**   joint_names;   // Names of joints
-  LList**  joint_map;     // Lists of which labels correspond to which joints
+  JSON_Value* joint_map;  // Map between joints and labels
   float*   joints;        // List of joint positions for each image
 
   uint32_t n_bandwidths;  // Number of bandwidth values
@@ -145,7 +145,7 @@ thread_body(void* userdata)
       uint32_t weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
       calc_pixel_weights(&ctx->depth_images[idx], ctx->inferred[i],
                          ctx->width, ctx->height, n_labels,
-                         ctx->joint_map, ctx->n_joints,
+                         ctx->joint_map,
                          &ctx->weights[weight_idx]);
 
       // Calculate inference accuracy if label images were specified
@@ -268,7 +268,7 @@ thread_body(void* userdata)
           // Get joint positions
           float* joints = infer_joints(depth_image, pr_table, weights,
                                        ctx->width, ctx->height, n_labels,
-                                       ctx->joint_map, ctx->n_joints,
+                                       ctx->joint_map,
                                        ctx->forest[0]->header.fov,
                                        params);
 
@@ -551,6 +551,7 @@ main (int argc, char** argv)
   printf("Scanning training directories...\n");
   gather_train_data(data_dir,
                     index_name,
+                    joint_map_path,
                     limit, skip, shuffle,
                     &ctx.n_images,
                     &ctx.n_joints,
@@ -571,9 +572,10 @@ main (int argc, char** argv)
     }
 
   printf("Loading joint map...\n");
-  ctx.joint_map = read_jointmap(joint_map_path, ctx.n_joints, &ctx.joint_names);
+  ctx.joint_map = json_parse_file(joint_map_path);
   if (!ctx.joint_map)
     {
+      fprintf(stderr, "Failed to load joint map %s\n", joint_map_path);
       return 1;
     }
 
@@ -735,11 +737,14 @@ main (int argc, char** argv)
 
       if (verbose || !output)
         {
+          JSON_Object *mapping = json_array_get_object(json_array(ctx.joint_map), j);
+          const char *joint_name = json_object_get_string(mapping, "joint");
+
           printf("Joint %d (%s): Mean distance: %.3fm\n"
                  "  Bandwidth: %f\n"
                  "  Threshold: %f\n"
                  "  Offset: %f\n",
-                 j, ctx.joint_names[j], best_dists[j] / ctx.n_images,
+                 j, joint_name, best_dists[j] / ctx.n_images,
                  best_bandwidths[j], best_thresholds[j], best_offsets[j]);
         }
 
@@ -767,7 +772,7 @@ main (int argc, char** argv)
   xfree(best_thresholds);
   xfree(ctx.offsets);
   xfree(best_offsets);
-  free_jointmap(ctx.joint_map, ctx.n_joints, ctx.joint_names);
+  json_value_free(ctx.joint_map);
   xfree(ctx.joints);
   free_forest(ctx.forest, ctx.n_trees);
 

@@ -12,7 +12,24 @@
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.001f
 
+#define ARRAY_LEN(ARRAY) (sizeof(ARRAY)/sizeof(ARRAY[0]))
+
+
 using half_float::half;
+
+
+typedef struct {
+    int n_labels;
+
+    /* XXX: There's a runtime check that we don't have joints mapped to
+     * more than two labels and this can easily be bumped if necessary.
+     * Keeping this at the minimum size seems likely to help improve
+     * locality considering the frequency of accessing this data within
+     * some of the inner loops below.
+     */
+    uint8_t labels[2];
+} JointMapEntry;
+
 
 float*
 infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
@@ -83,11 +100,44 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
   return output_pr;
 }
 
+/* We don't want to be making lots of function calls or dereferencing
+ * lots of pointers while accessing the joint map within inner loops
+ * so this lets us temporarily unpack the label mappings into a
+ * tight array of JointMapEntries.
+ */
+static void
+unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
+{
+  for (int i = 0; i < n_joints; i++)
+    {
+      JSON_Object *entry = json_array_get_object(json_array(joint_map), i);
+      JSON_Array *labels = json_object_get_array(entry, "labels");
+      unsigned n_labels = json_array_get_count(labels);
+
+      if (n_labels > ARRAY_LEN(map[0].labels))
+        {
+          fprintf(stderr, "Didn't expect joint to be mapped to > 4 labels\n");
+          exit(1);
+        }
+
+      map[i].n_labels = n_labels;
+      for (unsigned n = 0; n < n_labels; n++)
+        {
+          map[i].labels[n] = json_array_get_number(labels, n);
+        }
+    }
+}
+
 float*
 calc_pixel_weights(half* depth_image, float* pr_table,
                    int32_t width, int32_t height, uint8_t n_labels,
-                   LList** joint_map, uint8_t n_joints, float* weights)
+                   JSON_Value* joint_map, float* weights)
 {
+  int n_joints = json_array_get_count(json_array(joint_map));
+
+  JointMapEntry map[n_joints];
+  unpack_joint_map(joint_map, map, n_joints);
+
   if (!weights)
     {
       weights = (float*)xmalloc(width * height * n_joints * sizeof(float));
@@ -97,14 +147,15 @@ calc_pixel_weights(half* depth_image, float* pr_table,
     {
       for (int32_t x = 0; x < width; x++, pixel_idx++)
         {
-          float depth_2 = powf((float)depth_image[pixel_idx], 2);
+          float depth = depth_image[pixel_idx];
+          float depth_2 = depth * depth;
 
           for (uint8_t j = 0; j < n_joints; j++, weight_idx++)
             {
               float pr = 0.f;
-              for (LList* node = joint_map[j]; node; node = node->next)
+              for (int n = 0; n < map[j].n_labels; n++)
                 {
-                  uint8_t label = (uint8_t)((uintptr_t)node->data);
+                  uint8_t label = map[j].labels[n];
                   pr += pr_table[(pixel_idx * n_labels) + label];
                 }
               weights[weight_idx] = pr * depth_2;
@@ -118,9 +169,14 @@ calc_pixel_weights(half* depth_image, float* pr_table,
 float*
 infer_joints(half* depth_image, float* pr_table, float* weights,
              int32_t width, int32_t height,
-             uint8_t n_labels, LList** joint_map, uint8_t n_joints,
+             uint8_t n_labels, JSON_Value* joint_map,
              float vfov, JIParam* params)
 {
+  int n_joints = json_array_get_count(json_array(joint_map));
+
+  JointMapEntry map[n_joints];
+  unpack_joint_map(joint_map, map, n_joints);
+
   // Use mean-shift to find the inferred joint positions, set them back into
   // the body using the given offset, and return the results
   uint32_t* n_pixels = (uint32_t*)xcalloc(n_joints, sizeof(uint32_t));
@@ -157,9 +213,10 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
             {
               float threshold = params[j].threshold;
               uint32_t joint_idx = j * width * height;
-              for (LList* node = joint_map[j]; node; node = node->next)
+
+              for (int n = 0; n < map[j].n_labels; n++)
                 {
-                  uint8_t label = (uint8_t)((uintptr_t)node->data);
+                  uint8_t label = map[j].labels[n];
                   float label_pr = pr_table[(idx * n_labels) + label];
                   if (label_pr >= threshold)
                     {

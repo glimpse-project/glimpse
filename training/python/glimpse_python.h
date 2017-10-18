@@ -45,8 +45,7 @@ namespace Glimpse
     private:
       bool mValid;
       JIParams* mParams;
-      LList** mJointMap;
-      char**  mJointNames;
+      JSON_Value* mJointMap;
 
     public:
       JointMap(char* aJointMap, char* aJointInferenceParams);

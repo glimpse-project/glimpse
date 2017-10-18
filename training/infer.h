@@ -5,6 +5,7 @@
 #include "half.hpp"
 #include "loader.h"
 #include "llist.h"
+#include "parson.h"
 
 float* infer_labels(RDTree** forest,
                     uint8_t n_trees,
@@ -17,8 +18,7 @@ float* calc_pixel_weights(half_float::half* depth_image,
                           int32_t width,
                           int32_t height,
                           uint8_t n_labels,
-                          LList** joint_map,
-                          uint8_t n_joints,
+                          JSON_Value* joint_map,
                           float* out_weights = NULL);
 
 float* infer_joints(half_float::half* depth_image,
@@ -27,7 +27,6 @@ float* infer_joints(half_float::half* depth_image,
                     int32_t width,
                     int32_t height,
                     uint8_t n_labels,
-                    LList** joint_map,
-                    uint8_t n_joints,
+                    JSON_Value* joint_map,
                     float vfov,
                     JIParam* params);

@@ -96,33 +96,38 @@ Creating a joint map
 
 To know which bones from the training data are of interest, and what body
 labels they are associated with, these tools need a joint-map file.  This is a
-human-readable plain text file that describes what bones map to which labels.
+human-readable JSON text file that describes what bones map to which labels.
 
-Each line specifies a bone name and which end of the bone to reference like
-`thigh_l.head` followed by a comma separated list of labels that are associated
-with that end of the named bone. For example:
+It's an array of objects where each object specifies a joint and an array of
+label indices. A joint name is comprised of a bone name follow by `.head` or
+`.tail` to specify which end of the bone. For example:
 
-    head.tail, 2, 3
-    neck_01.head, 4
-    upperarm_l.head, 7
-    upperarm_r.head, 9
-    lowerarm_l.head, 11
-    lowerarm_l.tail, 15
-    lowerarm_r.head, 13
-    lowerarm_r.tail, 17
-    thigh_l.head, 19
-    thigh_l.tail, 23
-    thigh_r.head, 21
-    thigh_r.tail, 25
-    foot_l.head, 27
-    foot_r.head, 29
+```
+[
+    {
+        "joint": "head.tail",
+        "labels": [ 2, 3 ]
+    },
+    {
+        "joint": "neck_01.head",
+        "labels": [ 4 ]
+    },
+    {
+        "joint": "upperarm_l.head",
+        "labels": [ 7 ]
+    },
+    ...
+]
+```
+
+By default the revision controlled `training/joint-map.json` file should be used
 
 Generating joint files
 ======================
 
 Run the tool 'json-to-jnt.py' like so:
 
-json-to-jnt.py joint-map.txt path-to-json-files
+json-to-jnt.py joint-map.json path-to-labels-directory
 
 Binary files with the same names as the json files, but the extension '.jnt'
 will be written to the same location as the json files. These files will be

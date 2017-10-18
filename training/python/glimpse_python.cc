@@ -75,8 +75,7 @@ JointMap::JointMap(char* aJointMap, char* aJointInferenceParams)
   mParams = read_jip(aJointInferenceParams);
   if (mParams)
     {
-      mJointMap =
-        read_jointmap(aJointMap, mParams->header.n_joints, &mJointNames);
+      mJointMap = json_parse_file(aJointMap);
       if (mJointMap)
         {
           mValid = true;
@@ -93,7 +92,7 @@ JointMap::~JointMap()
   if (mValid)
     {
       mValid = false;
-      free_jointmap(mJointMap, mParams->header.n_joints, mJointNames);
+      json_value_free(mJointMap);
       free_jip(mParams);
     }
 }
@@ -113,12 +112,12 @@ JointMap::inferJoints(Forest* aForest, DepthImage* aDepthImage,
 
   float* weights = calc_pixel_weights(aDepthImage->mDepthImage,
                                       pr_table, width, height, n_labels,
-                                      mJointMap, mParams->header.n_joints);
+                                      mJointMap);
 
   *aJoints = infer_joints(aDepthImage->mDepthImage, pr_table, weights,
                           aDepthImage->mWidth, aDepthImage->mHeight,
                           aForest->mForest[0]->header.n_labels,
-                          mJointMap, mParams->header.n_joints,
+                          mJointMap,
                           aForest->mForest[0]->header.fov,
                           mParams->joint_params);
 

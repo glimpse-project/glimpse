@@ -27,7 +27,7 @@ def json_to_jnt(filename, joint_map):
     jnt_data = []
     bones = joints['bones']
     for joint in joint_map:
-        name = joint['name'].split('.')
+        name = joint['joint'].split('.')
 
         if len(name) != 2:
             print("Bad bone name \"" + joint['name'] + "\", expected map " +
@@ -60,14 +60,7 @@ def json_to_jnt(filename, joint_map):
     return np.array(jnt_data, dtype=np.float32)
 
 with open(sys.argv[1], 'r') as f:
-    joint_map = []
-    for joint_text in f.read().split('\n'):
-        parts = joint_text.split(',')
-        if len(parts) < 2:
-            continue
-        name = parts[0].strip()
-        labels = [int(x.strip()) for x in parts[1:]]
-        joint_map.append({ 'name': parts[0].strip(), 'labels': labels });
+    joint_map = json.load(f)
 
     print('Processing...')
     for json_file in find_files(sys.argv[2], ['json']):
