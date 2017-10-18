@@ -473,7 +473,7 @@ main(int argc, char **argv)
   uint32_t skip = 0;
   bool shuffle = false;
 
-  for (int i = 5; i < argc; i++)
+  for (int i = 4; i < argc; i++)
     {
       // All arguments should start with '-'
       if (argv[i][0] != '-')
