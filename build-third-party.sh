@@ -389,6 +389,7 @@ cp -a $STAGE_DIR/opencv/sdk/native/libs/$_ABI $STAGE_DIR/$_PKG_NAME/opencv/lib/$
 
 for i in dlib libpng flann boost pcl eigen
 do
+    mkdir -p $STAGE_DIR/$_PKG_NAME/$i
     cp -a $STAGE_DIR/$i/include $STAGE_DIR/$_PKG_NAME/$i
 done
 
@@ -404,5 +405,5 @@ do
     unzip ../$zip.zip
 done
 
-#cd $STAGE_DIR
-#tar -cjhf $_PKG_NAME.tar.bz2 $_PKG_NAME
+cd $STAGE_DIR
+tar -cjf $_PKG_NAME.tar.bz2 $_PKG_NAME
