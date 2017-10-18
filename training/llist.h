@@ -60,6 +60,10 @@ LList*   llist_slice(LList*            node,
                      LListIterCallback free_cb,
                      void*             userdata);
 
+void*    llist_pop(LList**           node,
+                   LListIterCallback free_cb,
+                   void*             userdata);
+
 #ifdef __cplusplus
 };
 #endif

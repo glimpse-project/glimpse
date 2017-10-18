@@ -107,7 +107,10 @@ llist_reverse(LList* node)
 LList*
 llist_first(LList* node)
 {
-  while (node->prev != NULL) node = node->prev;
+  if (node)
+    {
+      while (node->prev != NULL) node = node->prev;
+    }
   return node;
 }
 
@@ -215,4 +218,20 @@ llist_slice(LList* node, uint32_t begin, uint32_t end,
       node = next;
     }
   return sliced;
+}
+
+void*
+llist_pop(LList** node, LListIterCallback cb, void* userdata)
+{
+  if (!node || !(*node))
+    {
+      return NULL;
+    }
+
+  void* data = (*node)->data;
+  LList* remove = *node;
+  *node = (*node)->next;
+  llist_free(llist_remove(remove), cb, userdata);
+
+  return data;
 }

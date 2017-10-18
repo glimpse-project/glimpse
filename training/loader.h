@@ -55,13 +55,14 @@ extern "C" {
 #endif
 
 RDTree* load_tree(uint8_t* tree, unsigned len);
+RDTree* read_tree(const char* filename);
 void free_tree(RDTree* tree);
 
-RDTree** read_forest(char** files, unsigned n_files);
+RDTree** read_forest(const char** files, unsigned n_files);
 RDTree** load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees);
 void free_forest(RDTree** forest, int n_trees);
 
-JIParams* read_jip(char* filename);
+JIParams* read_jip(const char* filename);
 void free_jip(JIParams* jip);
 
 #ifdef __cplusplus

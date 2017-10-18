@@ -38,7 +38,7 @@ image-pre-processor: image-pre-processor.o tinyexr.o parson.o image_utils.o xall
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 
-train_rdt: train_rdt.o image_utils.o train_utils.o tinyexr.o parson.o llist.o xalloc.o
+train_rdt: train_rdt.o image_utils.o train_utils.o tinyexr.o parson.o llist.o xalloc.o loader.o
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) -lrt $(LDFLAGS) `pkg-config --libs libpng` -lpthread
 

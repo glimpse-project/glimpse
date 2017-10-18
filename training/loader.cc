@@ -78,6 +78,21 @@ load_tree(uint8_t* tree_buf, unsigned len)
   return tree;
 }
 
+RDTree*
+read_tree(const char* filename)
+{
+  RDTree** forest = read_forest(&filename, 1);
+
+  if (forest)
+    {
+      RDTree* tree = forest[0];
+      xfree(forest);
+      return tree;
+    }
+
+  return NULL;
+}
+
 void
 free_tree(RDTree* tree)
 {
@@ -141,34 +156,53 @@ load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees)
 }
 
 RDTree **
-read_forest(char **files, unsigned n_files)
+read_forest(const char **files, unsigned n_files)
 {
-  unsigned n_trees = n_files;
-  FILE* tree_fp[n_trees];
-  uint8_t* tree_bufs[n_trees];
-  unsigned tree_buf_lengths[n_trees];
+  uint8_t* tree_bufs[n_files];
+  unsigned tree_buf_lengths[n_files];
+  unsigned n_trees = 0;
+  bool error = false;
 
   for (unsigned i = 0; i < n_files; i++)
     {
-        const char* tree_file = files[i];
-        struct stat sb;
+      const char* tree_file = files[i];
 
-        tree_fp[i] = fopen(tree_file, "r");
-        if (fstat(fileno(tree_fp[i]), &sb) < 0) {
-            fprintf(stderr, "Failed to open decision tree: %s\n", tree_file);
-            exit(1);
+      FILE* tree_fp;
+      if (!(tree_fp = fopen(tree_file, "r")))
+        {
+          fprintf(stderr, "Failed to open decision tree: %s\n", tree_file);
+          error = true;
+          break;
         }
-        tree_bufs[i] = (uint8_t*)xcalloc(1, sb.st_size);
-        if (fread(tree_bufs[i], sb.st_size, 1, tree_fp[i]) != 1) {
-            fprintf(stderr, "Failed to read decision tree: %s\n", tree_file);
-            exit(1);
+
+      struct stat sb;
+      if (fstat(fileno(tree_fp), &sb) < 0)
+        {
+          fprintf(stderr, "Failed to stat decision tree: %s\n", tree_file);
+          error = true;
+          break;
         }
-        tree_buf_lengths[i] = sb.st_size;
+
+      tree_bufs[i] = (uint8_t*)xcalloc(1, sb.st_size);
+      n_trees++;
+      if (fread(tree_bufs[i], sb.st_size, 1, tree_fp) != 1)
+        {
+          fprintf(stderr, "Failed to read decision tree: %s\n", tree_file);
+          error = true;
+          break;
+        }
+      tree_buf_lengths[i] = sb.st_size;
+
+      if (fclose(tree_fp) != 0)
+        {
+          fprintf(stderr, "Error closing tree file: %s\n", tree_file);
+        }
     }
 
-  RDTree** forest = load_forest(tree_bufs, tree_buf_lengths, n_trees);
+  RDTree** forest = error ?
+    NULL : load_forest(tree_bufs, tree_buf_lengths, n_trees);
 
-  for (unsigned i = 0; i < n_files; i++)
+  for (unsigned i = 0; i < n_trees; i++)
     {
       xfree(tree_bufs[i]);
     }
@@ -187,7 +221,7 @@ free_forest(RDTree** forest, int n_trees)
 }
 
 JIParams*
-read_jip(char* filename)
+read_jip(const char* filename)
 {
   FILE* jip_file = fopen(filename, "r");
   if (!jip_file)

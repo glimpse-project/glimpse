@@ -546,7 +546,7 @@ main (int argc, char** argv)
     }
 
   printf("Loading decision forest...\n");
-  ctx.forest = read_forest(tree_paths, ctx.n_trees);
+  ctx.forest = read_forest((const char**)tree_paths, ctx.n_trees);
 
   printf("Scanning training directories...\n");
   gather_train_data(data_dir,

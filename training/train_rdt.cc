@@ -12,6 +12,7 @@
 #include <thread>
 #include <pthread.h>
 #include <time.h>
+#include <signal.h>
 
 #include "half.hpp"
 
@@ -24,6 +25,7 @@
 using half_float::half;
 
 static bool verbose = false;
+static bool interrupted = false;
 static uint32_t seed = 0;
 
 typedef struct {
@@ -170,7 +172,7 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
                       uint32_t c_start, uint32_t c_end,
                       uint32_t* root_histogram, uint32_t* lr_histograms)
 {
-  for (uint32_t p = 0; p < data->n_pixels; p++)
+  for (uint32_t p = 0; p < data->n_pixels && !interrupted; p++)
     {
       Int2D pixel = data->pixels[p].xy;
       uint32_t i = data->pixels[p].i;
@@ -251,8 +253,8 @@ thread_body(void* userdata)
       // Wait for everything to be ready to start processing
       pthread_barrier_wait(data->ready_barrier);
 
-      // Quit out if we've nothing left to process
-      if (!(*data->data))
+      // Quit out if we've nothing left to process or we've been interrupted
+      if (!(*data->data) || interrupted)
         {
           break;
         }
@@ -286,9 +288,9 @@ thread_body(void* userdata)
 
           // Calculate the gain for each combination of u,v,t and store the best
           for (uint32_t i = data->c_start, lr_histo_base = 0;
-               i < data->c_end; i++)
+               i < data->c_end && !interrupted; i++)
             {
-              for (uint32_t j = 0; j < data->ctx->n_t;
+              for (uint32_t j = 0; j < data->ctx->n_t && !interrupted;
                    j++, lr_histo_base += data->ctx->n_labels * 2)
                 {
                   float l_entropy, r_entropy, gain;
@@ -346,8 +348,12 @@ static void
 collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
                Int3D** l_pixels, Int3D** r_pixels, uint32_t* n_lr_pixels)
 {
-  *l_pixels = (Int3D*)xmalloc(n_lr_pixels[0] * sizeof(Int3D));
-  *r_pixels = (Int3D*)xmalloc(n_lr_pixels[1] * sizeof(Int3D));
+  *l_pixels = (Int3D*)xmalloc((n_lr_pixels[0] ? n_lr_pixels[0] :
+                                                data->n_pixels) *
+                              sizeof(Int3D));
+  *r_pixels = (Int3D*)xmalloc((n_lr_pixels[1] ? n_lr_pixels[1] :
+                                                data->n_pixels) *
+                              sizeof(Int3D));
 
   uint32_t l_index = 0;
   uint32_t r_index = 0;
@@ -369,6 +375,18 @@ collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
         {
           (*r_pixels)[r_index++] = *pixel;
         }
+    }
+
+  if (n_lr_pixels[0] != l_index)
+    {
+      *l_pixels = (Int3D*)xrealloc(*l_pixels, l_index * sizeof(Int3D));
+      n_lr_pixels[0] = l_index;
+    }
+
+  if (n_lr_pixels[1] != r_index)
+    {
+      *r_pixels = (Int3D*)xrealloc(*r_pixels, r_index * sizeof(Int3D));
+      n_lr_pixels[1] = r_index;
     }
 }
 
@@ -406,8 +424,24 @@ print_usage(FILE* stream)
 "                                  (default: autodetect)\n"
 "  -n, --seed=NUMBER             Seed to use for RNG.\n"
 "                                  (default: 0)\n"
+"  -i, --continue                Continue training from an interrupted run.\n"
 "  -v, --verbose                 Verbose output.\n"
 "  -h, --help                    Display this message.\n");
+}
+
+void
+sigint_handler(int signum)
+{
+  if (!interrupted)
+    {
+      printf("\nUser-triggered interrupt, saving checkpoint...\n");
+      interrupted = true;
+    }
+  else
+    {
+      printf("\nInterrupted during checkpoint, quitting!\n");
+      exit(1);
+    }
 }
 
 int
@@ -502,6 +536,10 @@ main(int argc, char **argv)
             {
               param = 'n';
             }
+          else if (strcmp(arg, "continue") == 0)
+            {
+              param = 'i';
+            }
           else if (strcmp(arg, "verbose") == 0)
             {
               param = 'v';
@@ -530,6 +568,9 @@ main(int argc, char **argv)
         {
         case 's':
           shuffle = true;
+          continue;
+        case 'i':
+          interrupted = true;
           continue;
         case 'v':
           verbose = true;
@@ -590,14 +631,6 @@ main(int argc, char **argv)
         }
     }
 
-  printf("Opening output file...\n");
-  FILE* output;
-  if (!(output = fopen(out_filename, "wb")))
-    {
-      fprintf(stderr, "Failed to open output file '%s'\n", out_filename);
-      exit(1);
-    }
-
   printf("Scanning training directories...\n");
   gather_train_data(data_dir,
                     index_name,
@@ -612,7 +645,7 @@ main(int argc, char **argv)
   float ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
   ctx.uv_range *= ppm;
 
-  // Initialise root node training data and add it to the queue
+  // Calculate the u,v,t parameters that we're going to test
   printf("Preparing training metadata...\n");
   ctx.uvs = (UVPair*)xmalloc(ctx.n_uv * sizeof(UVPair));
   //std::random_device rd;
@@ -632,17 +665,10 @@ main(int argc, char **argv)
       ctx.ts[i] = -ctx.t_range / 2.f + (i * ctx.t_range / (float)(ctx.n_t - 1));
     }
 
-  // Allocate memory to store the decision tree.
-  uint32_t n_nodes = (uint32_t)roundf(powf(2.f, ctx.max_depth)) - 1;
-  Node* tree = (Node*)xcalloc(n_nodes, sizeof(Node));
-  LList* tree_histograms = NULL;
-  uint32_t n_histograms = 0;
-
-  LList* train_queue =
-    llist_new(create_node_train_data(&ctx, 0, 0, 0, NULL));
+  // Allocate memory for the normalised histogram of the currently training node
   float* root_nhistogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
 
-  NodeTrainData* node_data;
+  NodeTrainData* node_data = NULL;
   printf("Initialising %u threads...\n", n_threads);
   pthread_barrier_t ready_barrier, finished_barrier;
   if (pthread_barrier_init(&ready_barrier, NULL, n_threads + 1) != 0 ||
@@ -682,7 +708,140 @@ main(int argc, char **argv)
         }
     }
 
+  // Allocate memory to store the decision tree.
+  uint32_t n_nodes = (uint32_t)roundf(powf(2.f, ctx.max_depth)) - 1;
+  Node* tree = (Node*)xcalloc(n_nodes, sizeof(Node));
+
+  // Initialise root node training data and add it to the queue
+  LList* train_queue = llist_new(create_node_train_data(&ctx, 0, 0, 0, NULL));
+
+  // Initialise histogram count
+  uint32_t n_histograms = 0;
+  LList* tree_histograms = NULL;
+
+  // If -i was passed, try to load the partial tree and repopulate the training
+  // queue and tree histogram list
+  RDTree* checkpoint;
+  if (interrupted && (checkpoint = read_tree(out_filename)))
+    {
+      printf("Restoring checkpoint...\n");
+
+      // Do some basic validation
+      if (checkpoint->header.n_labels != ctx.n_labels)
+        {
+          fprintf(stderr, "Checkpoint has %d labels, expected %d\n",
+                  (int)checkpoint->header.n_labels, (int)ctx.n_labels);
+          return 1;
+        }
+
+      if (fabs(checkpoint->header.fov - ctx.fov) > 1e-6)
+        {
+          fprintf(stderr, "Checkpoint has FOV %.2f, expected %.2f\n",
+                  checkpoint->header.fov, ctx.fov);
+          return 1;
+        }
+
+      if (checkpoint->header.depth > ctx.max_depth)
+        {
+          fprintf(stderr,
+                  "Can't train with a lower depth than checkpoint (%d < %d)\n",
+                  (int)ctx.max_depth, (int)checkpoint->header.depth);
+          return 1;
+        }
+
+      // Restore nodes
+      uint32_t n_checkpoint_nodes = (uint32_t)
+        roundf(powf(2.f, checkpoint->header.depth)) - 1;
+      memcpy(tree, checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
+
+      // Navigate the tree to determine any unfinished nodes and the last
+      // trained depth
+      LList* checkpoint_queue = train_queue;
+      train_queue = NULL;
+      while (checkpoint_queue)
+        {
+          NodeTrainData* data = (NodeTrainData*)
+            llist_pop(&checkpoint_queue, NULL, NULL);
+          Node* node = &tree[data->id];
+
+          // Check if the node has a valid probability table and copy it to
+          // the list if so. Given the order in which we iterate over the tree,
+          // we can just append to the list. Note that the code expects
+          // tree_histograms to point to the end of the list.
+          if (node->label_pr_idx != 0 && node->label_pr_idx != UINT32_MAX)
+            {
+              float* pr_table = &checkpoint->
+                label_pr_tables[ctx.n_labels * (node->label_pr_idx - 1)];
+              float* pr_copy = (float*)xmalloc(ctx.n_labels * sizeof(float));
+              memcpy(pr_copy, pr_table, ctx.n_labels * sizeof(float));
+              tree_histograms = llist_insert_after(tree_histograms,
+                                                   llist_new(pr_copy));
+              ++n_histograms;
+            }
+
+          // Check if the node is either marked as incomplete, or it sits on
+          // the last depth of the tree and we're trying to train deeper.
+          if (node->label_pr_idx == UINT32_MAX ||
+              (data->depth == (uint32_t)(checkpoint->header.depth - 1) &&
+               ctx.max_depth > checkpoint->header.depth))
+            {
+              // This node is referenced and incomplete, add it to the training
+              // queue.
+              train_queue ?
+                llist_insert_after(train_queue, llist_new(data)) :
+                train_queue = llist_new(data);
+              continue;
+            }
+
+          // If the node isn't a leaf-node, calculate which pixels should go
+          // to the next two nodes and add them to the checkpoint queue
+          if (node->label_pr_idx == 0)
+            {
+              Int3D* l_pixels;
+              Int3D* r_pixels;
+              uint32_t n_lr_pixels[] = { 0, 0 };
+              collect_pixels(&ctx, data, node->uv, node->t, &l_pixels, &r_pixels,
+                             n_lr_pixels);
+
+              uint32_t id = (2 * data->id) + 1;
+              uint32_t depth = data->depth + 1;
+              NodeTrainData* ldata = create_node_train_data(
+                &ctx, id, depth, n_lr_pixels[0], l_pixels);
+              NodeTrainData* rdata = create_node_train_data(
+                &ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
+
+              checkpoint_queue =
+                llist_first(
+                  llist_insert_after(
+                    llist_insert_after(llist_last(checkpoint_queue),
+                                       llist_new(ldata)),
+                    llist_new(rdata)));
+            }
+
+          // Free the unused training data
+          destroy_node_train_data(data);
+        }
+
+      free_tree(checkpoint);
+      interrupted = false;
+
+      if (!train_queue)
+        {
+          fprintf(stderr, "Tree already fully trained.\n");
+          return 1;
+        }
+    }
+  else
+    {
+      // Mark nodes in tree as unfinished, for checkpoint restoration
+      for (uint32_t i = 0; i < n_nodes; i++)
+        {
+          tree[i].label_pr_idx = UINT32_MAX;
+        }
+    }
+
   printf("Beginning training...\n");
+  signal(SIGINT, sigint_handler);
   clock_gettime(CLOCK_MONOTONIC, &begin);
   last = begin;
   uint32_t last_depth = UINT32_MAX;
@@ -714,6 +873,17 @@ main(int argc, char **argv)
 
       // Wait for threads to finish
       pthread_barrier_wait(&finished_barrier);
+
+
+      if (interrupted)
+        {
+          break;
+        }
+      // Quit if we've been interrupted
+      if (interrupted)
+        {
+          break;
+        }
 
       // See which thread got the best uvt combination
       for (uint32_t i = 0; i < n_threads; i++)
@@ -764,6 +934,9 @@ main(int argc, char **argv)
           llist_insert_after(
             llist_insert_after(llist_last(train_queue), llist_new(ldata)),
             llist_new(rdata));
+
+          // Mark the node as a continuing node
+          node->label_pr_idx = 0;
         }
       else
         {
@@ -780,7 +953,7 @@ main(int argc, char **argv)
             }
 
           node->label_pr_idx = ++n_histograms;
-          float* node_histogram = (float*)malloc(ctx.n_labels * sizeof(float));
+          float* node_histogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
           memcpy(node_histogram, root_nhistogram, ctx.n_labels * sizeof(float));
           tree_histograms = llist_insert_after(tree_histograms,
                                                llist_new(node_histogram));
@@ -830,6 +1003,13 @@ main(int argc, char **argv)
          since_last.hours, since_last.minutes, since_last.seconds,
          out_filename);
 
+  FILE* output;
+  if (!(output = fopen(out_filename, "wb")))
+    {
+      fprintf(stderr, "Failed to open output file '%s'\n", out_filename);
+      exit(1);
+    }
+
   // Write a header
   RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \
                        ctx.n_labels, ctx.fov };
@@ -867,9 +1047,10 @@ main(int argc, char **argv)
   since_begin = get_time_for_display(&begin, &now);
   since_last = get_time_for_display(&last, &now);
   last = now;
-  printf("(%02d:%02d:%02d / %02d:%02d:%02d) Done!\n",
+  printf("(%02d:%02d:%02d / %02d:%02d:%02d) %s\n",
          since_begin.hours, since_begin.minutes, since_begin.seconds,
-         since_last.hours, since_last.minutes, since_last.seconds);
+         since_last.hours, since_last.minutes, since_last.seconds,
+         interrupted ? "Interrupted!" : "Done!");
 
   return 0;
 }

@@ -147,7 +147,7 @@ main(int argc, char **argv)
 
   // Do inference
   unsigned n_trees = argc - optind - 2;
-  RDTree** forest = read_forest(&argv[optind+2], n_trees);
+  RDTree** forest = read_forest((const char**)&argv[optind+2], n_trees);
   if (!forest)
     {
       return 1;
