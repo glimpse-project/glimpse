@@ -20,8 +20,8 @@ namespace Glimpse
     public:
       DepthImage(const char* aFileName);
       DepthImage(float*      aDepthImage,
-                 int         aWidth,
-                 int         aHeight);
+                 int         aHeight,
+                 int         aWidth);
       ~DepthImage();
 
       void WriteEXR(const char* aFileName);

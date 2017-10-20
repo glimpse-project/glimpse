@@ -45,6 +45,6 @@ import_array();
 %apply (char** IN_ARRAY1, int DIM1) {(char** aFiles, unsigned int aNFiles)};
 %apply (float** ARGOUTVIEWM_ARRAY3, int* DIM1, int* DIM2, int* DIM3) {(float** aLabelPr, int* aOutWidth, int* aOutHeight, int* aNLabels)};
 %apply (float** ARGOUTVIEWM_ARRAY2, int* DIM1, int* DIM2) {(float** aJoints, int* aOutNJoints, int* aOutNDims)};
-%apply (float* IN_ARRAY2, int DIM1, int DIM2) {(float* aDepthImage, int aWidth, int aHeight)};
+%apply (float* IN_ARRAY2, int DIM1, int DIM2) {(float* aDepthImage, int aHeight, int aWidth)};
 
 %include "glimpse_python.h"

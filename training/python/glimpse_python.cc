@@ -28,7 +28,7 @@ DepthImage::DepthImage(const char* aFileName)
     }
 }
 
-DepthImage::DepthImage(float* aDepthImage, int aWidth, int aHeight)
+DepthImage::DepthImage(float* aDepthImage, int aHeight, int aWidth)
 {
   mValid = true;
   mWidth = aWidth;
