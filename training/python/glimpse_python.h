@@ -19,7 +19,12 @@ namespace Glimpse
 
     public:
       DepthImage(const char* aFileName);
+      DepthImage(float*      aDepthImage,
+                 int         aWidth,
+                 int         aHeight);
       ~DepthImage();
+
+      void WriteEXR(const char* aFileName);
   };
 
   class Forest {

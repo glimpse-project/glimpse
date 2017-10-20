@@ -28,12 +28,35 @@ DepthImage::DepthImage(const char* aFileName)
     }
 }
 
+DepthImage::DepthImage(float* aDepthImage, int aWidth, int aHeight)
+{
+  mValid = true;
+  mWidth = aWidth;
+  mHeight = aHeight;
+  mDepthImage = (half*)xmalloc(aWidth * aHeight * sizeof(half));
+  for (int i = 0; i < aWidth * aHeight; i++)
+    {
+      mDepthImage[i] = (half)aDepthImage[i];
+    }
+}
+
 DepthImage::~DepthImage()
 {
   if (mValid)
     {
       xfree(mDepthImage);
       mValid = false;
+    }
+}
+
+void
+DepthImage::WriteEXR(const char* aFileName)
+{
+  IUImageSpec spec = { (int)mWidth, (int)mHeight, IU_FORMAT_HALF };
+  if (iu_write_exr_to_file(aFileName, &spec, (void*)mDepthImage,
+                           IU_FORMAT_HALF) != SUCCESS)
+    {
+      fprintf(stderr, "Error writing EXR file '%s'\n", aFileName);
     }
 }
 
