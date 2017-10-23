@@ -25,6 +25,7 @@ namespace Glimpse
       ~DepthImage();
 
       void WriteEXR(const char* aFileName);
+      void AsArray(float** aDepth, int* aOutHeight, int* aOutWidth);
   };
 
   class Forest {
@@ -41,8 +42,8 @@ namespace Glimpse
 
       void inferLabels(DepthImage* aDepthImage,
                        float**     aLabelPr,
-                       int*        aOutWidth,
                        int*        aOutHeight,
+                       int*        aOutWidth,
                        int*        aNLabels);
   };
 

@@ -60,6 +60,18 @@ DepthImage::WriteEXR(const char* aFileName)
     }
 }
 
+void
+DepthImage::AsArray(float** aDepth, int* aOutHeight, int* aOutWidth)
+{
+  *aDepth = (float*)xmalloc(mWidth * mHeight * sizeof(float));
+  for (uint32_t i = 0; i < mWidth * mHeight; i++)
+    {
+      (*aDepth)[i] = (float)mDepthImage[i];
+    }
+  *aOutWidth = mWidth;
+  *aOutHeight = mHeight;
+}
+
 Forest::Forest(const char** aFiles, unsigned int aNFiles)
 {
   RDTree** forest = read_forest(aFiles, aNFiles);
@@ -78,7 +90,7 @@ Forest::~Forest()
 
 void
 Forest::inferLabels(DepthImage* aDepthImage, float** aLabelPr,
-                    int* aOutWidth, int* aOutHeight, int* aNLabels)
+                    int* aOutHeight, int* aOutWidth, int* aNLabels)
 {
   if (!mForest || !aDepthImage->mValid)
     {
