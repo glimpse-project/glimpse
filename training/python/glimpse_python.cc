@@ -50,7 +50,7 @@ DepthImage::~DepthImage()
 }
 
 void
-DepthImage::WriteEXR(const char* aFileName)
+DepthImage::writeEXR(const char* aFileName)
 {
   IUImageSpec spec = { (int)mWidth, (int)mHeight, IU_FORMAT_HALF };
   if (iu_write_exr_to_file(aFileName, &spec, (void*)mDepthImage,
@@ -61,7 +61,7 @@ DepthImage::WriteEXR(const char* aFileName)
 }
 
 void
-DepthImage::AsArray(float** aDepth, int* aOutHeight, int* aOutWidth)
+DepthImage::asArray(float** aDepth, int* aOutHeight, int* aOutWidth)
 {
   *aDepth = (float*)xmalloc(mWidth * mHeight * sizeof(float));
   for (uint32_t i = 0; i < mWidth * mHeight; i++)
