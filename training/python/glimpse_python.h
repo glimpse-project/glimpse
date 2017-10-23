@@ -24,8 +24,8 @@ namespace Glimpse
                  int         aWidth);
       ~DepthImage();
 
-      void WriteEXR(const char* aFileName);
-      void AsArray(float** aDepth, int* aOutHeight, int* aOutWidth);
+      void writeEXR(const char* aFileName);
+      void asArray(float** aDepth, int* aOutHeight, int* aOutWidth);
   };
 
   class Forest {
