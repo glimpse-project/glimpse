@@ -426,7 +426,7 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
           continue;
         }
 
-      float y = point[1] / (tan_half_vfov * point[2]);
+      float y = -point[1] / (tan_half_vfov * point[2]);
       if (y < -1.0f || y > 1.0f)
         {
           continue;
