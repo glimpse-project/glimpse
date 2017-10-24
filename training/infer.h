@@ -30,3 +30,17 @@ float* infer_joints(half_float::half* depth_image,
                     JSON_Value* joint_map,
                     float vfov,
                     JIParam* params);
+
+float* reproject(half_float::half* depth_image,
+                 int32_t width,
+                 int32_t height,
+                 float vfov,
+                 float threshold,
+                 uint32_t* n_points);
+
+half_float::half* project(float* point_cloud,
+                          uint32_t n_points,
+                          int32_t width,
+                          int32_t height,
+                          float vfov,
+                          float background = 0.f);

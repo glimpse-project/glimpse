@@ -348,3 +348,98 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
 
   return joints;
 }
+
+float*
+reproject(half* depth_image, int32_t width, int32_t height,
+          float vfov, float threshold, uint32_t* n_points)
+{
+  float half_width = width / 2.f;
+  float half_height = height / 2.f;
+  float aspect = half_width / half_height;
+
+  float vfov_rad = vfov * M_PI / 180.f;
+  float tan_half_vfov = tanf(vfov_rad / 2.f);
+  float tan_half_hfov = tan_half_vfov * aspect;
+
+  float* point_cloud = (float*)xmalloc(width * height * 3 * sizeof(float));
+
+  *n_points = 0;
+  int32_t ty = -1;
+  for (int32_t y = 0, idx = 0; y < height; y++)
+    {
+      float t;
+      for (int32_t x = 0; x < width; x++, idx++)
+        {
+          float depth = (float)depth_image[idx];
+          if (!std::isnormal(depth) || depth > threshold)
+            {
+              continue;
+            }
+
+          float s = (x / half_width) - 1.f;
+          if (ty != y)
+            {
+              t = -((y / half_height) - 1.f);
+              ty = y;
+            }
+          uint32_t cloud_idx = (*n_points) * 3;
+
+          point_cloud[cloud_idx] = (tan_half_hfov * depth) * s;
+          point_cloud[cloud_idx + 1] = (tan_half_vfov * depth) * t;
+          point_cloud[cloud_idx + 2] = depth;
+
+          (*n_points)++;
+        }
+    }
+
+  point_cloud = (float*)xrealloc(point_cloud, (*n_points) * 3 * sizeof(float));
+
+  return point_cloud;
+}
+
+half*
+project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
+        float vfov, float background)
+{
+  float half_width = width / 2.f;
+  float half_height = height / 2.f;
+  float aspect = half_width / half_height;
+
+  float vfov_rad = vfov * M_PI / 180.f;
+  float tan_half_vfov = tanf(vfov_rad / 2.f);
+  float tan_half_hfov = tan_half_vfov * aspect;
+
+  half* depth_image = (half*)xmalloc(width * height * sizeof(half));
+  half bg_half = (half)background;
+  for (int32_t i = 0; i < width * height; i++)
+    {
+      depth_image[i] = bg_half;
+    }
+
+  for (uint32_t i = 0, idx = 0; i < n_points; i++, idx += 3)
+    {
+      float* point = &point_cloud[idx];
+
+      float x = point[0] / (tan_half_hfov * point[2]);
+      if (x < -1.0f || x > 1.0f)
+        {
+          continue;
+        }
+
+      float y = point[1] / (tan_half_vfov * point[2]);
+      if (y < -1.0f || y > 1.0f)
+        {
+          continue;
+        }
+
+      x = (x + 1.0f) * half_width;
+      y = (y + 1.0f) * half_height;
+
+      int32_t col = x + 0.5f;
+      int32_t row = y + 0.5f;
+
+      depth_image[row * width + col] = (half)point[2];
+    }
+
+  return depth_image;
+}

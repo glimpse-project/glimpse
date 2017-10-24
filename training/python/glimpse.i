@@ -44,7 +44,9 @@ import_array();
 
 %apply (char** IN_ARRAY1, int DIM1) {(char** aFiles, unsigned int aNFiles)};
 %apply (float* IN_ARRAY2, int DIM1, int DIM2) {(float* aDepthImage, int aHeight, int aWidth)};
+%apply (float* IN_ARRAY2, int DIM1, int DIM2) {(float* aPointCloud, int aNPoints, int aNDims)};
 %apply (float** ARGOUTVIEWM_ARRAY2, int* DIM1, int* DIM2) {(float** aDepth, int* aOutHeight, int* aOutWidth)};
+%apply (float** ARGOUTVIEWM_ARRAY2, int* DIM1, int* DIM2) {(float** aCloud, int* aOutNPoints, int* aOutNDims)};
 %apply (float** ARGOUTVIEWM_ARRAY2, int* DIM1, int* DIM2) {(float** aJoints, int* aOutNJoints, int* aOutNDims)};
 %apply (float** ARGOUTVIEWM_ARRAY3, int* DIM1, int* DIM2, int* DIM3) {(float** aLabelPr, int* aOutHeight, int* aOutWidth, int* aNLabels)};
 

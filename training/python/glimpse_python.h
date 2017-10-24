@@ -6,6 +6,13 @@ namespace Glimpse
   class DepthImage {
     friend class Forest;
     friend class JointMap;
+    friend DepthImage* DepthImageFromPointCloud(float* aPointCloud,
+                                                int    aNPoints,
+                                                int    aNDims,
+                                                int    aHeight,
+                                                int    aWidth,
+                                                float  aVFOV,
+                                                float  aBackground);
 
     private:
       bool              mValid;
@@ -26,7 +33,17 @@ namespace Glimpse
 
       void writeEXR(const char* aFileName);
       void asArray(float** aDepth, int* aOutHeight, int* aOutWidth);
+      void asPointCloud(float aVFOV, float aThreshold, float** aCloud,
+                        int* aOutNPoints, int* aOutNDims);
   };
+
+  DepthImage* DepthImageFromPointCloud(float* aPointCloud,
+                                       int    aNPoints,
+                                       int    aNDims,
+                                       int    aHeight,
+                                       int    aWidth,
+                                       float  aVFOV,
+                                       float  aBackground = 0.f);
 
   class Forest {
     friend class JointMap;

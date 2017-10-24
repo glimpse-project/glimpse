@@ -72,6 +72,32 @@ DepthImage::asArray(float** aDepth, int* aOutHeight, int* aOutWidth)
   *aOutHeight = mHeight;
 }
 
+void
+DepthImage::asPointCloud(float aVFOV, float aThreshold, float** aCloud,
+                         int* aOutNPoints, int* aOutNDims)
+{
+  uint32_t n_points = 0;
+  *aCloud = reproject(mDepthImage, mWidth, mHeight, aVFOV,
+                      aThreshold, &n_points);
+  *aOutNPoints = (int)n_points;
+  *aOutNDims = 3;
+}
+
+DepthImage*
+DepthImageFromPointCloud(float* aPointCloud, int aNPoints, int aNDims,
+                         int aHeight, int aWidth, float aVFOV,
+                         float aBackground)
+{
+  if (aNDims != 3 || aNPoints < 1 || aWidth < 1 || aHeight < 1 || aVFOV <= 0.f)
+    {
+      return NULL;
+    }
+
+  half* depth_image = project(aPointCloud, aNPoints, aWidth, aHeight, aVFOV,
+                              aBackground);
+  return new DepthImage(depth_image, aWidth, aHeight);
+}
+
 Forest::Forest(const char** aFiles, unsigned int aNFiles)
 {
   RDTree** forest = read_forest(aFiles, aNFiles);
