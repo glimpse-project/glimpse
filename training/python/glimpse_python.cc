@@ -81,6 +81,11 @@ DepthImage::asPointCloud(float aVFOV, float aThreshold, float** aCloud,
                       aThreshold, &n_points);
   *aOutNPoints = (int)n_points;
   *aOutNDims = 3;
+
+  if (n_points == 0)
+    {
+      *aCloud = (float*)xmalloc(sizeof(float));
+    }
 }
 
 DepthImage*
