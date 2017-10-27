@@ -191,7 +191,7 @@ function fetch_all {
         git clone https://github.com/jamiesnape/qhull -b cmake
     fi
     if ! test -d glm; then
-        git clone https://github.com/g-truc/glm
+        git clone https://github.com/g-truc/glm -b 0.9.8.5 glm
     fi
     if ! test -d pcl; then
         git clone https://github.com/PointCloudLibrary/pcl pcl
