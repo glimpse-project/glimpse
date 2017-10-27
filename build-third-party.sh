@@ -186,9 +186,9 @@ export PKG_CONFIG_LIBDIR=/dummy/foo
 # single sysroot which is much simpler from the pov of cmake configuration.
 #
 
+#    -DANDROID_STL=$_CMAKE_STL \
 ANDROID_CMAKE_ARGS="\
     -DANDROID_DEPRECATED_HEADERS=ON \
-    -DANDROID_STL=$_CMAKE_STL \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_NATIVE_API_LEVEL=$_PLATFORM \
     -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake"
