@@ -1,0 +1,35 @@
+From 210ba9e729a33b7aa508735653fcb1e0357d699d Mon Sep 17 00:00:00 2001
+From: Robert Bragg <robert@impossible.com>
+Date: Fri, 27 Oct 2017 12:42:00 +0000
+Subject: [PATCH] boost: avoid versioned sonames
+
+---
+ boostcpp.jam | 12 ++++++------
+ 1 file changed, 6 insertions(+), 6 deletions(-)
+
+diff --git a/boostcpp.jam b/boostcpp.jam
+index f45d12e..0733d83 100644
+--- a/boostcpp.jam
++++ b/boostcpp.jam
+@@ -152,12 +152,12 @@ rule tag ( name : type ? : property-set )
+         # version suffix is not needed -- the linker expects the
+         # libFoo.1.2.3.dylib format. AIX linkers do not accept version suffixes
+         # either. Pgi compilers can not accept a library with version suffix.
+-        if $(type) = SHARED_LIB &&
+-          ! [ $(property-set).get <target-os> ] in windows cygwin darwin aix &&
+-          ! [ $(property-set).get <toolset> ] in pgi
+-        {
+-            result = $(result).$(BOOST_VERSION)  ;
+-        }
++        #if $(type) = SHARED_LIB &&
++        #  ! [ $(property-set).get <target-os> ] in windows cygwin darwin aix &&
++        #  ! [ $(property-set).get <toolset> ] in pgi
++        #{
++        #    result = $(result).$(BOOST_VERSION)  ;
++        #}
+ 
+         return $(result) ;
+     }
+-- 
+2.7.4
+

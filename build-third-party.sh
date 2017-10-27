@@ -343,6 +343,7 @@ function fetch_all {
 	#  See: https://github.com/android-ndk/ndk/issues/480
 	#
         patch -p1 -d boost/libs/filesystem < $SCRIPT_DIR/0001-boost-filesystems-avoid-_FILE_OFFSET_BITS-64-broken-.patch
+        patch -p1 -d boost < $SCRIPT_DIR/0001-boost-avoid-versioned-sonames.patch
     fi
     if ! test -d flann; then
         git clone git://github.com/mariusmuja/flann.git
