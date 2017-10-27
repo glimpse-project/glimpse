@@ -164,6 +164,7 @@ fi
 export PATH=$STAGE_DIR/cmake-$CMAKE_VER-Linux-x86_64/bin:$PATH
 cmake --version
 
+
 # We need to cripple pkg-config to not find anything because of cmake's design.
 # If we don't cripple pkg-config then projects like dlib end up finding host
 # libraries which aren't relevant when cross compiling and lead to link failures.
@@ -273,35 +274,6 @@ function cmake_build {
     fi
 }
 
-function strip_shared_versioning {
-    pushd $1
-
-    for lib in lib*.so
-    do
-        soname=`$SCRIPT_DIR/patchelf.py --print-soname $lib`
-        if test "$soname" != "$lib"; then
-            $SCRIPT_DIR/patchelf.py --set-soname $lib $lib
-
-            rm $lib
-            mv $soname $lib
-            rm -f $lib.* # remove any other intermediate version symlinks
-            touch $soname # create a hack symlink to placate FindBoost.cmake
-        fi
-    done
-
-    for lib in lib*.so
-    do
-        for needed in `$SCRIPT_DIR/patchelf.py --print-needed $lib`
-        do
-            if echo "$needed" | grep -q '.so.'; then
-                stripped=`echo $needed|cut -d'.' -f1`
-                $SCRIPT_DIR/patchelf.py --replace-needed $needed $stripped.so $lib
-            fi
-        done
-    done
-
-    popd
-}
 
 function build_boost {
     if test -f $STAGE_DIR/boost.built; then
@@ -335,7 +307,7 @@ function build_boost {
             --with-iostreams \
             --with-serialization \
             -sNO_BZIP2=1 && \
-        touch $STAGE_DIR/boost.built
+	touch $STAGE_DIR/boost.built
     fi
 }
 
@@ -415,21 +387,6 @@ done
 
 mkdir -p $STAGE_DIR/$_PKG_NAME/opencv/lib
 cp -a $STAGE_DIR/opencv/sdk/native/libs/$_ABI $STAGE_DIR/$_PKG_NAME/opencv/lib/$_ABI
-
-
-# Android doesn't support shared library versioning but there's no practical
-# way to affect the Boost build system to avoiding building shared librareies
-# without versioning so we have to manually fix things up afterwards.
-#
-# Note: we have to wait until the very end of the build to strip the versioning
-# because cmake's FindBoost.cmake will fail to find Boost after the versioning
-# is stripped.
-#
-#for i in dlib libpng flann boost pcl opencv
-#do
-#    strip_shared_versioning $STAGE_DIR/$_PKG_NAME/$i/lib/$_ABI
-#done
-
 
 for i in dlib libpng flann boost pcl eigen
 do
