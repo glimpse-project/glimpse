@@ -273,7 +273,7 @@ _BUILD_NAME=glimpse
 _BUILD_DIR_NAME=build-$_BUILD_NAME
 _BUILD_TYPE=release
 _COMPONENTS=shared
-_J_ARG=-j8
+_J_ARG=-j`nproc --all`
 
 _PKG_SUFFIX=${_BUILD_TYPE}_$(date +%F|tr '-' '_')
 
