@@ -155,7 +155,7 @@ function fetch_all {
     fi
     if ! test -d opencv; then
         git clone https://github.com/opencv/opencv -b master opencv
-        git checkout 2c1b4f571123cae115850c49830c217783669270
+        git checkout 29b0ef44aa24e237498b032c2ab5adc63ffafadb
     fi
     if ! test -d libpng; then
         git clone https://github.com/glennrp/libpng -b libpng16 libpng
