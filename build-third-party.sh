@@ -36,6 +36,7 @@ function usage {
     echo " -f,--fetch-only      only fetch source code and exit"
     echo " -j,--jobs            allow N jobs at once (passed to make)"
     echo " -n,--native          build for the host machine not Android"
+    echo " -d,--debug           build debug libraries with no optimizations"
     echo ""
     echo "ENVIRONMENT:"
     echo ""
@@ -88,11 +89,12 @@ function cmake_build {
         #    -DCMAKE_C_STANDARD_LIBRARIES="-lm -llog" \
         #    $@ \
 
-        cmake $ANDROID_CMAKE_ARGS \
-            -DCMAKE_POLICY_DEFAULT_CMP0056=NEW \
+        cmake $_CMAKE_ARGS \
+            $@ \
+            -DCMAKE_C_FLAGS="$CFLAGS" \
+            -DCMAKE_CXX_FLAGS="$CXXFLAGS" \
             -DCMAKE_EXE_LINKER_FLAGS="$CMAKE_RPATH_ARG" \
             -DCMAKE_SHARED_LINKER_FLAGS="$CMAKE_RPATH_ARG" \
-            $@ \
             -DCMAKE_INSTALL_PREFIX=$STAGE_DIR/$PROJ ../ && \
         make $_J_ARG VERBOSE=1 && \
         cmake --build . --target install && \
@@ -132,6 +134,8 @@ function build_boost {
             toolset=clang \
             link=$_COMPONENTS \
             define="_FILE_OFFSET_BITS=32" \
+            cflags="$CFLAGS" \
+            cxxflags="$CXXFLAGS" \
             $SYS_OPTS \
             --prefix=$STAGE_DIR/boost \
             --with-system \
@@ -214,9 +218,10 @@ function fetch_all {
 
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
+_BUILD_TYPE=release
 
-SHORT_OPTS="+hfj:n"
-LONG_OPTS="help,fetch-only,jobs,native"
+SHORT_OPTS="+hfj:nd"
+LONG_OPTS="help,fetch-only,jobs,native,debug"
 OPTS=$(getopt -n $0 -o $SHORT_OPTS -l $LONG_OPTS -- "$@" || usage)
 eval set -- $OPTS
 while true; do
@@ -234,6 +239,10 @@ while true; do
             ;;
         -n|--native)
             _NATIVE_BUILD=yes
+            shift
+            ;;
+        -d|--debug)
+            _BUILD_TYPE=debug
             shift
             ;;
         --)
@@ -271,7 +280,6 @@ echo "STAGE_DIR=$STAGE_DIR"
 
 _BUILD_NAME=glimpse
 _BUILD_DIR_NAME=build-$_BUILD_NAME
-_BUILD_TYPE=release
 _COMPONENTS=shared
 _J_ARG=-j`nproc --all`
 
@@ -379,7 +387,7 @@ export PKG_CONFIG_LIBDIR=/dummy/foo
 # up with libraries depending on a non-existent libgnustl_shared library...
 #    -DANDROID_STL=$_CMAKE_STL
 if test "$_NATIVE_BUILD" != "yes"; then
-    ANDROID_CMAKE_ARGS="\
+    _CMAKE_ARGS="\
         -DANDROID_DEPRECATED_HEADERS=ON \
         -DANDROID_ABI=arm64-v8a \
         -DANDROID_NATIVE_API_LEVEL=$_PLATFORM \
@@ -387,6 +395,13 @@ if test "$_NATIVE_BUILD" != "yes"; then
     echo "Android Build"
 else
     echo "Native Build"
+fi
+_CMAKE_ARGS="$_CMAKE_ARGS -DCMAKE_POLICY_DEFAULT_CMP0056=NEW"
+
+if test "$_BUILD_TYPE" = "debug"; then
+    export CFLAGS="-g3 -O0"
+    export CXXFLAGS="-g3 -O0"
+    _CMAKE_ARGS="$_CMAKE_ARGS -DCMAKE_BUILD_TYPE=Debug"
 fi
 
 #
