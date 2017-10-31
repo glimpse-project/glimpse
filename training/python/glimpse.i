@@ -42,7 +42,7 @@ import_array();
   free((char *) $1);
 }
 
-%apply (char** IN_ARRAY1, int DIM1) {(char** aFiles, unsigned int aNFiles)};
+%apply (char** IN_ARRAY1, int DIM1) {(const char** aFiles, unsigned int aNFiles)};
 %apply (float* IN_ARRAY2, int DIM1, int DIM2) {(float* aDepthImage, int aHeight, int aWidth)};
 %apply (float* IN_ARRAY2, int DIM1, int DIM2) {(float* aPointCloud, int aNPoints, int aNDims)};
 %apply (float** ARGOUTVIEWM_ARRAY2, int* DIM1, int* DIM2) {(float** aDepth, int* aOutHeight, int* aOutWidth)};
