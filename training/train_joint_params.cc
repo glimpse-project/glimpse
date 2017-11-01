@@ -703,65 +703,108 @@ main (int argc, char** argv)
   xfree(ctx.inferred);
 
   // Open output file
-  FILE* output;
-  JIPHeader header = { { 'J', 'I', 'P' }, JIP_VERSION, ctx.n_joints };
-  if (!(output = fopen(out_filename, "wb")))
-    {
-      fprintf(stderr, "Failed to open output file\n");
-    }
-  else
-    {
-      if (fwrite(&header, sizeof(JIPHeader), 1, output) != 1)
-        {
-          fprintf(stderr, "Error writing header\n");
 
-          fclose(output);
-          output = NULL;
-        }
-    }
-
-  // Find the best parameter combination and write to output file
-  for (uint32_t j = 0; j < ctx.n_joints; j++)
+  const char *ext;
+  if ((ext = strstr(out_filename, ".json")) && ext[5] == '\0')
     {
-      for (uint32_t i = 1; i < ctx.n_threads; i++)
+      JSON_Value* js_root = json_value_init_object();
+
+      json_object_set_number(json_object(js_root), "n_joints", ctx.n_joints);
+      JSON_Value* js_params = json_value_init_array();
+
+      for (uint32_t j = 0; j < ctx.n_joints; j++)
         {
-          uint32_t idx = ctx.n_joints * i + j;
-          if (best_dists[idx] < best_dists[j])
+          for (uint32_t i = 1; i < ctx.n_threads; i++)
             {
-              best_dists[j] = best_dists[idx];
-              best_bandwidths[j] = best_bandwidths[idx];
-              best_thresholds[j] = best_thresholds[idx];
-              best_offsets[j] = best_offsets[idx];
+              uint32_t idx = ctx.n_joints * i + j;
+              if (best_dists[idx] < best_dists[j])
+                {
+                  best_dists[j] = best_dists[idx];
+                  best_bandwidths[j] = best_bandwidths[idx];
+                  best_thresholds[j] = best_thresholds[idx];
+                  best_offsets[j] = best_offsets[idx];
+                }
             }
-        }
 
-      if (verbose || !output)
-        {
           JSON_Object *mapping = json_array_get_object(json_array(ctx.joint_map), j);
           const char *joint_name = json_object_get_string(mapping, "joint");
 
-          printf("Joint %d (%s): Mean distance: %.3fm\n"
-                 "  Bandwidth: %f\n"
-                 "  Threshold: %f\n"
-                 "  Offset: %f\n",
-                 j, joint_name, best_dists[j] / ctx.n_images,
-                 best_bandwidths[j], best_thresholds[j], best_offsets[j]);
+          JSON_Value* js_param = json_value_init_object();
+          json_object_set_string(json_object(js_param), "name", joint_name);
+          json_object_set_number(json_object(js_param), "bandwidth", best_bandwidths[j]);
+          json_object_set_number(json_object(js_param), "threshold", best_thresholds[j]);
+          json_object_set_number(json_object(js_param), "offset", best_offsets[j]);
+
+          json_array_append_value(json_array(js_params), js_param);
         }
 
-      if (output)
+      json_object_set_value(json_object(js_root), "params", js_params);
+
+      json_serialize_to_file_pretty(js_root, out_filename);
+      json_value_free(js_root);
+    }
+  else
+    {
+      FILE* output;
+      JIPHeader header = { { 'J', 'I', 'P' }, JIP_VERSION, ctx.n_joints };
+      if (!(output = fopen(out_filename, "wb")))
         {
-          if (fwrite(&best_bandwidths[j], sizeof(float), 1, output) != 1 ||
-              fwrite(&best_thresholds[j], sizeof(float), 1, output) != 1 ||
-              fwrite(&best_offsets[j], sizeof(float), 1, output) != 1)
+          fprintf(stderr, "Failed to open output file\n");
+        }
+      else
+        {
+          if (fwrite(&header, sizeof(JIPHeader), 1, output) != 1)
             {
-              fprintf(stderr, "Error writing output\n");
+              fprintf(stderr, "Error writing header\n");
+
+              fclose(output);
+              output = NULL;
             }
         }
-    }
 
-  if (fclose(output) != 0)
-    {
-      fprintf(stderr, "Error closing output file\n");
+      // Find the best parameter combination and write to output file
+      for (uint32_t j = 0; j < ctx.n_joints; j++)
+        {
+          for (uint32_t i = 1; i < ctx.n_threads; i++)
+            {
+              uint32_t idx = ctx.n_joints * i + j;
+              if (best_dists[idx] < best_dists[j])
+                {
+                  best_dists[j] = best_dists[idx];
+                  best_bandwidths[j] = best_bandwidths[idx];
+                  best_thresholds[j] = best_thresholds[idx];
+                  best_offsets[j] = best_offsets[idx];
+                }
+            }
+
+          if (verbose || !output)
+            {
+              JSON_Object *mapping = json_array_get_object(json_array(ctx.joint_map), j);
+              const char *joint_name = json_object_get_string(mapping, "joint");
+
+              printf("Joint %d (%s): Mean distance: %.3fm\n"
+                     "  Bandwidth: %f\n"
+                     "  Threshold: %f\n"
+                     "  Offset: %f\n",
+                     j, joint_name, best_dists[j] / ctx.n_images,
+                     best_bandwidths[j], best_thresholds[j], best_offsets[j]);
+            }
+
+          if (output)
+            {
+              if (fwrite(&best_bandwidths[j], sizeof(float), 1, output) != 1 ||
+                  fwrite(&best_thresholds[j], sizeof(float), 1, output) != 1 ||
+                  fwrite(&best_offsets[j], sizeof(float), 1, output) != 1)
+                {
+                  fprintf(stderr, "Error writing output\n");
+                }
+            }
+        }
+
+      if (fclose(output) != 0)
+        {
+          fprintf(stderr, "Error closing output file\n");
+        }
     }
 
   // Free the last of the allocated memory
