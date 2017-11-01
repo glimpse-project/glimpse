@@ -248,8 +248,8 @@ read_jip(const char* filename)
         }
 
       jip->joint_params[i].bandwidth = params[0];
-      jip->joint_params[i].threshold = params[0];
-      jip->joint_params[i].offset = params[0];
+      jip->joint_params[i].threshold = params[1];
+      jip->joint_params[i].offset = params[2];
     }
 
   if (fclose(jip_file) != 0)
