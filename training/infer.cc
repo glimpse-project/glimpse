@@ -284,6 +284,8 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
 
   float root_2pi = sqrtf(2 * M_PI);
 
+  uint32_t total_pixels = width * height;
+
   // Gather pixels above the given threshold
   for (int32_t y = 0, idx = 0; y < height; y++)
     {
@@ -333,7 +335,7 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
   // Means shift to find joint modes
   for (uint8_t j = 0; j < n_joints; j++)
     {
-      if (n_pixels[j] == 0)
+      if (n_pixels[j] == 0 || n_pixels[j] == total_pixels)
         {
           continue;
         }
