@@ -451,7 +451,12 @@ fi
 #
 ###############################################################################
 
-cmake_build dlib
+if test "$_BUILD_TYPE" = "debug"; then
+    cmake_build dlib -DDLIB_ENABLE_ASSERTS=ON
+else
+    cmake_build dlib
+fi
+
 cmake_build opencv -DWITH_TBB=ON -DBUILD_SHARED_LIBS=ON
 
 # We rely on distro packages of libpng for native builds
