@@ -7,6 +7,7 @@
 #include <cstddef>
 
 #include "loader.h"
+#include "parson.h"
 #include "xalloc.h"
 
 RDTree*
@@ -220,9 +221,54 @@ free_forest(RDTree** forest, int n_trees)
   xfree(forest);
 }
 
+JIParams *
+joint_params_from_json(JSON_Value *root)
+{
+  JIParams* jip = (JIParams*)xcalloc(1, sizeof(JIParams));
+
+  jip->header.tag[0] = 'J';
+  jip->header.tag[1] = 'I';
+  jip->header.tag[2] = 'P';
+
+  jip->header.version = 0;
+
+  jip->header.n_joints = json_object_get_number(json_object(root), "n_joints");
+
+  JSON_Array *params = json_object_get_array(json_object(root), "params");
+  int len = json_array_get_count(params);
+  if (len != jip->header.n_joints)
+    {
+      fprintf(stderr, "Inconsistency between \"n_joints\" and length of \"params\" array\n");
+      free(jip);
+      return NULL;
+    }
+
+  jip->joint_params = (JIParam*)xmalloc(jip->header.n_joints * sizeof(JIParam));
+  for (int i = 0; i < len; i++)
+    {
+      JSON_Object *param = json_array_get_object(params, i);
+
+      jip->joint_params[i].bandwidth = json_object_get_number(param, "bandwidth");
+      jip->joint_params[i].threshold = json_object_get_number(param, "threshold");
+      jip->joint_params[i].offset = json_object_get_number(param, "offset");
+    }
+
+  return jip;
+}
+
 JIParams*
 read_jip(const char* filename)
 {
+  const char* ext;
+
+  if ((ext = strstr(filename, ".json")) && ext[5] == '\0')
+    {
+      JSON_Value *js = json_parse_file(filename);
+      JIParams *ret = joint_params_from_json(js);
+      json_value_free(js);
+      return ret;
+    }
+
   FILE* jip_file = fopen(filename, "r");
   if (!jip_file)
     {
