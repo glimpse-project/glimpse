@@ -31,6 +31,7 @@
 
 #include <imgui.h>
 #include <imgui_impl_glfw_gles3.h>
+#include <profiler.h>
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
@@ -135,6 +136,14 @@ now()
   return ts.tv_sec + ts.tv_nsec / 1000000000.0;
 }
 
+static bool pause_profile;
+
+static void
+on_profiler_pause_cb(bool pause)
+{
+    pause_profile = pause;
+}
+
 static void
 redraw(Data *data)
 {
@@ -230,6 +239,8 @@ redraw(Data *data)
     ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver);
     ImGui::ShowTestWindow(&show_test_window);
 #endif
+
+    ProfileDrawUI();
 
     /*
      * Upload textures
@@ -425,6 +436,7 @@ static void
 event_loop(Data *data)
 {
     while (!glfwWindowShouldClose(data->window)) {
+        ProfileNewFrame();
         glfwPollEvents();
         redraw(data);
     }
@@ -956,6 +968,8 @@ main(int argc, char **argv)
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->AddFontFromFileTTF("Roboto-Medium.ttf", 16.0f);
 
+    ProfileInitialize(&pause_profile, on_profiler_pause_cb);
+
     init_opengl(&data);
 
     gm_context = gm_context_new(NULL);
@@ -1010,6 +1024,7 @@ main(int argc, char **argv)
 
     event_loop(&data);
 
+    ProfileShutdown();
     ImGui_ImplGlfwGLES3_Shutdown();
     glfwDestroyWindow(data.window);
     glfwTerminate();

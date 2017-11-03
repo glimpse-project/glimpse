@@ -32,6 +32,8 @@ IMGUI_OBJS=\
 	imgui/imgui.o \
 	imgui/imgui_demo.o \
 	imgui/imgui_draw.o \
+	imgui/profiler.o \
+	imgui/timer.o \
 	imgui/imgui_impl_glfw_gles3.o
 
 THIRD_PARTY_DEPS ?= ../third_party_deps
