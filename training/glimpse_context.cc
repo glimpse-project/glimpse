@@ -55,8 +55,6 @@
 
 #include "glimpse_context.h"
 
-#include "plane_fitting.h"
-
 #include "wrapper_image.h"
 #include "infer.h"
 #include "loader.h"
