@@ -737,11 +737,6 @@ main(int argc, char **argv)
 
     init_opengl(&data);
 
-    /*
-     * To look more like Android we create a separate app/ui thread and a
-     * separate Tango thread...
-     */
-
     gm_context = gm_context_new(NULL);
 
     TangoCameraIntrinsics kinect_camera_intrinsics;
