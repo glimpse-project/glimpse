@@ -17,7 +17,7 @@ _CFLAGS = $(CFLAGS) -Wall -std=c11 -fPIC
 _CXXFLAGS = $(CXXFLAGS) -std=c++14 -Wall -fPIC
 
 
-INCLUDES = `pkg-config --cflags OpenEXR libpng`
+INCLUDES = `pkg-config --cflags libpng`
 
 TOOLS = image-pre-processor \
 	train_rdt \
@@ -48,7 +48,7 @@ train_joint_params: train_joint_params.o infer.o parson.o image_utils.o train_ut
 
 depth2labels: depth2labels.o infer.o parson.o loader.o xalloc.o llist.o tinyexr.o image_utils.o
 	$(E)echo "(LD)      $(@)"
-	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs OpenEXR libpng`
+	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(LDFLAGS) `pkg-config --libs libpng`
 
 exr-to-pfm: exr-to-pfm.o tinyexr.o
 	$(E)echo "(LD)      $(@)"
