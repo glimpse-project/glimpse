@@ -1531,10 +1531,10 @@ gm_context_update_luminance(struct gm_context *ctx,
 }
 
 void
-gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
-                                    double timestamp,
-                                    int width, int height,
-                                    uint16_t *depth_mm)
+gm_context_update_depth(struct gm_context *ctx,
+                        double timestamp,
+                        int width, int height,
+                        void *depth, GlimpseDepthCallback cb)
 {
     TangoCameraIntrinsics *intrinsics = &ctx->depth_camera_intrinsics;
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = ctx->cloud_back;
@@ -1553,7 +1553,7 @@ gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             int off = y * width + x;
-            float depth_m = depth_mm[off] / 1000.0f;
+            float depth_m = cb ? cb(off, depth) : ((float*)depth)[off];
 
             cloud->points[off].x = (float)((x - cx) * depth_m * inv_fx);
             cloud->points[off].y = (float)((y - cy) * depth_m * inv_fy);
@@ -1564,7 +1564,7 @@ gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
     uint64_t end = get_time();
     uint64_t duration = end - start;
 
-    LOGI("gm_context_update_depth_from_u16_mm: projected depth buffer into pcl cloud in %.3f%s",
+    LOGI("gm_context_update_depth: projected depth buffer into pcl cloud in %.3f%s",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -1573,6 +1573,40 @@ gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
     ctx->got_cloud = true;
     pthread_cond_signal(&ctx->skel_track_cond);
     pthread_mutex_unlock(&ctx->cloud_swap_mutex);
+}
+
+static float
+gm_float_from_u16_mm(int offset, void *depth)
+{
+    uint16_t *depth_mm = (uint16_t*)depth;
+    return depth_mm[offset] / 1000.0f;
+}
+
+void
+gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
+                                    double timestamp,
+                                    int width, int height,
+                                    uint16_t *depth_mm)
+{
+    gm_context_update_depth(ctx, timestamp, width, height, (void*)depth_mm,
+                            gm_float_from_u16_mm);
+}
+
+static float
+gm_float_from_half(int offset, void *depth)
+{
+    half *depth_m = (half*)depth;
+    return (float)depth_m[offset];
+}
+
+void
+gm_context_update_depth_from_half(struct gm_context *ctx,
+                                  double timestamp,
+                                  int width, int height,
+                                  half_float::half *depth)
+{
+    gm_context_update_depth(ctx, timestamp, width, height, (void*)depth,
+                            gm_float_from_half);
 }
 
 void

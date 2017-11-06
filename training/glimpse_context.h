@@ -62,21 +62,35 @@ void
 gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
                                        TangoCameraIntrinsics *intrinsics);
 
-
 /* XXX: the timebase of the timestamp is currently undefined with units
  * of seconds.
- * XXX: if can currently be assume that there's an implici copy made of
+ * XXX: it can currently be assumed that there's an implicit copy made of
  * the depth data and the given depth buffer is not required once the call
  * returns.
  * XXX: we don't say whether the image is rectified or not.
  * XXX: this wouldn't be called if using GL to downsample the luminance data
  * via a yuv texture-external sampler.
+ * XXX: If cb is NULL, depth is assumed to be float format
  */
+typedef float (*GlimpseDepthCallback)(int offset, void* depth);
+
+void
+gm_context_update_depth(struct gm_context *ctx,
+                        double timestamp,
+                        int width, int height,
+                        void *depth, GlimpseDepthCallback cb);
+
 void
 gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
                                     double timestamp,
                                     int width, int height,
                                     uint16_t *depth);
+
+void
+gm_context_update_depth_from_half(struct gm_context *ctx,
+                                  double timestamp,
+                                  int width, int height,
+                                  half_float::half *depth);
 
 /* Should be called every frame from the render thread with a gles context
  * bound to have a chance to use the gpu.
