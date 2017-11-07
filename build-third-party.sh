@@ -100,6 +100,9 @@ function cmake_build {
         cmake --build . --target install && \
         touch $STAGE_DIR/$PROJ.built
     fi
+
+    export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:$STAGE_DIR/$PROJ/lib64/pkgconfig
+    export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:$STAGE_DIR/$PROJ/lib/pkgconfig
 }
 
 function build_boost {
@@ -199,6 +202,9 @@ function fetch_all {
     fi
     if ! test -d pcl; then
         git clone https://github.com/PointCloudLibrary/pcl pcl
+    fi
+    if ! test -d libfreenect; then
+        git clone https://github.com/rib/libfreenect -b fakenect-depth-mm-video-yuv
     fi
 
     for zip in TangoSDK_Ikariotikos_C TangoSupport_Ikariotikos_C Tango3DR_Ikariotikos_C
@@ -372,6 +378,7 @@ cmake --version
 # libraries which aren't relevant when cross compiling and lead to link failures.
 #
 export PKG_CONFIG_LIBDIR=/dummy/foo
+export PKG_CONFIG_PATH=
 
 # Note we enable ANDROID_DEPRECATED_HEADERS because the new way is not reliably
 # supported by the hacks android.toolchain.cmake attempts to use to get cmake
@@ -462,6 +469,10 @@ cmake_build opencv -DWITH_TBB=ON -DBUILD_SHARED_LIBS=ON
 # We rely on distro packages of libpng for native builds
 if test "$_NATIVE_BUILD" != "yes"; then
     cmake_build libpng -Dld-version-script=OFF -DPNG_ARM_NEON=on
+fi
+
+if test "$_NATIVE_BUILD" = "yes"; then
+    cmake_build libfreenect
 fi
 
 cmake_build flann -DBUILD_PYTHON_BINDINGS=OFF -DBUILD_MATLAB_BINDINGS=OFF -DBUILD_EXAMPLES=OFF -DBUILD_TESTS=OFF -DBUILD_DOC=OFF -DBUILD_TESTS=OFF -DUSE_OPENMP=OFF
