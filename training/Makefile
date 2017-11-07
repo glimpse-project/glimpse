@@ -94,7 +94,7 @@ libglimpse.so: xalloc.o tinyexr.o llist.o loader.o infer.o parson.o image_utils.
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -shared -o $(@) $(^) $(_CXXFLAGS) $(_LDFLAGS) `pkg-config --libs libpng`
 
-glimpse_viewer: glimpse_viewer.o glimpse_context.o infer.o parson.o loader.o parson.o xalloc.o $(IMGUI_OBJS)
+glimpse_viewer: glimpse_viewer.o glimpse_context.o infer.o parson.o loader.o parson.o xalloc.o image_utils.o tinyexr.o $(IMGUI_OBJS)
 	$(E)echo "(LD)      $(@)"
 	$(E)$(CXX) -o $(@) $(^) $(_CXXFLAGS) $(_LDFLAGS) -lpthread -lpcl_common -lpcl_features -lpcl_filters -lpcl_io_ply -lpcl_io -lpcl_kdtree -lpcl_keypoints -lpcl_ml -lpcl_octree -lpcl_recognition -lpcl_registration -lpcl_sample_consensus -lpcl_search -lpcl_segmentation -lpcl_stereo -lpcl_surface -lpcl_tracking -ldlib -lopencv_core -lopencv_objdetect -lflann_cpp -lpng -lboost_date_time -lboost_iostreams -lboost_filesystem -lboost_wserialization -lboost_serialization -lboost_thread -lboost_system -llapack -lcblas -lusb-1.0 `pkg-config --libs libfreenect libpng glfw3 epoxy`
 

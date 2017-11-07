@@ -5,10 +5,17 @@
 #include <errno.h>
 #include <locale.h>
 #include <assert.h>
+#include <time.h>
+
+#include <dirent.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 #include <math.h>
 
 #include <pthread.h>
+
+#include <vector>
 
 #include <epoxy/gl.h>
 #include <epoxy/egl.h>
@@ -19,6 +26,8 @@
 #include <libfreenect.h>
 
 #include "glimpse_context.h"
+#include "image_utils.h"
+#include "half.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_glfw_gles3.h>
@@ -26,6 +35,13 @@
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
 #define TOOLBAR_LEFT_WIDTH 300
+
+#define xsnprintf(dest, fmt, ...) do { \
+        if (snprintf(dest, sizeof(dest), fmt,  __VA_ARGS__) >= (int)sizeof(dest)) \
+            exit(1); \
+    } while(0)
+
+using half_float::half;
 
 typedef struct _Data
 {
@@ -37,13 +53,40 @@ typedef struct _Data
     int attr_tex_coord;
     int attr_color;
 
+    int depth_width;
+    int depth_height;
+
+    int luminance_width;
+    int luminance_height;
+
 } Data;
 
+typedef struct
+{
+    int       frame;
+    double    time;
+    int       n_images;
+    half    **depth_images;
+    uint8_t **lum_images;
+    Data     *data;
+} DummyData;
+
+typedef struct
+{
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+} Color;
+
+typedef struct {
+    float depth;
+    Color color;
+} ColorStop;
 
 static struct gm_context *gm_context;
 
 /*
- * We generally use tripple buffering to decouple the capture and preparation
+ * We generally use triple buffering to decouple the capture and preparation
  * of new data buffers from the buffers used to render.
  *
  * Preparation happens within the back buffer and when it's ready it
@@ -70,8 +113,8 @@ static GLuint gl_depth_rgb_tex;
 static GLuint gl_rgb_tex;
 static GLuint gl_lum_tex;
 
-static freenect_context *kinect_ctx;
-static freenect_device *kinect_dev;
+static freenect_context *kinect_ctx = NULL;
+static freenect_device *kinect_dev = NULL;
 
 static int kinect_ir_brightness;
 static float kinect_tilt;
@@ -83,6 +126,14 @@ static float kinect_mks_accel_y;
 static float kinect_mks_accel_z;
 
 static pthread_cond_t gl_frame_cond = PTHREAD_COND_INITIALIZER;
+
+static double
+now()
+{
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return ts.tv_sec + ts.tv_nsec / 1000000000.0;
+}
 
 static void
 redraw(Data *data)
@@ -113,10 +164,12 @@ redraw(Data *data)
     ImGui::Begin("Controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize);
-    if (ImGui::SliderInt("IR Intensity", &kinect_ir_brightness, 1, 50))
-        freenect_set_ir_brightness(kinect_dev, kinect_ir_brightness);
-    if (ImGui::SliderFloat("Tilt", &kinect_tilt, -30, 30))
-        freenect_set_tilt_degs(kinect_dev, kinect_tilt);
+    if (kinect_ctx) {
+        if (ImGui::SliderInt("IR Intensity", &kinect_ir_brightness, 1, 50))
+            freenect_set_ir_brightness(kinect_dev, kinect_ir_brightness);
+        if (ImGui::SliderFloat("Tilt", &kinect_tilt, -30, 30))
+            freenect_set_tilt_degs(kinect_dev, kinect_tilt);
+    }
 
     ImGui::Separator();
     ImGui::LabelText("Accel", "%.3f,%.3f,%.3f",
@@ -214,7 +267,8 @@ redraw(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 640, 480, 0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb_front);
+                 data->depth_width, data->depth_height,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb_front);
 
     /*
      * Draw luminance from RGB camera
@@ -229,7 +283,8 @@ redraw(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
     glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                 640, 480, 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, lum_front);
+                 data->luminance_width, data->luminance_height,
+                 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, lum_front);
 
     /*
      * Draw inferred label map
@@ -375,92 +430,84 @@ event_loop(Data *data)
     }
 }
 
-static void
-kinect_depth_frame_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
+static Color
+color_from_depth(float depth, float range, int stops)
 {
-    uint16_t *depth_mm = (uint16_t*)v_depth;
-    uint32_t rainbow[] = {
+    static const uint32_t rainbow[] = {
         0xffff00ff, //yellow
         0x0000ffff, //blue
         0x00ff00ff, //green
         0xff0000ff, //red
         0x00ffffff, //cyan
     };
+
+    int stop = (int)((fmax(0, fmin(range, depth)) / range) * stops);
+    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
+    int band = ((int)stop) % ARRAY_LEN(rainbow);
+
+    uint32_t rgba = rainbow[band];
+
+    float r = ((rgba & 0xff000000) >> 24) / 255.0f;
+    float g = ((rgba & 0xff0000) >> 16) / 255.0f;
+    float b = ((rgba & 0xff00) >> 8) / 255.0f;
+
+    r *= f;
+    g *= f;
+    b *= f;
+
+    return { (uint8_t)(r * 255.f),
+             (uint8_t)(g * 255.f),
+             (uint8_t)(b * 255.f) };
+}
+
+static Color
+get_color_from_stops(ColorStop *stops, int n_stops, float depth, float range)
+{
+    int i = (int)((fmax(0, fmin(range, depth)) / range) * n_stops) + 1;
+    if (i < 1) i = 1;
+    else if (i >= n_stops) i = n_stops - 1;
+
+    float t = (depth - stops[i - 1].depth) /
+        (stops[i].depth - stops[i - 1].depth);
+
+    Color col0 = stops[i - 1].color;
+    Color col1 = stops[i].color;
+
+    float r = (1.0f - t) * col0.r + t * col1.r;
+    float g = (1.0f - t) * col0.g + t * col1.g;
+    float b = (1.0f - t) * col0.b + t * col1.b;
+
+    return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
+}
+
+static void
+kinect_depth_frame_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
+{
+    uint16_t *depth_mm = (uint16_t*)v_depth;
     int range = 5000;
+    float range_m = 5.f;
     int step = 250;
     int n_stops = range / step;
-    struct {
-        float depth;
-        uint32_t color;
-    } stops[n_stops];
 
-    unsigned band = 0;
-    float f = 1.0f;
+    ColorStop stops[n_stops] = { 0, };
+
     for (int i = 0; i < n_stops; i++) {
-        uint32_t rgba = rainbow[band];
-
-        float r = ((rgba & 0xff000000) >> 24) / 255.0f;
-        float g = ((rgba & 0xff0000) >> 16) / 255.0f;
-        float b = ((rgba & 0xff00) >> 8) / 255.0f;
-
-        r *= f;
-        g *= f;
-        b *= f;
-
-        uint8_t red = (r * 255.0f) + 0.5f;
-        uint8_t green = (g * 255.0f) + 0.5f;
-        uint8_t blue = (b * 255.0f) + 0.5f;
-
-        stops[i].color = ((uint32_t)red << 24) |
-                         ((uint32_t)green << 16) |
-                         ((uint32_t)blue << 8) |
-                         0xff;
-        stops[i].depth = (i * step) / 1000.0f;
-
-        band++;
-        if (band >= ARRAY_LEN(rainbow)) {
-            f *= 0.8;
-            band = 0;
-        }
+        stops[i].depth = (i * step) / 1000.f;
+        stops[i].color =
+          color_from_depth(stops[i].depth, range_m, n_stops);
     }
 
     for (int y = 0; y < 480; y++) {
         for (int x = 0; x < 640; x++) {
             int in_pos = y * 640 + x;
             int out_pos = y * 640 * 3 + x * 3;
-            float depth_m = depth_mm[in_pos] /  1000.0f;
+            float depth_m = depth_mm[in_pos] / 1000.0f;
 
-            for (int i = 1; i < n_stops; i++) {
+            Color col = get_color_from_stops(stops, n_stops, depth_m, range_m);
 
-                depth_rgb_back[out_pos] = 0xff;
-                depth_rgb_back[out_pos + 1] = 0xff;
-                depth_rgb_back[out_pos + 2] = 0xff;
-                if (depth_m < stops[i].depth) {
-                    float t = (depth_m - stops[i - 1].depth) /
-                        (stops[i].depth - stops[i - 1].depth);
-
-                    uint32_t col0 = stops[i - 1].color;
-                    uint32_t col1 = stops[i].color;
-
-                    float r0 = ((col0 & 0xff000000) >> 24) / 255.0f;
-                    float g0 = ((col0 & 0xff0000) >> 16) / 255.0f;
-                    float b0 = ((col0 & 0xff00) >> 8) / 255.0f;
-
-                    float r1 = ((col1 & 0xff000000) >> 24) / 255.0f;
-                    float g1 = ((col1 & 0xff0000) >> 16) / 255.0f;
-                    float b1 = ((col1 & 0xff00) >> 8) / 255.0f;
-
-                    float r = (1.0f - t) * r0 + t * r1;
-                    float g = (1.0f - t) * g0 + t * g1;
-                    float b = (1.0f - t) * b0 + t * b1;
-
-                    depth_rgb_back[out_pos] = (r * 255.0f) + 0.5f;
-                    depth_rgb_back[out_pos + 1] = (g * 255.0f) + 0.5f;
-                    depth_rgb_back[out_pos + 2] = (b * 255.0f) + 0.5f;
-
-                    break;
-                }
-            }
+            depth_rgb_back[out_pos] = col.r;
+            depth_rgb_back[out_pos + 1] = col.g;
+            depth_rgb_back[out_pos + 2] = col.b;
         }
     }
 
@@ -563,6 +610,71 @@ kinect_io_thread_cb(void *data)
     return NULL;
 }
 
+static void *
+dummy_io_thread_cb(void *userdata)
+{
+    DummyData *dummy = (DummyData*)userdata;
+
+    float range = 5.f;
+    float step = 0.25f;
+    int n_stops = (int)(range / step);
+
+    ColorStop stops[n_stops];
+
+    for (int i = 0; i < n_stops; i++) {
+        stops[i].depth = (i * step);
+        stops[i].color = color_from_depth(stops[i].depth, range, n_stops);
+    }
+
+    while(true) {
+        double timestamp = now();
+        int wait = (int)(((1.0/30.0) - (timestamp - dummy->time)) * 1000000.0);
+        if (wait > 0) {
+            usleep((useconds_t)wait);
+        }
+        dummy->time = now();
+
+        half *depth_image = dummy->depth_images[dummy->frame];
+        uint8_t *luminance_image = dummy->lum_images[dummy->frame];
+
+        for (int y = 0, in = 0, out = 0; y < dummy->data->depth_height; y++) {
+            for (int x = 0; x < dummy->data->depth_width; x++, in++, out += 3) {
+                float depth = (float)depth_image[in];
+                Color col = get_color_from_stops(stops, n_stops, depth, range);
+                depth_rgb_back[out] = col.r;
+                depth_rgb_back[out + 1] = col.g;
+                depth_rgb_back[out + 2] = col.b;
+            }
+        }
+
+        memcpy(lum_back, luminance_image,
+               dummy->data->luminance_width * dummy->data->luminance_height);
+
+        gm_context_update_depth_from_half(gm_context,
+                                          dummy->time,
+                                          dummy->data->depth_width,
+                                          dummy->data->depth_height,
+                                          depth_image);
+        gm_context_update_luminance(gm_context,
+                                    dummy->time,
+                                    dummy->data->luminance_width,
+                                    dummy->data->luminance_height,
+                                    luminance_image);
+
+        pthread_mutex_lock(&swap_buffers_mutex);
+        std::swap(depth_rgb_back, depth_rgb_mid);
+        depth_rgb_mid_valid = true;
+        std::swap(lum_back, lum_mid);
+        rgb_mid_valid = true;
+        pthread_cond_signal(&gl_frame_cond);
+        pthread_mutex_unlock(&swap_buffers_mutex);
+
+        dummy->frame = (dummy->frame + 1) % dummy->n_images;
+    }
+
+    return NULL;
+}
+
 static void
 on_window_fb_size_change_cb(GLFWwindow *window, int width, int height)
 {
@@ -621,63 +733,172 @@ on_khr_debug_message_cb(GLenum source,
     }
 }
 
+static void
+directory_recurse(const char *path, const char *ext,
+                  std::vector<char *> &files)
+{
+    struct dirent *entry;
+    struct stat st;
+    size_t ext_len;
+    char *cur_ext;
+    DIR *dir;
+
+    if (!(dir = opendir(path))) {
+        fprintf(stderr, "Failed to open directory %s\n", path);
+        exit(1);
+    }
+
+    ext_len = strlen(ext);
+
+    while ((entry = readdir(dir)) != NULL) {
+        char next_path[1024];
+
+        if (strcmp(entry->d_name, ".") == 0 ||
+            strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        xsnprintf(next_path, "%s/%s", path, entry->d_name);
+
+        stat(next_path, &st);
+        if (S_ISDIR(st.st_mode)) {
+            directory_recurse(next_path, ext, files);
+        } else if ((cur_ext = strstr(entry->d_name, ext)) &&
+                   cur_ext[ext_len] == '\0') {
+            files.push_back(strdup(next_path));
+        }
+    }
+
+    closedir(dir);
+}
+
 int
 main(int argc, char **argv)
 {
     Data data;
+    DummyData dummy;
 
     if (!glfwInit()) {
         fprintf(stderr, "Failed to init GLFW, OpenGL windows system library\n");
         exit(1);
     }
 
-    //depth_mid = (uint8_t*)malloc(640*480*2);
-    //depth_front = (uint8_t*)malloc(640*480*2);
+    if (argc == 2) {
+        /* Load dummy images instead of using Kinect */
+        std::vector<char *> exr_files;
+        std::vector<char *> png_files;
 
-    depth_rgb_back = (uint8_t*)malloc(640*480*3);
-    depth_rgb_mid = (uint8_t*)malloc(640*480*3);
-    depth_rgb_front = (uint8_t*)malloc(640*480*3);
+        directory_recurse(argv[1], ".exr", exr_files);
+        directory_recurse(argv[1], ".png", png_files);
 
-    rgb_back = (uint8_t*)malloc(640*480*3);
-    rgb_mid = (uint8_t*)malloc(640*480*3);
-    rgb_front = (uint8_t*)malloc(640*480*3);
+        if (exr_files.size() == 0 || png_files.size() == 0) {
+            fprintf(stderr, "No exr or png files found\n");
+            exit(1);
+        }
+        if (exr_files.size() != png_files.size()) {
+            fprintf(stderr, "exr/png quantity mismatch\n");
+            exit(1);
+        }
 
-    lum_back = (uint8_t*)malloc(640*480);
-    lum_mid = (uint8_t*)malloc(640*480);
-    lum_front = (uint8_t*)malloc(640*480);
+        /* Load dummy data into memory */
+        data.depth_width = 0;
+        data.depth_height = 0;
+        data.luminance_width = 0;
+        data.luminance_height = 0;
 
-    if (freenect_init(&kinect_ctx, NULL) < 0) {
-        fprintf(stderr, "Failed to init libfreenect\n");
-        return 1;
+        dummy.n_images = exr_files.size();
+        dummy.depth_images = (half**)calloc(sizeof(half*), dummy.n_images);
+        dummy.lum_images = (uint8_t**)calloc(sizeof(uint8_t*), dummy.n_images);
+        dummy.data = &data;
+
+        int i = 0;
+        for (auto it = exr_files.cbegin(); it != exr_files.cend(); ++it, ++i) {
+            IUImageSpec spec =
+              { data.depth_width, data.depth_height, IU_FORMAT_HALF };
+
+            if (iu_read_exr_from_file(*it, &spec, (void**)
+                                      &dummy.depth_images[i]) != SUCCESS) {
+                fprintf(stderr, "Failed to open %s\n", *it);
+                exit(1);
+            }
+            free(*it);
+
+            if (data.depth_width == 0) {
+                data.depth_width = spec.width;
+                data.depth_height = spec.height;
+            }
+        }
+        exr_files.clear();
+
+        i = 0;
+        for (auto it = png_files.cbegin(); it != png_files.cend(); ++it, ++i) {
+            IUImageSpec spec =
+              { data.luminance_width, data.luminance_height, IU_FORMAT_U8 };
+
+            if (iu_read_png_from_file(*it, &spec, &dummy.lum_images[i],
+                                      NULL, NULL) != SUCCESS) {
+                fprintf(stderr, "Failed to open %s\n", *it);
+                exit(1);
+            }
+            free(*it);
+
+            if (data.luminance_width == 0) {
+                data.luminance_width = spec.width;
+                data.luminance_height = spec.height;
+            }
+        }
+        png_files.clear();
+    } else {
+        if (freenect_init(&kinect_ctx, NULL) < 0) {
+            fprintf(stderr, "Failed to init libfreenect\n");
+            return 1;
+        }
+
+        /* We get loads of 'errors' from the kinect but it seems to vaguely
+         * be working :)
+         */
+        freenect_set_log_level(kinect_ctx, FREENECT_LOG_FATAL);
+        freenect_select_subdevices(kinect_ctx,
+                                   (freenect_device_flags)(FREENECT_DEVICE_MOTOR |
+                                                           FREENECT_DEVICE_CAMERA));
+
+        if (!freenect_num_devices(kinect_ctx)) {
+            fprintf(stderr, "Failed to find a Kinect device\n");
+            freenect_shutdown(kinect_ctx);
+            exit(1);
+        }
+
+        if (freenect_open_device(kinect_ctx, &kinect_dev, 0) < 0) {
+            fprintf(stderr, "Could not open Kinect device\n");
+            freenect_shutdown(kinect_ctx);
+            return 1;
+        }
+
+        kinect_ir_brightness = freenect_get_ir_brightness(kinect_dev);
+
+        freenect_raw_tilt_state *tilt_state;
+        freenect_update_tilt_state(kinect_dev);
+        tilt_state = freenect_get_tilt_state(kinect_dev);
+
+        kinect_tilt = freenect_get_tilt_degs(tilt_state);
+
+        data.depth_width = data.luminance_width = 640;
+        data.depth_height = data.luminance_height = 480;
     }
 
-    /* We get loads of 'errors' from the kinect but it seems to vaguely
-     * be working :)
-     */
-    freenect_set_log_level(kinect_ctx, FREENECT_LOG_FATAL);
-    freenect_select_subdevices(kinect_ctx,
-                               (freenect_device_flags)(FREENECT_DEVICE_MOTOR |
-                                                       FREENECT_DEVICE_CAMERA));
+    //depth_mid = (uint8_t*)malloc(data.depth_width*data.depth_height*2);
+    //depth_front = (uint8_t*)malloc(data.depth_width*data.depth_height*2);
 
-    if (!freenect_num_devices(kinect_ctx)) {
-        fprintf(stderr, "Failed to find a Kinect device\n");
-        freenect_shutdown(kinect_ctx);
-        exit(1);
-    }
+    depth_rgb_back = (uint8_t*)malloc(data.depth_width*data.depth_height*3);
+    depth_rgb_mid = (uint8_t*)malloc(data.depth_width*data.depth_height*3);
+    depth_rgb_front = (uint8_t*)malloc(data.depth_width*data.depth_height*3);
 
-    if (freenect_open_device(kinect_ctx, &kinect_dev, 0) < 0) {
-        fprintf(stderr, "Could not open Kinect device\n");
-        freenect_shutdown(kinect_ctx);
-        return 1;
-    }
+    rgb_back = (uint8_t*)malloc(data.luminance_width*data.luminance_height*3);
+    rgb_mid = (uint8_t*)malloc(data.luminance_width*data.luminance_height*3);
+    rgb_front = (uint8_t*)malloc(data.luminance_width*data.luminance_height*3);
 
-    kinect_ir_brightness = freenect_get_ir_brightness(kinect_dev);
-
-    freenect_raw_tilt_state *tilt_state;
-    freenect_update_tilt_state(kinect_dev);
-    tilt_state = freenect_get_tilt_state(kinect_dev);
-
-    kinect_tilt = freenect_get_tilt_degs(tilt_state);
+    lum_back = (uint8_t*)malloc(data.luminance_width*data.luminance_height);
+    lum_mid = (uint8_t*)malloc(data.luminance_width*data.luminance_height);
+    lum_front = (uint8_t*)malloc(data.luminance_width*data.luminance_height);
 
     //data.win_width = 540;
     //data.win_height = 960;
@@ -740,8 +961,8 @@ main(int argc, char **argv)
     gm_context = gm_context_new(NULL);
 
     TangoCameraIntrinsics kinect_camera_intrinsics;
-    kinect_camera_intrinsics.width = 640;
-    kinect_camera_intrinsics.height = 480;
+    kinect_camera_intrinsics.width = data.depth_width;
+    kinect_camera_intrinsics.height = data.depth_height;
 
     /* libfreenect doesn't give us a way to query camera intrinsics so just
      * using these random/plausible intrinsics found on the internet to avoid
@@ -757,19 +978,35 @@ main(int argc, char **argv)
      * TODO: we should allow explicit calibrarion and loading these at runtime
      */
 #if 0
-    cx = 322.515987
-    cy = 259.055966
-    fx = 521.179233
-    fy = 493.033034
+    kinect_camera_intrinsics.cx = 322.515987
+    kinect_camera_intrinsics.cy = 259.055966
+    kinect_camera_intrinsics.fx = 521.179233
+    kinect_camera_intrinsics.fy = 493.033034
+#endif
+#if 0
+    kinect_camera_intrinsics.cx = 110.8;
+    kinect_camera_intrinsics.cy = 86.2104;
+    kinect_camera_intrinsics.fx = 217.431;
+    kinect_camera_intrinsics.fy = 217.431;
 #endif
 
     gm_context_set_depth_camera_intrinsics(gm_context, &kinect_camera_intrinsics);
 
-    pthread_t kinect_io_thread;
-    pthread_create(&kinect_io_thread,
-                   NULL, //attributes
-                   kinect_io_thread_cb,
-                   NULL); //data
+    if (kinect_ctx) {
+        pthread_t kinect_io_thread;
+        pthread_create(&kinect_io_thread,
+                       NULL, //attributes
+                       kinect_io_thread_cb,
+                       NULL); //data
+    } else {
+        dummy.frame = 0;
+        dummy.time = now();
+        pthread_t dummy_io_thread;
+        pthread_create(&dummy_io_thread,
+                       NULL,
+                       dummy_io_thread_cb,
+                       &dummy);
+    }
 
     event_loop(&data);
 
