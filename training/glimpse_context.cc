@@ -1228,21 +1228,23 @@ gm_context_new(char **err)
 
     struct gm_ui_property prop;
 
+    ctx->min_depth = 0.5;
     prop = gm_ui_property();
     prop.name = "min_depth";
     prop.desc = "throw away points nearer than this";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_ptr = &ctx->min_depth;
-    prop.min = 0;
+    prop.min = 0.5;
     prop.max = 10;
     ctx->properties.push_back(prop);
 
+    ctx->max_depth = 5;
     prop = gm_ui_property();
     prop.name = "max_depth";
     prop.desc = "throw away points further than this";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_ptr = &ctx->max_depth;
-    prop.min = 0;
+    prop.min = 0.5;
     prop.max = 10;
     ctx->properties.push_back(prop);
 
