@@ -1047,24 +1047,26 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale_suffix(duration));
 
 #if 1
-    start = get_time();
-    float vfov =  2.0f * atanf(0.5 * height / ctx->training_camera_intrinsics.fy);
-    float *joints = infer_joints(depth_img->data_half,
-                                 label_probabilities,
-                                 weights,
-                                 width, height,
-                                 ctx->n_labels,
-                                 ctx->joint_map,
-                                 vfov,
-                                 ctx->joint_params->joint_params);
-    end = get_time();
-    duration = end - start;
-    LOGI("People Detector: inferred joints in %.3f%s\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+    if (ctx->joint_params) {
+        start = get_time();
+        float vfov =  2.0f * atanf(0.5 * height / ctx->training_camera_intrinsics.fy);
+        float *joints = infer_joints(depth_img->data_half,
+                                     label_probabilities,
+                                     weights,
+                                     width, height,
+                                     ctx->n_labels,
+                                     ctx->joint_map,
+                                     vfov,
+                                     ctx->joint_params->joint_params);
+        end = get_time();
+        duration = end - start;
+        LOGI("People Detector: inferred joints in %.3f%s\n",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
 
-    free(joints);
-    joints = NULL;
+        free(joints);
+        joints = NULL;
+    }
 #endif
     free(weights);
     weights = NULL;
