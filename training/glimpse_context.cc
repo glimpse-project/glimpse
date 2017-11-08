@@ -722,9 +722,9 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                       enum image_format fmt)
 {
     int width = intrinsics->width;
-    float half_width = width / 2.0;
+    float half_width = (width - 1) / 2.0f;
     int height = intrinsics->height;
-    float half_height = height / 2.0;
+    float half_height = (height - 1) / 2.0f;
 
     assert(fmt == IMAGE_FORMAT_XHALF || fmt == IMAGE_FORMAT_XFLOAT);
 
@@ -792,8 +792,8 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                 ndc_point.x = point.x / hfield_width;
                 ndc_point.y = point.y / vfield_height;
 
-                if (ndc_point.x < -1.0f || ndc_point.x > 1.0 ||
-                    ndc_point.y < -1.0f || ndc_point.y > 1.0f)
+                if (ndc_point.x < -1.0f || ndc_point.x >= 1.0f ||
+                    ndc_point.y < -1.0f || ndc_point.y >= 1.0f)
                     continue;
 
                 pos.x = (ndc_point.x + 1.0f) * half_width;
@@ -840,7 +840,9 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                 glm::vec2 ndc_point;
                 glm::vec2 pos;
 
-                if (isnan(point.x) || isnan(point.y) || isnan(point.z) || point.z == 0)
+                if (isnan(point.x) || isinf(point.x) ||
+                    isnan(point.y) || isinf(point.y) ||
+                    !isnormal(point.z))
                     continue;
 
                 float hfield_width = tan_half_hfov * point.z;
@@ -849,8 +851,8 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                 ndc_point.x = point.x / hfield_width;
                 ndc_point.y = point.y / vfield_height;
 
-                if (ndc_point.x < -1.0f || ndc_point.x > 1.0 ||
-                    ndc_point.y < -1.0f || ndc_point.y > 1.0f)
+                if (ndc_point.x < -1.0f || ndc_point.x >= 1.0f ||
+                    ndc_point.y < -1.0f || ndc_point.y >= 1.0f)
                     continue;
 
                 pos.x = (ndc_point.x + 1.0f) * half_width;
