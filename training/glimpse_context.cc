@@ -1277,6 +1277,9 @@ detector_thread_cb(void *data)
         pthread_mutex_unlock(&ctx->cloud_swap_mutex);
 
         gm_context_track_skeleton(ctx);
+
+        /* We throttle frame aquisition according to our tracking rate... */
+        ctx->need_new_luminance_cam_frame = true;
     }
 
     pthread_exit((void *)1);
@@ -1794,15 +1797,6 @@ gm_context_render_thread_hook(struct gm_context *ctx)
      * coding...
      */
     dlib::pyramid_down<6> pyr;
-
-    pthread_mutex_lock(&ctx->luminance_cond_mutex);
-
-    LOGI("Waiting for new camera frame to downsample");
-    ctx->need_new_luminance_cam_frame = true;
-    while (ctx->need_new_luminance_cam_frame)
-        pthread_cond_wait(&ctx->luminance_available_cond, &ctx->luminance_cond_mutex);
-    pthread_mutex_unlock(&ctx->luminance_cond_mutex);
-
 
     /* The most practical way to get face detection running at any half
      * decent rate on a relatively underpowered device is to massively
