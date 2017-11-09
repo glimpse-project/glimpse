@@ -105,7 +105,7 @@ DepthImageFromPointCloud(float* aPointCloud, int aNPoints, int aNDims,
 
 Forest::Forest(const char** aFiles, unsigned int aNFiles)
 {
-  RDTree** forest = read_forest(aFiles, aNFiles);
+  RDTree** forest = read_json_forest(aFiles, aNFiles);
   mForest = forest;
   mNTrees = aNFiles;
 }

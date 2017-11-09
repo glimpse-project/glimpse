@@ -194,6 +194,7 @@ main(int argc, char **argv)
     json_object_set_number(json_object(root), "depth", tree->header.depth);
     json_object_set_number(json_object(root), "vertical_fov", tree->header.fov);
     json_object_set_number(json_object(root), "n_labels", tree->header.n_labels);
+    json_object_set_number(json_object(root), "bg_label", tree->header.bg_label);
 
     JSON_Value *nodes = recursive_build_tree(tree, tree->nodes, 0, 0);
 

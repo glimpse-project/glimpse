@@ -768,7 +768,7 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 
         /* Our training set had a background depth of 1000 */
         for (int i = 0; i < width * height; i++)
-            img[i] = 1000.0;
+            img[i] = HUGE_DEPTH;
 
         /* XXX: we don't assume that cloud->width/height are the same as
          * width/height. The pcl point cloud might not be 2d and if it is
@@ -827,7 +827,7 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 
         /* Our training set had a background depth of 1000 */
         for (int i = 0; i < width * height; i++)
-            img[i] = 1000.0;
+            img[i] = HUGE_DEPTH;
 
         /* XXX: we don't assume that cloud->width/height are the same as
          * width/height. The pcl point cloud might not be 2d and if it is
@@ -994,9 +994,9 @@ gm_context_track_skeleton(struct gm_context *ctx)
         for (int x = 0; x < width; x++) {
             int pos = y * width + x;
             if (depth_buf[pos] < min_depth)
-                depth_buf[pos] = 1000;
+                depth_buf[pos] = HUGE_DEPTH;
             else if (depth_buf[pos] > max_depth)
-                depth_buf[pos] = 1000;
+                depth_buf[pos] = HUGE_DEPTH;
         }
     }
 

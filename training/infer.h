@@ -7,6 +7,8 @@
 #include "llist.h"
 #include "parson.h"
 
+#define HUGE_DEPTH 1000.f
+
 float* infer_labels(RDTree** forest,
                     uint8_t n_trees,
                     half_float::half* depth_image,

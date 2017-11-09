@@ -422,6 +422,8 @@ print_usage(FILE* stream)
 "                                  (default: 20)\n"
 "  -m, --threads=NUMBER          Number of threads to use.\n"
 "                                  (default: autodetect)\n"
+"  -b, --background=NUMBER       Index of the background label\n"
+"                                  (default: 0)\n"
 "  -n, --seed=NUMBER             Seed to use for RNG.\n"
 "                                  (default: 0)\n"
 "  -i, --continue                Continue training from an interrupted run.\n"
@@ -451,6 +453,7 @@ main(int argc, char **argv)
   TimeForDisplay since_begin, since_last;
   struct timespec begin, last, now;
   uint32_t n_threads = std::thread::hardware_concurrency();
+  uint8_t bg_label = 0;
 
   if (argc < 4)
     {
@@ -527,6 +530,10 @@ main(int argc, char **argv)
           else if (strstr(arg, "depth="))
             {
               param = 'd';
+            }
+          else if (strstr(arg, "background="))
+            {
+              param = 'b';
             }
           else if (strstr(arg, "threads="))
             {
@@ -617,6 +624,9 @@ main(int argc, char **argv)
           break;
         case 'd':
           ctx.max_depth = (uint8_t)atoi(value);
+          break;
+        case 'b':
+          bg_label = (uint8_t)atoi(value);
           break;
         case 'm':
           n_threads = (uint32_t)atoi(value);
@@ -1012,7 +1022,7 @@ main(int argc, char **argv)
 
   // Write a header
   RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \
-                       ctx.n_labels, ctx.fov };
+                       ctx.n_labels, bg_label, ctx.fov };
   if (fwrite(&header, sizeof(RDTHeader), 1, output) != 1)
     {
       fprintf(stderr, "Error writing header\n");

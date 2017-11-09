@@ -50,9 +50,18 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
         {
           for (uint32_t x = 0; x < width; x++)
             {
-              Int2D pixel = { (int32_t)x, (int32_t)y };
+              float* out_pr_table = &output_pr[(y * width * n_labels) +
+                                               (x * n_labels)];
               float depth_value = depth_image[y * width + x];
 
+              // TODO: Provide a configurable threshold here?
+              if (depth_value >= HUGE_DEPTH)
+                {
+                  out_pr_table[tree->header.bg_label] = 1.0f;
+                  continue;
+                }
+
+              Int2D pixel = { (int32_t)x, (int32_t)y };
               Node* node = tree->nodes;
               uint32_t id = 0;
               while (node->label_pr_idx == 0)
@@ -77,8 +86,6 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
                */
               float* pr_table =
                 &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
-              float* out_pr_table = &output_pr[(y * width * n_labels) +
-                                               (x * n_labels)];
               for (int i = 0; i < n_labels; i++)
                 {
                   out_pr_table[i] += pr_table[i];
@@ -118,7 +125,7 @@ unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
 
       if (n_labels > ARRAY_LEN(map[0].labels))
         {
-          fprintf(stderr, "Didn't expect joint to be mapped to > 4 labels\n");
+          fprintf(stderr, "Didn't expect joint to be mapped to > 2 labels\n");
           exit(1);
         }
 

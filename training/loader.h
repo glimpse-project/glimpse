@@ -8,7 +8,7 @@
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
-#define RDT_VERSION 3
+#define RDT_VERSION 4
 
 typedef struct {
   /* XXX: Note that (at least with gcc) then uv will have a 16 byte
@@ -25,6 +25,7 @@ typedef struct __attribute__((__packed__)) {
   uint8_t version;
   uint8_t depth;
   uint8_t n_labels;
+  uint8_t bg_label;
   float   fov;
 } RDTHeader;
 
@@ -55,12 +56,20 @@ typedef struct {
 extern "C" {
 #endif
 
-RDTree* load_tree(uint8_t* tree, unsigned len);
+RDTree* load_json_tree(uint8_t* json_tree_buf, uint32_t len);
+RDTree* read_json_tree(const char* filename);
+
+RDTree* load_tree(uint8_t* tree, uint32_t len);
 RDTree* read_tree(const char* filename);
+
 void free_tree(RDTree* tree);
 
-RDTree** read_forest(const char** files, unsigned n_files);
-RDTree** load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees);
+RDTree** load_json_forest(uint8_t** json_tree_bufs, uint32_t* json_tree_buf_lengths, uint32_t n_trees);
+RDTree** read_json_forest(const char** files, uint32_t n_files);
+
+RDTree** load_forest(uint8_t** tree_bufs, uint32_t* tree_buf_lengths, uint32_t n_trees);
+RDTree** read_forest(const char** files, uint32_t n_files);
+
 void free_forest(RDTree** forest, int n_trees);
 
 JIParams *joint_params_from_json(JSON_Value *root);

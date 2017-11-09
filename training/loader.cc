@@ -10,20 +10,157 @@
 #include "parson.h"
 #include "xalloc.h"
 
-RDTree*
-load_tree(uint8_t* tree_buf, unsigned len)
+static void
+assert_rdt_abi()
 {
-  RDTree* tree = (RDTree*)xcalloc(1, sizeof(RDTree));
-
-  static_assert(sizeof(RDTHeader) == 10, "RDT ABI Breakage");
+  static_assert(sizeof(RDTHeader) == 11, "RDT ABI Breakage");
   static_assert(sizeof(Node) == 32,      "RDT ABI Breakage");
   static_assert(offsetof(Node, t) == 16, "RDT ABI Breakage");
+}
 
-  if (len < sizeof(RDTHeader)) {
+static int
+count_pr_tables(JSON_Object* node)
+{
+  if (json_object_has_value(node, "p"))
+    {
+      return 1;
+    }
+
+  return count_pr_tables(json_object_get_object(node, "l")) +
+    count_pr_tables(json_object_get_object(node, "r"));
+}
+
+static void
+unpack_json_tree(JSON_Object* jnode, Node* nodes, uint32_t node_index,
+                 float* pr_tables, uint32_t* table_index, uint8_t n_labels)
+{
+  Node* node = &nodes[node_index];
+
+  if (json_object_has_value(jnode, "p"))
+    {
+      float* pr_table = &pr_tables[(*table_index) * n_labels];
+
+      JSON_Array* p = json_object_get_array(jnode, "p");
+      for (uint8_t i = 0; i < n_labels; i++)
+        {
+          pr_table[i] = (float)json_array_get_number(p, i);
+        }
+
+      // Write out probability table
+      node->label_pr_idx = ++(*table_index);
+      return;
+    }
+
+  JSON_Array* u = json_object_get_array(jnode, "u");
+  JSON_Array* v = json_object_get_array(jnode, "v");
+
+  node->uv[0] = (float)json_array_get_number(u, 0);
+  node->uv[1] = (float)json_array_get_number(u, 1);
+  node->uv[2] = (float)json_array_get_number(v, 0);
+  node->uv[3] = (float)json_array_get_number(v, 1);
+  node->t = (float)json_object_get_number(jnode, "t");
+  node->label_pr_idx = 0;
+
+  unpack_json_tree(json_object_get_object(jnode, "l"), nodes,
+                   node_index * 2 + 1, pr_tables, table_index, n_labels);
+  unpack_json_tree(json_object_get_object(jnode, "r"), nodes,
+                   node_index * 2 + 2, pr_tables, table_index, n_labels);
+}
+
+RDTree*
+load_json_tree(uint8_t* json_tree_buf, uint32_t len)
+{
+  assert_rdt_abi();
+
+  JSON_Value* json_tree_value = json_parse_string((const char *)json_tree_buf);
+  if (!json_tree_value)
+    {
+      fprintf(stderr, "Failed to parse JSON string\n");
+      return NULL;
+    }
+
+  JSON_Object* json_tree = json_value_get_object(json_tree_value);
+  if (!json_tree)
+    {
+      fprintf(stderr, "Failed to find top-level tree object\n");
+      json_value_free(json_tree_value);
+      return NULL;
+    }
+
+  if ((int)json_object_get_number(json_tree, "_rdt_version_was") != RDT_VERSION)
+    {
+      fprintf(stderr, "Unexpected RDT version (expected %d)\n", RDT_VERSION);
+      json_value_free(json_tree_value);
+      return NULL;
+    }
+
+  JSON_Object* root = json_object_get_object(json_tree, "root");
+  if (!root)
+    {
+      fprintf(stderr, "Failed to find tree root node\n");
+      json_value_free(json_tree_value);
+      return NULL;
+    }
+
+  RDTree* tree = (RDTree*)xcalloc(1, sizeof(RDTree));
+  tree->header.tag[0] = 'R';
+  tree->header.tag[1] = 'D';
+  tree->header.tag[2] = 'T';
+  tree->header.version = RDT_VERSION;
+
+  tree->header.depth = (uint8_t)json_object_get_number(json_tree, "depth");
+  tree->header.n_labels = (uint8_t)json_object_get_number(json_tree, "n_labels");
+  tree->header.bg_label = (uint8_t)json_object_get_number(json_tree, "bg_label");
+  tree->header.fov = (float)json_object_get_number(json_tree, "vertical_fov");
+
+  // Count probability arrays
+  int n_pr_tables = count_pr_tables(root);
+
+  // Allocate tree structure
+  uint32_t n_nodes = (uint32_t)roundf(powf(2.f, tree->header.depth)) - 1;
+  tree->nodes = (Node*)xmalloc(n_nodes * sizeof(Node));
+  tree->label_pr_tables = (float*)
+    xmalloc(n_pr_tables * tree->header.n_labels * sizeof(float));
+
+  // Copy over nodes and probability tables
+  uint32_t table_index = 0;
+  unpack_json_tree(root, tree->nodes, 0, tree->label_pr_tables, &table_index,
+                   tree->header.n_labels);
+
+  // Free data and return tree
+  json_value_free(json_tree_value);
+
+  return tree;
+}
+
+RDTree*
+read_json_tree(const char* filename)
+{
+  RDTree** forest = read_json_forest(&filename, 1);
+
+  if (forest)
+    {
+      RDTree* tree = forest[0];
+      xfree(forest);
+      return tree;
+    }
+
+  return NULL;
+}
+
+RDTree*
+load_tree(uint8_t* tree_buf, uint32_t len)
+{
+  assert_rdt_abi();
+
+  RDTree* tree = (RDTree*)xcalloc(1, sizeof(RDTree));
+
+  if (len < sizeof(RDTHeader))
+    {
       fprintf(stderr, "Buffer too small to contain tree\n");
       free_tree(tree);
       return NULL;
-  }
+    }
   memcpy(&tree->header, tree_buf, sizeof(RDTHeader));
   tree_buf += sizeof(RDTHeader);
   len -= sizeof(RDTHeader);
@@ -46,11 +183,12 @@ load_tree(uint8_t* tree_buf, unsigned len)
   // Read in the decision tree nodes
   uint32_t n_nodes = (uint32_t)roundf(powf(2.f, tree->header.depth)) - 1;
   tree->nodes = (Node*)xmalloc(n_nodes * sizeof(Node));
-  if (len < (sizeof(Node) * n_nodes)) {
+  if (len < (sizeof(Node) * n_nodes))
+    {
       fprintf(stderr, "Error parsing tree nodes\n");
       free_tree(tree);
       return NULL;
-  }
+    }
   memcpy(tree->nodes, tree_buf, sizeof(Node) * n_nodes);
   tree_buf += sizeof(Node) * n_nodes;
   len -= sizeof(Node) * n_nodes;
@@ -108,17 +246,21 @@ free_tree(RDTree* tree)
   xfree(tree);
 }
 
-RDTree**
-load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees)
+static RDTree**
+load_any_forest(uint8_t** tree_bufs, uint32_t* tree_buf_lengths,
+                uint32_t n_trees, bool is_json)
 {
   bool error = false;
   uint8_t n_labels = 0;
   RDTree** trees = (RDTree**)xcalloc(n_trees, sizeof(RDTree*));
 
-  for (unsigned i = 0; i < n_trees; i++)
+  for (uint32_t i = 0; i < n_trees; i++)
     {
       // Validate the decision tree
-      RDTree* tree = trees[i] = load_tree(tree_bufs[i], tree_buf_lengths[i]);
+      RDTree* tree = trees[i] = is_json ?
+        load_json_tree(tree_bufs[i], tree_buf_lengths[i]) :
+        load_tree(tree_bufs[i], tree_buf_lengths[i]);
+
       if (!tree)
         {
           error = true;
@@ -141,7 +283,7 @@ load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees)
 
   if (error)
     {
-      for (unsigned i = 0; i < n_trees; i++)
+      for (uint32_t i = 0; i < n_trees; i++)
         {
           if (trees[i])
             {
@@ -156,15 +298,28 @@ load_forest(uint8_t** tree_bufs, unsigned* tree_buf_lengths, unsigned n_trees)
   return trees;
 }
 
-RDTree **
-read_forest(const char **files, unsigned n_files)
+RDTree**
+load_json_forest(uint8_t** tree_bufs, uint32_t* tree_buf_lengths,
+                 uint32_t n_trees)
+{
+  return load_any_forest(tree_bufs, tree_buf_lengths, n_trees, true);
+}
+
+RDTree**
+load_forest(uint8_t** tree_bufs, uint32_t* tree_buf_lengths, uint32_t n_trees)
+{
+  return load_any_forest(tree_bufs, tree_buf_lengths, n_trees, false);
+}
+
+static RDTree**
+read_any_forest(const char** files, uint32_t n_files, bool is_json)
 {
   uint8_t* tree_bufs[n_files];
-  unsigned tree_buf_lengths[n_files];
-  unsigned n_trees = 0;
+  uint32_t tree_buf_lengths[n_files];
+  uint32_t n_trees = 0;
   bool error = false;
 
-  for (unsigned i = 0; i < n_files; i++)
+  for (uint32_t i = 0; i < n_files; i++)
     {
       const char* tree_file = files[i];
 
@@ -201,14 +356,26 @@ read_forest(const char **files, unsigned n_files)
     }
 
   RDTree** forest = error ?
-    NULL : load_forest(tree_bufs, tree_buf_lengths, n_trees);
+    NULL : load_any_forest(tree_bufs, tree_buf_lengths, n_trees, is_json);
 
-  for (unsigned i = 0; i < n_trees; i++)
+  for (uint32_t i = 0; i < n_trees; i++)
     {
       xfree(tree_bufs[i]);
     }
 
   return forest;
+}
+
+RDTree**
+read_json_forest(const char** files, uint32_t n_files)
+{
+  return read_any_forest(files, n_files, true);
+}
+
+RDTree**
+read_forest(const char** files, uint32_t n_files)
+{
+  return read_any_forest(files, n_files, false);
 }
 
 void
