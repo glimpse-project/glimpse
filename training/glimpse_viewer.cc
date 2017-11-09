@@ -23,29 +23,38 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
-#include <libfreenect.h>
-
 #include "glimpse_context.h"
-#include "image_utils.h"
+#include "glimpse_device.h"
 #include "half.hpp"
 
 #include <imgui.h>
 #include <imgui_impl_glfw_gles3.h>
 #include <profiler.h>
 
-#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
-
 #define TOOLBAR_LEFT_WIDTH 300
-
-#define xsnprintf(dest, fmt, ...) do { \
-        if (snprintf(dest, sizeof(dest), fmt,  __VA_ARGS__) >= (int)sizeof(dest)) \
-            exit(1); \
-    } while(0)
 
 using half_float::half;
 
+enum event_type
+{
+    EVENT_DEVICE,
+    EVENT_CONTEXT
+};
+
+struct event
+{
+    enum event_type type;
+    union {
+        struct gm_event *context_event;
+        struct gm_device_event *device_event;
+    };
+};
+
 typedef struct _Data
 {
+    struct gm_context *ctx;
+    struct gm_device *device;
+
     GLFWwindow *window;
     int win_width;
     int win_height;
@@ -54,58 +63,52 @@ typedef struct _Data
     int attr_tex_coord;
     int attr_color;
 
+    /* A convenience for accessing the depth_camera_intrinsics.width/height */
     int depth_width;
     int depth_height;
 
-    int luminance_width;
-    int luminance_height;
+    /* A convenience for accessing the video_camera_intrinsics.width/height */
+    int video_width;
+    int video_height;
 
+    /* When we request gm_device for a frame we set requirements for what the
+     * frame should include. We track the requirements so we avoid sending
+     * subsequent frame requests that would downgrade the requirements
+     */
+    uint64_t pending_frame_requirements;
+
+    /* Set when gm_device sends a _FRAME_READY device event */
+    bool device_frame_ready;
+
+    /* Once we've been notified that there's a device frame ready for us then
+     * we store the latest frame from gm_device_get_latest_frame() here...
+     *
+     * NB: this frame is only valid to access up until the next call to
+     * gm_device_get_latest_frame() because the gm_device api is free to
+     * recycle the back buffers that are part of a frame.
+     */
+    struct gm_frame *device_frame;
+
+    /* Set when gm_context sends a _REQUEST_FRAME event */
+    bool context_needs_frame;
+    /* Set when gm_context sends a _TRACKING_READY event */
+    bool tracking_ready;
+
+    /* Once we've been notified that there's a skeleton tracking update for us
+     * then we store the latest tracking data from
+     * gm_context_get_latest_tracking() here...
+     */
+    struct gm_tracking *latest_tracking;
+
+    /* Events from the gm_context and gm_device apis may be delivered via any
+     * arbitrary thread which we don't want to block, and at a time where
+     * the gm_ apis may not be reentrant due to locks held during event
+     * notification
+     */
+    pthread_mutex_t event_queue_lock;
+    std::vector<struct event> *events_back;
+    std::vector<struct event> *events_front;
 } Data;
-
-typedef struct
-{
-    int       frame;
-    double    time;
-    int       n_images;
-    half    **depth_images;
-    uint8_t **lum_images;
-    Data     *data;
-} DummyData;
-
-typedef struct
-{
-    uint8_t r;
-    uint8_t g;
-    uint8_t b;
-} Color;
-
-typedef struct {
-    float depth;
-    Color color;
-} ColorStop;
-
-static struct gm_context *gm_context;
-
-/*
- * We generally use triple buffering to decouple the capture and preparation
- * of new data buffers from the buffers used to render.
- *
- * Preparation happens within the back buffer and when it's ready it
- * gets swapped with the mid buffer and a flag is set to indicate that
- * new data is available.
- *
- * The render thread can always render the front buffer. The renderer
- * regularly checks if there's a new valid mid buffer and if so it swaps
- * it with the front buffer.
- */
-static uint8_t *depth_rgb_back, *depth_rgb_mid, *depth_rgb_front;
-static bool depth_rgb_mid_valid;
-
-static uint8_t *rgb_back, *rgb_mid, *rgb_front;
-static uint8_t *lum_back, *lum_mid, *lum_front;
-static bool rgb_mid_valid; // also covers lum_mid
-
-static pthread_mutex_t swap_buffers_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static GLuint gl_tex_program;
 static GLuint uniform_tex_sampler;
@@ -113,28 +116,6 @@ static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_rgb_tex;
 static GLuint gl_lum_tex;
-
-static freenect_context *kinect_ctx = NULL;
-static freenect_device *kinect_dev = NULL;
-
-static int kinect_ir_brightness;
-static float kinect_tilt;
-static float kinect_accel_x;
-static float kinect_accel_y;
-static float kinect_accel_z;
-static float kinect_mks_accel_x;
-static float kinect_mks_accel_y;
-static float kinect_mks_accel_z;
-
-static pthread_cond_t gl_frame_cond = PTHREAD_COND_INITIALIZER;
-
-static double
-now()
-{
-  struct timespec ts;
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  return ts.tv_sec + ts.tv_nsec / 1000000000.0;
-}
 
 static bool pause_profile;
 
@@ -145,14 +126,12 @@ on_profiler_pause_cb(bool pause)
 }
 
 static void
-redraw(Data *data)
+draw_ui(Data *data)
 {
-    gm_context_render_thread_hook(gm_context);
-
-
     float left_col = TOOLBAR_LEFT_WIDTH;
     ImVec2 main_menu_size;
     ImVec2 win_size;
+    ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
 
     ImGui_ImplGlfwGLES3_NewFrame();
 
@@ -173,24 +152,8 @@ redraw(Data *data)
     ImGui::Begin("Controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize);
-    if (kinect_ctx) {
-        if (ImGui::SliderInt("IR Intensity", &kinect_ir_brightness, 1, 50))
-            freenect_set_ir_brightness(kinect_dev, kinect_ir_brightness);
-        if (ImGui::SliderFloat("Tilt", &kinect_tilt, -30, 30))
-            freenect_set_tilt_degs(kinect_dev, kinect_tilt);
-    }
 
-    ImGui::Separator();
-    ImGui::LabelText("Accel", "%.3f,%.3f,%.3f",
-                     kinect_accel_x,
-                     kinect_accel_y,
-                     kinect_accel_z);
-    ImGui::LabelText("MKS Accel", "%.3f,%.3f,%.3f",
-                     kinect_mks_accel_x,
-                     kinect_mks_accel_y,
-                     kinect_mks_accel_z);
-
-    struct gm_ui_properties *props = gm_context_get_ui_properties(gm_context);
+    struct gm_ui_properties *props = gm_context_get_ui_properties(data->ctx);
 
     for (int i = 0; i < props->n_properties; i++) {
         struct gm_ui_property *prop = &props->properties[i];
@@ -199,6 +162,33 @@ redraw(Data *data)
             ImGui::SliderInt(prop->name, prop->int_ptr, prop->min, prop->max);
         if (prop->type == GM_PROPERTY_FLOAT)
             ImGui::SliderFloat(prop->name, prop->float_ptr, prop->min, prop->max);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    props = gm_device_get_ui_properties(data->device);
+
+    for (int i = 0; i < props->n_properties; i++) {
+        struct gm_ui_property *prop = &props->properties[i];
+
+        switch (prop->type) {
+        case GM_PROPERTY_INT:
+            ImGui::SliderInt(prop->name, prop->int_ptr, prop->min, prop->max);
+            break;
+        case GM_PROPERTY_FLOAT:
+            ImGui::SliderFloat(prop->name, prop->float_ptr, prop->min, prop->max);
+            break;
+        case GM_PROPERTY_FLOAT_VEC3:
+            if (prop->read_only) {
+                ImGui::LabelText(prop->name, "%.3f,%.3f,%.3f",
+                                 prop->float_vec3[0],
+                                 prop->float_vec3[1],
+                                 prop->float_vec3[2]);
+            } // else TODO
+            break;
+        }
     }
 
     ImGui::End();
@@ -242,31 +232,123 @@ redraw(Data *data)
 
     ProfileDrawUI();
 
-    /*
-     * Upload textures
-     */
+    ImGui::Render();
+}
 
+static void
+redraw(Data *data)
+{
+    ProfileScopedSection(Redraw);
 
     glViewport(0, 0, data->win_width, data->win_height);
     glClear(GL_COLOR_BUFFER_BIT);
 
-    pthread_mutex_lock(&swap_buffers_mutex);
+    draw_ui(data);
+}
 
-    if (depth_rgb_mid_valid) {
-        //std::swap(depth_front, depth_mid);
-        std::swap(depth_rgb_front, depth_rgb_mid);
-        depth_rgb_mid_valid = false;
+/* If we've already requested gm_device for a frame then this won't submit
+ * a request that downgrades the requirements
+ */
+static void
+request_device_frame(Data *data, uint64_t requirements)
+{
+    uint64_t new_requirements = data->pending_frame_requirements | requirements;
+
+    if (data->pending_frame_requirements != new_requirements) {
+        gm_device_request_frame(data->device, new_requirements);
+        data->pending_frame_requirements = new_requirements;
     }
-    if (rgb_mid_valid) {
-        std::swap(rgb_front, rgb_mid);
-        std::swap(lum_front, lum_mid);
-        rgb_mid_valid = false;
+}
+
+static void
+handle_device_frame_updates(Data *data)
+{
+    ProfileScopedSection(UpdatingDeviceFrame);
+    bool upload = false;
+
+    if (!data->device_frame_ready)
+        return;
+
+    /* XXX We have to consider that a gm_frame currently only remains valid
+     * to access until the next call to gm_device_get_latest_frame().
+     *
+     * Conceptually we have two decoupled consumers: 1) this redraw/render
+     * loop 2) skeletal tracking so we need to be careful about
+     * understanding the required gm_frame lifetime.
+     *
+     * Since we can currently assume gm_context_notify_frame() will
+     * internally copy whatever frame data it requires then so long as we
+     * synchronize these calls with the redraw loop we know it's safe to
+     * free the last gm_frame once we have received a new one.
+     */
+
+    if (data->device_frame) {
+        ProfileScopedSection(FreeFrame);
+        gm_device_free_frame(data->device, data->device_frame);
     }
 
-    pthread_mutex_unlock(&swap_buffers_mutex);
+    {
+        ProfileScopedSection(GetLatestFrame);
+        data->device_frame = gm_device_get_latest_frame(data->device);
+        assert(data->device_frame);
+        upload = true;
+    }
+
+    if (data->context_needs_frame) {
+        ProfileScopedSection(FwdContextFrame);
+
+        data->context_needs_frame =
+            !gm_context_notify_frame(data->ctx, data->device_frame);
+    }
+
+    data->device_frame_ready = false;
+
+    {
+        ProfileScopedSection(DeviceFrameRequest);
+
+        /* immediately request a new frame since we want to render the camera
+         * at the native capture rate, even though we might not be tracking
+         * at that rate.
+         *
+         * Note: the requirements may be upgraded to ask for _DEPTH data
+         * after the next iteration of skeltal tracking completes.
+         */
+        request_device_frame(data, GM_REQUEST_FRAME_LUMINANCE);
+    }
+
+    if (upload) {
+        ProfileScopedSection(UploadFrameTextures);
+
+        /*
+         * Update luminance from RGB camera
+         */
+        glBindTexture(GL_TEXTURE_2D, gl_lum_tex);
+
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        /* NB: gles2 only allows npot textures with clamp to edge
+         * coordinate wrapping
+         */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        void *video_front = gm_frame_get_video_buffer(data->device_frame);
+        enum gm_format video_format = gm_frame_get_video_format(data->device_frame);
+
+        assert(video_format == GM_FORMAT_LUMINANCE_U8);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                     data->video_width, data->video_height,
+                     0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+    }
+}
+
+static void
+upload_tracking_textures(Data *data)
+{
+    ProfileScopedSection(UploadTrackingBufs);
 
     /*
-     * Draw the depth buffer via RGB
+     * Update the RGB visualization of the depth buffer
      */
     glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
 
@@ -277,28 +359,13 @@ redraw(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
+    const uint8_t *depth_rgb = gm_tracking_get_rgb_depth(data->latest_tracking);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                  data->depth_width, data->depth_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb_front);
+                 0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
 
     /*
-     * Draw luminance from RGB camera
-     */
-    glBindTexture(GL_TEXTURE_2D, gl_lum_tex);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    /* NB: gles2 only allows npot textures with clamp to edge
-     * coordinate wrapping
-     */
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                 data->luminance_width, data->luminance_height,
-                 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, lum_front);
-
-    /*
-     * Draw inferred label map
+     * Update inferred label map
      */
     glBindTexture(GL_TEXTURE_2D, gl_labels_tex);
 
@@ -311,14 +378,215 @@ redraw(Data *data)
 
     int label_map_width = 0;
     int label_map_height = 0;
-    const uint8_t *labels_rgb = gm_context_get_latest_rgb_label_map(gm_context,
-                                                                    &label_map_width,
-                                                                    &label_map_height);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 label_map_width, label_map_height, 0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
 
-    ImGui::Render();
-    glfwSwapBuffers(data->window);
+    const uint8_t *labels_rgb =
+        gm_tracking_get_rgb_label_map(data->latest_tracking,
+                                      &label_map_width,
+                                      &label_map_height);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                 label_map_width, label_map_height,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
+}
+
+static void
+handle_context_tracking_updates(Data *data)
+{
+    ProfileScopedSection(UpdatingTracking);
+
+    if (!data->tracking_ready)
+        return;
+
+    data->tracking_ready = false;
+    data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
+    assert(data->latest_tracking);
+    
+    upload_tracking_textures(data);
+}
+
+static void
+handle_device_event(Data *data, struct gm_device_event *event)
+{
+    switch (event->type) {
+    case GM_DEV_EVENT_FRAME_READY:
+
+        /* It's always possible that we will see an event for a frame
+         * that was ready before we upgraded the requirements for what
+         * we need, so we skip notifications for frames we can't use.
+         */
+        if (event->frame_ready.met_requirements ==
+            data->pending_frame_requirements)
+        {
+            data->pending_frame_requirements = 0;
+            data->device_frame_ready = true;
+        }
+        break;
+    }
+
+    gm_device_event_free(event);
+}
+
+static void
+handle_context_event(Data *data, struct gm_event *event)
+{
+    switch (event->type) {
+    case GM_EVENT_REQUEST_FRAME:
+        data->context_needs_frame = true;
+        request_device_frame(data,
+                             (GM_REQUEST_FRAME_DEPTH |
+                              GM_REQUEST_FRAME_LUMINANCE));
+        break;
+    case GM_EVENT_TRACKING_READY:
+        data->tracking_ready = true;
+        break;
+    }
+
+    gm_context_event_free(event);
+}
+
+static void
+event_loop(Data *data)
+{
+    while (!glfwWindowShouldClose(data->window)) {
+        ProfileNewFrame();
+
+        ProfileScopedSection(Frame);
+
+        {
+            ProfileScopedSection(GLFWEvents);
+            glfwPollEvents();
+        }
+
+        {
+            ProfileScopedSection(GlimpseEvents);
+
+            pthread_mutex_lock(&data->event_queue_lock);
+            std::swap(data->events_front, data->events_back);
+            pthread_mutex_unlock(&data->event_queue_lock);
+
+            for (unsigned i = 0; i < data->events_front->size(); i++) {
+                struct event event = (*data->events_front)[i];
+
+                switch (event.type) {
+                case EVENT_DEVICE:
+                    handle_device_event(data, event.device_event);
+                    break;
+                case EVENT_CONTEXT:
+                    handle_context_event(data, event.context_event);
+                    break;
+                }
+            }
+
+            data->events_front->clear();
+        }
+
+        handle_device_frame_updates(data);
+        handle_context_tracking_updates(data);
+
+        {
+            ProfileScopedSection(GlimpseGPUHook);
+            gm_context_render_thread_hook(data->ctx);
+        }
+
+        redraw(data);
+
+        {
+            ProfileScopedSection(SwapBuffers);
+            glfwSwapBuffers(data->window);
+        }
+    }
+}
+
+static void
+on_window_fb_size_change_cb(GLFWwindow *window, int width, int height)
+{
+    Data *data = (Data *)glfwGetWindowUserPointer(window);
+
+    data->win_width = width;
+    data->win_height = height;
+}
+
+static void
+on_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mods)
+{
+    Data *data = (Data *)glfwGetWindowUserPointer(window);
+
+    if (action != GLFW_PRESS)
+        return;
+
+    switch (key) {
+    case GLFW_KEY_ESCAPE:
+    case GLFW_KEY_Q:
+        glfwSetWindowShouldClose(data->window, 1);
+        break;
+    }
+
+    ImGui_ImplGlfwGLES3_KeyCallback(window, key, scancode, action, mods);
+}
+
+static void
+on_glfw_error_cb(int error_code, const char *error_msg)
+{
+    fprintf(stderr, "GLFW ERROR: %d: %s\n", error_code, error_msg);
+}
+
+static void
+on_khr_debug_message_cb(GLenum source,
+                        GLenum type,
+                        GLuint id,
+                        GLenum gl_severity,
+                        GLsizei length,
+                        const GLchar *message,
+                        void *userParam)
+{
+    switch (gl_severity) {
+    case GL_DEBUG_SEVERITY_HIGH:
+        fprintf(stderr, "GL DEBUG: HIGH SEVERITY: %s\n", message);
+        break;
+    case GL_DEBUG_SEVERITY_MEDIUM:
+        fprintf(stderr, "GL DEBUG: MEDIUM SEVERITY: %s\n", message);
+        break;
+    case GL_DEBUG_SEVERITY_LOW:
+        fprintf(stderr, "GL DEBUG: LOW SEVERITY: %s\n", message);
+        break;
+    case GL_DEBUG_SEVERITY_NOTIFICATION:
+        fprintf(stderr, "GL DEBUG: NOTIFICATION: %s\n", message);
+        break;
+    }
+}
+
+/* NB: it's undefined what thread this is called on and we are currently
+ * assuming it's safe to call gm_device_request_frame() from any thread
+ * considering that it just sets a bitmask and signals a condition variable.
+ */
+static void
+on_event_cb(struct gm_context *ctx,
+            struct gm_event *context_event, void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    struct event event = {};
+    event.type = EVENT_CONTEXT;
+    event.context_event = context_event;
+
+    pthread_mutex_lock(&data->event_queue_lock);
+    data->events_back->push_back(event);
+    pthread_mutex_unlock(&data->event_queue_lock);
+}
+
+static void
+on_device_event_cb(struct gm_device *dev,
+                   struct gm_device_event *device_event,
+                   void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    struct event event = {};
+    event.type = EVENT_DEVICE;
+    event.device_event = device_event;
+
+    pthread_mutex_lock(&data->event_queue_lock);
+    data->events_back->push_back(event);
+    pthread_mutex_unlock(&data->event_queue_lock);
 }
 
 static void
@@ -432,362 +700,13 @@ init_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 }
 
-static void
-event_loop(Data *data)
-{
-    while (!glfwWindowShouldClose(data->window)) {
-        ProfileNewFrame();
-        glfwPollEvents();
-        redraw(data);
-    }
-}
-
-static Color
-color_from_depth(float depth, float range, int stops)
-{
-    static const uint32_t rainbow[] = {
-        0xffff00ff, //yellow
-        0x0000ffff, //blue
-        0x00ff00ff, //green
-        0xff0000ff, //red
-        0x00ffffff, //cyan
-    };
-
-    int stop = (int)((fmax(0, fmin(range, depth)) / range) * stops);
-    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
-    int band = ((int)stop) % ARRAY_LEN(rainbow);
-
-    uint32_t rgba = rainbow[band];
-
-    float r = ((rgba & 0xff000000) >> 24) / 255.0f;
-    float g = ((rgba & 0xff0000) >> 16) / 255.0f;
-    float b = ((rgba & 0xff00) >> 8) / 255.0f;
-
-    r *= f;
-    g *= f;
-    b *= f;
-
-    return { (uint8_t)(r * 255.f),
-             (uint8_t)(g * 255.f),
-             (uint8_t)(b * 255.f) };
-}
-
-static Color
-get_color_from_stops(ColorStop *stops, int n_stops, float depth, float range)
-{
-    int i = (int)((fmax(0, fmin(range, depth)) / range) * n_stops) + 1;
-    if (i < 1) i = 1;
-    else if (i >= n_stops) i = n_stops - 1;
-
-    float t = (depth - stops[i - 1].depth) /
-        (stops[i].depth - stops[i - 1].depth);
-
-    Color col0 = stops[i - 1].color;
-    Color col1 = stops[i].color;
-
-    float r = (1.0f - t) * col0.r + t * col1.r;
-    float g = (1.0f - t) * col0.g + t * col1.g;
-    float b = (1.0f - t) * col0.b + t * col1.b;
-
-    return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
-}
-
-static void
-kinect_depth_frame_cb(freenect_device *dev, void *v_depth, uint32_t timestamp)
-{
-    uint16_t *depth_mm = (uint16_t*)v_depth;
-    int range = 5000;
-    float range_m = 5.f;
-    int step = 250;
-    int n_stops = range / step;
-
-    ColorStop stops[n_stops] = { 0, };
-
-    for (int i = 0; i < n_stops; i++) {
-        stops[i].depth = (i * step) / 1000.f;
-        stops[i].color =
-          color_from_depth(stops[i].depth, range_m, n_stops);
-    }
-
-    for (int y = 0; y < 480; y++) {
-        for (int x = 0; x < 640; x++) {
-            int in_pos = y * 640 + x;
-            int out_pos = y * 640 * 3 + x * 3;
-            float depth_m = depth_mm[in_pos] / 1000.0f;
-
-            Color col = get_color_from_stops(stops, n_stops, depth_m, range_m);
-
-            depth_rgb_back[out_pos] = col.r;
-            depth_rgb_back[out_pos + 1] = col.g;
-            depth_rgb_back[out_pos + 2] = col.b;
-        }
-    }
-
-    gm_context_update_depth_from_u16_mm(gm_context,
-                                        0, // FIXME timestamp
-                                        640, 480,
-                                        (uint16_t *)v_depth);
-
-    pthread_mutex_lock(&swap_buffers_mutex);
-    std::swap(depth_rgb_back, depth_rgb_mid);
-    depth_rgb_mid_valid = true;
-    pthread_cond_signal(&gl_frame_cond);
-    pthread_mutex_unlock(&swap_buffers_mutex);
-}
-
-static void
-kinect_rgb_frame_cb(freenect_device *dev, void *rgb, uint32_t timestamp)
-{
-    for (int y = 0; y < 480; y++) {
-        for (int x = 0; x < 640; x++) {
-            int in_pos = y * 640 * 2 + x * 2;
-            int out_pos = y * 640 + x;
-
-            uint8_t lum = ((uint8_t *)rgb)[in_pos + 1];
-            lum_back[out_pos] = lum;
-        }
-    }
-
-    /* XXX: as far as I can tell the kinect timestamp is based off of a 60Hz
-     * timer, so if we want to pass through a timestamp we should handle
-     * 32bit overflow and scale into seconds/nanoseconds
-     */
-    gm_context_update_luminance(gm_context,
-                                0, // ignored timestamp
-                                640, 480,
-                                lum_back);
-
-    pthread_mutex_lock(&swap_buffers_mutex);
-
-    assert(rgb_back == rgb);
-    std::swap(rgb_back, rgb_mid);
-    freenect_set_video_buffer(dev, rgb_back);
-
-    std::swap(lum_back, lum_mid);
-
-    rgb_mid_valid = true;
-
-    pthread_cond_signal(&gl_frame_cond);
-
-    pthread_mutex_unlock(&swap_buffers_mutex);
-}
-
-static void *
-kinect_io_thread_cb(void *data)
-{
-    int state_check_throttle = 0;
-
-    freenect_set_tilt_degs(kinect_dev, 0);
-    freenect_set_led(kinect_dev, LED_RED);
-    freenect_set_depth_callback(kinect_dev, kinect_depth_frame_cb);
-    freenect_set_video_callback(kinect_dev, kinect_rgb_frame_cb);
-    freenect_set_video_mode(kinect_dev, freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_VIDEO_YUV_RAW));
-    //freenect_set_depth_mode(kinect_dev, freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_DEPTH_REGISTERED)); // MM, aligned to RGB
-    freenect_set_depth_mode(kinect_dev, freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM, FREENECT_DEPTH_MM));
-    freenect_set_video_buffer(kinect_dev, rgb_back);
-
-    freenect_start_depth(kinect_dev);
-    freenect_start_video(kinect_dev);
-
-    while (freenect_process_events(kinect_ctx) >= 0) {
-        if (state_check_throttle++ >= 2000) {
-            freenect_raw_tilt_state* state;
-            freenect_update_tilt_state(kinect_dev);
-            state = freenect_get_tilt_state(kinect_dev);
-
-            kinect_accel_x = state->accelerometer_x;
-            kinect_accel_y = state->accelerometer_y;
-            kinect_accel_z = state->accelerometer_z;
-
-            double mks_dx, mks_dy, mks_dz;
-            freenect_get_mks_accel(state, &mks_dx, &mks_dy, &mks_dz);
-
-            kinect_mks_accel_x = mks_dx;
-            kinect_mks_accel_y = mks_dy;
-            kinect_mks_accel_z = mks_dz;
-
-            kinect_tilt = freenect_get_tilt_degs(state);
-            kinect_ir_brightness = freenect_get_ir_brightness(kinect_dev);
-
-            state_check_throttle = 0;
-        }
-    }
-
-    freenect_stop_depth(kinect_dev);
-    freenect_stop_video(kinect_dev);
-
-    freenect_close_device(kinect_dev);
-    freenect_shutdown(kinect_ctx);
-
-    return NULL;
-}
-
-static void *
-dummy_io_thread_cb(void *userdata)
-{
-    DummyData *dummy = (DummyData*)userdata;
-
-    float range = 5.f;
-    float step = 0.25f;
-    int n_stops = (int)(range / step);
-
-    ColorStop stops[n_stops];
-
-    for (int i = 0; i < n_stops; i++) {
-        stops[i].depth = (i * step);
-        stops[i].color = color_from_depth(stops[i].depth, range, n_stops);
-    }
-
-    while(true) {
-        double timestamp = now();
-        int wait = (int)(((1.0/30.0) - (timestamp - dummy->time)) * 1000000.0);
-        if (wait > 0) {
-            usleep((useconds_t)wait);
-        }
-        dummy->time = now();
-
-        half *depth_image = dummy->depth_images[dummy->frame];
-        uint8_t *luminance_image = dummy->lum_images[dummy->frame];
-
-        for (int y = 0, in = 0, out = 0; y < dummy->data->depth_height; y++) {
-            for (int x = 0; x < dummy->data->depth_width; x++, in++, out += 3) {
-                float depth = (float)depth_image[in];
-                Color col = get_color_from_stops(stops, n_stops, depth, range);
-                depth_rgb_back[out] = col.r;
-                depth_rgb_back[out + 1] = col.g;
-                depth_rgb_back[out + 2] = col.b;
-            }
-        }
-
-        memcpy(lum_back, luminance_image,
-               dummy->data->luminance_width * dummy->data->luminance_height);
-
-        gm_context_update_depth_from_half(gm_context,
-                                          dummy->time,
-                                          dummy->data->depth_width,
-                                          dummy->data->depth_height,
-                                          depth_image);
-        gm_context_update_luminance(gm_context,
-                                    dummy->time,
-                                    dummy->data->luminance_width,
-                                    dummy->data->luminance_height,
-                                    luminance_image);
-
-        pthread_mutex_lock(&swap_buffers_mutex);
-        std::swap(depth_rgb_back, depth_rgb_mid);
-        depth_rgb_mid_valid = true;
-        std::swap(lum_back, lum_mid);
-        rgb_mid_valid = true;
-        pthread_cond_signal(&gl_frame_cond);
-        pthread_mutex_unlock(&swap_buffers_mutex);
-
-        dummy->frame = (dummy->frame + 1) % dummy->n_images;
-    }
-
-    return NULL;
-}
-
-static void
-on_window_fb_size_change_cb(GLFWwindow *window, int width, int height)
-{
-    Data *data = (Data *)glfwGetWindowUserPointer(window);
-
-    data->win_width = width;
-    data->win_height = height;
-}
-
-static void
-on_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mods)
-{
-    Data *data = (Data *)glfwGetWindowUserPointer(window);
-
-    if (action != GLFW_PRESS)
-        return;
-
-    switch (key) {
-    case GLFW_KEY_ESCAPE:
-    case GLFW_KEY_Q:
-        glfwSetWindowShouldClose(data->window, 1);
-        break;
-    }
-
-    ImGui_ImplGlfwGLES3_KeyCallback(window, key, scancode, action, mods);
-}
-
-static void
-on_glfw_error_cb(int error_code, const char *error_msg)
-{
-    fprintf(stderr, "GLFW ERROR: %d: %s\n", error_code, error_msg);
-}
-
-static void
-on_khr_debug_message_cb(GLenum source,
-                        GLenum type,
-                        GLuint id,
-                        GLenum gl_severity,
-                        GLsizei length,
-                        const GLchar *message,
-                        void *userParam)
-{
-    switch (gl_severity) {
-    case GL_DEBUG_SEVERITY_HIGH:
-        fprintf(stderr, "GL DEBUG: HIGH SEVERITY: %s\n", message);
-        break;
-    case GL_DEBUG_SEVERITY_MEDIUM:
-        fprintf(stderr, "GL DEBUG: MEDIUM SEVERITY: %s\n", message);
-        break;
-    case GL_DEBUG_SEVERITY_LOW:
-        fprintf(stderr, "GL DEBUG: LOW SEVERITY: %s\n", message);
-        break;
-    case GL_DEBUG_SEVERITY_NOTIFICATION:
-        fprintf(stderr, "GL DEBUG: NOTIFICATION: %s\n", message);
-        break;
-    }
-}
-
-static void
-directory_recurse(const char *path, const char *ext,
-                  std::vector<char *> &files)
-{
-    struct dirent *entry;
-    struct stat st;
-    size_t ext_len;
-    char *cur_ext;
-    DIR *dir;
-
-    if (!(dir = opendir(path))) {
-        fprintf(stderr, "Failed to open directory %s\n", path);
-        exit(1);
-    }
-
-    ext_len = strlen(ext);
-
-    while ((entry = readdir(dir)) != NULL) {
-        char next_path[1024];
-
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0)
-            continue;
-
-        xsnprintf(next_path, "%s/%s", path, entry->d_name);
-
-        stat(next_path, &st);
-        if (S_ISDIR(st.st_mode)) {
-            directory_recurse(next_path, ext, files);
-        } else if ((cur_ext = strstr(entry->d_name, ext)) &&
-                   cur_ext[ext_len] == '\0') {
-            files.push_back(strdup(next_path));
-        }
-    }
-
-    closedir(dir);
-}
-
 int
 main(int argc, char **argv)
 {
-    Data data;
-    DummyData dummy;
+    Data data = {};
+
+    data.events_front = new std::vector<struct event>();
+    data.events_back = new std::vector<struct event>();
 
     if (!glfwInit()) {
         fprintf(stderr, "Failed to init GLFW, OpenGL windows system library\n");
@@ -795,125 +714,26 @@ main(int argc, char **argv)
     }
 
     if (argc == 2) {
-        /* Load dummy images instead of using Kinect */
-        std::vector<char *> exr_files;
-        std::vector<char *> png_files;
-
-        directory_recurse(argv[1], ".exr", exr_files);
-        directory_recurse(argv[1], ".png", png_files);
-
-        if (exr_files.size() == 0 || png_files.size() == 0) {
-            fprintf(stderr, "No exr or png files found\n");
-            exit(1);
-        }
-        if (exr_files.size() != png_files.size()) {
-            fprintf(stderr, "exr/png quantity mismatch\n");
-            exit(1);
-        }
-
-        /* Load dummy data into memory */
-        data.depth_width = 0;
-        data.depth_height = 0;
-        data.luminance_width = 0;
-        data.luminance_height = 0;
-
-        dummy.n_images = exr_files.size();
-        dummy.depth_images = (half**)calloc(sizeof(half*), dummy.n_images);
-        dummy.lum_images = (uint8_t**)calloc(sizeof(uint8_t*), dummy.n_images);
-        dummy.data = &data;
-
-        int i = 0;
-        for (auto it = exr_files.cbegin(); it != exr_files.cend(); ++it, ++i) {
-            IUImageSpec spec =
-              { data.depth_width, data.depth_height, IU_FORMAT_HALF };
-
-            if (iu_read_exr_from_file(*it, &spec, (void**)
-                                      &dummy.depth_images[i]) != SUCCESS) {
-                fprintf(stderr, "Failed to open %s\n", *it);
-                exit(1);
-            }
-            free(*it);
-
-            if (data.depth_width == 0) {
-                data.depth_width = spec.width;
-                data.depth_height = spec.height;
-            }
-        }
-        exr_files.clear();
-
-        i = 0;
-        for (auto it = png_files.cbegin(); it != png_files.cend(); ++it, ++i) {
-            IUImageSpec spec =
-              { data.luminance_width, data.luminance_height, IU_FORMAT_U8 };
-
-            if (iu_read_png_from_file(*it, &spec, &dummy.lum_images[i],
-                                      NULL, NULL) != SUCCESS) {
-                fprintf(stderr, "Failed to open %s\n", *it);
-                exit(1);
-            }
-            free(*it);
-
-            if (data.luminance_width == 0) {
-                data.luminance_width = spec.width;
-                data.luminance_height = spec.height;
-            }
-        }
-        png_files.clear();
+        struct gm_device_config config = {};
+        config.type = GM_DEVICE_RECORDING;
+        config.recording.path = argv[1];
+        data.device = gm_device_open(&config, NULL);
     } else {
-        if (freenect_init(&kinect_ctx, NULL) < 0) {
-            fprintf(stderr, "Failed to init libfreenect\n");
-            return 1;
-        }
-
-        /* We get loads of 'errors' from the kinect but it seems to vaguely
-         * be working :)
-         */
-        freenect_set_log_level(kinect_ctx, FREENECT_LOG_FATAL);
-        freenect_select_subdevices(kinect_ctx,
-                                   (freenect_device_flags)(FREENECT_DEVICE_MOTOR |
-                                                           FREENECT_DEVICE_CAMERA));
-
-        if (!freenect_num_devices(kinect_ctx)) {
-            fprintf(stderr, "Failed to find a Kinect device\n");
-            freenect_shutdown(kinect_ctx);
-            exit(1);
-        }
-
-        if (freenect_open_device(kinect_ctx, &kinect_dev, 0) < 0) {
-            fprintf(stderr, "Could not open Kinect device\n");
-            freenect_shutdown(kinect_ctx);
-            return 1;
-        }
-
-        kinect_ir_brightness = freenect_get_ir_brightness(kinect_dev);
-
-        freenect_raw_tilt_state *tilt_state;
-        freenect_update_tilt_state(kinect_dev);
-        tilt_state = freenect_get_tilt_state(kinect_dev);
-
-        kinect_tilt = freenect_get_tilt_degs(tilt_state);
-
-        data.depth_width = data.luminance_width = 640;
-        data.depth_height = data.luminance_height = 480;
+        struct gm_device_config config = {};
+        config.type = GM_DEVICE_KINECT;
+        data.device = gm_device_open(&config, NULL);
     }
 
-    //depth_mid = (uint8_t*)malloc(data.depth_width*data.depth_height*2);
-    //depth_front = (uint8_t*)malloc(data.depth_width*data.depth_height*2);
+    TangoCameraIntrinsics *depth_intrinsics =
+        gm_device_get_depth_intrinsics(data.device);
+    data.depth_width = depth_intrinsics->width;
+    data.depth_height = depth_intrinsics->height;
 
-    depth_rgb_back = (uint8_t*)malloc(data.depth_width*data.depth_height*3);
-    depth_rgb_mid = (uint8_t*)malloc(data.depth_width*data.depth_height*3);
-    depth_rgb_front = (uint8_t*)malloc(data.depth_width*data.depth_height*3);
+    TangoCameraIntrinsics *video_intrinsics =
+        gm_device_get_video_intrinsics(data.device);
+    data.video_width = video_intrinsics->width;
+    data.video_height = video_intrinsics->height;
 
-    rgb_back = (uint8_t*)malloc(data.luminance_width*data.luminance_height*3);
-    rgb_mid = (uint8_t*)malloc(data.luminance_width*data.luminance_height*3);
-    rgb_front = (uint8_t*)malloc(data.luminance_width*data.luminance_height*3);
-
-    lum_back = (uint8_t*)malloc(data.luminance_width*data.luminance_height);
-    lum_mid = (uint8_t*)malloc(data.luminance_width*data.luminance_height);
-    lum_front = (uint8_t*)malloc(data.luminance_width*data.luminance_height);
-
-    //data.win_width = 540;
-    //data.win_height = 960;
     data.win_width = 800 + TOOLBAR_LEFT_WIDTH;
     data.win_height = 600;
 
@@ -964,7 +784,6 @@ main(int argc, char **argv)
     glfwSetScrollCallback(data.window, ImGui_ImplGlfwGLES3_ScrollCallback);
     glfwSetCharCallback(data.window, ImGui_ImplGlfwGLES3_CharCallback);
 
-
     ImGuiIO& io = ImGui::GetIO();
     io.Fonts->AddFontFromFileTTF("Roboto-Medium.ttf", 16.0f);
 
@@ -972,62 +791,33 @@ main(int argc, char **argv)
 
     init_opengl(&data);
 
-    gm_context = gm_context_new(NULL);
+    data.ctx = gm_context_new(NULL);
 
-    TangoCameraIntrinsics kinect_camera_intrinsics;
-    kinect_camera_intrinsics.width = data.depth_width;
-    kinect_camera_intrinsics.height = data.depth_height;
+    gm_context_set_depth_camera_intrinsics(data.ctx, depth_intrinsics);
+    gm_context_set_video_camera_intrinsics(data.ctx, video_intrinsics);
 
-    /* libfreenect doesn't give us a way to query camera intrinsics so just
-     * using these random/plausible intrinsics found on the internet to avoid
-     * manually calibrating for now :)
+    /* NB: there's no guarantee about what thread these event callbacks
+     * might be invoked from...
      */
-    kinect_camera_intrinsics.cx = 339.30780975300314;
-    kinect_camera_intrinsics.cy = 242.73913761751615;
-    kinect_camera_intrinsics.fx = 594.21434211923247;
-    kinect_camera_intrinsics.fy = 591.04053696870778;
+    gm_context_set_event_callback(data.ctx, on_event_cb, &data);
+    gm_device_set_event_callback(data.device, on_device_event_cb, &data);
 
-    /* Some alternative intrinsics
-     *
-     * TODO: we should allow explicit calibrarion and loading these at runtime
-     */
-#if 0
-    kinect_camera_intrinsics.cx = 322.515987
-    kinect_camera_intrinsics.cy = 259.055966
-    kinect_camera_intrinsics.fx = 521.179233
-    kinect_camera_intrinsics.fy = 493.033034
-#endif
-#if 0
-    kinect_camera_intrinsics.cx = 110.8;
-    kinect_camera_intrinsics.cy = 86.2104;
-    kinect_camera_intrinsics.fx = 217.431;
-    kinect_camera_intrinsics.fy = 217.431;
-#endif
-
-    gm_context_set_depth_camera_intrinsics(gm_context, &kinect_camera_intrinsics);
-
-    if (kinect_ctx) {
-        pthread_t kinect_io_thread;
-        pthread_create(&kinect_io_thread,
-                       NULL, //attributes
-                       kinect_io_thread_cb,
-                       NULL); //data
-    } else {
-        dummy.frame = 0;
-        dummy.time = now();
-        pthread_t dummy_io_thread;
-        pthread_create(&dummy_io_thread,
-                       NULL,
-                       dummy_io_thread_cb,
-                       &dummy);
-    }
+    gm_device_start(data.device);
+    gm_context_enable(data.ctx);
 
     event_loop(&data);
+
+    gm_context_destroy(data.ctx);
 
     ProfileShutdown();
     ImGui_ImplGlfwGLES3_Shutdown();
     glfwDestroyWindow(data.window);
     glfwTerminate();
+
+    gm_device_close(data.device);
+
+    delete data.events_front;
+    delete data.events_back;
 
     return 0;
 }

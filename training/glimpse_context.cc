@@ -72,12 +72,23 @@
 #define LOGE(...) \
   __android_log_print(ANDROID_LOG_ERROR, "glimpse_context", __VA_ARGS__)
 
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
 using half_float::half;
 using namespace pcl::common;
 
 
 #define DOWNSAMPLE_1_2
+//#define DOWNSAMPLE_1_4
+
+#ifdef DOWNSAMPLE_1_4
+
+/* One implies the other... */
+#ifndef DOWNSAMPLE_1_2
+#define DOWNSAMPLE_1_2
+#endif
+
+#endif
 
 enum image_format {
     IMAGE_FORMAT_X8,
@@ -104,11 +115,44 @@ struct pt {
     float x, y;
 };
 
+struct color
+{
+    uint8_t r;
+    uint8_t g;
+    uint8_t b;
+};
+
+struct color_stop
+{
+    float depth;
+    struct color color;
+};
+
+struct gm_tracking
+{
+    struct gm_context *ctx;
+
+    uint64_t depth_capture_timestamp;
+    uint64_t video_capture_timestamp;
+
+    uint8_t *depth_rgb;
+    uint8_t *label_map;
+    uint8_t *label_map_rgb;
+    float *label_probs;
+
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+
+    uint8_t *face_detect_buf;
+    size_t face_detect_buf_width;
+    size_t face_detect_buf_height;
+};
+
 struct gm_context
 {
     //TangoCameraIntrinsics color_camera_intrinsics;
     //TangoCameraIntrinsics rgbir_camera_intrinsics;
     TangoCameraIntrinsics depth_camera_intrinsics;
+    TangoCameraIntrinsics video_camera_intrinsics;
     TangoCameraIntrinsics training_camera_intrinsics;
 
     AAssetManager *asset_manager;
@@ -129,7 +173,6 @@ struct gm_context
     //dlib::pyramid_down<2> frame_downsampler;
     std::vector<uint8_t> grey_buffer_1_1; //original
     std::vector<uint8_t> grey_buffer_1_2; //half size
-    std::vector<uint8_t> grey_buffer_1_4; //quater size
 
     std::vector<struct pt> landmarks;
     GLuint landmarks_program;
@@ -146,28 +189,6 @@ struct gm_context
 
     std::vector<uint8_t> grey_face_detect_scratch;
     std::vector<glimpse::wrapped_image<unsigned char>> grey_face_detect_wrapped_layers;
-    uint8_t *detect_buf_data;
-    size_t detect_buf_width;
-    size_t detect_buf_height;
-
-
-    /* We have slightly awkward producer consumer relationships at the
-     * moment, camera frames from Tango service, scaling done via GLES on
-     * render thread, face detection done in dedicated thread.
-     *
-     * For now we use a synchronous pull model.
-     *
-     * Setting need_new_luminance_cam_frame_ lets the render thread request
-     * a new camera frame from Tango.
-     *
-     * Setting need_new_scaled_frame_ lets the face detect thread request
-     * the render thread to build a pyramid of downsampled camera frame
-     * images.
-     */
-    std::atomic<bool> need_new_luminance_cam_frame;
-    pthread_mutex_t luminance_cond_mutex;
-    pthread_cond_t luminance_available_cond;
-    double luminance_timestamp;
 
     std::atomic<bool> need_new_scaled_frame;
     pthread_mutex_t scaled_frame_cond_mutex;
@@ -216,35 +237,12 @@ struct gm_context
 
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
-
-    pthread_mutex_t cloud_swap_mutex;
-    /* derived during gm_context_update_depth_from_... */
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_back;
-    /* ready to be used for skeleton tracking */
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_pending;
-    bool got_cloud; /* pending cloud is valid */
-    /* in use by skeleton tracking code */
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_processing;
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr debug_cloud;
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr debug_label_cloud;
-
-
-    pthread_mutex_t labels_swap_mutex;
-    uint8_t *label_map_back;
-    uint8_t *label_map_mid;
-    uint8_t *label_map_front;
-    bool have_label_map;
-
-    uint8_t *label_map_rgb_back;
-    uint8_t *label_map_rgb_mid;
-    uint8_t *label_map_rgb_front;
-    bool have_rgb_label_map;
-
-    float *label_probs_back;
-    float *label_probs_mid;
-    float *label_probs_front;
-    bool have_label_probs;
+ 
+    pthread_mutex_t tracking_swap_mutex;
+    bool have_tracking;
+    struct gm_tracking *tracking_front;
+    struct gm_tracking *tracking_mid;
+    struct gm_tracking *tracking_back;
 
     int n_labels;
 
@@ -254,8 +252,22 @@ struct gm_context
     float min_depth;
     float max_depth;
 
+    int n_color_stops;
+    float color_stops_range;
+    struct color_stop *color_stops;
+
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
+
+    pthread_mutex_t frame_ready_mutex;
+    bool frame_ready;
+    pthread_cond_t frame_ready_cond;
+
+    void (*event_callback)(struct gm_context *ctx,
+                           struct gm_event *event,
+                           void *user_data);
+
+    void *callback_data;
 };
 
 static png_color default_palette[] = {
@@ -296,7 +308,7 @@ static png_color default_palette[] = {
 };
 
 
-uint64_t
+static uint64_t
 get_time(void)
 {
     struct timespec ts;
@@ -305,7 +317,7 @@ get_time(void)
     return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-char *
+static char *
 get_duration_ns_print_scale_suffix(uint64_t duration_ns)
 {
     if (duration_ns > 1000000000)
@@ -318,7 +330,7 @@ get_duration_ns_print_scale_suffix(uint64_t duration_ns)
         return (char *)"ns";
 }
 
-float
+static float
 get_duration_ns_print_scale(uint64_t duration_ns)
 {
     if (duration_ns > 1000000000)
@@ -407,15 +419,17 @@ create_program(const char *vertex_source, const char *fragment_source, char **er
 void
 gm_context_detect_faces(struct gm_context *ctx)
 {
-    if (!ctx->detect_buf_data) {
-        LOGI("NULL ctx->detect_buf_data");
+    struct gm_tracking *tracking = ctx->tracking_back;
+
+    if (!tracking->face_detect_buf) {
+        LOGI("NULL tracking->face_detect_buf");
         return;
     }
 
     uint64_t start, end, duration_ns;
     std::vector<dlib::rectangle> face_rects(0);
     glimpse::wrapped_image<unsigned char> grey_img;
-    dlib::rectangle buf_rect(ctx->detect_buf_width, ctx->detect_buf_height);
+    dlib::rectangle buf_rect(tracking->face_detect_buf_width, tracking->face_detect_buf_height);
 
     LOGI("New camera frame to process");
 
@@ -430,9 +444,9 @@ gm_context_detect_faces(struct gm_context *ctx)
 
             grey_img.wrap(rect.width(),
                           rect.height(),
-                          ctx->detect_buf_width, //stride
-                          static_cast<unsigned char *>(ctx->detect_buf_data +
-                                                       rect.top() * ctx->detect_buf_width +
+                          tracking->face_detect_buf_width, //stride
+                          static_cast<unsigned char *>(tracking->face_detect_buf +
+                                                       rect.top() * tracking->face_detect_buf_width +
                                                        rect.left()));
             LOGI("Starting constrained face detection with %dx%d sub image",
                  (int)rect.width(), (int)rect.height());
@@ -461,10 +475,10 @@ gm_context_detect_faces(struct gm_context *ctx)
     /* Even if not used for full frame face detection, we still want
      * an image for the full frame for the landmark detection...
      */
-    grey_img.wrap(ctx->detect_buf_width,
-                  ctx->detect_buf_height,
-                  ctx->detect_buf_width, //stride
-                  static_cast<unsigned char *>(ctx->detect_buf_data));
+    grey_img.wrap(tracking->face_detect_buf_width,
+                  tracking->face_detect_buf_height,
+                  tracking->face_detect_buf_width, //stride
+                  static_cast<unsigned char *>(tracking->face_detect_buf));
 
     /* Fall back to checking full frame if the number of detected
      * faces has changed
@@ -473,7 +487,7 @@ gm_context_detect_faces(struct gm_context *ctx)
         face_rects.size() == 0)
     {
         LOGI("Starting face detection with %dx%d image",
-             (int)ctx->detect_buf_width, (int)ctx->detect_buf_height);
+             (int)tracking->face_detect_buf_width, (int)tracking->face_detect_buf_height);
         start = get_time();
         face_rects = ctx->detector(grey_img);
         end = get_time();
@@ -682,8 +696,8 @@ gm_context_detect_faces(struct gm_context *ctx)
 
     /* Convert into normalized device coordinates */
     for (unsigned i = 0; i < landmarks.size(); i++) {
-        landmarks[i].x = (landmarks[i].x / (float)ctx->detect_buf_width) * 2.f - 1.f;
-        landmarks[i].y = (landmarks[i].y / (float)ctx->detect_buf_height) * -2.f + 1.f;
+        landmarks[i].x = (landmarks[i].x / (float)tracking->face_detect_buf_width) * 2.f - 1.f;
+        landmarks[i].y = (landmarks[i].y / (float)tracking->face_detect_buf_height) * -2.f + 1.f;
     }
 
     /* XXX: This mutex is reused for the grey debug buffer and the
@@ -698,10 +712,10 @@ gm_context_detect_faces(struct gm_context *ctx)
         uint64_t start = get_time();
         pthread_mutex_lock(&ctx->debug_viz_mutex);
         /* Save the frame to display for debug too... */
-        grey_debug_buffer_.resize(ctx->detect_buf_width * ctx->detect_buf_height);
-        memcpy(&grey_debug_buffer_[0], ctx->detect_buf_data, grey_debug_buffer_.size());
-        grey_debug_width_ = ctx->detect_buf_width;
-        grey_debug_height_ = ctx->detect_buf_height;
+        grey_debug_buffer_.resize(tracking->face_detect_buf_width * tracking->face_detect_buf_height);
+        memcpy(&grey_debug_buffer_[0], tracking->face_detect_buf, grey_debug_buffer_.size());
+        grey_debug_width_ = tracking->face_detect_buf_width;
+        grey_debug_height_ = tracking->face_detect_buf_height;
         pthread_mutex_unlock(&ctx->debug_viz_mutex);
         uint64_t end = get_time();
         uint64_t duration_ns = end - start;
@@ -894,13 +908,15 @@ free_image(struct image *image)
 void
 gm_context_track_skeleton(struct gm_context *ctx)
 {
+    struct gm_tracking *tracking = ctx->tracking_back;
+
     uint64_t start, end, duration;
 
     // X increases to the right
     // Y increases downwards
     // Z increases outwards
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = ctx->cloud_processing;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = tracking->cloud;
 
 #if 0
     pcl::CropBox<pcl::PointXYZ> crop;
@@ -1108,7 +1124,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
                  depth_img->data_half,
                  width,
                  height,
-                 ctx->label_probs_back);
+                 tracking->label_probs);
     end = get_time();
     duration = end - start;
     LOGI("People Detector: ran label probability inference in %.3f%s\n",
@@ -1119,7 +1135,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     start = get_time();
     float *weights = calc_pixel_weights(depth_img->data_half,
-                                        ctx->label_probs_back,
+                                        tracking->label_probs,
                                         width, height,
                                         ctx->n_labels,
                                         ctx->joint_map);
@@ -1134,7 +1150,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         start = get_time();
         float vfov =  2.0f * atanf(0.5 * height / ctx->training_camera_intrinsics.fy);
         float *joints = infer_joints(depth_img->data_half,
-                                     ctx->label_probs_back,
+                                     tracking->label_probs,
                                      weights,
                                      width, height,
                                      ctx->n_labels,
@@ -1155,10 +1171,10 @@ gm_context_track_skeleton(struct gm_context *ctx)
     weights = NULL;
 
     LOGI("People Detector: colorizing most probable labels. n_labels=%d, data=%p\n",
-         n_labels, ctx->label_probs_back);
+         n_labels, tracking->label_probs);
 
-    uint8_t *label_map = ctx->label_map_back;
-    uint8_t *rgb_label_map = ctx->label_map_rgb_back;
+    uint8_t *label_map = tracking->label_map;
+    uint8_t *rgb_label_map = tracking->label_map_rgb;
 
     // colorize cloud based on labels for debug
     for (int y = 0; y < height; y++) {
@@ -1166,7 +1182,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
             uint8_t label = 0;
             float pr = 0.0;
             int pos = y * width + x;
-            float *pr_table = &ctx->label_probs_back[pos * n_labels];
+            float *pr_table = &tracking->label_probs[pos * n_labels];
             for (uint8_t l = 0; l < n_labels; l++) {
                 if (pr_table[l] > pr) {
                     label = l;
@@ -1190,22 +1206,42 @@ gm_context_track_skeleton(struct gm_context *ctx)
     }
 
     free_image(depth_img);
+}
 
-    pthread_mutex_lock(&ctx->labels_swap_mutex);
-    std::swap(ctx->label_map_rgb_back, ctx->label_map_rgb_mid);
-    std::swap(ctx->label_map_back, ctx->label_map_mid);
-    std::swap(ctx->label_probs_back, ctx->label_probs_mid);
-    ctx->have_label_map = true;
-    ctx->have_rgb_label_map = true;
-    ctx->have_label_probs = true;
-    pthread_mutex_unlock(&ctx->labels_swap_mutex);
+static struct gm_event *
+event_alloc(enum gm_event_type type)
+{
+    struct gm_event *event =
+        (struct gm_event *)xcalloc(sizeof(struct gm_event), 1);
 
-    pthread_mutex_lock(&ctx->debug_viz_mutex);
+    event->type = type;
 
-    ctx->debug_cloud = cloud;
-    ctx->debug_label_cloud = label_cloud;
+    return event;
+}
 
-    pthread_mutex_unlock(&ctx->debug_viz_mutex);
+void
+gm_context_event_free(struct gm_event *event)
+{
+    free(event);
+}
+
+static void
+request_frame(struct gm_context *ctx)
+{
+    struct gm_event *event = event_alloc(GM_EVENT_REQUEST_FRAME);
+
+    event->request_frame.flags =
+        GM_REQUEST_FRAME_DEPTH | GM_REQUEST_FRAME_LUMINANCE;
+
+    ctx->event_callback(ctx, event, ctx->callback_data);
+}
+
+static void
+notify_tracking(struct gm_context *ctx)
+{
+    struct gm_event *event = event_alloc(GM_EVENT_TRACKING_READY);
+
+    ctx->event_callback(ctx, event, ctx->callback_data);
 }
 
 static void *
@@ -1253,33 +1289,43 @@ detector_thread_cb(void *data)
         LOGE("No asset manager set before starting face detector thread");
 
     while(1) {
-#if 0
-        LOGI("Waiting for new scaled frame for face detection");
+        LOGI("Waiting for new frame to start tracking\n");
+        pthread_mutex_lock(&ctx->frame_ready_mutex);
+        while (!ctx->frame_ready) {
+            pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
+        }
+        ctx->frame_ready = false;
+        pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
+        /* While downsampling on the CPU we currently do that synchronosuly
+         * when we are notified of a new frame.
+         */
+#ifdef DOWNSAMPLE_ON_GPU
+        LOGI("Waiting for new scaled frame for face detection");
         pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
         ctx->need_new_scaled_frame = true;
         while (ctx->need_new_scaled_frame)
             pthread_cond_wait(&ctx->scaled_frame_available_cond, &ctx->scaled_frame_cond_mutex);
         pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
-
-        gm_context_detect_faces(ctx);
 #endif
 
-        LOGI("Waiting for point cloud for skeletal tracking");
-        pthread_mutex_lock(&ctx->skel_track_cond_mutex);
-        while (!ctx->got_cloud)
-            pthread_cond_wait(&ctx->skel_track_cond, &ctx->skel_track_cond_mutex);
-        pthread_mutex_unlock(&ctx->skel_track_cond_mutex);
+        LOGI("Starting tracking iteration\n");
 
-        pthread_mutex_lock(&ctx->cloud_swap_mutex);
-        std::swap(ctx->cloud_pending, ctx->cloud_processing);
-        ctx->got_cloud = false;
-        pthread_mutex_unlock(&ctx->cloud_swap_mutex);
+        //gm_context_detect_faces(ctx);
 
         gm_context_track_skeleton(ctx);
+        LOGI("Finished skeletal tracking");
 
+        pthread_mutex_lock(&ctx->tracking_swap_mutex);
+        std::swap(ctx->tracking_back, ctx->tracking_mid);
+        ctx->have_tracking = true;
+        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+
+        notify_tracking(ctx);
+
+        LOGI("Requesting new frame for skeletal tracking");
         /* We throttle frame aquisition according to our tracking rate... */
-        ctx->need_new_luminance_cam_frame = true;
+        request_frame(ctx);
     }
 
     pthread_exit((void *)1);
@@ -1287,22 +1333,162 @@ detector_thread_cb(void *data)
     return NULL;
 }
 
+static void
+free_tracking(struct gm_tracking *tracking)
+{
+    free(tracking->label_map);
+    free(tracking->label_map_rgb);
+    free(tracking->label_probs);
+
+    free(tracking->depth_rgb);
+
+    free(tracking->face_detect_buf);
+
+    delete tracking;
+}
+
+static struct gm_tracking *
+alloc_tracking(struct gm_context *ctx)
+{
+    struct gm_tracking *tracking = new gm_tracking();
+
+    tracking->ctx = ctx;
+
+    int labels_width = ctx->training_camera_intrinsics.width;
+    int labels_height = ctx->training_camera_intrinsics.height;
+
+    tracking->label_map = (uint8_t *)xcalloc(labels_width * labels_height, 1);
+    tracking->label_map_rgb = (uint8_t *)xcalloc(labels_width * labels_height, 3);
+    tracking->label_probs = (float *)xcalloc(labels_width *
+                                             labels_height *
+                                             sizeof(float) * ctx->n_labels, 1);
+
+    tracking->cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
+
+    int depth_width = ctx->depth_camera_intrinsics.width;
+    int depth_height = ctx->depth_camera_intrinsics.height;
+
+    assert(depth_width);
+    assert(depth_height);
+
+    tracking->depth_rgb = (uint8_t *)xcalloc(depth_width * depth_height, 3);
+
+    int video_width = ctx->video_camera_intrinsics.width;
+    int video_height = ctx->video_camera_intrinsics.height;
+
+#ifdef DOWNSAMPLE_1_2
+#ifdef DOWNSAMPLE_1_4
+    tracking->face_detect_buf_width = video_width / 4;
+    tracking->face_detect_buf_height = video_height / 4;
+#else
+    tracking->face_detect_buf_width = video_width / 2;
+    tracking->face_detect_buf_height = video_height / 2;
+#endif
+#else
+    tracking->face_detect_buf_width = video_width;
+    tracking->face_detect_buf_height = video_height;
+#endif
+
+    tracking->face_detect_buf =
+        (uint8_t *)xcalloc(tracking->face_detect_buf_width *
+                           tracking->face_detect_buf_height, 1);
+
+    return tracking;
+}
+
+
 void
 gm_context_destroy(struct gm_context *ctx)
 {
-    free(ctx->label_map_front);
-    free(ctx->label_map_mid);
-    free(ctx->label_map_back);
+    free_tracking(ctx->tracking_front);
+    free_tracking(ctx->tracking_mid);
+    free_tracking(ctx->tracking_back);
 
-    free(ctx->label_map_rgb_front);
-    free(ctx->label_map_rgb_mid);
-    free(ctx->label_map_rgb_back);
+    free(ctx->color_stops);
 
-    free(ctx->label_probs_front);
-    free(ctx->label_probs_mid);
-    free(ctx->label_probs_back);
+    free_forest(ctx->decision_trees, 1);
+    free_jip(ctx->joint_params);
+
+    json_value_free(ctx->joint_map);
 
     delete ctx;
+}
+
+static struct color
+get_color_from_stops(struct gm_context *ctx, float depth)
+{
+    struct color_stop *stops = ctx->color_stops;
+    int n_stops = ctx->n_color_stops;
+    float range = ctx->color_stops_range;
+
+    int i = (int)((fmax(0, fmin(range, depth)) / range) * n_stops) + 1;
+
+    if (i < 1)
+        i = 1;
+    else if (i >= n_stops)
+        i = n_stops - 1;
+
+    float t = (depth - stops[i - 1].depth) /
+        (stops[i].depth - stops[i - 1].depth);
+
+    struct color col0 = stops[i - 1].color;
+    struct color col1 = stops[i].color;
+
+    float r = (1.0f - t) * col0.r + t * col1.r;
+    float g = (1.0f - t) * col0.g + t * col1.g;
+    float b = (1.0f - t) * col0.b + t * col1.b;
+
+    return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
+}
+
+static struct color
+color_from_depth(float depth, float range, int n_stops)
+{
+    static const uint32_t rainbow[] = {
+        0xffff00ff, //yellow
+        0x0000ffff, //blue
+        0x00ff00ff, //green
+        0xff0000ff, //red
+        0x00ffffff, //cyan
+    };
+
+    int stop = (int)((fmax(0, fmin(range, depth)) / range) * n_stops);
+    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
+    int band = ((int)stop) % ARRAY_LEN(rainbow);
+
+    uint32_t rgba = rainbow[band];
+
+    float r = ((rgba & 0xff000000) >> 24) / 255.0f;
+    float g = ((rgba & 0xff0000) >> 16) / 255.0f;
+    float b = ((rgba & 0xff00) >> 8) / 255.0f;
+
+    r *= f;
+    g *= f;
+    b *= f;
+
+    return { (uint8_t)(r * 255.f),
+             (uint8_t)(g * 255.f),
+             (uint8_t)(b * 255.f) };
+}
+
+static void
+alloc_rgb_color_stops(struct gm_context *ctx)
+{
+    int range = 5000;
+    float range_m = 5.f;
+    int step = 250;
+    int n_stops = range / step;
+
+    ctx->n_color_stops = n_stops;
+    ctx->color_stops_range = range_m;
+    ctx->color_stops = (struct color_stop *)xcalloc(sizeof(struct color_stop), n_stops);
+
+    struct color_stop *stops = ctx->color_stops;
+
+    for (int i = 0; i < n_stops; i++) {
+        stops[i].depth = (i * step) / 1000.f;
+        stops[i].color = color_from_depth(stops[i].depth, range_m, n_stops);
+    }
 }
 
 struct gm_context *
@@ -1338,13 +1524,6 @@ gm_context_new(char **err)
     ctx->properties_state.n_properties = ctx->properties.size();
     pthread_mutex_init(&ctx->properties_state.lock, NULL);
     ctx->properties_state.properties = &ctx->properties[0];
-
-    ctx->cloud_back.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    ctx->cloud_pending.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    ctx->cloud_processing.reset(new pcl::PointCloud<pcl::PointXYZ>);
-
-    ctx->debug_cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
-    ctx->debug_label_cloud.reset(new pcl::PointCloud<pcl::PointXYZRGBA>);
 
     pthread_cond_init(&ctx->skel_track_cond, NULL);
     pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
@@ -1435,8 +1614,6 @@ gm_context_new(char **err)
         return NULL;
     }
 
-    ctx->need_new_luminance_cam_frame = true;
-
     int labels_width = 172;
     int labels_height = 224;
     ctx->training_camera_intrinsics.width = labels_width;
@@ -1446,23 +1623,6 @@ gm_context_new(char **err)
     ctx->training_camera_intrinsics.fx = 217.461437772;
     ctx->training_camera_intrinsics.fy = 217.461437772;
 
-    ctx->label_map_front = (uint8_t *)xcalloc(labels_width * labels_height, 1);
-    ctx->label_map_mid = (uint8_t *)xcalloc(labels_width * labels_height, 1);
-    ctx->label_map_back = (uint8_t *)xcalloc(labels_width * labels_height, 1);
-
-    ctx->label_map_rgb_front = (uint8_t *)xcalloc(labels_width * labels_height * 3, 1);
-    ctx->label_map_rgb_mid = (uint8_t *)xcalloc(labels_width * labels_height * 3, 1);
-    ctx->label_map_rgb_back = (uint8_t *)xcalloc(labels_width * labels_height * 3, 1);
-
-    ctx->label_probs_front = (float *)xcalloc(labels_width *
-                                              labels_height *
-                                              sizeof(float) * ctx->n_labels, 1);
-    ctx->label_probs_mid = (float *)xcalloc(labels_width *
-                                            labels_height *
-                                            sizeof(float) * ctx->n_labels, 1);
-    ctx->label_probs_back = (float *)xcalloc(labels_width *
-                                             labels_height *
-                                             sizeof(float) * ctx->n_labels, 1);
 
     ctx->joint_map = NULL;
     AAsset *joint_map_asset = AAssetManager_open(ctx->asset_manager,
@@ -1515,6 +1675,8 @@ gm_context_new(char **err)
         AAsset_close(joint_params_asset);
     }
 
+    alloc_rgb_color_stops(ctx);
+
     return ctx;
 }
 
@@ -1526,56 +1688,41 @@ gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
 }
 
 void
-gm_context_update_luminance(struct gm_context *ctx,
-                            double timestamp,
-                            int width, int height,
-                            uint8_t *luminance)
+gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
+                                       TangoCameraIntrinsics *intrinsics)
 {
-    /* Note we completely synchronize capturing new frames and running face
-     * detection to avoid redundant bandwidth overhead copying frames that we
-     * don't use
-     */
-    if (!ctx->need_new_luminance_cam_frame)
-        return;
+    ctx->video_camera_intrinsics = *intrinsics;
+}
 
+void
+update_tracking_luminance(struct gm_context *ctx,
+                          struct gm_tracking *tracking,
+                          enum gm_format format,
+                          uint8_t *luminance,
+                          uint64_t timestamp)
+{
+    int width = ctx->video_camera_intrinsics.width;
+    int height = ctx->video_camera_intrinsics.height;
+
+    assert(format == GM_FORMAT_LUMINANCE_U8);
 
     if (!ctx->grey_width) {
         ctx->grey_width = width;
         ctx->grey_height = height;
-        //uv_buffer_offset_ = ctx->grey_width * ctx->grey_height;
-        //yuv_size_ = yuv_width_ * yuv_height_ + yuv_width_ * yuv_height_ / 2;
-
-#ifndef USE_GL_EXT_YUV_TARGET_EXT
-        ctx->grey_buffer_1_1.resize(ctx->grey_width * ctx->grey_height);
-        ctx->grey_buffer_1_2.resize((ctx->grey_width / 2) * (ctx->grey_height / 2));
-        ctx->grey_buffer_1_4.resize((ctx->grey_width / 4) * (ctx->grey_height / 4));
-#endif
-
-        //yuv_buffers_[0].resize(yuv_size_);
-        //yuv_buffers_[1].resize(yuv_size_);
-        //yuv_buffers_[2].resize(yuv_size_);
-        //LOGE("Allocated yuv_buffers_[]");
-    } //else
-    //LOGE("Already allocated yuv_buffers_[]");
-
-    uint64_t start, end, duration_ns;
-
-#ifndef USE_GL_EXT_YUV_TARGET_EXT
-    start = get_time();
-    memcpy(ctx->grey_buffer_1_1.data(), luminance, ctx->grey_buffer_1_1.size());
-    end = get_time();
-    duration_ns = end - start;
-    LOGI("Copying original 1:1 frame too %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
-#endif
 
 #ifndef DOWNSAMPLE_ON_GPU
+#ifdef DOWNSAMPLE_1_4
+        ctx->grey_buffer_1_2.resize((width / 2) * (height / 2));
+#endif
+#endif
+    }
+
+#ifndef DOWNSAMPLE_ON_GPU
+    uint64_t start, end, duration_ns;
 
 #ifdef DOWNSAMPLE_1_2
-    /* We're just taking the luminance and ignoring the chroma for face
-     * detection...
-     */
+#ifdef DOWNSAMPLE_1_4
+    /* 1/4 resolution */
     glimpse::wrapped_image<unsigned char> orig_grey_img;
     orig_grey_img.wrap(ctx->grey_width,
                        ctx->grey_height,
@@ -1583,18 +1730,33 @@ gm_context_update_luminance(struct gm_context *ctx,
                        static_cast<unsigned char *>(luminance));
 
     glimpse::wrapped_image<unsigned char> grey_1_2_img;
-    grey_1_2_img.wrap(ctx->grey_width / 2,
-                      ctx->grey_height / 2,
-                      ctx->grey_width / 2, //stride
+    grey_1_2_img.wrap(width / 2,
+                      height / 2,
+                      width / 2, //stride
                       static_cast<unsigned char *>(ctx->grey_buffer_1_2.data()));
-#endif
 
-#ifdef DOWNSAMPLE_1_4
     glimpse::wrapped_image<unsigned char> grey_1_4_img;
-    grey_1_4_img.wrap(ctx->grey_width / 4,
-                      ctx->grey_height / 4,
-                      ctx->grey_width / 4, //stride
-                      static_cast<unsigned char *>(ctx->grey_buffer_1_4.data()));
+    grey_1_4_img.wrap(width / 4,
+                      height / 4,
+                      width / 4, //stride
+                      static_cast<unsigned char *>(tracking->face_detect_buf));
+#else
+    /* half resolution */
+    glimpse::wrapped_image<unsigned char> orig_grey_img;
+    orig_grey_img.wrap(ctx->grey_width,
+                       ctx->grey_height,
+                       ctx->grey_width, //stride
+                       static_cast<unsigned char *>(luminance));
+
+    glimpse::wrapped_image<unsigned char> grey_1_2_img;
+    grey_1_2_img.wrap(width / 2,
+                      height / 2,
+                      width / 2, //stride
+                      static_cast<unsigned char *>(tracking->face_detect_buf));
+#endif
+#else
+    /* full resolution */
+    memcpy(tracking->face_detect_buf, luminance, width * height);
 #endif
 
 #ifdef DOWNSAMPLE_1_2
@@ -1618,83 +1780,101 @@ gm_context_update_luminance(struct gm_context *ctx,
     LOGI("Frame scaled to 1/4 size on CPU in %.3f%s",
          get_duration_ns_print_scale(duration_ns),
          get_duration_ns_print_scale_suffix(duration_ns));
-
-    ctx->detect_buf_data = ctx->grey_buffer_1_4.data();
-    ctx->detect_buf_width = ctx->grey_width / 4;
-    ctx->detect_buf_height = ctx->grey_height / 4;
-#else
-    ctx->detect_buf_data = ctx->grey_buffer_1_2.data();
-    ctx->detect_buf_width = ctx->grey_width / 2;
-    ctx->detect_buf_height = ctx->grey_height / 2;
 #endif // DOWNSAMPLE_1_4
-
-#else
-    ctx->detect_buf_data = ctx->grey_buffer_1_1.data();
-    ctx->detect_buf_width = ctx->grey_width;
-    ctx->detect_buf_height = ctx->grey_height;
-#endif
+#endif // DOWNSAMPLE_1_2
 
 
 #endif // !DOWNSAMPLE_ON_GPU
 
-    ctx->luminance_timestamp = timestamp;
-
-    ctx->need_new_luminance_cam_frame = false;
-    pthread_cond_signal(&ctx->luminance_available_cond);
-
-    //pthread_mutex_lock(&yuv_data_mutex_);
-    //std::swap(current_copy_buf_, current_ready_buf_);
-    //pthread_mutex_unlock(&yuv_data_mutex_);
-
-    /* Note: from observation of the buffer->data pointers I was hoping to get a
-     * clue about whether Tango was internally managing a chain of recycled
-     * buffers so we could look at avoiding copying here. Although it looks like
-     * it does recycle allocations there was a surprisingly large number (13)
-     * which made me doubt whether they might actually just be allocating on
-     * demand and so 13 is just a quirk of recycling addresses within their
-     * allocator. 13 buffers would equate to ~51MB (1920x1080 NV21) which isn't
-     * so large as to rule out that Tango might really be holding on to that
-     * many buffers internally.
-     */
-    //LOGE("DEBUG: New color frame available. width = %d, height = %d, format = %s, ptr=%p",
-    //     width, height, fmt, buffer->data);
+    tracking->video_capture_timestamp = timestamp;
 }
 
-void
-gm_context_update_depth(struct gm_context *ctx,
-                        double timestamp,
-                        int width, int height,
-                        void *depth, GlimpseDepthCallback cb)
+static void
+update_tracking_depth_from_buffer(struct gm_context *ctx,
+                                  struct gm_tracking *tracking,
+                                  enum gm_format format,
+                                  void *depth,
+                                  uint64_t timestamp)
 {
     TangoCameraIntrinsics *intrinsics = &ctx->depth_camera_intrinsics;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = ctx->cloud_back;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = tracking->cloud;
+
+    int width = ctx->depth_camera_intrinsics.width;
+    int height = ctx->depth_camera_intrinsics.height;
 
     uint64_t start = get_time();
 
-    cloud->width = width;
-    cloud->height = height;
-    cloud->points.resize(width * height);
+    cloud->points.clear();
+    cloud->width = 0;
+    cloud->height = 1;
 
     float inv_fx = 1.0f / intrinsics->fx;
     float inv_fy = 1.0f / intrinsics->fy;
     float cx = intrinsics->cx;
     float cy = intrinsics->cy;
 
-    int n_points = 0;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int off = y * width + x;
-            float depth_m = cb ? cb(off, depth) : ((float*)depth)[off];
 
-            if (isnormal(depth_m) && depth_m < HUGE_DEPTH) {
-                cloud->points[n_points].x = (float)((x - cx) * depth_m * inv_fx);
-                cloud->points[n_points].y = (float)((y - cy) * depth_m * inv_fy);
-                cloud->points[n_points].z = depth_m;
-                ++n_points;
-            }
+    /* With this foreach macro the following block of code will have access to
+     * x, y, z, off and depth_m variables. (off = y * width + x)
+     */
+#define foreach_xy_off(width, height) \
+    for (int y = 0; y < height; y++) \
+        for (int x = 0, off = 0; x < width && (off = y * width + x); x++)
+
+#define VALIDATE_AND_APPEND_POINT(CLOUD, X, Y, Z) \
+    do { \
+        if (isnormal(Z) && Z < HUGE_DEPTH) { \
+            pcl::PointXYZ point((float)((X - cx) * Z * inv_fx), \
+                                (float)((Y - cy) * Z * inv_fy), \
+                                Z); \
+            CLOUD->points.push_back(point); \
+        } \
+    } while (0)
+
+#define MAP_DEPTH_TO_RGB(DEPTH_RGB_BUF, OFF, DEPTH) \
+    do { \
+        struct color rgb = get_color_from_stops(ctx, DEPTH); \
+        uint8_t *depth_rgb = DEPTH_RGB_BUF + OFF * 3; \
+        depth_rgb[0] = rgb.r; \
+        depth_rgb[1] = rgb.g; \
+        depth_rgb[2] = rgb.b; \
+    } while (0)
+
+    uint8_t *depth_rgb_back = tracking->depth_rgb;
+
+    switch (format) {
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_LUMINANCE_U8:
+        assert(0);
+        break;
+    case GM_FORMAT_Z_U16_MM:
+        foreach_xy_off(width, height) {
+            float depth_m = ((uint16_t *)depth)[off] / 1000.f;
+            VALIDATE_AND_APPEND_POINT(cloud, x, y, depth_m);
+            MAP_DEPTH_TO_RGB(depth_rgb_back, off, depth_m);
         }
+        break;
+    case GM_FORMAT_Z_F32_M:
+        foreach_xy_off(width, height) {
+            float depth_m = ((float *)depth)[off];
+            VALIDATE_AND_APPEND_POINT(cloud, x, y, depth_m);
+            MAP_DEPTH_TO_RGB(depth_rgb_back, off, depth_m);
+        }
+        break;
+    case GM_FORMAT_Z_F16_M:
+        foreach_xy_off(width, height) {
+            float depth_m = ((half *)depth)[off];
+            VALIDATE_AND_APPEND_POINT(cloud, x, y, depth_m);
+            MAP_DEPTH_TO_RGB(depth_rgb_back, off, depth_m);
+        }
+        break;
     }
-    cloud->points.resize(n_points);
+
+#undef MAP_DEPTH_TO_RGB
+#undef VALIDATE_AND_APPEND_POINT
+#undef foreach_cast_depth_m
+
+    cloud->width = cloud->points.size();
 
     uint64_t end = get_time();
     uint64_t duration = end - start;
@@ -1703,83 +1883,95 @@ gm_context_update_depth(struct gm_context *ctx,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    pthread_mutex_lock(&ctx->cloud_swap_mutex);
-    std::swap(ctx->cloud_back, ctx->cloud_pending);
-    ctx->got_cloud = true;
-    pthread_cond_signal(&ctx->skel_track_cond);
-    pthread_mutex_unlock(&ctx->cloud_swap_mutex);
+    tracking->depth_capture_timestamp = timestamp;
 }
 
-static float
-gm_float_from_u16_mm(int offset, void *depth)
+const uint8_t *
+gm_tracking_get_rgb_depth(struct gm_tracking *tracking)
 {
-    uint16_t *depth_mm = (uint16_t*)depth;
-    return depth_mm[offset] / 1000.0f;
+    //struct gm_context *ctx = tracking->ctx;
+
+    return tracking->depth_rgb;
 }
 
-void
-gm_context_update_depth_from_u16_mm(struct gm_context *ctx,
-                                    double timestamp,
-                                    int width, int height,
-                                    uint16_t *depth_mm)
+const uint8_t *
+gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
+                              int *width,
+                              int *height)
 {
-    gm_context_update_depth(ctx, timestamp, width, height, (void*)depth_mm,
-                            gm_float_from_u16_mm);
+    struct gm_context *ctx = tracking->ctx;
+
+    *width = ctx->training_camera_intrinsics.width;
+    *height = ctx->training_camera_intrinsics.height;
+
+    return tracking->label_map_rgb;
 }
 
-static float
-gm_float_from_half(int offset, void *depth)
+const uint8_t *
+gm_tracking_get_label_map(struct gm_tracking *tracking,
+                          int *width,
+                          int *height)
 {
-    half *depth_m = (half*)depth;
-    return (float)depth_m[offset];
+    struct gm_context *ctx = tracking->ctx;
+
+    *width = ctx->training_camera_intrinsics.width;
+    *height = ctx->training_camera_intrinsics.height;
+
+    return tracking->label_map;
 }
 
-void
-gm_context_update_depth_from_half(struct gm_context *ctx,
-                                  double timestamp,
-                                  int width, int height,
-                                  half_float::half *depth)
+const float *
+gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
+                                    int *width,
+                                    int *height)
 {
-    gm_context_update_depth(ctx, timestamp, width, height, (void*)depth,
-                            gm_float_from_half);
+    struct gm_context *ctx = tracking->ctx;
+
+    *width = ctx->training_camera_intrinsics.width;
+    *height = ctx->training_camera_intrinsics.height;
+
+    return tracking->label_probs;
 }
 
-void
-gm_context_update_depth_from_tango_cloud(struct gm_context *ctx,
-                                         double timestamp,
-                                         int width, int height,
-                                         TangoPointCloud *point_cloud)
+/* Note this may be called via any arbitrary thread
+ */
+bool
+gm_context_notify_frame(struct gm_context *ctx,
+                        struct gm_frame *frame)
 {
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = ctx->cloud_pending;
+    /* Ignore frames without depth and video data */
+    if (frame->depth == NULL || frame->video == NULL)
+        return false;
 
-    uint64_t start = get_time();
+    update_tracking_depth_from_buffer(ctx,
+                                      ctx->tracking_back,
+                                      frame->depth_format,
+                                      frame->depth,
+                                      frame->timestamp);
 
-    cloud->width  = point_cloud->num_points;
-    cloud->height = 1;
-    cloud->points.resize(cloud->width * cloud->height);
+    assert(frame->video_format == GM_FORMAT_LUMINANCE_U8);
+    update_tracking_luminance(ctx,
+                              ctx->tracking_back,
+                              frame->video_format,
+                              (uint8_t *)frame->video,
+                              frame->timestamp);
 
-    /* Convert TangoPointCloud into libpcl PointCloud
-     * XXX: Note libpcl doesn't appear to support a zero-copy way of
-     * constructing a PointCloud from existing data :(
-     */
-    float *tg_points = (float *)point_cloud->points;
-    for (size_t i = 0; i < cloud->points.size(); ++i) {
-        cloud->points[i].x = tg_points[i*4 + 0];
-        cloud->points[i].y = tg_points[i*4 + 1];
-        cloud->points[i].z = tg_points[i*4 + 2];
-    }
+    pthread_mutex_lock(&ctx->frame_ready_mutex);
+    ctx->frame_ready = true;
+    pthread_cond_signal(&ctx->frame_ready_cond);
+    pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
-    uint64_t end = get_time();
-    uint64_t duration = end - start;
-    LOGI("People Detector: converted Tango cloud into pcl cloud in %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+    return true;
+}
 
-    pthread_mutex_lock(&ctx->cloud_swap_mutex);
-    std::swap(ctx->cloud_back, ctx->cloud_pending);
-    ctx->got_cloud = true;
-    pthread_cond_signal(&ctx->skel_track_cond);
-    pthread_mutex_unlock(&ctx->cloud_swap_mutex);
+struct gm_tracking *
+gm_context_get_latest_tracking(struct gm_context *ctx)
+{
+    pthread_mutex_lock(&ctx->tracking_swap_mutex);
+    std::swap(ctx->tracking_mid, ctx->tracking_front);
+    pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+
+    return ctx->tracking_front;
 }
 
 void
@@ -1814,6 +2006,8 @@ gm_context_render_thread_hook(struct gm_context *ctx)
      * of glGenerateMipmap is optimal and downsampling by another 50%.
      */
 #ifdef DOWNSAMPLE_ON_GPU
+    struct gm_tracking *tracking = ctx->tracking_front;
+
     struct {
         float x, y, s, t;
     } quad_strip[] = {
@@ -2209,20 +2403,20 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     {
         dlib::timing::timer lv0_cpy_timer("Copied pyramid level0 frame for face detection from PBO in");
 
-        ctx->detect_buf_width = rotated_frame_width / 4;
-        ctx->detect_buf_height = rotated_frame_height / 4;
+        tracking->face_detect_buf_width = rotated_frame_width / 4;
+        tracking->face_detect_buf_height = rotated_frame_height / 4;
 
         /* TODO: avoid copying out of the PBO later (assuming we can get a
          * cached mapping)
          */
         LOGI("face detect scratch width = %d, height = %d",
-             (int)ctx->detect_buf_width,
-             (int)ctx->detect_buf_height);
-        ctx->grey_face_detect_scratch.resize(ctx->detect_buf_width * ctx->detect_buf_height);
+             (int)tracking->face_detect_buf_width,
+             (int)tracking->face_detect_buf_height);
+        ctx->grey_face_detect_scratch.resize(tracking->face_detect_buf_width * tracking->face_detect_buf_height);
         memcpy(ctx->grey_face_detect_scratch.data(), pbo_ptr, ctx->grey_face_detect_scratch.size());
 
-        ctx->detect_buf_data = ctx->grey_face_detect_scratch.data();
-        LOGI("ctx->detect_buf_data = %p", ctx->detect_buf_data);
+        tracking->face_detect_buf = ctx->grey_face_detect_scratch.data();
+        LOGI("tracking->face_detect_buf = %p", tracking->face_detect_buf);
     }
 
     glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
@@ -2237,62 +2431,51 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     pthread_cond_signal(&ctx->scaled_frame_available_cond);
 }
 
-const float *
-gm_context_get_latest_label_probabilities(struct gm_context *ctx,
-                                          int *width,
-                                          int *height)
-{
-    pthread_mutex_lock(&ctx->labels_swap_mutex);
-    if (ctx->have_label_probs) {
-        std::swap(ctx->label_probs_mid, ctx->label_probs_front);
-        ctx->have_label_probs = false;
-    }
-    pthread_mutex_unlock(&ctx->labels_swap_mutex);
-
-    *width = ctx->training_camera_intrinsics.width;
-    *height = ctx->training_camera_intrinsics.height;
-
-    return ctx->label_probs_front;
-}
-
-const uint8_t *
-gm_context_get_latest_label_map(struct gm_context *ctx,
-                                int *width,
-                                int *height)
-{
-    pthread_mutex_lock(&ctx->labels_swap_mutex);
-    if (ctx->have_label_map) {
-        std::swap(ctx->label_map_mid, ctx->label_map_front);
-        ctx->have_label_map = false;
-    }
-    pthread_mutex_unlock(&ctx->labels_swap_mutex);
-
-    *width = ctx->training_camera_intrinsics.width;
-    *height = ctx->training_camera_intrinsics.height;
-
-    return ctx->label_map_front;
-}
-
-const uint8_t *
-gm_context_get_latest_rgb_label_map(struct gm_context *ctx,
-                                    int *width,
-                                    int *height)
-{
-    pthread_mutex_lock(&ctx->labels_swap_mutex);
-    if (ctx->have_rgb_label_map) {
-        std::swap(ctx->label_map_rgb_mid, ctx->label_map_rgb_front);
-        ctx->have_rgb_label_map = false;
-    }
-    pthread_mutex_unlock(&ctx->labels_swap_mutex);
-
-    *width = ctx->training_camera_intrinsics.width;
-    *height = ctx->training_camera_intrinsics.height;
-
-    return ctx->label_map_rgb_front;
-}
-
 struct gm_ui_properties *
 gm_context_get_ui_properties(struct gm_context *ctx)
 {
     return &ctx->properties_state;
 }
+
+void
+gm_context_set_event_callback(struct gm_context *ctx,
+                              void (*event_callback)(struct gm_context *ctx,
+                                                     struct gm_event *event,
+                                                     void *user_data),
+                              void *user_data)
+{
+    ctx->event_callback = event_callback;
+    ctx->callback_data = user_data;
+}
+
+void
+gm_context_enable(struct gm_context *ctx)
+{
+    /* Note: we can't allocate these up front in gm_cotext_new because we need
+     * to wait until we've been told depth + video camera intrinsics
+     */
+    ctx->tracking_front = alloc_tracking(ctx);
+    ctx->tracking_mid = alloc_tracking(ctx);
+    ctx->tracking_back = alloc_tracking(ctx);
+
+    request_frame(ctx);
+}
+
+/* Disable skeltal tracking */
+void
+gm_context_disable(struct gm_context *ctx)
+{
+}
+
+void *
+gm_frame_get_video_buffer(struct gm_frame *frame)
+{
+    return frame->video;
+}
+
+enum gm_format
+gm_frame_get_video_format(struct gm_frame *frame)
+{
+    return frame->video_format;
+}
+
