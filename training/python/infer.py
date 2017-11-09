@@ -3,8 +3,8 @@
 import glimpse
 import sys
 
-if len(sys.argv) != 5:
-    print('Usage: infer.py <jointmap.txt> <params.jip> <depth.exr> <tree1.rdt> [tree2.rdt ...]')
+if len(sys.argv) < 5:
+    print('Usage: infer.py <joint_params.jip> <params.jip> <depth.exr> <tree1.rdt> [tree2.rdt ...]')
     sys.exit(0)
 
 forest = glimpse.Forest(sys.argv[4:])

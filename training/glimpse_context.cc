@@ -1017,12 +1017,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
     LOGI("People Detector: starting label inference: n_trees=%d, w=%d, h=%d, data=%p\n",
          ctx->n_decision_trees, width, height, depth_img->data_half);
     start = get_time();
-    float *label_probabilities =
-        infer_labels(ctx->decision_trees,
-                     ctx->n_decision_trees,
-                     depth_img->data_half,
-                     width,
-                     height);
+    infer_labels(ctx->decision_trees,
+                 ctx->n_decision_trees,
+                 depth_img->data_half,
+                 width,
+                 height,
+                 ctx->label_probs_back);
     end = get_time();
     duration = end - start;
     LOGI("People Detector: ran label probability inference in %.3f%s\n",
@@ -1031,16 +1031,9 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     uint8_t n_labels = ctx->decision_trees[0]->header.n_labels;
 
-    /* XXX: could avoid this copy if infer labels could be given a buffer
-     * to write into...
-     */
-    memcpy(ctx->label_probs_back,
-           label_probabilities,
-           width * height * (int)n_labels * sizeof(float));
-
     start = get_time();
     float *weights = calc_pixel_weights(depth_img->data_half,
-                                        label_probabilities,
+                                        ctx->label_probs_back,
                                         width, height,
                                         ctx->n_labels,
                                         ctx->joint_map);
@@ -1055,7 +1048,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         start = get_time();
         float vfov =  2.0f * atanf(0.5 * height / ctx->training_camera_intrinsics.fy);
         float *joints = infer_joints(depth_img->data_half,
-                                     label_probabilities,
+                                     ctx->label_probs_back,
                                      weights,
                                      width, height,
                                      ctx->n_labels,
@@ -1076,7 +1069,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     weights = NULL;
 
     LOGI("People Detector: colorizing most probable labels. n_labels=%d, data=%p\n",
-         n_labels, label_probabilities);
+         n_labels, ctx->label_probs_back);
 
     uint8_t *label_map = ctx->label_map_back;
     uint8_t *rgb_label_map = ctx->label_map_rgb_back;
@@ -1087,7 +1080,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
             uint8_t label = 0;
             float pr = 0.0;
             int pos = y * width + x;
-            float *pr_table = &label_probabilities[pos * n_labels];
+            float *pr_table = &ctx->label_probs_back[pos * n_labels];
             for (uint8_t l = 0; l < n_labels; l++) {
                 if (pr_table[l] > pr) {
                     label = l;
@@ -1111,7 +1104,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
     }
 
     free_image(depth_img);
-    free(label_probabilities);
 
     pthread_mutex_lock(&ctx->labels_swap_mutex);
     std::swap(ctx->label_map_rgb_back, ctx->label_map_rgb_mid);
