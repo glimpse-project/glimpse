@@ -1268,20 +1268,34 @@ gm_context_new(char **err)
     /* Load the decision trees immediately so we know how many labels we're
      * dealing with asap.
      */
-    AAsset *tree_asset = AAssetManager_open(ctx->asset_manager,
-                                            "tree0.rdt",
-                                            AASSET_MODE_BUFFER);
-    if (tree_asset) {
-        const void *buf = AAsset_getBuffer(tree_asset);
-        unsigned len = AAsset_getLength(tree_asset);
+    AAsset *tree_asset0 = AAssetManager_open(ctx->asset_manager,
+                                             "tree0.json",
+                                             AASSET_MODE_BUFFER);
+    AAsset *tree_asset1 = AAssetManager_open(ctx->asset_manager,
+                                             "tree1.json",
+                                             AASSET_MODE_BUFFER);
+    AAsset *tree_asset2 = AAssetManager_open(ctx->asset_manager,
+                                             "tree2.json",
+                                             AASSET_MODE_BUFFER);
+    if (tree_asset0 && tree_asset1 && tree_asset2) {
+        uint8_t *buffers[] = {
+            (uint8_t*)AAsset_getBuffer(tree_asset0),
+            (uint8_t*)AAsset_getBuffer(tree_asset1),
+            (uint8_t*)AAsset_getBuffer(tree_asset2) };
+        uint32_t lengths[] = {
+            (uint32_t)AAsset_getLength(tree_asset0),
+            (uint32_t)AAsset_getLength(tree_asset1),
+            (uint32_t)AAsset_getLength(tree_asset2) };
 
-        ctx->decision_trees = load_forest((uint8_t **)&buf, &len, 1);
+        ctx->decision_trees = load_json_forest(buffers, lengths, 3);
         if (ctx->decision_trees) {
-            LOGI("Loaded decision tree\n");
-            ctx->n_decision_trees = 1;
+            LOGI("Loaded decision trees\n");
+            ctx->n_decision_trees = 3;
         }
 
-        AAsset_close(tree_asset);
+        AAsset_close(tree_asset0);
+        AAsset_close(tree_asset1);
+        AAsset_close(tree_asset2);
     }
     if (!ctx->decision_trees) {
         xasprintf(err, "Failed to open decision tree asset");
