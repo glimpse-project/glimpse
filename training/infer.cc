@@ -511,13 +511,13 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
       float* point = &point_cloud[idx];
 
       float x = point[0] / (tan_half_hfov * point[2]);
-      if (x < -1.0f || x > 1.0f)
+      if (x < -1.0f || x >= 1.0f)
         {
           continue;
         }
 
       float y = -point[1] / (tan_half_vfov * point[2]);
-      if (y < -1.0f || y > 1.0f)
+      if (y < -1.0f || y >= 1.0f)
         {
           continue;
         }
@@ -525,8 +525,8 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
       x = (x + 1.0f) * half_width;
       y = (y + 1.0f) * half_height;
 
-      int32_t col = x + 0.5f;
-      int32_t row = y + 0.5f;
+      int32_t col = x;
+      int32_t row = y;
 
       depth_image[row * width + col] = (half)point[2];
     }
