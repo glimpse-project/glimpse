@@ -57,7 +57,7 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
               // TODO: Provide a configurable threshold here?
               if (depth_value >= HUGE_DEPTH)
                 {
-                  out_pr_table[tree->header.bg_label] = 1.0f;
+                  out_pr_table[tree->header.bg_label] += 1.0f;
                   continue;
                 }
 
