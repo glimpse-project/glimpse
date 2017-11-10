@@ -191,7 +191,7 @@ function fetch_all {
         git clone git://github.com/mariusmuja/flann.git
     fi
     if ! test -d eigen; then
-        hg clone https://bitbucket.org/eigen/eigen/
+        hg clone https://bitbucket.org/eigen/eigen/ --updaterev 3.3.4
     fi
     if ! test -d qhull; then
         # NB: This is a non-upstream branch because the upstream cmake build is totally broken
@@ -201,7 +201,7 @@ function fetch_all {
         git clone https://github.com/g-truc/glm -b 0.9.8.5 glm
     fi
     if ! test -d pcl; then
-        git clone https://github.com/PointCloudLibrary/pcl pcl
+        git clone https://github.com/PointCloudLibrary/pcl pcl -b pcl-1.8.1
     fi
     if ! test -d libfreenect; then
         git clone https://github.com/rib/libfreenect -b fakenect-depth-mm-video-yuv
