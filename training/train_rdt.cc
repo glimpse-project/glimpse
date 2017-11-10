@@ -1013,41 +1013,26 @@ main(int argc, char **argv)
          since_last.hours, since_last.minutes, since_last.seconds,
          out_filename);
 
-  FILE* output;
-  if (!(output = fopen(out_filename, "wb")))
-    {
-      fprintf(stderr, "Failed to open output file '%s'\n", out_filename);
-      exit(1);
-    }
-
-  // Write a header
   RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \
                        ctx.n_labels, bg_label, ctx.fov };
-  if (fwrite(&header, sizeof(RDTHeader), 1, output) != 1)
+  RDTree rdtree = { header, tree, llist_length(tree_histograms), NULL };
+  rdtree.label_pr_tables = (float*)
+    xmalloc(ctx.n_labels * rdtree.n_pr_tables * sizeof(float));
+  float* pr_table = rdtree.label_pr_tables;
+  for (LList* l = tree_histograms; l; l = l->next, pr_table += ctx.n_labels)
     {
-      fprintf(stderr, "Error writing header\n");
-      return 1;
-    }
-  if (fwrite(tree, sizeof(Node), n_nodes, output) != n_nodes)
-    {
-      fprintf(stderr, "Error writing tree\n");
-      return 1;
-    }
-  for (LList* l = tree_histograms; l; l = l->next)
-    {
-      if (fwrite(l->data, sizeof(float), ctx.n_labels, output) != ctx.n_labels)
-        {
-          fprintf(stderr, "Error writing labels\n");
-          return 1;
-        }
+      memcpy(pr_table, l->data, sizeof(float) * ctx.n_labels);
     }
 
-  // Close the output file
-  if (fclose(output) != 0)
-    {
-      fprintf(stderr, "Error closing output file\n");
-      return 1;
-    }
+  save_tree(&rdtree, out_filename);
+
+  char* out_filename_json = (char*)xmalloc(strlen(out_filename) + 6);
+  strcpy(out_filename_json, out_filename);
+  strcat(out_filename_json, ".json");
+  save_tree_json(&rdtree, out_filename_json, false);
+
+  xfree(rdtree.label_pr_tables);
+  xfree(out_filename_json);
 
   // Free the last data
   xfree(tree);

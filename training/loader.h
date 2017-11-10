@@ -2,6 +2,7 @@
 #pragma once
 
 #include <stdio.h>
+#include <stdbool.h>
 
 #include "llist.h"
 #include "parson.h"
@@ -32,6 +33,7 @@ typedef struct __attribute__((__packed__)) {
 typedef struct {
   RDTHeader header;
   Node* nodes;
+  uint32_t n_pr_tables;
   float* label_pr_tables;
 } RDTree;
 
@@ -55,6 +57,9 @@ typedef struct {
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+bool save_tree(RDTree* tree, const char* filename);
+bool save_tree_json(RDTree* tree, const char* filename, bool pretty);
 
 RDTree* load_json_tree(uint8_t* json_tree_buf, uint32_t len);
 RDTree* read_json_tree(const char* filename);

@@ -18,6 +18,147 @@ assert_rdt_abi()
   static_assert(offsetof(Node, t) == 16, "RDT ABI Breakage");
 }
 
+bool
+save_tree(RDTree* tree, const char* filename)
+{
+  uint32_t n_nodes;
+  bool success;
+  FILE* output;
+
+  if (!(output = fopen(filename, "wb")))
+    {
+      fprintf(stderr, "Failed to open output file '%s'\n", filename);
+      return false;
+    }
+
+  success = false;
+  if (fwrite(&tree->header, sizeof(RDTHeader), 1, output) != 1)
+    {
+      fprintf(stderr, "Error writing header\n");
+      goto save_tree_close;
+    }
+
+  n_nodes = (uint32_t)roundf(powf(2.f, tree->header.depth)) - 1;
+  if (fwrite(tree->nodes, sizeof(Node), n_nodes, output) != n_nodes)
+    {
+      fprintf(stderr, "Error writing tree nodes\n");
+      goto save_tree_close;
+    }
+
+  if (fwrite(tree->label_pr_tables, sizeof(float) * tree->header.n_labels,
+             tree->n_pr_tables, output) != tree->n_pr_tables)
+    {
+      fprintf(stderr, "Error writing tree probability tables\n");
+      goto save_tree_close;
+    }
+
+  success = true;
+
+save_tree_close:
+  if (fclose(output) != 0)
+    {
+      fprintf(stderr, "Error closing output file\n");
+      return false;
+    }
+
+  return success;
+}
+
+static JSON_Value*
+recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
+{
+  JSON_Value* json_node_val = json_value_init_object();
+  JSON_Object* json_node = json_object(json_node_val);
+
+  if (node->label_pr_idx == 0)
+    {
+      json_object_set_number(json_node, "t", node->t);
+
+      JSON_Value* u_val = json_value_init_array();
+      JSON_Array* u = json_array(u_val);
+      json_array_append_number(u, node->uv[0]);
+      json_array_append_number(u, node->uv[1]);
+      json_object_set_value(json_node, "u", u_val);
+
+      JSON_Value* v_val = json_value_init_array();
+      JSON_Array* v = json_array(v_val);
+      json_array_append_number(v, node->uv[2]);
+      json_array_append_number(v, node->uv[3]);
+      json_object_set_value(json_node, "v", v_val);
+
+      if (depth < (tree->header.depth - 1))
+        {
+          /* NB: The nodes in .rdt files are in a packed array arranged in
+           * breadth-first, left then right child order with the root node at
+           * index zero.
+           *
+           * With this layout then given an index for any particular node
+           * ('id' here) then 2 * id + 1 is the index for the left child and
+           * 2 * id + 2 is the index for the right child...
+           */
+          int left_id = id * 2 + 1;
+          Node* left_node = tree->nodes + left_id;
+          int right_id = id * 2 + 2;
+          Node* right_node = tree->nodes + right_id;
+
+          JSON_Value* left_json = recursive_build_tree(tree, left_node,
+                                                       depth + 1, left_id);
+          json_object_set_value(json_node, "l", left_json);
+          JSON_Value* right_json = recursive_build_tree(tree, right_node,
+                                                        depth + 1, right_id);
+          json_object_set_value(json_node, "r", right_json);
+        }
+    }
+  else
+    {
+      JSON_Value* probs_val = json_value_init_array();
+      JSON_Array* probs = json_array(probs_val);
+
+      /* NB: node->label_pr_idx is a base-one index since index zero is
+       * reserved to indicate that the node is not a leaf node
+       */
+      float* pr_table = &tree->label_pr_tables[(node->label_pr_idx - 1) *
+                                               tree->header.n_labels];
+
+      for (int i = 0; i < tree->header.n_labels; i++)
+        {
+          json_array_append_number(probs, pr_table[i]);
+        }
+
+      json_object_set_value(json_node, "p", probs_val);
+    }
+
+  return json_node_val;
+}
+
+bool
+save_tree_json(RDTree* tree, const char* filename, bool pretty)
+{
+  JSON_Value *root = json_value_init_object();
+
+  json_object_set_number(json_object(root), "_rdt_version_was", tree->header.version);
+  json_object_set_number(json_object(root), "depth", tree->header.depth);
+  json_object_set_number(json_object(root), "vertical_fov", tree->header.fov);
+  json_object_set_number(json_object(root), "n_labels", tree->header.n_labels);
+  json_object_set_number(json_object(root), "bg_label", tree->header.bg_label);
+
+  JSON_Value *nodes = recursive_build_tree(tree, tree->nodes, 0, 0);
+
+  json_object_set_value(json_object(root), "root", nodes);
+
+  JSON_Status status = pretty ?
+    json_serialize_to_file_pretty(root, filename) :
+    json_serialize_to_file(root, filename);
+
+  if (status != JSONSuccess)
+    {
+      fprintf(stderr, "Failed to serialize output to JSON\n");
+      return false;
+    }
+
+  return true;
+}
+
 static int
 count_pr_tables(JSON_Object* node)
 {
@@ -115,6 +256,7 @@ load_json_tree(uint8_t* json_tree_buf, uint32_t len)
 
   // Count probability arrays
   int n_pr_tables = count_pr_tables(root);
+  tree->n_pr_tables = n_pr_tables;
 
   // Allocate tree structure
   uint32_t n_nodes = (uint32_t)roundf(powf(2.f, tree->header.depth)) - 1;
@@ -210,6 +352,7 @@ load_tree(uint8_t* tree_buf, uint32_t len)
     }
   uint32_t n_tables = n_prs / tree->header.n_labels;
 
+  tree->n_pr_tables = n_tables;
   tree->label_pr_tables = (float*)xmalloc(label_bytes);
   memcpy(tree->label_pr_tables, tree_buf,
          sizeof(float) * tree->header.n_labels * n_tables);
