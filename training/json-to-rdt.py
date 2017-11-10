@@ -73,25 +73,27 @@ with open(args.json_file[0], 'r') as json_fp:
 
     depth = int(tree['depth'])
     n_labels = int(tree['n_labels'])
+    bg_label = int(tree['bg_label'])
     fov = float(tree['vertical_fov'])
 
     with open(args.rdt_file[0], 'wb+') as fp:
-        # 10 byte v3 RDTHeader
+        # 11 byte v4 RDTHeader
         #
         # Note: the leading '<' specifies little endian and also ensures the
         # data is packed without alignment padding between the first 6 bytes
         # and the float fov)
-        fp.write(struct.pack('<3s3Bf',
+        fp.write(struct.pack('<3s4Bf',
                              "RDT".encode('ascii'),
-                             3, # Version
+                             4, # Version
                              depth,
                              n_labels,
+                             bg_label,
                              fov
                              ))
 
         # NB: the .uv member of the C Node struct is 16 byte aligned resulting
         # in 4 bytes padding at the end of the struct.
-        sizeof_v3_Node = 32
+        sizeof_v4_Node = 32
         n_nodes = pow(2, depth) - 1
 
         def count_probability_arrays(node):
@@ -100,11 +102,12 @@ with open(args.json_file[0], 'r') as json_fp:
             return (count_probability_arrays(node['l']) +
                     count_probability_arrays(node['r']))
 
-        # NB: the label_pr_idx should be a base-one index since index zero
-        # is reserved to indicate that a node is not a leaf node
-        def pack_probability_arrays(buf, node, next_idx=1):
+        def pack_probability_arrays(buf, node, next_idx=0):
             if 'p' in node:
-                node['label_pr_idx'] = next_idx
+                # NB: the label_pr_idx should be a base-one index since index zero
+                # is reserved to indicate that a node is not a leaf node
+                node['label_pr_idx'] = next_idx + 1
+
                 off = next_idx * 4 * n_labels
                 for i in range(n_labels):
                     struct.pack_into('f', buf, off, node['p'][i])
@@ -120,7 +123,7 @@ with open(args.json_file[0], 'r') as json_fp:
         pack_probability_arrays(pr_array, tree['root'])
 
         def pack_node(buf, node, idx):
-            off = sizeof_v3_Node * idx
+            off = sizeof_v4_Node * idx
             if 't' in node:
                 struct.pack_into('ff', buf, off,    node['u'][0], node['u'][1])
                 struct.pack_into('ff', buf, off+8,  node['v'][0], node['v'][1])
@@ -135,7 +138,7 @@ with open(args.json_file[0], 'r') as json_fp:
             else:
                 struct.pack_into('I',  buf, off+20, node['label_pr_idx'])
         
-        node_array = bytearray(sizeof_v3_Node * n_nodes);
+        node_array = bytearray(sizeof_v4_Node * n_nodes);
         pack_node(node_array, node=tree['root'], idx=0)
         fp.write(node_array)
 
