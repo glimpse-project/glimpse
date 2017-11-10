@@ -192,6 +192,7 @@ function fetch_all {
     fi
     if ! test -d eigen; then
         hg clone https://bitbucket.org/eigen/eigen/ --updaterev 3.3.4
+        patch -p1 -d eigen < $SCRIPT_DIR/eigen-already-aligned.patch
     fi
     if ! test -d qhull; then
         # NB: This is a non-upstream branch because the upstream cmake build is totally broken
