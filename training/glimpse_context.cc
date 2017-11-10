@@ -1268,15 +1268,34 @@ gm_context_new(char **err)
     /* Load the decision trees immediately so we know how many labels we're
      * dealing with asap.
      */
+    bool is_json[3] = { false, false, false };
     AAsset *tree_asset0 = AAssetManager_open(ctx->asset_manager,
-                                             "tree0.json",
+                                             "tree0.rdt",
                                              AASSET_MODE_BUFFER);
     AAsset *tree_asset1 = AAssetManager_open(ctx->asset_manager,
-                                             "tree1.json",
+                                             "tree1.rdt",
                                              AASSET_MODE_BUFFER);
     AAsset *tree_asset2 = AAssetManager_open(ctx->asset_manager,
-                                             "tree2.json",
+                                             "tree2.rdt",
                                              AASSET_MODE_BUFFER);
+    if (!tree_asset0) {
+        tree_asset0 = AAssetManager_open(ctx->asset_manager,
+                                         "tree0.json",
+                                         AASSET_MODE_BUFFER);
+        is_json[0] = true;
+    }
+    if (!tree_asset1) {
+        tree_asset1 = AAssetManager_open(ctx->asset_manager,
+                                         "tree1.json",
+                                         AASSET_MODE_BUFFER);
+        is_json[1] = true;
+    }
+    if (!tree_asset2) {
+        tree_asset2 = AAssetManager_open(ctx->asset_manager,
+                                         "tree2.json",
+                                         AASSET_MODE_BUFFER);
+        is_json[2] = true;
+    }
     if (tree_asset0 && tree_asset1 && tree_asset2) {
         uint8_t *buffers[] = {
             (uint8_t*)AAsset_getBuffer(tree_asset0),
@@ -1287,18 +1306,28 @@ gm_context_new(char **err)
             (uint32_t)AAsset_getLength(tree_asset1),
             (uint32_t)AAsset_getLength(tree_asset2) };
 
-        ctx->decision_trees = load_json_forest(buffers, lengths, 3);
-        if (ctx->decision_trees) {
-            LOGI("Loaded decision trees\n");
-            ctx->n_decision_trees = 3;
+        /* XXX: Note, we're not doing any verification that tree parameters
+         *      are compatible here.
+         */
+        ctx->n_decision_trees = 0;
+        ctx->decision_trees = (RDTree**)calloc(3, sizeof(RDTree*));
+        for (int i = 0; i < 3; i++) {
+            if ((ctx->decision_trees[ctx->n_decision_trees] = is_json[i] ?
+                 load_json_tree(buffers[i], lengths[i]) :
+                 load_tree(buffers[i], lengths[i]))) {
+                ++ctx->n_decision_trees;
+                LOGI("Loaded decision tree %d\n", i);
+            } else {
+                LOGE("Failed to load decision tree %d\n", i);
+            }
         }
 
         AAsset_close(tree_asset0);
         AAsset_close(tree_asset1);
         AAsset_close(tree_asset2);
     }
-    if (!ctx->decision_trees) {
-        xasprintf(err, "Failed to open decision tree asset");
+    if (!ctx->n_decision_trees) {
+        xasprintf(err, "Failed to open any decision tree assets");
         gm_context_destroy(ctx);
         return NULL;
     }
