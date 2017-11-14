@@ -37,15 +37,19 @@
 #include <pcl/common/generate.h>
 #include <pcl/common/common.h>
 
+#include <pcl/kdtree/kdtree.h>
+
 #include <pcl/sample_consensus/method_types.h>
 #include <pcl/sample_consensus/model_types.h>
 
 #include <pcl/segmentation/sac_segmentation.h>
+#include <pcl/segmentation/extract_clusters.h>
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/passthrough.h>
+#include <pcl/filters/voxel_grid.h>
 
 #ifndef ANDROID
 #include <epoxy/gl.h>
@@ -919,6 +923,14 @@ gm_context_track_skeleton(struct gm_context *ctx)
 #endif
 
 #if 1
+    pcl::VoxelGrid<pcl::PointXYZ> vg;
+    vg.setInputCloud(cloud);
+    vg.setLeafSize(0.01, 0.01, 0.01);
+    vg.filter(*cloud);
+    LOGI("Cloud has %d points after voxel grid\n", (int)cloud->points.size());
+#endif
+
+#if 1
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::PassThrough<pcl::PointXYZ> passY;
     passY.setInputCloud(cloud);
@@ -993,7 +1005,58 @@ gm_context_track_skeleton(struct gm_context *ctx)
         extract.filterDirectly(cloud_floor);
     } while (n_removed_points < n_floor_points * 0.5);
 
+    // Remove HUGE_DEPTH points
+    passZ.setInputCloud(cloud);
+    passZ.setKeepOrganized(false);
+    passZ.setFilterLimits(HUGE_DEPTH, FLT_MAX);
+    passZ.setFilterLimitsNegative(true);
+    passZ.filter(*cloud);
+
     LOGI("Removed %d floor candidate points\n", n_removed_points);
+#endif
+
+#if 1
+    // Use Euclidean cluster extraction to look at only the largest cluster of
+    // points (which we hope is the human)
+
+    // Creating the KdTree object for the search method of the extraction
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr
+      tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    tree->setInputCloud (cloud);
+
+    std::vector<pcl::PointIndices> cluster_indices;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
+    ec.setClusterTolerance (0.03);
+    ec.setMinClusterSize (cloud->points.size() * 0.1);
+    ec.setMaxClusterSize (cloud->points.size());
+    ec.setSearchMethod (tree);
+    ec.setInputCloud (cloud);
+    ec.extract (cluster_indices);
+
+    if (cluster_indices.size() > 0) {
+        const pcl::PointIndices* largest_cluster = &cluster_indices[0];
+        for (uint32_t i = 1; i < cluster_indices.size(); i++) {
+            if (cluster_indices[i].indices.size() >
+                largest_cluster->indices.size()) {
+                largest_cluster = &cluster_indices[i];
+            }
+        }
+
+        LOGI("Largest cluster size: %d\n", (int)largest_cluster->indices.size());
+
+        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(
+            new pcl::PointCloud<pcl::PointXYZ>);
+        for (std::vector<int>::const_iterator it =
+             largest_cluster->indices.begin();
+             it != largest_cluster->indices.end (); ++it) {
+            cloud_cluster->points.push_back (cloud->points[*it]);
+        }
+        cloud_cluster->width = cloud_cluster->points.size();
+        cloud_cluster->height = 1;
+        cloud_cluster->is_dense = true;
+
+        cloud.swap(cloud_cluster);
+    }
 #endif
 
     if (ctx->depth_camera_intrinsics.width == 0 ||
