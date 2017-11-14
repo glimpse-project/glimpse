@@ -44,6 +44,8 @@
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/extract_indices.h>
+#include <pcl/filters/crop_box.h>
+#include <pcl/filters/passthrough.h>
 
 #ifndef ANDROID
 #include <epoxy/gl.h>
@@ -785,7 +787,7 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 
                 if (isnan(point.x) || isinf(point.x) ||
                     isnan(point.y) || isinf(point.y) ||
-                    !isnormal(point.z))
+                    !isnormal(point.z) || point.z >= HUGE_DEPTH)
                     continue;
 
                 float hfield_width = tan_half_hfov * point.z;
@@ -844,7 +846,7 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 
                 if (isnan(point.x) || isinf(point.x) ||
                     isnan(point.y) || isinf(point.y) ||
-                    !isnormal(point.z))
+                    !isnormal(point.z) || point.z >= HUGE_DEPTH)
                     continue;
 
                 float hfield_width = tan_half_hfov * point.z;
@@ -890,75 +892,108 @@ gm_context_track_skeleton(struct gm_context *ctx)
 {
     uint64_t start, end, duration;
 
+    // X increases to the right
+    // Y increases downwards
+    // Z increases outwards
+
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = ctx->cloud_processing;
 
-    /* if we want to see each individual plane that's found... */
-    //pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_plane(new pcl::PointCloud<pcl::PointXYZ>);
+#if 0
+    pcl::CropBox<pcl::PointXYZ> crop;
+    crop.setInputCloud(cloud);
+    crop.setMin(Eigen::Vector4f(-5, -5, ctx->min_depth, 1));
+    crop.setMax(Eigen::Vector4f(5, 5, ctx->max_depth, 1));
+    crop.filter(*cloud);
+#endif
 
-    /* scratch where */
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_tmp(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr label_cloud(new pcl::PointCloud<pcl::PointXYZRGBA>);
+    LOGI("Processing cloud with %d points\n", (int)cloud->points.size());
 
+#if 1
+    pcl::PassThrough<pcl::PointXYZ> passZ(true);
+    passZ.setInputCloud(cloud);
+    passZ.setFilterFieldName ("z");
+    passZ.setFilterLimits(ctx->min_depth, ctx->max_depth);
+    passZ.filter(*cloud);
 
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
-    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+    LOGI("Cloud has %d points after depth filter\n", (int)cloud->points.size());
+#endif
+
+#if 1
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PassThrough<pcl::PointXYZ> passY;
+    passY.setInputCloud(cloud);
+    passY.setUserFilterValue(HUGE_DEPTH);
+    passY.setKeepOrganized(true);
+    passY.setFilterFieldName ("y");
+    // XXX: Here we're assuming the camera may be on the ground, but ideally
+    //      we'd use a height sensor reading here (minus a threshold).
+    passY.setFilterLimits(0.0, FLT_MAX);
+    passY.filter(*cloud_floor);
+
+    assert(cloud_floor->points.size() == cloud->points.size());
+
+    int n_floor_points = cloud->points.size() -
+      passY.getRemovedIndices()->size();
+    LOGI("Cloud possible floor subset has %d points\n", n_floor_points);
+#endif
+
+#if 1
     // Create the segmentation object
     pcl::SACSegmentation<pcl::PointXYZ> seg;
     // Optional
-    seg.setOptimizeCoefficients(true);
+    seg.setOptimizeCoefficients(false);
     // Mandatory
-    seg.setModelType(pcl::SACMODEL_PLANE);
+    seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setMaxIterations(1000);
-    seg.setDistanceThreshold(0.01);
+    seg.setInputCloud(cloud_floor);
+
+    seg.setMaxIterations(250);
+    seg.setDistanceThreshold(0.03);
+
+    // XXX: We're assuming that the camera here is perpendicular to the floor
+    //      and give a generous threshold, but ideally we'd use device sensors
+    //      to detect orientation and use a slightly less broad angle here.
+    seg.setAxis(Eigen::Vector3f(0.f, -1.f, 0.f));
+    seg.setEpsAngle(M_PI/180.0 * 15.0);
 
     // Create the filtering object
     pcl::ExtractIndices<pcl::PointXYZ> extract;
+    extract.setUserFilterValue(HUGE_DEPTH);
+    extract.setKeepOrganized(true);
 
-#if 0
-    int min_remaining = cloud->points.size() * 0.3;
-    int n_planes = 0;
-    while (cloud->points.size() > min_remaining) {
-        seg.setInputCloud(cloud);
+    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+
+    int n_removed_points = 0;
+    int min_removal_size = n_floor_points * 0.25;
+    do {
         seg.segment(*inliers, *coefficients);
 
-        if (inliers->indices.size() == 0) {
-            LOGI("No more planes could be detected");
+        int n_inliers = (int)inliers->indices.size();
+        if (n_inliers == 0 || n_inliers < min_removal_size) {
             break;
         }
+        n_removed_points += n_inliers;
 
-        n_planes++;
-
-        extract.setIndices(inliers);
-
+        LOGI("Removing %d points\n", n_inliers);
 #if 0
-        extract.setNegative(false);
-        extract.filter(*cloud_plane);
+        if (i == 0) {
+            for (uint32_t j = 0; j < inliers->indices.size(); j++) {
+                LOGI("Removing (%.2f, %.2f, %.2f)\n",
+                     (float)cloud_floor->points[inliers->indices[j]].x,
+                     (float)cloud_floor->points[inliers->indices[j]].y,
+                     (float)cloud_floor->points[inliers->indices[j]].z);
+            }
+        }
 #endif
 
-        /* XXX: note that computationally it's a lot more costly to extract
-         * the inverse, and I'm sure there's opportunity to optimize here
-         * if this is a problem
-         */
         extract.setNegative(true);
-        extract.filter(*cloud_tmp);
+        extract.setIndices(inliers);
+        extract.filterDirectly(cloud);
+        extract.filterDirectly(cloud_floor);
+    } while (n_removed_points < n_floor_points * 0.5);
 
-        /* XXX: there's also an api for filtering in-place although notably
-         * it doesn't change/reduce the size of the cloud it will just
-         * replace filtered-out points with NANs. We could also consider
-         * using that API.
-         */
-
-        cloud.swap(cloud_tmp);
-    }
-
-    end = get_time();
-    duration = end - start;
-    LOGI("People Detector: pre-processed point cloud in %.3f%s, removed %d planes, %d points remaining\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration),
-         n_planes,
-         (int)cloud->size());
+    LOGI("Removed %d floor candidate points\n", n_removed_points);
 #endif
 
     if (ctx->depth_camera_intrinsics.width == 0 ||
@@ -973,6 +1008,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     }
 
     start = get_time();
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr label_cloud(new pcl::PointCloud<pcl::PointXYZRGBA>);
     struct image *depth_img =
         reproject_point_cloud(cloud,
                               label_cloud,
@@ -985,19 +1021,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
         LOGE("Skipping detection: bad re-projected depth image size: %dx%d\n",
              width, height);
         return;
-    }
-
-    half *depth_buf = depth_img->data_half;
-    float min_depth = ctx->min_depth;
-    float max_depth = ctx->max_depth;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int pos = y * width + x;
-            if (depth_buf[pos] < min_depth)
-                depth_buf[pos] = HUGE_DEPTH;
-            else if (depth_buf[pos] > max_depth)
-                depth_buf[pos] = HUGE_DEPTH;
-        }
     }
 
     end = get_time();
@@ -1232,11 +1255,11 @@ gm_context_new(char **err)
     prop.desc = "throw away points nearer than this";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_ptr = &ctx->min_depth;
-    prop.min = 0.5;
+    prop.min = 0.0;
     prop.max = 10;
     ctx->properties.push_back(prop);
 
-    ctx->max_depth = 5;
+    ctx->max_depth = 3.5;
     prop = gm_ui_property();
     prop.name = "max_depth";
     prop.desc = "throw away points further than this";
@@ -1591,16 +1614,21 @@ gm_context_update_depth(struct gm_context *ctx,
     float cx = intrinsics->cx;
     float cy = intrinsics->cy;
 
+    int n_points = 0;
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             int off = y * width + x;
             float depth_m = cb ? cb(off, depth) : ((float*)depth)[off];
 
-            cloud->points[off].x = (float)((x - cx) * depth_m * inv_fx);
-            cloud->points[off].y = (float)((y - cy) * depth_m * inv_fy);
-            cloud->points[off].z = depth_m;
+            if (isnormal(depth_m) && depth_m < HUGE_DEPTH) {
+                cloud->points[n_points].x = (float)((x - cx) * depth_m * inv_fx);
+                cloud->points[n_points].y = (float)((y - cy) * depth_m * inv_fy);
+                cloud->points[n_points].z = depth_m;
+                ++n_points;
+            }
         }
     }
+    cloud->points.resize(n_points);
 
     uint64_t end = get_time();
     uint64_t duration = end - start;

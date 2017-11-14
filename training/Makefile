@@ -34,18 +34,20 @@ IMGUI_OBJS=\
 	imgui/imgui_draw.o \
 	imgui/imgui_impl_glfw_gles3.o
 
-THIRD_PARTY_DEPS=../third_party_deps
+THIRD_PARTY_DEPS ?= ../third_party_deps
+THIRD_PARTY_INCLUDE ?= $(THIRD_PARTY_DEPS)/include
+THIRD_PARTY_LIBS ?= $(THIRD_PARTY_DEPS)/lib
 
 _CFLAGS = $(CFLAGS) -Wall -std=gnu99 -fPIC
 _CXXFLAGS = $(CXXFLAGS) -std=c++14 -Wall -fPIC
-_LDFLAGS = $(LDFLAGS) -L$(THIRD_PARTY_DEPS)/lib
+_LDFLAGS = $(LDFLAGS) -L$(THIRD_PARTY_LIBS)
 
 _CPPFLAGS = \
 	-I. \
 	-Iandroid_stub/ \
 	-Iimgui \
 	-DGLM_ENABLE_EXPERIMENTAL=1 \
-	-I$(THIRD_PARTY_DEPS)/include \
+	-I$(THIRD_PARTY_INCLUDE) \
 	`pkg-config --cflags libpng libfreenect`
 
 
