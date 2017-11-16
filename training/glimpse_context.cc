@@ -135,6 +135,8 @@ struct gm_tracking
     uint8_t *label_map;
     uint8_t *label_map_rgb;
     float *label_probs;
+    float *joints;
+    GlimpsePointXYZRGBA* label_cloud;
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
 
@@ -241,17 +243,28 @@ struct gm_context
 
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
- 
+
     pthread_mutex_t tracking_swap_mutex;
     bool have_tracking;
     struct gm_tracking *tracking_front;
     struct gm_tracking *tracking_mid;
     struct gm_tracking *tracking_back;
 
+    float *joints_back;
+    float *joints_mid;
+    float *joints_front;
+    bool have_joints;
+
+    GlimpsePointXYZRGBA* debug_label_cloud_back;
+    GlimpsePointXYZRGBA* debug_label_cloud_mid;
+    GlimpsePointXYZRGBA* debug_label_cloud_front;
+    bool have_label_cloud;
+
     int n_labels;
 
     JSON_Value *joint_map;
     JIParams *joint_params;
+    int n_joints;
 
     float min_depth;
     float max_depth;
@@ -741,7 +754,7 @@ gm_context_detect_faces(struct gm_context *ctx)
  */
 struct image *
 reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                      const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr rgba_cloud,
+                      GlimpsePointXYZRGBA *rgba_cloud,
                       const struct gm_intrinsics *intrinsics,
                       enum image_format fmt)
 {
@@ -758,28 +771,19 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
     float tan_half_hfov = tan(h_fov / 2.0); // XXX: or just 0.5 * width / intrinsics->fx
     float tan_half_vfov = tan(v_fov / 2.0);
 
-    rgba_cloud->width = width;
-    rgba_cloud->height = height;
-    rgba_cloud->reserve(width * height);
-
-    for (unsigned i = 0; i < rgba_cloud->size(); i++) {
-        rgba_cloud->points[i].x = HUGE_VALF;
-        rgba_cloud->points[i].y = HUGE_VALF;
-        rgba_cloud->points[i].z = HUGE_VALF;
-        rgba_cloud->points[i].rgba = 0x00000000;
+    for (int i = 0; i < width * height; i++) {
+        rgba_cloud[i].x = HUGE_VALF;
+        rgba_cloud[i].y = HUGE_VALF;
+        rgba_cloud[i].z = HUGE_VALF;
+        rgba_cloud[i].rgba = 0x00000000;
     }
-    rgba_cloud->is_dense = false;
-    LOGI("resized rgba cloud: w=%d, h=%d, size=%d\n",
-         rgba_cloud->width,
-         rgba_cloud->height,
-         (int)rgba_cloud->size());
 
     /* XXX: curious to measure what impact there might be with using a soft
      * float16 implementation for representing intermediate depth buffers
      * so just naively duplicating the code for now, for profiling...
      */
+    struct image *ret = (struct image *)xmalloc(sizeof(*ret));
     if (fmt == IMAGE_FORMAT_XFLOAT) {
-        struct image *ret = (struct image *)xmalloc(sizeof(*ret));
         float *img;
 
         ret->format = IMAGE_FORMAT_XFLOAT;
@@ -829,16 +833,13 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 
                 int off = width * y + x;
                 img[off] = point.z;
-                rgba_cloud->points[off].x = point.x;
-                rgba_cloud->points[off].y = point.y;
-                rgba_cloud->points[off].z = point.z;
-                rgba_cloud->points[off].rgba = 0xffffffff;
+                rgba_cloud[off].x = point.x;
+                rgba_cloud[off].y = point.y;
+                rgba_cloud[off].z = point.z;
+                rgba_cloud[off].rgba = 0xffffffff;
             }
         }
-
-        return ret;
     } else if (fmt == IMAGE_FORMAT_XHALF) {
-        struct image *ret = (struct image *)xmalloc(sizeof(*ret));
         half *img;
 
         ret->format = IMAGE_FORMAT_XHALF;
@@ -888,18 +889,17 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 
                 int off = width * y + x;
                 img[off] = point.z;
-                rgba_cloud->points[off].x = point.x;
-                rgba_cloud->points[off].y = point.y;
-                rgba_cloud->points[off].z = point.z;
-                rgba_cloud->points[off].rgba = 0xffffffff;
+                rgba_cloud[off].x = point.x;
+                rgba_cloud[off].y = point.y;
+                rgba_cloud[off].z = point.z;
+                rgba_cloud[off].rgba = 0xffffffff;
             }
         }
-
-        return ret;
+    } else {
+        assert(!"reached");
     }
 
-    assert(!"reached");
-    return NULL;
+    return ret;
 }
 
 void
@@ -1091,10 +1091,9 @@ gm_context_track_skeleton(struct gm_context *ctx)
     }
 
     start = get_time();
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr label_cloud(new pcl::PointCloud<pcl::PointXYZRGBA>);
     struct image *depth_img =
         reproject_point_cloud(cloud,
-                              label_cloud,
+                              tracking->label_cloud,
                               &ctx->training_camera_intrinsics,
                               IMAGE_FORMAT_XHALF);
     int width = depth_img->width;
@@ -1108,12 +1107,11 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     end = get_time();
     duration = end - start;
-    LOGI("People Detector: re-projected point cloud in %.3f%s, w=%d, h=%d, n_rgba_points=%d\n",
+    LOGI("People Detector: re-projected point cloud in %.3f%s, w=%d, h=%d\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration),
          (int)width,
-         (int)height,
-         (int)label_cloud->size());
+         (int)height);
 
 
     if (!ctx->decision_trees) {
@@ -1152,23 +1150,23 @@ gm_context_track_skeleton(struct gm_context *ctx)
 #if 1
     if (ctx->joint_params) {
         start = get_time();
-        float vfov =  2.0f * atanf(0.5 * height / ctx->training_camera_intrinsics.fy);
-        float *joints = infer_joints(depth_img->data_half,
-                                     tracking->label_probs,
-                                     weights,
-                                     width, height,
-                                     ctx->n_labels,
-                                     ctx->joint_map,
-                                     vfov,
-                                     ctx->joint_params->joint_params);
+        float vfov =  (2.0f * atanf(0.5 * height /
+                                    ctx->training_camera_intrinsics.fy)) *
+          180 / M_PI;
+        infer_joints(depth_img->data_half,
+                     tracking->label_probs,
+                     weights,
+                     width, height,
+                     ctx->n_labels,
+                     ctx->joint_map,
+                     vfov,
+                     ctx->joint_params->joint_params,
+                     tracking->joints);
         end = get_time();
         duration = end - start;
         LOGI("People Detector: inferred joints in %.3f%s\n",
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
-
-        free(joints);
-        joints = NULL;
     }
 #endif
     free(weights);
@@ -1184,7 +1182,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
             uint8_t label = 0;
-            float pr = 0.0;
+            float pr = -1.0;
             int pos = y * width + x;
             float *pr_table = &tracking->label_probs[pos * n_labels];
             for (uint8_t l = 0; l < n_labels; l++) {
@@ -1200,8 +1198,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
             uint8_t b = default_palette[label].blue;
 
             uint32_t col = r<<24|g<<16|b<<8|0xff;
-            label_cloud->points[pos].rgba = col;
-            //label_cloud->points[pos].rgba = 0xffff80ff;
+            tracking->label_cloud[pos].rgba = col;
+            //tracking->label_cloud[pos].rgba = 0xffff80ff;
 
             rgb_label_map[pos * 3] = r;
             rgb_label_map[pos * 3 + 1] = g;
@@ -1343,6 +1341,8 @@ free_tracking(struct gm_tracking *tracking)
     free(tracking->label_map);
     free(tracking->label_map_rgb);
     free(tracking->label_probs);
+    free(tracking->joints);
+    free(tracking->label_cloud);
 
     free(tracking->depth_rgb);
 
@@ -1366,6 +1366,9 @@ alloc_tracking(struct gm_context *ctx)
     tracking->label_probs = (float *)xcalloc(labels_width *
                                              labels_height *
                                              sizeof(float) * ctx->n_labels, 1);
+    tracking->joints = (float *)xcalloc(ctx->n_joints, 3 * sizeof(float));
+    tracking->label_cloud = (GlimpsePointXYZRGBA *)
+        xcalloc(labels_width * labels_height, sizeof(GlimpsePointXYZRGBA));
 
     tracking->cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
 
@@ -1627,7 +1630,6 @@ gm_context_new(char **err)
     ctx->training_camera_intrinsics.fx = 217.461437772;
     ctx->training_camera_intrinsics.fy = 217.461437772;
 
-
     ctx->joint_map = NULL;
     AAsset *joint_map_asset = AAssetManager_open(ctx->asset_manager,
                                                  "joint-map.json",
@@ -1654,6 +1656,8 @@ gm_context_new(char **err)
         gm_context_destroy(ctx);
         return NULL;
     }
+
+    ctx->n_joints = json_array_get_count(json_array(ctx->joint_map));
 
     ctx->joint_params = NULL;
     AAsset *joint_params_asset = AAssetManager_open(ctx->asset_manager,
@@ -1896,6 +1900,24 @@ gm_tracking_get_rgb_depth(struct gm_tracking *tracking)
     //struct gm_context *ctx = tracking->ctx;
 
     return tracking->depth_rgb;
+}
+
+const GlimpsePointXYZRGBA *
+gm_tracking_get_rgb_label_cloud(struct gm_tracking *tracking,
+                                int *n_points)
+{
+    if (n_points)
+      *n_points = tracking->ctx->training_camera_intrinsics.width *
+                  tracking->ctx->training_camera_intrinsics.height;
+    return tracking->label_cloud;
+}
+
+const float *
+gm_tracking_get_joint_positions(struct gm_tracking *tracking,
+                                int *n_joints)
+{
+    if (n_joints) *n_joints = tracking->ctx->n_joints;
+    return tracking->joints;
 }
 
 const uint8_t *

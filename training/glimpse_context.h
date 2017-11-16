@@ -116,6 +116,13 @@ struct gm_intrinsics {
 
 struct gm_context;
 
+typedef struct {
+    float x;
+    float y;
+    float z;
+    uint32_t rgba;
+} GlimpsePointXYZRGBA;
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -146,7 +153,6 @@ gm_context_update_luminance(struct gm_context *ctx,
                             uint8_t *luminance,
                             uint64_t timestamp);
 
-/* TODO: make tango api agnostic */
 void
 gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
                                        struct gm_intrinsics *intrinsics);
@@ -217,6 +223,13 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *tracking);
 
+const GlimpsePointXYZRGBA *
+gm_tracking_get_rgb_label_cloud(struct gm_tracking *tracking,
+                                int *n_points);
+
+const float *
+gm_tracking_get_joint_positions(struct gm_tracking *tracking,
+                                int *n_joints);
 #ifdef __cplusplus
 }
 #endif
