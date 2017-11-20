@@ -10,7 +10,7 @@
 #include "loader.h"
 
 #define N_SHIFTS 5
-#define SHIFT_THRESHOLD 0.001f
+#define SHIFT_THRESHOLD 0.01f
 
 #define ARRAY_LEN(ARRAY) (sizeof(ARRAY)/sizeof(ARRAY[0]))
 
@@ -215,7 +215,7 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
         {
           float s = (x / half_width) - 1.f;
           float depth = (float)depth_image[idx];
-          if (!std::isnormal(depth))
+          if (!std::isnormal(depth) || depth >= HUGE_DEPTH)
             {
               continue;
             }

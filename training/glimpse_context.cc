@@ -931,6 +931,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
 #endif
 
     LOGI("Processing cloud with %d points\n", (int)cloud->points.size());
+    start = get_time();
 
 #if 1
     pcl::PassThrough<pcl::PointXYZ> passZ(true);
@@ -1040,8 +1041,16 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // points (which we hope is the human)
 
     // Creating the KdTree object for the search method of the extraction
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr
-      tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    /*pcl::search::KdTree<pcl::PointXYZ>::Ptr
+      tree(new pcl::search::KdTree<pcl::PointXYZ>);*/
+
+    // Seems Octree is faster than KdTree for this use-case. This appears to
+    // be highly dependent on the resolution, which I assume should be
+    // tweaked alongside the voxel-grid resolution above and the minimum
+    // cluster size below.
+    pcl::search::Octree<pcl::PointXYZ>::Ptr
+      tree(new pcl::search::Octree<pcl::PointXYZ>(0.1));
+
     tree->setInputCloud (cloud);
 
     std::vector<pcl::PointIndices> cluster_indices;
@@ -1078,6 +1087,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
         cloud.swap(cloud_cluster);
     }
 #endif
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Human segmentation took %.3f%s",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 
     if (ctx->depth_camera_intrinsics.width == 0 ||
         ctx->depth_camera_intrinsics.height == 0)
