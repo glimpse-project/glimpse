@@ -817,7 +817,7 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                     continue;
 
                 float hfield_width = tan_half_hfov * point.z;
-                float vfield_height = tan_half_vfov * point.z;
+                float vfield_height = -tan_half_vfov * point.z;
 
                 ndc_point.x = point.x / hfield_width;
                 ndc_point.y = point.y / vfield_height;
@@ -873,7 +873,7 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                     continue;
 
                 float hfield_width = tan_half_hfov * point.z;
-                float vfield_height = tan_half_vfov * point.z;
+                float vfield_height = -tan_half_vfov * point.z;
 
                 ndc_point.x = point.x / hfield_width;
                 ndc_point.y = point.y / vfield_height;
@@ -917,7 +917,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     uint64_t start, end, duration;
 
     // X increases to the right
-    // Y increases downwards
+    // Y increases upwards
     // Z increases outwards
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = tracking->cloud;
@@ -959,7 +959,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     passY.setFilterFieldName ("y");
     // XXX: Here we're assuming the camera may be on the ground, but ideally
     //      we'd use a height sensor reading here (minus a threshold).
-    passY.setFilterLimits(0.0, FLT_MAX);
+    passY.setFilterLimits(-FLT_MAX, 0.0);
     passY.filter(*cloud_floor);
 
     assert(cloud_floor->points.size() == cloud->points.size());
@@ -985,7 +985,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // XXX: We're assuming that the camera here is perpendicular to the floor
     //      and give a generous threshold, but ideally we'd use device sensors
     //      to detect orientation and use a slightly less broad angle here.
-    seg.setAxis(Eigen::Vector3f(0.f, -1.f, 0.f));
+    seg.setAxis(Eigen::Vector3f(0.f, 1.f, 0.f));
     seg.setEpsAngle(M_PI/180.0 * 15.0);
 
     // Create the filtering object
@@ -1817,7 +1817,7 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
     cloud->height = 1;
 
     float inv_fx = 1.0f / intrinsics->fx;
-    float inv_fy = 1.0f / intrinsics->fy;
+    float inv_fy = -1.0f / intrinsics->fy;
     float cx = intrinsics->cx;
     float cy = intrinsics->cy;
 

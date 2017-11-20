@@ -179,8 +179,8 @@ intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
 
   return glm::frustum(scalex * -width / 2.0f - offsetx,
                       scalex * width / 2.0f - offsetx,
-                      scaley * -height / 2.0f - offsety,
-                      scaley * height / 2.0f - offsety, near, far);
+                      scaley * height / 2.0f - offsety,
+                      scaley * -height / 2.0f - offsety, near, far);
 }
 
 static void
@@ -616,7 +616,7 @@ upload_tracking_textures(Data *data)
         GlimpsePointXYZRGBA colored_joints[data->n_joints];
         for (int i = 0, off = 0; i < data->n_joints; i++) {
             colored_joints[i].x = joints[off++];
-            colored_joints[i].y = -joints[off++];
+            colored_joints[i].y = joints[off++];
             colored_joints[i].z = joints[off++];
             colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
         }
