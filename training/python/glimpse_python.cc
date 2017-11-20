@@ -148,8 +148,13 @@ JointMap::JointMap(char* aJointMap, char* aJointInferenceParams)
         }
       else
         {
+          fprintf(stderr, "Error reading joint map\n");
           free_jip(mParams);
         }
+    }
+  else
+    {
+      fprintf(stderr, "Error reading joint parameters\n");
     }
 }
 

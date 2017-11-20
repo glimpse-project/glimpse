@@ -4,7 +4,7 @@ import glimpse
 import sys
 
 if len(sys.argv) < 5:
-    print('Usage: infer.py <joint_params.jip> <params.jip> <depth.exr> <tree1.json> [tree2.json ...]')
+    print('Usage: infer.py <joint-map.json> <joint-params.json> <depth.exr> <tree1.json> [tree2.json ...]')
     sys.exit(0)
 
 forest = glimpse.Forest(sys.argv[4:])
