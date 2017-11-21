@@ -82,6 +82,9 @@ typedef struct _Data
     int n_points;
     int n_joints;
 
+    glm::vec3 focal_point;
+    float camera_rot_yx[2];
+
     /* When we request gm_device for a frame we set requirements for what the
      * frame should include. We track the requirements so we avoid sending
      * subsequent frame requests that would downgrade the requirements
@@ -325,6 +328,11 @@ draw_ui(Data *data)
       gm_device_get_depth_intrinsics(data->device);
     glm::mat4 proj = intrinsics_to_project_matrix(intrinsics, 0.01f, 10);
     glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
+    mvp = glm::translate(mvp, data->focal_point);
+    mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
+    mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
+    mvp = glm::translate(mvp, -data->focal_point);
+
     glUniformMatrix4fv(gl_cloud_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
 
     // Enable vertex arrays for drawing point-clouds
@@ -378,7 +386,18 @@ draw_ui(Data *data)
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    ImGui::Image((void *)(intptr_t)gl_cloud_tex, win_size);
+    ImGui::ImageButton((void *)(intptr_t)gl_cloud_tex, win_size,
+                       ImVec2(0, 0), ImVec2(1, 1), 0);
+
+    if (ImGui::IsItemActive()) {
+        if (ImGui::IsMouseDragging()) {
+            ImVec2 drag_delta = ImGui::GetMouseDragDelta();
+            data->camera_rot_yx[0] += (drag_delta.x * M_PI / 180.f) * 0.2f;
+            data->camera_rot_yx[1] += (drag_delta.y * M_PI / 180.f) * 0.2f;
+            ImGui::ResetMouseDragDelta();
+        }
+    }
+
     ImGui::End();
 
     ImGui::PopStyleVar();
@@ -968,6 +987,7 @@ main(int argc, char **argv)
 
     data.events_front = new std::vector<struct event>();
     data.events_back = new std::vector<struct event>();
+    data.focal_point = glm::vec3(0.0, 0.0, 2.5);
 
     if (!glfwInit()) {
         fprintf(stderr, "Failed to init GLFW, OpenGL windows system library\n");
