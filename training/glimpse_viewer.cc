@@ -724,12 +724,12 @@ main(int argc, char **argv)
         data.device = gm_device_open(&config, NULL);
     }
 
-    TangoCameraIntrinsics *depth_intrinsics =
+    struct gm_intrinsics *depth_intrinsics =
         gm_device_get_depth_intrinsics(data.device);
     data.depth_width = depth_intrinsics->width;
     data.depth_height = depth_intrinsics->height;
 
-    TangoCameraIntrinsics *video_intrinsics =
+    struct gm_intrinsics *video_intrinsics =
         gm_device_get_video_intrinsics(data.device);
     data.video_width = video_intrinsics->width;
     data.video_height = video_intrinsics->height;

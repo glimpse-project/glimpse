@@ -46,10 +46,10 @@ gm_device_open(struct gm_device_config *config, char **err);
 struct gm_ui_properties *
 gm_device_get_ui_properties(struct gm_device *dev);
 
-TangoCameraIntrinsics *
+struct gm_intrinsics *
 gm_device_get_depth_intrinsics(struct gm_device *dev);
 
-TangoCameraIntrinsics *
+struct gm_intrinsics *
 gm_device_get_video_intrinsics(struct gm_device *dev);
 
 void

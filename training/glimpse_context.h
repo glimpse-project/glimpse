@@ -1,7 +1,6 @@
 #pragma once
 
 #include <assert.h>
-#include <tango_client_api.h>
 
 #include "loader.h"
 #include "half.hpp"
@@ -103,6 +102,17 @@ struct gm_frame
 #endif
 };
 
+struct gm_intrinsics {
+  uint32_t width;
+  uint32_t height;
+
+  double fx;
+  double fy;
+  double cx;
+  double cy;
+
+  /* TODO: add distortion model discription */
+};
 
 struct gm_context;
 
@@ -139,11 +149,11 @@ gm_context_update_luminance(struct gm_context *ctx,
 /* TODO: make tango api agnostic */
 void
 gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
-                                       TangoCameraIntrinsics *intrinsics);
+                                       struct gm_intrinsics *intrinsics);
 
 void
 gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
-                                       TangoCameraIntrinsics *intrinsics);
+                                       struct gm_intrinsics *intrinsics);
 
 /* Enable skeletal tracking */
 void

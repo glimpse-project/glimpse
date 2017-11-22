@@ -21,10 +21,6 @@
 #include <android/asset_manager_jni.h>
 #include <android/asset_manager.h>
 
-#include <tango_support_api.h>
-
-#include <tango_3d_reconstruction_api.h>
-
 #include <dlib/image_processing/frontal_face_detector.h>
 #include <dlib/image_processing/shape_predictor.h>
 #include <dlib/image_transforms/interpolation.h>
@@ -147,13 +143,21 @@ struct gm_tracking
     size_t face_detect_buf_height;
 };
 
+enum gm_rotation {
+  GM_ROTATION_UNKNOWN = -1,
+  GM_ROTATION_0 = 0,
+  GM_ROTATION_90 = 1,
+  GM_ROTATION_180 = 2,
+  GM_ROTATION_270 = 3
+};
+
 struct gm_context
 {
-    //TangoCameraIntrinsics color_camera_intrinsics;
-    //TangoCameraIntrinsics rgbir_camera_intrinsics;
-    TangoCameraIntrinsics depth_camera_intrinsics;
-    TangoCameraIntrinsics video_camera_intrinsics;
-    TangoCameraIntrinsics training_camera_intrinsics;
+    //struct gm_intrinsics color_camera_intrinsics;
+    //struct gm_intrinsics rgbir_camera_intrinsics;
+    struct gm_intrinsics depth_camera_intrinsics;
+    struct gm_intrinsics video_camera_intrinsics;
+    struct gm_intrinsics training_camera_intrinsics;
 
     AAssetManager *asset_manager;
 
@@ -197,7 +201,7 @@ struct gm_context
     GLuint yuv_frame_scale_program;
     GLuint scale_program;
 
-    TangoSupportRotation current_attrib_bo_rotation_ = { ROTATION_IGNORED };
+    enum gm_rotation current_attrib_bo_rotation_ = { GM_ROTATION_UNKNOWN };
     GLuint attrib_quad_rot_scale_bo;
 
     GLuint attrib_quad_rot_scale_pos;
@@ -738,7 +742,7 @@ gm_context_detect_faces(struct gm_context *ctx)
 struct image *
 reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                       const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr rgba_cloud,
-                      const TangoCameraIntrinsics *intrinsics,
+                      const struct gm_intrinsics *intrinsics,
                       enum image_format fmt)
 {
     int width = intrinsics->width;
@@ -1682,14 +1686,14 @@ gm_context_new(char **err)
 
 void
 gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
-                                       TangoCameraIntrinsics *intrinsics)
+                                       struct gm_intrinsics *intrinsics)
 {
     ctx->depth_camera_intrinsics = *intrinsics;
 }
 
 void
 gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
-                                       TangoCameraIntrinsics *intrinsics)
+                                       struct gm_intrinsics *intrinsics)
 {
     ctx->video_camera_intrinsics = *intrinsics;
 }
@@ -1796,7 +1800,7 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
                                   void *depth,
                                   uint64_t timestamp)
 {
-    TangoCameraIntrinsics *intrinsics = &ctx->depth_camera_intrinsics;
+    struct gm_intrinsics *intrinsics = &ctx->depth_camera_intrinsics;
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = tracking->cloud;
 
     int width = ctx->depth_camera_intrinsics.width;
@@ -2040,8 +2044,9 @@ gm_context_render_thread_hook(struct gm_context *ctx)
         float coords[] = { 0, 1, 0, 0, 1, 1, 1, 0 };
         float out_coords[8];
 
-        TangoSupport_getVideoOverlayUVBasedOnDisplayRotation(
-            coords, display_rotation_, out_coords);
+        //FIXME
+        //TangoSupport_getVideoOverlayUVBasedOnDisplayRotation(
+        //    coords, display_rotation_, out_coords);
 
         quad_strip[0].s = out_coords[0];
         quad_strip[0].t = out_coords[1];
@@ -2055,19 +2060,19 @@ gm_context_render_thread_hook(struct gm_context *ctx)
         glBufferData(GL_ARRAY_BUFFER, sizeof(quad_strip), quad_strip, GL_STATIC_DRAW);
 
         switch(display_rotation_) {
-        case ROTATION_0:
+        case GM_ROTATION_0:
             need_portrait_downsample_fb = true;
             LOGI("> rotation = 0");
             break;
-        case ROTATION_90:
+        case GM_ROTATION_90:
             need_portrait_downsample_fb = false;
             LOGI("> rotation = 90");
             break;
-        case ROTATION_180:
+        case GM_ROTATION_180:
             need_portrait_downsample_fb = true;
             LOGI("> rotation = 180");
             break;
-        case ROTATION_270:
+        case GM_ROTATION_270:
             need_portrait_downsample_fb = false;
             LOGI("> rotation = 270");
             break;

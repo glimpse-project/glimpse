@@ -51,8 +51,8 @@ struct gm_device
         } kinect;
     };
 
-    TangoCameraIntrinsics video_camera_intrinsics;
-    TangoCameraIntrinsics depth_camera_intrinsics;
+    struct gm_intrinsics video_camera_intrinsics;
+    struct gm_intrinsics depth_camera_intrinsics;
 
     void (*frame_callback)(struct gm_device *dev,
                            struct gm_frame *frame,
@@ -668,13 +668,13 @@ gm_device_start(struct gm_device *dev)
     }
 }
 
-TangoCameraIntrinsics *
+struct gm_intrinsics *
 gm_device_get_depth_intrinsics(struct gm_device *dev)
 {
     return &dev->depth_camera_intrinsics;
 }
 
-TangoCameraIntrinsics *
+struct gm_intrinsics *
 gm_device_get_video_intrinsics(struct gm_device *dev)
 {
     return &dev->video_camera_intrinsics;
