@@ -24,6 +24,17 @@ float* calc_pixel_weights(half_float::half* depth_image,
                           JSON_Value* joint_map,
                           float* out_weights = NULL);
 
+float* infer_joints_fast(half_float::half* depth_image,
+                         float* pr_table,
+                         float* weights,
+                         int32_t width,
+                         int32_t height,
+                         uint8_t n_labels,
+                         JSON_Value* joint_map,
+                         float vfov,
+                         JIParam* params,
+                         float* out_joints = NULL);
+
 float* infer_joints(half_float::half* depth_image,
                     float* pr_table,
                     float* weights,

@@ -176,6 +176,290 @@ calc_pixel_weights(half* depth_image, float* pr_table,
 }
 
 float*
+infer_joints_fast(half* depth_image, float* pr_table, float* weights,
+                  int32_t width, int32_t height, uint8_t n_labels,
+                  JSON_Value* joint_map, float vfov, JIParam* params,
+                  float* out_joints)
+{
+  int n_joints = json_array_get_count(json_array(joint_map));
+  JointMapEntry map[n_joints];
+  unpack_joint_map(joint_map, map, n_joints);
+
+  // Plan: For each scan-line, scan along and record clusters on 1 dimension.
+  //       For each scanline cluster, check to see if it intersects with any
+  //       cluster on the previous scanline and if so, join the lists together.
+  //       Eventually we should have a list of lists of clusters, which we
+  //       can then calculate confidence for, then when we have the highest
+  //       confidence for each label, we can project the points and calculate
+  //       the center-point.
+  //
+  //       TODO: Let this take a distance so that clusters don't need to be
+  //             perfectly contiguous?
+  typedef struct {
+    int32_t y;
+    int32_t left;
+    int32_t right;
+  } ScanlineCluster;
+
+  // scanline_clusters is a height x joints array of lists of ScanlineCluster
+  LList** scanline_clusters = (LList**)
+    xcalloc(n_joints * height, sizeof(LList*));
+
+  // Collect clusters across scanlines
+  for (int32_t y = 0; y < height; y++)
+    {
+      for (int32_t x = 0; x < width; x++)
+        {
+          for (int32_t j = 0; j < n_joints; j++)
+            {
+              float threshold = params[j].threshold;
+              for (int n = 0; n < map[j].n_labels; n++)
+                {
+                  uint8_t label = map[j].labels[n];
+                  float label_pr = pr_table[(y * width + x) * n_labels + label];
+                  if (label_pr >= threshold)
+                    {
+                      // Check to see if this pixel can be added to an existing
+                      // cluster.
+                      bool create_new = true;
+                      int scan_idx = y * n_joints + j;
+                      for (LList* l = scanline_clusters[scan_idx];
+                           l; l = l->next)
+                        {
+                          ScanlineCluster* c = (ScanlineCluster*)l->data;
+                          if (c->right == x - 1)
+                            {
+                              c->right = x;
+                              create_new = false;
+                              break;
+                            }
+                        }
+
+                      if (create_new)
+                        {
+                          ScanlineCluster* c = (ScanlineCluster*)
+                            xmalloc(sizeof(ScanlineCluster));
+                          c->y = y;
+                          c->left = x;
+                          c->right = x;
+
+                          scanline_clusters[scan_idx] = llist_insert_before(
+                            scanline_clusters[scan_idx], llist_new(c));
+                        }
+                      break;
+                    }
+                }
+            }
+        }
+    }
+
+  // Add each separate scanline cluster to a list of clusters
+  typedef struct {
+    LList* scanlines;
+    bool complete;
+  } Cluster;
+
+  // clusters is a joints sized array of lists of Cluster
+  LList* clusters[n_joints];
+  memset(clusters, 0, sizeof(LList*) * n_joints);
+
+  for (int j = 0; j < n_joints; j++)
+    {
+      for (int y = 0; y < height; y++)
+        {
+          for (LList* l = scanline_clusters[y * n_joints + j]; l; l = l->next)
+            {
+              Cluster* cluster = (Cluster*)xmalloc(sizeof(Cluster));
+              cluster->scanlines = llist_new(l->data);
+              cluster->complete = false;
+              clusters[j] = llist_insert_before(clusters[j],
+                                                llist_new(cluster));
+            }
+          llist_free(scanline_clusters[y * n_joints + j], NULL, NULL);
+        }
+    }
+
+  // Free scanline_clusters, not needed anymore
+  xfree(scanline_clusters);
+
+  // Now iteratively connect the scanline clusters
+  bool changed;
+  bool finished[n_joints] = { false, };
+  do
+    {
+      changed = false;
+      for (int j = 0; j < n_joints; j++)
+        {
+          if (finished[j])
+            {
+              continue;
+            }
+
+          bool local_change = false;
+          for (LList* l = clusters[j]; l && !local_change; l = l->next)
+            {
+              Cluster* parent = (Cluster*)l->data;
+              if (parent->complete)
+                {
+                  continue;
+                }
+
+              for (LList* l2 = clusters[j]; l2 && !local_change; l2 = l2->next)
+                {
+                  Cluster* candidate = (Cluster*)l2->data;
+                  if (l2 == l || candidate->complete)
+                    {
+                      continue;
+                    }
+
+                  // If this scanline cluster connects to the cluster being
+                  // checked, remove it from the cluster list, add it to the
+                  // checked cluster and break out.
+                  for (LList* ps = parent->scanlines; ps && !local_change;
+                       ps = ps->next)
+                    {
+                      ScanlineCluster* parent_scanline =
+                        (ScanlineCluster*)ps->data;
+
+                      for (LList* cs = candidate->scanlines;
+                           cs && !local_change; cs = cs->next)
+                        {
+                          ScanlineCluster* candidate_scanline =
+                            (ScanlineCluster*)cs->data;
+
+                          // Check if these two scanline cluster segments touch
+                          if ((abs(candidate_scanline->y -
+                                   parent_scanline->y) <= 1) &&
+                              (candidate_scanline->left <=
+                               parent_scanline->right) &&
+                              (candidate_scanline->right >=
+                               parent_scanline->left))
+                            {
+                              parent->scanlines =
+                                llist_insert_before(parent->scanlines,
+                                                    candidate->scanlines);
+                              xfree(candidate);
+                              llist_remove(l2);
+                              local_change = true;
+                            }
+                        }
+                    }
+                }
+
+              if (!local_change)
+                {
+                  parent->complete = true;
+                }
+            }
+
+          if (!local_change)
+            {
+              finished[j] = true;
+            }
+          else
+            {
+              changed = true;
+            }
+        }
+    } while (changed == true);
+
+  // clusters now contains the boundaries per scanline of each cluster of
+  // joint labels, which we can now use to calculate the highest confidence
+  // cluster and the projected cluster centroid.
+
+  // Variables for reprojection of 2d point + depth
+  float half_width = width / 2.f;
+  float half_height = height / 2.f;
+  float aspect = half_width / half_height;
+
+  float vfov_rad = vfov * M_PI / 180.f;
+  float tan_half_vfov = tanf(vfov_rad / 2.f);
+  float tan_half_hfov = tan_half_vfov * aspect;
+  //float hfov = atanf(tan_half_hfov) * 2.f;
+
+  //float root_2pi = sqrtf(2.f * M_PI);
+
+  // Allocate/clear joints array
+  size_t joints_size = n_joints * 3 * sizeof(float);
+  float* joints = out_joints ? out_joints : (float*)xmalloc(joints_size);
+  memset(joints, 0, joints_size);
+
+  Cluster* best_clusters[n_joints];
+  for (int j = 0; j < n_joints; j++)
+    {
+      best_clusters[j] = NULL;
+      float best_confidence = -1.f;
+
+      for (LList* c = clusters[j]; c; c = c->next)
+        {
+          float confidence = 0.f;
+          Cluster* cluster = (Cluster*)c->data;
+          for (LList* s = cluster->scanlines; s; s = s->next)
+            {
+              ScanlineCluster* scanline = (ScanlineCluster*)s->data;
+              int idx = scanline->y * width;
+              for (int i = scanline->left; i <= scanline->right; i++)
+                {
+                  confidence +=
+                    weights[(idx + i) * n_joints + j];
+                }
+            }
+
+          if (confidence > best_confidence)
+            {
+              best_confidence = confidence;
+              best_clusters[j] = cluster;
+            }
+        }
+
+      if (!best_clusters[j])
+        {
+          continue;
+        }
+
+      // Now calculate the center-point of the best cluster
+      int n_points = 0;
+      int x = 0;
+      int y = 0;
+      for (LList* sl = best_clusters[j]->scanlines; sl; sl = sl->next)
+        {
+          ScanlineCluster* scanline = (ScanlineCluster*)sl->data;
+          for (int i = scanline->left; i <= scanline->right; i++, n_points++)
+            {
+              x += i;
+              y += scanline->y;
+            }
+        }
+
+      x = (int)roundf(x / (float)n_points);
+      y = (int)roundf(y / (float)n_points);
+
+      // Reproject and offset point
+      float s = (x / half_width) - 1.f;
+      float t = -((y / half_height) - 1.f);
+      float depth = (float)depth_image[y * width + x];
+      joints[j * 3] = (tan_half_hfov * depth) * s;
+      joints[j * 3 + 1] = (tan_half_vfov * depth) * t;
+      joints[j * 3 + 2] = depth + params[j].offset;
+
+      // Free this joint's clusters
+      for (LList* c = clusters[j]; c; c = c->next)
+        {
+          Cluster* cluster = (Cluster*)c->data;
+          for (LList* s = cluster->scanlines; s; s = s->next)
+            {
+              xfree(s->data);
+            }
+          llist_free(cluster->scanlines, NULL, NULL);
+          xfree(cluster);
+        }
+      llist_free(clusters[j], NULL, NULL);
+    }
+
+  return joints;
+}
+
+float*
 infer_joints(half* depth_image, float* pr_table, float* weights,
              int32_t width, int32_t height,
              uint8_t n_labels, JSON_Value* joint_map,

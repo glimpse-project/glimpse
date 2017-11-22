@@ -1168,15 +1168,15 @@ gm_context_track_skeleton(struct gm_context *ctx)
         float vfov =  (2.0f * atanf(0.5 * height /
                                     ctx->training_camera_intrinsics.fy)) *
           180 / M_PI;
-        infer_joints(depth_img->data_half,
-                     tracking->label_probs,
-                     weights,
-                     width, height,
-                     ctx->n_labels,
-                     ctx->joint_map,
-                     vfov,
-                     ctx->joint_params->joint_params,
-                     tracking->joints);
+        infer_joints_fast(depth_img->data_half,
+                          tracking->label_probs,
+                          weights,
+                          width, height,
+                          ctx->n_labels,
+                          ctx->joint_map,
+                          vfov,
+                          ctx->joint_params->joint_params,
+                          tracking->joints);
         end = get_time();
         duration = end - start;
         LOGI("People Detector: inferred joints in %.3f%s\n",

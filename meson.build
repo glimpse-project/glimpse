@@ -73,6 +73,7 @@ src = [
     'training/loader.cc',
     'training/xalloc.c',
     'training/image_utils.cc',
+    'training/llist.c',
 
     'training/tinyexr.cc',
     'training/parson.c',
