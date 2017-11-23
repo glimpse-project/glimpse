@@ -79,7 +79,7 @@ src = [
     'training/parson.c',
 ]
 
-shared_library('glimpse-unity-plugin', src,
+shared_library('glimpse-unity-plugin', src + [ 'training/glimpse_unity.cc' ],
                include_directories: inc,
                dependencies: deps)
 
