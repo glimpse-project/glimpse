@@ -1830,6 +1830,7 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
     cloud->points.clear();
     cloud->width = 0;
     cloud->height = 1;
+    cloud->is_dense = true;
 
     float inv_fx = 1.0f / intrinsics->fx;
     float inv_fy = -1.0f / intrinsics->fy;
@@ -1895,7 +1896,7 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
 
 #undef MAP_DEPTH_TO_RGB
 #undef VALIDATE_AND_APPEND_POINT
-#undef foreach_cast_depth_m
+#undef foreach_xy_off
 
     cloud->width = cloud->points.size();
 
