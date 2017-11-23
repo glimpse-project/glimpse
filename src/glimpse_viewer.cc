@@ -438,55 +438,6 @@ request_device_frame(Data *data, uint64_t requirements)
     }
 }
 
-static GLuint
-compile_shader(GLenum shaderType, const char *shaderText)
-{
-    GLint stat;
-    GLuint shader = glCreateShader(shaderType);
-    glShaderSource(shader, 1, (const char **) &shaderText, NULL);
-    glCompileShader(shader);
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &stat);
-    if (!stat) {
-        char log[1000];
-        GLsizei len;
-        glGetShaderInfoLog (shader, 1000, &len, log);
-        fprintf(stderr, "Error: Shader did not compile: %s\n", log);
-        exit(1);
-    }
-
-    return shader;
-}
-
-static GLuint
-link_program(GLuint firstShader, ...)
-{
-    GLint stat;
-    GLuint program = glCreateProgram();
-
-    glAttachShader(program, firstShader);
-
-    va_list args;
-    va_start(args, firstShader);
-
-    GLuint shader;
-    while ((shader = va_arg(args, GLuint))) {
-        glAttachShader(program, shader);
-    }
-    va_end(args);
-
-    glLinkProgram(program);
-    glGetProgramiv(program, GL_LINK_STATUS, &stat);
-    if (!stat) {
-        char log[1000];
-        GLsizei len;
-        glGetProgramInfoLog(program, 1000, &len, log);
-        fprintf (stderr, "Error linking:\n%s\n", log);
-        exit (1);
-    }
-
-    return program;
-}
-
 static void
 handle_device_frame_updates(Data *data)
 {
@@ -849,6 +800,55 @@ on_device_event_cb(struct gm_device *dev,
     pthread_mutex_lock(&data->event_queue_lock);
     data->events_back->push_back(event);
     pthread_mutex_unlock(&data->event_queue_lock);
+}
+
+static GLuint
+compile_shader(GLenum shaderType, const char *shaderText)
+{
+    GLint stat;
+    GLuint shader = glCreateShader(shaderType);
+    glShaderSource(shader, 1, (const char **) &shaderText, NULL);
+    glCompileShader(shader);
+    glGetShaderiv(shader, GL_COMPILE_STATUS, &stat);
+    if (!stat) {
+        char log[1000];
+        GLsizei len;
+        glGetShaderInfoLog (shader, 1000, &len, log);
+        fprintf(stderr, "Error: Shader did not compile: %s\n", log);
+        exit(1);
+    }
+
+    return shader;
+}
+
+static GLuint
+link_program(GLuint firstShader, ...)
+{
+    GLint stat;
+    GLuint program = glCreateProgram();
+
+    glAttachShader(program, firstShader);
+
+    va_list args;
+    va_start(args, firstShader);
+
+    GLuint shader;
+    while ((shader = va_arg(args, GLuint))) {
+        glAttachShader(program, shader);
+    }
+    va_end(args);
+
+    glLinkProgram(program);
+    glGetProgramiv(program, GL_LINK_STATUS, &stat);
+    if (!stat) {
+        char log[1000];
+        GLsizei len;
+        glGetProgramInfoLog(program, 1000, &len, log);
+        fprintf (stderr, "Error linking:\n%s\n", log);
+        exit (1);
+    }
+
+    return program;
 }
 
 static void
