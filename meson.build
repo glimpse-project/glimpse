@@ -9,10 +9,10 @@ threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
 
 inc = include_directories(
-	'training',
-        'training/android_stub',
-	'training/imgui',
-	'training/UnityPluginAPI')
+	'src',
+        'src/android_stub',
+	'src/imgui',
+	'src/UnityPluginAPI')
 
 deps = []
 if use_system_libs
@@ -57,33 +57,33 @@ endif
 c_defines = [ '-DGLM_ENABLE_EXPERIMENTAL=1' ]
 
 imgui_src = [
-    'training/imgui/imgui.cpp',
-    'training/imgui/imgui_demo.cpp',
-    'training/imgui/imgui_draw.cpp',
-    'training/imgui/profiler.cpp',
-    'training/imgui/timer.cpp',
-    'training/imgui/imgui_impl_glfw_gles3.cpp',
+    'src/imgui/imgui.cpp',
+    'src/imgui/imgui_demo.cpp',
+    'src/imgui/imgui_draw.cpp',
+    'src/imgui/profiler.cpp',
+    'src/imgui/timer.cpp',
+    'src/imgui/imgui_impl_glfw_gles3.cpp',
 ]
 
 src = [
-    'training/glimpse_context.cc',
-    'training/glimpse_device.cc',
+    'src/glimpse_context.cc',
+    'src/glimpse_device.cc',
 
-    'training/infer.cc',
-    'training/loader.cc',
-    'training/xalloc.c',
-    'training/image_utils.cc',
-    'training/llist.c',
+    'src/infer.cc',
+    'src/loader.cc',
+    'src/xalloc.c',
+    'src/image_utils.cc',
+    'src/llist.c',
 
-    'training/tinyexr.cc',
-    'training/parson.c',
+    'src/tinyexr.cc',
+    'src/parson.c',
 ]
 
-shared_library('glimpse-unity-plugin', src + [ 'training/glimpse_unity.cc' ],
+shared_library('glimpse-unity-plugin', src + [ 'src/glimpse_unity.cc' ],
                include_directories: inc,
                dependencies: deps)
 
 executable('glimpse_viewer',
-           src + imgui_src + [ 'training/glimpse_viewer.cc' ],
+           src + imgui_src + [ 'src/glimpse_viewer.cc' ],
            include_directories: inc,
            dependencies: deps)
