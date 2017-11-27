@@ -15,8 +15,8 @@
 
 #include "glimpse_device.h"
 
-#define xsnprintf(dest, fmt, ...) do { \
-        if (snprintf(dest, sizeof(dest), fmt,  __VA_ARGS__) >= (int)sizeof(dest)) \
+#define xsnprintf(dest, n, fmt, ...) do { \
+        if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
             exit(1); \
     } while(0)
 
@@ -386,7 +386,7 @@ directory_recurse(const char *path, const char *ext,
             strcmp(entry->d_name, "..") == 0)
             continue;
 
-        xsnprintf(next_path, "%s/%s", path, entry->d_name);
+        xsnprintf(next_path, sizeof(next_path), "%s/%s", path, entry->d_name);
 
         stat(next_path, &st);
         if (S_ISDIR(st.st_mode)) {
