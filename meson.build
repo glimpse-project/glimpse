@@ -1,5 +1,5 @@
 project('glimpse', ['c', 'cpp'],
-        default_options: ['c_std=c11', 'cpp_std=c++14'])
+        default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
 use_system_libs = get_option('use_system_libs')
 
