@@ -68,6 +68,7 @@ imgui_src = [
 src = [
     'src/glimpse_context.cc',
     'src/glimpse_device.cc',
+    'src/glimpse_assets.c',
 
     'src/infer.cc',
     'src/loader.cc',

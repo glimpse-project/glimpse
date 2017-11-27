@@ -18,9 +18,6 @@
 #include <glm/mat4x4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 
-#include <android/asset_manager_jni.h>
-#include <android/asset_manager.h>
-
 #include <dlib/image_processing/frontal_face_detector.h>
 #include <dlib/image_processing/shape_predictor.h>
 #include <dlib/image_transforms/interpolation.h>
@@ -55,12 +52,15 @@
 #include <png.h>
 #include <setjmp.h>
 
-#include "glimpse_context.h"
+#include "half.hpp"
 
+#include "xalloc.h"
 #include "wrapper_image.h"
 #include "infer.h"
 #include "loader.h"
-#include "half.hpp"
+
+#include "glimpse_context.h"
+#include "glimpse_assets.h"
 
 #include <android/log.h>
 #define LOGI(...) \
@@ -69,6 +69,12 @@
   __android_log_print(ANDROID_LOG_ERROR, "glimpse_context", __VA_ARGS__)
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
+
+#define xsnprintf(dest, n, fmt, ...) do { \
+        if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
+            exit(1); \
+    } while(0)
+
 
 using half_float::half;
 using namespace pcl::common;
@@ -160,8 +166,6 @@ struct gm_context
     struct gm_intrinsics depth_camera_intrinsics;
     struct gm_intrinsics video_camera_intrinsics;
     struct gm_intrinsics training_camera_intrinsics;
-
-    AAssetManager *asset_manager;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -1282,28 +1286,27 @@ detector_thread_cb(void *data)
 
     //LOGI("Detector debug %p", &ctx->detector.scanner);
 
-    if (ctx->asset_manager) {
-        AAsset *predictor_asset = AAssetManager_open(ctx->asset_manager,
-                                                     "shape_predictor_68_face_landmarks.dat",
-                                                     AASSET_MODE_BUFFER);
-        if (predictor_asset) {
-            const void *buf = AAsset_getBuffer(predictor_asset);
-            off_t len = AAsset_getLength(predictor_asset);
-            std::istringstream stream_in(std::string((char *)buf, len));
-            try {
-                dlib::deserialize(ctx->face_feature_detector, stream_in);
-            } catch (dlib::serialization_error &e) {
-                LOGI("Failed to deserialize shape predictor: %s", e.info.c_str());
-            }
-
-            LOGI("Mapped shape predictor asset %p, len = %d", buf, (int)len);
-            AAsset_close(predictor_asset);
-        } else {
-            LOGE("Failed to open shape predictor asset");
+    char *err = NULL;
+    struct gm_asset *predictor_asset =
+        gm_asset_open("shape_predictor_68_face_landmarks.dat",
+                      GM_ASSET_MODE_BUFFER,
+                      &err);
+    if (predictor_asset) {
+        const void *buf = gm_asset_get_buffer(predictor_asset);
+        off_t len = gm_asset_get_length(predictor_asset);
+        std::istringstream stream_in(std::string((char *)buf, len));
+        try {
+            dlib::deserialize(ctx->face_feature_detector, stream_in);
+        } catch (dlib::serialization_error &e) {
+            LOGI("Failed to deserialize shape predictor: %s", e.info.c_str());
         }
 
-    } else
-        LOGE("No asset manager set before starting face detector thread");
+        LOGI("Mapped shape predictor asset %p, len = %d", buf, (int)len);
+        gm_asset_close(predictor_asset);
+    } else {
+        LOGE("Failed to open shape predictor asset: %s", err);
+        free(err);
+    }
 
     while(1) {
         LOGI("Waiting for new frame to start tracking\n");
@@ -1428,7 +1431,10 @@ gm_context_destroy(struct gm_context *ctx)
 
     free(ctx->color_stops);
 
-    free_forest(ctx->decision_trees, 1);
+    for (int i = 0; i < ctx->n_decision_trees; i++)
+        free_tree(ctx->decision_trees[i]);
+    xfree(ctx->decision_trees);
+
     free_jip(ctx->joint_params);
 
     json_value_free(ctx->joint_map);
@@ -1551,71 +1557,70 @@ gm_context_new(char **err)
     pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
 
 
-#ifndef ANDROID
-    ctx->asset_manager = (AAssetManager *)0x1; // HACK
+#ifdef ANDROID
+#error "TODO: call gm_assets_android_set_manager()"
 #endif
 
     /* Load the decision trees immediately so we know how many labels we're
      * dealing with asap.
      */
-    bool is_json[3] = { false, false, false };
-    AAsset *tree_asset0 = AAssetManager_open(ctx->asset_manager,
-                                             "tree0.rdt",
-                                             AASSET_MODE_BUFFER);
-    AAsset *tree_asset1 = AAssetManager_open(ctx->asset_manager,
-                                             "tree1.rdt",
-                                             AASSET_MODE_BUFFER);
-    AAsset *tree_asset2 = AAssetManager_open(ctx->asset_manager,
-                                             "tree2.rdt",
-                                             AASSET_MODE_BUFFER);
-    if (!tree_asset0) {
-        tree_asset0 = AAssetManager_open(ctx->asset_manager,
-                                         "tree0.json",
-                                         AASSET_MODE_BUFFER);
-        is_json[0] = true;
-    }
-    if (!tree_asset1) {
-        tree_asset1 = AAssetManager_open(ctx->asset_manager,
-                                         "tree1.json",
-                                         AASSET_MODE_BUFFER);
-        is_json[1] = true;
-    }
-    if (!tree_asset2) {
-        tree_asset2 = AAssetManager_open(ctx->asset_manager,
-                                         "tree2.json",
-                                         AASSET_MODE_BUFFER);
-        is_json[2] = true;
-    }
-    if (tree_asset0 && tree_asset1 && tree_asset2) {
-        uint8_t *buffers[] = {
-            (uint8_t*)AAsset_getBuffer(tree_asset0),
-            (uint8_t*)AAsset_getBuffer(tree_asset1),
-            (uint8_t*)AAsset_getBuffer(tree_asset2) };
-        uint32_t lengths[] = {
-            (uint32_t)AAsset_getLength(tree_asset0),
-            (uint32_t)AAsset_getLength(tree_asset1),
-            (uint32_t)AAsset_getLength(tree_asset2) };
+    int max_trees = 3;
+    ctx->n_decision_trees = 0;
+    ctx->decision_trees = (RDTree**)xcalloc(max_trees, sizeof(RDTree*));
 
-        /* XXX: Note, we're not doing any verification that tree parameters
-         *      are compatible here.
-         */
-        ctx->n_decision_trees = 0;
-        ctx->decision_trees = (RDTree**)calloc(3, sizeof(RDTree*));
-        for (int i = 0; i < 3; i++) {
-            if ((ctx->decision_trees[ctx->n_decision_trees] = is_json[i] ?
-                 load_json_tree(buffers[i], lengths[i]) :
-                 load_tree(buffers[i], lengths[i]))) {
-                ++ctx->n_decision_trees;
-                LOGI("Loaded decision tree %d\n", i);
-            } else {
-                LOGE("Failed to load decision tree %d\n", i);
+    for (int i = 0; i < max_trees; i++) {
+        char rdt_name[16];
+        char json_name[16];
+        char *name = NULL;
+
+        xsnprintf(rdt_name, sizeof(rdt_name), "tree%u.rdt", i);
+        xsnprintf(json_name, sizeof(json_name), "tree%u.rdt", i);
+
+        char *catch_err = NULL;
+        struct gm_asset *tree_asset = gm_asset_open(rdt_name,
+                                                    GM_ASSET_MODE_BUFFER,
+                                                    &catch_err);
+        if (tree_asset) {
+            name = rdt_name;
+            ctx->decision_trees[i] =
+                load_tree((uint8_t *)gm_asset_get_buffer(tree_asset),
+                          gm_asset_get_length(tree_asset));
+        } else {
+            free(catch_err);
+            char *open_err = NULL;
+
+            name = json_name;
+            tree_asset = gm_asset_open(json_name,
+                                       GM_ASSET_MODE_BUFFER,
+                                       &open_err);
+            if (!tree_asset) {
+                xasprintf(err, "Failed to open tree%u.rdt and tree%u.json: %s",
+                          i, i, open_err);
+                break;
             }
+
+            /* XXX: Technically we should pass a NUL terminated string but
+             * since we're assuming we're passing a valid Json Object then we
+             * can rely on parsing terminating on the closing '}' without
+             * depending on finding a terminating NUL. Otherwise we would
+             * have to copy the asset into a larger buffer so we can
+             * explicitly add the NUL.
+             */
+            ctx->decision_trees[i] =
+                load_json_tree((uint8_t *)gm_asset_get_buffer(tree_asset),
+                               gm_asset_get_length(tree_asset));
         }
 
-        AAsset_close(tree_asset0);
-        AAsset_close(tree_asset1);
-        AAsset_close(tree_asset2);
+        gm_asset_close(tree_asset);
+
+        if (!ctx->decision_trees[i]) {
+            LOGI("Failed to load %s", name);
+            break;
+        }
+
+        ctx->n_decision_trees++;
     }
+
     if (!ctx->n_decision_trees) {
         xasprintf(err, "Failed to open any decision tree assets");
         gm_context_destroy(ctx);
@@ -1646,15 +1651,16 @@ gm_context_new(char **err)
     ctx->training_camera_intrinsics.fy = 217.461437772;
 
     ctx->joint_map = NULL;
-    AAsset *joint_map_asset = AAssetManager_open(ctx->asset_manager,
-                                                 "joint-map.json",
-                                                 AASSET_MODE_BUFFER);
+    char *open_err = NULL;
+    struct gm_asset *joint_map_asset = gm_asset_open("joint-map.json",
+                                                     GM_ASSET_MODE_BUFFER,
+                                                     &open_err);
     if (joint_map_asset) {
-        const void *buf = AAsset_getBuffer(joint_map_asset);
-        unsigned len = AAsset_getLength(joint_map_asset);
+        const void *buf = gm_asset_get_buffer(joint_map_asset);
+        unsigned len = gm_asset_get_length(joint_map_asset);
 
         /* unfortunately parson doesn't support parsing from a buffer with
-         * a given length...
+         * a given length and expects a NUL terminated string...
          */
         char *js_string = (char *)xmalloc(len + 1);
 
@@ -1663,24 +1669,33 @@ gm_context_new(char **err)
 
         ctx->joint_map = json_parse_string(js_string);
 
-        free(js_string);
-        AAsset_close(joint_map_asset);
-    }
-    if (!ctx->joint_map) {
-        xasprintf(err, "Failed to open joint map\n");
+        xfree(js_string);
+        gm_asset_close(joint_map_asset);
+
+        if (!ctx->joint_map) {
+            xasprintf(err, "Failed to open joint map\n");
+            gm_context_destroy(ctx);
+            return NULL;
+        }
+
+        ctx->n_joints = json_array_get_count(json_array(ctx->joint_map));
+    } else {
+        xasprintf(err, "Failed to open joint-map.json: %s", open_err);
+        free(open_err);
         gm_context_destroy(ctx);
         return NULL;
     }
 
-    ctx->n_joints = json_array_get_count(json_array(ctx->joint_map));
 
     ctx->joint_params = NULL;
-    AAsset *joint_params_asset = AAssetManager_open(ctx->asset_manager,
-                                                    "joint-params.json",
-                                                    AASSET_MODE_BUFFER);
+
+    struct gm_asset *joint_params_asset =
+        gm_asset_open("joint-params.json",
+                      GM_ASSET_MODE_BUFFER,
+                      &open_err);
     if (joint_params_asset) {
-        const void *buf = AAsset_getBuffer(joint_params_asset);
-        unsigned len = AAsset_getLength(joint_params_asset);
+        const void *buf = gm_asset_get_buffer(joint_params_asset);
+        unsigned len = gm_asset_get_length(joint_params_asset);
 
         /* unfortunately parson doesn't support parsing from a buffer with
          * a given length...
@@ -1689,13 +1704,26 @@ gm_context_new(char **err)
 
         memcpy(js_string, buf, len);
         js_string[len] = '\0';
+
         JSON_Value *root = json_parse_string(js_string);
+        if (root) {
+            ctx->joint_params = joint_params_from_json(root);
+            json_value_free(root);
+        }
 
-        ctx->joint_params = joint_params_from_json(root);
+        xfree(js_string);
+        gm_asset_close(joint_params_asset);
 
-        json_value_free(root);
-        free(js_string);
-        AAsset_close(joint_params_asset);
+        if (!ctx->joint_params) {
+            xasprintf(err, "Failed to laod joint params from json");
+            gm_context_destroy(ctx);
+            return NULL;
+        }
+    } else {
+        xasprintf(err, "Failed to open joint-params.json: %s", open_err);
+        free(open_err);
+        gm_context_destroy(ctx);
+        return NULL;
     }
 
     alloc_rgb_color_stops(ctx);
