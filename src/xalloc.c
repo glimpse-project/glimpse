@@ -57,8 +57,9 @@ xasprintf(char **strp, const char *fmt, ...)
 
     va_start(ap, fmt);
 
-    if (!fmt) {
+    if (!strp) {
         vfprintf(stderr, fmt, ap);
+        fprintf(stderr, "\n");
         exit(1);
     } else {
         if (vasprintf(strp, fmt, ap) < 0)
