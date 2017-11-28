@@ -89,8 +89,6 @@
 #include "glimpse_context.h"
 #include "glimpse_assets.h"
 
-#include <android/log.h>
-
 #undef GM_LOG_CONTEXT
 #define GM_LOG_CONTEXT "ctx"
 #define LOGI(...) gm_info(ctx->log, __VA_ARGS__)
