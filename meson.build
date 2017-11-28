@@ -11,7 +11,6 @@ maths_dep = compiler.find_library('m', required : false)
 
 inc = include_directories(
 	'src',
-        'src/android_stub',
 	'src/imgui',
 	'src/UnityPluginAPI')
 
