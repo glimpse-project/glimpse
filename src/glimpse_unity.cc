@@ -101,7 +101,7 @@ static IUnityGraphics *unity_graphics;
 
 static UnityGfxRenderer unity_renderer_type = kUnityGfxRendererNull;
 
-static struct glimpse_data *glimpse_data;
+static struct glimpse_data *plugin_data;
 
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -158,10 +158,195 @@ on_graphics_device_event_cb(UnityGfxDeviceEventType type)
     }
 }
 
+/* If we've already requested gm_device for a frame then this won't submit
+ * a request that downgrades the requirements
+ */
+static void
+request_device_frame(struct glimpse_data *data, uint64_t requirements)
+{
+    uint64_t new_requirements = data->pending_frame_requirements | requirements;
+
+    if (data->pending_frame_requirements != new_requirements) {
+        gm_device_request_frame(data->device, new_requirements);
+        data->pending_frame_requirements = new_requirements;
+    }
+}
+
+static void
+handle_device_frame_updates(struct glimpse_data *data)
+{
+    //ProfileScopedSection(UpdatingDeviceFrame);
+    //bool upload = false;
+
+    if (!data->device_frame_ready)
+        return;
+
+    /* XXX We have to consider that a gm_frame currently only remains valid
+     * to access until the next call to gm_device_get_latest_frame().
+     *
+     * Conceptually we have two decoupled consumers: 1) this redraw/render
+     * loop 2) skeletal tracking so we need to be careful about
+     * understanding the required gm_frame lifetime.
+     *
+     * Since we can currently assume gm_context_notify_frame() will
+     * internally copy whatever frame data it requires then so long as we
+     * synchronize these calls with the redraw loop we know it's safe to
+     * free the last gm_frame once we have received a new one.
+     */
+
+    if (data->device_frame) {
+        //ProfileScopedSection(FreeFrame);
+        gm_device_free_frame(data->device, data->device_frame);
+    }
+
+    {
+        //ProfileScopedSection(GetLatestFrame);
+        data->device_frame = gm_device_get_latest_frame(data->device);
+        assert(data->device_frame);
+        //upload = true;
+    }
+
+    if (data->context_needs_frame) {
+        //ProfileScopedSection(FwdContextFrame);
+
+        data->context_needs_frame =
+            !gm_context_notify_frame(data->ctx, data->device_frame);
+    }
+
+    data->device_frame_ready = false;
+
+    {
+        //ProfileScopedSection(DeviceFrameRequest);
+
+        /* immediately request a new frame since we want to render the camera
+         * at the native capture rate, even though we might not be tracking
+         * at that rate.
+         *
+         * Note: the requirements may be upgraded to ask for _DEPTH data
+         * after the next iteration of skeltal tracking completes.
+         */
+        request_device_frame(data, GM_REQUEST_FRAME_LUMINANCE);
+    }
+
+#if 0
+    if (upload) {
+        ProfileScopedSection(UploadFrameTextures);
+
+        /*
+         * Update luminance from RGB camera
+         */
+        glBindTexture(GL_TEXTURE_2D, gl_lum_tex);
+
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        /* NB: gles2 only allows npot textures with clamp to edge
+         * coordinate wrapping
+         */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        void *video_front = gm_frame_get_video_buffer(data->device_frame);
+        enum gm_format video_format = gm_frame_get_video_format(data->device_frame);
+
+        assert(video_format == GM_FORMAT_LUMINANCE_U8);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                     data->video_width, data->video_height,
+                     0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+    }
+#endif
+}
+
+static void
+handle_context_tracking_updates(struct glimpse_data *data)
+{
+    if (!data->tracking_ready)
+        return;
+
+    data->tracking_ready = false;
+    data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
+    assert(data->latest_tracking);
+
+    //upload_tracking_textures(data);
+}
+
+static void
+handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
+{
+    switch (event->type) {
+    case GM_DEV_EVENT_FRAME_READY:
+        gm_debug(data->log, "GM_DEV_EVENT_FRAME_READY\n");
+
+        /* It's always possible that we will see an event for a frame
+         * that was ready before we upgraded the requirements for what
+         * we need, so we skip notifications for frames we can't use.
+         */
+        if (event->frame_ready.met_requirements ==
+            data->pending_frame_requirements)
+        {
+            data->pending_frame_requirements = 0;
+            data->device_frame_ready = true;
+        }
+        break;
+    }
+
+    gm_device_event_free(event);
+}
+
+static void
+handle_context_event(struct glimpse_data *data, struct gm_event *event)
+{
+    switch (event->type) {
+    case GM_EVENT_REQUEST_FRAME:
+        gm_debug(data->log, "GM_EVENT_REQUEST_FRAME\n");
+        data->context_needs_frame = true;
+        request_device_frame(data,
+                             (GM_REQUEST_FRAME_DEPTH |
+                              GM_REQUEST_FRAME_LUMINANCE));
+        break;
+    case GM_EVENT_TRACKING_READY:
+        gm_debug(data->log, "GM_EVENT_TRACKING_READY\n");
+        data->tracking_ready = true;
+        break;
+    }
+
+    gm_context_event_free(event);
+}
+
+static void
+process_events(struct glimpse_data *data)
+{
+    pthread_mutex_lock(&data->event_queue_lock);
+    std::swap(data->events_front, data->events_back);
+    pthread_mutex_unlock(&data->event_queue_lock);
+
+    for (unsigned i = 0; i < data->events_front->size(); i++) {
+        struct event event = (*data->events_front)[i];
+
+        switch (event.type) {
+        case EVENT_DEVICE:
+            handle_device_event(data, event.device_event);
+            break;
+        case EVENT_CONTEXT:
+            handle_context_event(data, event.context_event);
+            break;
+        }
+    }
+
+    data->events_front->clear();
+
+    handle_device_frame_updates(data);
+    handle_context_tracking_updates(data);
+
+    gm_context_render_thread_hook(data->ctx);
+}
+
+
 static void UNITY_INTERFACE_API
 on_render_event_cb(int event)
 {
-    unity_log("Render Event %d DEBUG\n", event);
+    gm_debug(plugin_data->log, "Render Event %d DEBUG\n", event);
+
+    process_events(plugin_data);
 }
 
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -180,7 +365,7 @@ on_event_cb(struct gm_context *ctx,
 {
     struct glimpse_data *data = (struct glimpse_data *)user_data;
 
-    unity_log("GLIMPSE: Context Event\n");
+    gm_debug(data->log, "GLIMPSE: Context Event\n");
 
     struct event event = {};
     event.type = EVENT_CONTEXT;
@@ -198,7 +383,7 @@ on_device_event_cb(struct gm_device *dev,
 {
     struct glimpse_data *data = (struct glimpse_data *)user_data;
 
-    unity_log("GLIMPSE: Device Event\n");
+    gm_debug(data->log, "GLIMPSE: Device Event\n");
 
     struct event event = {};
     event.type = EVENT_DEVICE;
@@ -212,56 +397,71 @@ on_device_event_cb(struct gm_device *dev,
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_init(void)
 {
-    glimpse_data->log = gm_logger_new(logger_cb, glimpse_data);
+    struct glimpse_data *data = new glimpse_data();
+
+    plugin_data = data;
+
+    data->log = gm_logger_new(logger_cb, data);
+
+    gm_debug(data->log, "GLIMPSE: Init\n");
+
+    data->events_front = new std::vector<struct event>();
+    data->events_back = new std::vector<struct event>();
 
     struct gm_device_config config = {};
     config.type = GM_DEVICE_KINECT;
-    glimpse_data->device = gm_device_open(glimpse_data->log, &config, NULL);
+    data->device = gm_device_open(data->log, &config, NULL);
 
     struct gm_intrinsics *depth_intrinsics =
-        gm_device_get_depth_intrinsics(glimpse_data->device);
-    glimpse_data->depth_width = depth_intrinsics->width;
-    glimpse_data->depth_height = depth_intrinsics->height;
+        gm_device_get_depth_intrinsics(data->device);
+    data->depth_width = depth_intrinsics->width;
+    data->depth_height = depth_intrinsics->height;
 
     struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(glimpse_data->device);
-    glimpse_data->video_width = video_intrinsics->width;
-    glimpse_data->video_height = video_intrinsics->height;
+        gm_device_get_video_intrinsics(data->device);
+    data->video_width = video_intrinsics->width;
+    data->video_height = video_intrinsics->height;
 
-    glimpse_data->ctx = gm_context_new(glimpse_data->log, NULL);
+    data->ctx = gm_context_new(data->log, NULL);
 
-    gm_context_set_depth_camera_intrinsics(glimpse_data->ctx, depth_intrinsics);
-    gm_context_set_video_camera_intrinsics(glimpse_data->ctx, video_intrinsics);
+    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
+    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
 
     /* NB: there's no guarantee about what thread these event callbacks
      * might be invoked from...
      */
-    gm_context_set_event_callback(glimpse_data->ctx, on_event_cb, glimpse_data);
-    gm_device_set_event_callback(glimpse_data->device, on_device_event_cb, glimpse_data);
+    gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
+    gm_device_set_event_callback(data->device, on_device_event_cb, plugin_data);
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_run(void)
 {
-    unity_log("GLIMPSE: Run\n");
-    gm_device_start(glimpse_data->device);
-    gm_context_enable(glimpse_data->ctx);
+    struct glimpse_data *data = plugin_data;
+
+    gm_debug(data->log, "GLIMPSE: Run\n");
+    gm_device_start(data->device);
+    gm_context_enable(data->ctx);
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_stop(void)
 {
-    unity_log("GLIMPSE: Stop\n");
-    gm_context_disable(glimpse_data->ctx);
-    //gm_device_stop(glimpse_data->device);
+    struct glimpse_data *data = plugin_data;
+
+    gm_debug(data->log, "GLIMPSE: Stop\n");
+    gm_context_disable(data->ctx);
+    //gm_device_stop(data->device);
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_terminate(void)
 {
-    unity_log("GLIMPSE: Terminate\n");
-    gm_context_destroy(glimpse_data->ctx);
-    gm_device_close(glimpse_data->device);
+    struct glimpse_data *data = plugin_data;
+
+    gm_debug(data->log, "GLIMPSE: Terminate\n");
+    gm_context_destroy(data->ctx);
+    gm_device_close(data->device);
 }
 
 extern "C" void	UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
