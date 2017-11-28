@@ -41,7 +41,9 @@ extern "C" {
 #endif
 
 struct gm_device *
-gm_device_open(struct gm_device_config *config, char **err);
+gm_device_open(struct gm_logger *log,
+               struct gm_device_config *config,
+               char **err);
 
 struct gm_ui_properties *
 gm_device_get_ui_properties(struct gm_device *dev);

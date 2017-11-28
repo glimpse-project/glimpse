@@ -27,6 +27,8 @@ struct gm_device
 {
     enum gm_device_type type;
 
+    struct gm_logger *log;
+
     union {
         struct {
             int frame;
@@ -607,10 +609,14 @@ recording_start(struct gm_device *dev)
 }
 
 struct gm_device *
-gm_device_open(struct gm_device_config *config, char **err)
+gm_device_open(struct gm_logger *log,
+               struct gm_device_config *config,
+               char **err)
 {
     struct gm_device *dev = new gm_device();
     bool status;
+
+    dev->log = log;
 
     switch (config->type) {
     case GM_DEVICE_KINECT:

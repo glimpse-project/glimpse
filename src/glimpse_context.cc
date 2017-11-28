@@ -59,14 +59,16 @@
 #include "infer.h"
 #include "loader.h"
 
+#include "glimpse_log.h"
 #include "glimpse_context.h"
 #include "glimpse_assets.h"
 
 #include <android/log.h>
-#define LOGI(...) \
-  __android_log_print(ANDROID_LOG_INFO, "glimpse_context", __VA_ARGS__)
-#define LOGE(...) \
-  __android_log_print(ANDROID_LOG_ERROR, "glimpse_context", __VA_ARGS__)
+
+#undef GM_LOG_CONTEXT
+#define GM_LOG_CONTEXT "ctx"
+#define LOGI(...) gm_info(ctx->log, __VA_ARGS__)
+#define LOGE(...) gm_error(ctx->log, __VA_ARGS__)
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
@@ -161,6 +163,8 @@ enum gm_rotation {
 
 struct gm_context
 {
+    struct gm_logger *log;
+
     //struct gm_intrinsics color_camera_intrinsics;
     //struct gm_intrinsics rgbir_camera_intrinsics;
     struct gm_intrinsics depth_camera_intrinsics;
@@ -1520,12 +1524,15 @@ alloc_rgb_color_stops(struct gm_context *ctx)
 }
 
 struct gm_context *
-gm_context_new(char **err)
+gm_context_new(struct gm_logger *logger,
+               char **err)
 {
     /* NB: we can't just calloc this struct since it contains C++ class members
      * that need to be constructed appropriately
      */
     struct gm_context *ctx = new gm_context();
+
+    ctx->log = logger;
 
     struct gm_ui_property prop;
 

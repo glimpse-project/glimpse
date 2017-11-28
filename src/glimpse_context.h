@@ -127,7 +127,7 @@ typedef struct {
 extern "C" {
 #endif
 
-struct gm_context *gm_context_new(char **err);
+struct gm_context *gm_context_new(struct gm_logger *logger, char **err);
 void gm_context_destroy(struct gm_context *ctx);
 
 

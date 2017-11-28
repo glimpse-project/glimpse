@@ -27,13 +27,16 @@
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
 
-#include "glimpse_context.h"
-#include "glimpse_device.h"
-#include "half.hpp"
-
 #include <imgui.h>
 #include <imgui_impl_glfw_gles3.h>
 #include <profiler.h>
+
+#include "half.hpp"
+
+#include "glimpse_log.h"
+#include "glimpse_context.h"
+#include "glimpse_device.h"
+
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 #define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
@@ -59,6 +62,7 @@ struct event
 
 typedef struct _Data
 {
+    struct gm_logger *log;
     struct gm_context *ctx;
     struct gm_device *device;
 
@@ -980,10 +984,38 @@ init_opengl(Data *data)
     glGenFramebuffers(1, &gl_cloud_fbo);
 }
 
+static void
+logger_cb(struct gm_logger *logger,
+          enum gm_log_level level,
+          const char *context,
+          const char *backtrace,
+          const char *format,
+          va_list ap,
+          void *user_data)
+{
+    //Data *data = (Data *)user_data;
+
+    switch (level) {
+    case GM_LOG_ERROR:
+        fprintf(stderr, "%s: ERROR: ", context);
+        break;
+    case GM_LOG_WARN:
+        fprintf(stderr, "%s: WARN: ", context);
+        break;
+    default:
+        fprintf(stderr, "%s: ", context);
+    }
+
+    vfprintf(stderr, format, ap);
+    fprintf(stderr, "\n");
+}
+
 int
 main(int argc, char **argv)
 {
     Data data = {};
+
+    data.log = gm_logger_new(logger_cb, &data);
 
     data.events_front = new std::vector<struct event>();
     data.events_back = new std::vector<struct event>();
@@ -998,11 +1030,11 @@ main(int argc, char **argv)
         struct gm_device_config config = {};
         config.type = GM_DEVICE_RECORDING;
         config.recording.path = argv[1];
-        data.device = gm_device_open(&config, NULL);
+        data.device = gm_device_open(data.log, &config, NULL);
     } else {
         struct gm_device_config config = {};
         config.type = GM_DEVICE_KINECT;
-        data.device = gm_device_open(&config, NULL);
+        data.device = gm_device_open(data.log, &config, NULL);
     }
 
     struct gm_intrinsics *depth_intrinsics =
@@ -1072,7 +1104,7 @@ main(int argc, char **argv)
 
     init_opengl(&data);
 
-    data.ctx = gm_context_new(NULL);
+    data.ctx = gm_context_new(data.log, NULL);
 
     gm_context_set_depth_camera_intrinsics(data.ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data.ctx, video_intrinsics);

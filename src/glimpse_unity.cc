@@ -13,6 +13,7 @@
 
 #include "half.hpp"
 
+#include "glimpse_log.h"
 #include "glimpse_device.h"
 #include "glimpse_context.h"
 
@@ -35,6 +36,7 @@ struct event
 
 struct glimpse_data
 {
+    struct gm_logger *log;
     struct gm_context *ctx;
     struct gm_device *device;
 
@@ -85,7 +87,9 @@ struct glimpse_data
     std::vector<struct event> *events_front;
 };
 
-static void (*unity_log_function)(const char *msg);
+static void (*unity_log_function)(int level,
+                                  const char *context,
+                                  const char *msg);
 
 static GLuint video_texture;
 static int video_texture_width;
@@ -101,26 +105,28 @@ static struct glimpse_data *glimpse_data;
 
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_notify_log_function(void (*log_func)(const char *msg))
+gm_unity_notify_log_function(void (*log_func)(int level,
+                                              const char *context,
+                                              const char *msg))
 {
     unity_log_function = log_func;
 }
 
 static void
-unity_log(const char *fmt, ...)
+logger_cb(struct gm_logger *logger,
+          enum gm_log_level level,
+          const char *context,
+          const char *backtrace,
+          const char *format,
+          va_list ap,
+          void *user_data)
 {
-    va_list ap;
     char *msg = NULL;
 
-    if (!unity_log_function)
-        return;
-
-    va_start(ap, fmt);
-    if (vasprintf(&msg, fmt, ap) > 0) {
-        unity_log_function(msg);
+    if (vasprintf(&msg, format, ap) > 0) {
+        unity_log_function(level, context, msg);
         free(msg);
     }
-    va_end(ap);
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -206,10 +212,11 @@ on_device_event_cb(struct gm_device *dev,
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_init(void)
 {
-    unity_log("GLIMPSE: Init\n");
+    glimpse_data->log = gm_logger_new(logger_cb, glimpse_data);
+
     struct gm_device_config config = {};
     config.type = GM_DEVICE_KINECT;
-    glimpse_data->device = gm_device_open(&config, NULL);
+    glimpse_data->device = gm_device_open(glimpse_data->log, &config, NULL);
 
     struct gm_intrinsics *depth_intrinsics =
         gm_device_get_depth_intrinsics(glimpse_data->device);
@@ -221,7 +228,7 @@ gm_unity_init(void)
     glimpse_data->video_width = video_intrinsics->width;
     glimpse_data->video_height = video_intrinsics->height;
 
-    glimpse_data->ctx = gm_context_new(NULL);
+    glimpse_data->ctx = gm_context_new(glimpse_data->log, NULL);
 
     gm_context_set_depth_camera_intrinsics(glimpse_data->ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(glimpse_data->ctx, video_intrinsics);
