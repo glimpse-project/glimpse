@@ -158,25 +158,6 @@ void gm_context_destroy(struct gm_context *ctx);
 struct gm_ui_properties *
 gm_context_get_ui_properties(struct gm_context *ctx);
 
-
-/* XXX: the timebase of the timestamp is currently undefined with units
- * of nanoseconds.
- * XXX: it can currently be assumed that there's an implicit copy made
- * of the luminance data and the given luminance buffer is not required
- * once the call returns.
- * XXX: we don't say whether the image is rectified or not.
- * XXX: this wouldn't be called if using GL to downsample the luminance data
- * via a yuv texture-external sampler.
- * XXX: we currently make no assumption about what thread this is called
- * on, in case camera/device IO is associated with a dedicated thread.
- */
-void
-gm_context_update_luminance(struct gm_context *ctx,
-                            int width,
-                            int height,
-                            uint8_t *luminance,
-                            uint64_t timestamp);
-
 void
 gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
                                        struct gm_intrinsics *intrinsics);
@@ -246,6 +227,10 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
 
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *tracking);
+
+const GlimpsePointXYZRGBA *
+gm_tracking_get_rgb_cloud(struct gm_tracking *tracking,
+                          int *n_points);
 
 const GlimpsePointXYZRGBA *
 gm_tracking_get_rgb_label_cloud(struct gm_tracking *tracking,

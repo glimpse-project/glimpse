@@ -150,6 +150,9 @@ typedef struct _Data
     pthread_mutex_t event_queue_lock;
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
+
+    /* UI data */
+    int selected_view;
 } Data;
 
 static uint32_t joint_palette[] = {
@@ -279,6 +282,14 @@ draw_ui(Data *data)
             break;
         }
     }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    static const char* view_items[] = { "Labels", "Luminance" };
+    ImGui::ListBox("Cloud view", &data->selected_view, view_items,
+                   ARRAY_LEN(view_items));
 
     ImGui::End();
 
@@ -598,8 +609,9 @@ upload_tracking_textures(Data *data)
      */
     data->n_points = 0;
     data->n_joints = 0;
-    const GlimpsePointXYZRGBA *cloud =
-        gm_tracking_get_rgb_label_cloud(data->latest_tracking, &data->n_points);
+    const GlimpsePointXYZRGBA *cloud = (data->selected_view == 0) ?
+        gm_tracking_get_rgb_label_cloud(data->latest_tracking, &data->n_points) :
+        gm_tracking_get_rgb_cloud(data->latest_tracking, &data->n_points);
     const float *joints =
         gm_tracking_get_joint_positions(data->latest_tracking, &data->n_joints);
 

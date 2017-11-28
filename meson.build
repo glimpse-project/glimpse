@@ -44,6 +44,7 @@ if use_system_libs
     pcl_deps += dependency('pcl_keypoints-1.8')
     pcl_deps += dependency('pcl_ml-1.8')
     pcl_deps += dependency('pcl_octree-1.8')
+    pcl_deps += dependency('pcl_people-1.8')
     pcl_deps += dependency('pcl_recognition-1.8')
     pcl_deps += dependency('pcl_registration-1.8')
     pcl_deps += dependency('pcl_sample_consensus-1.8')

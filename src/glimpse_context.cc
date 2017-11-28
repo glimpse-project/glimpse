@@ -62,6 +62,8 @@
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/segmentation/extract_clusters.h>
 
+#include <pcl/people/ground_based_people_detection_app.h>
+
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/filters/extract_indices.h>
 #include <pcl/filters/crop_box.h>
@@ -101,6 +103,12 @@
             exit(1); \
     } while(0)
 
+/* With this foreach macro the following block of code will have access to
+ * x, y, z and off variables. (off = y * width + x)
+ */
+#define foreach_xy_off(width, height) \
+    for (int y = 0, off = 0; y < (int)height; y++) \
+        for (int x = 0; x < (int)width; x++, off++)
 
 using half_float::half;
 using namespace pcl::common;
@@ -124,18 +132,10 @@ enum image_format {
     IMAGE_FORMAT_XFLOAT,
 };
 
-struct image
-{
-    enum image_format format;
-    int width;
-    int height;
-    int byte_stride;
-
-    union {
-        uint8_t *data_u8;
-        half_float::half *data_half;
-        float *data_float;
-    };
+enum reproject_op {
+    RGBA_INTO_CLOUD,
+    RGB_INTO_CLOUD,
+    DEPTH_INTO_BUFFER
 };
 
 /* XXX: fix namespace */
@@ -163,14 +163,34 @@ struct gm_tracking
     uint64_t depth_capture_timestamp;
     uint64_t video_capture_timestamp;
 
-    uint8_t *depth_rgb;
-    uint8_t *label_map;
-    uint8_t *label_map_rgb;
-    float *label_probs;
-    float *joints;
-    GlimpsePointXYZRGBA* label_cloud;
+    // Depth data, in meters
+    float *depth;
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud;
+    // Colour data, RGBA
+    uint32_t *video;
+
+    // Depth data mapped to colour for visualisation
+    uint8_t *depth_rgb;
+
+    // Label inference data
+    uint8_t *label_map;
+
+    // Label inference data in RGB (3x size of label_map) for visualisation
+    uint8_t *label_map_rgb;
+
+    // Label probability tables
+    float *label_probs;
+
+    // Inferred joint positions
+    float *joints;
+
+    // Coloured point cloud
+    GlimpsePointXYZRGBA* cloud;
+    int cloud_size;
+
+    // Labelled point-cloud for visualisation
+    GlimpsePointXYZRGBA* label_cloud;
+    int label_cloud_size;
 
     uint8_t *face_detect_buf;
     size_t face_detect_buf_width;
@@ -217,13 +237,6 @@ struct gm_context
     GLuint attrib_landmarks_bo;
     size_t attrib_landmarks_bo_size;
     GLuint attrib_landmarks_pos;
-
-    GLuint point_cloud_program;
-    GLuint attrib_cloud_bo;
-    size_t attrib_cloud_bo_size;
-    GLuint attrib_cloud_pos;
-    GLuint attrib_cloud_color;
-    GLuint uniform_cloud_mvp;
 
     std::vector<uint8_t> grey_face_detect_scratch;
     std::vector<glimpse::wrapped_image<unsigned char>> grey_face_detect_wrapped_layers;
@@ -282,16 +295,6 @@ struct gm_context
     struct gm_tracking *tracking_mid;
     struct gm_tracking *tracking_back;
 
-    float *joints_back;
-    float *joints_mid;
-    float *joints_front;
-    bool have_joints;
-
-    GlimpsePointXYZRGBA* debug_label_cloud_back;
-    GlimpsePointXYZRGBA* debug_label_cloud_mid;
-    GlimpsePointXYZRGBA* debug_label_cloud_front;
-    bool have_label_cloud;
-
     int n_labels;
 
     JSON_Value *joint_map;
@@ -317,6 +320,9 @@ struct gm_context
                            void *user_data);
 
     void *callback_data;
+
+    pcl::people::GroundBasedPeopleDetectionApp<pcl::PointXYZRGBA>
+      people_detector;
 };
 
 static png_color default_palette[] = {
@@ -775,27 +781,19 @@ gm_context_detect_faces(struct gm_context *ctx)
 #endif
 }
 
-/* XXX: does more than we should need in the end, but works for early testing
- *
- * we output to a half or full float image that can be easily passed to our
- * current infer() code to infer label probabilities.
- *
- * We also output to another 'organised' xyzrgba point cloud in the layout of
- * an image so it's easy to add the inferred label colors to this but then
- * also convenient to pass the points directly to opengl.
- */
-struct image *
-reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                      GlimpsePointXYZRGBA *rgba_cloud,
-                      const struct gm_intrinsics *intrinsics,
-                      enum image_format fmt)
+void
+reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
+                void *buffer,
+                const struct gm_intrinsics *intrinsics,
+                enum reproject_op op,
+                GlimpsePointXYZRGBA *cloud_copy = NULL,
+                int *cloud_size = NULL,
+                bool copy_is_dense = true)
 {
     int width = intrinsics->width;
     float half_width = width / 2.0f;
     int height = intrinsics->height;
     float half_height = height / 2.0f;
-
-    assert(fmt == IMAGE_FORMAT_XHALF || fmt == IMAGE_FORMAT_XFLOAT);
 
     float h_fov = 2.0 * atan(0.5 * width / intrinsics->fx);
     float v_fov = 2.0 * atan(0.5 * height / intrinsics->fy);
@@ -803,142 +801,83 @@ reproject_point_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
     float tan_half_hfov = tan(h_fov / 2.0); // XXX: or just 0.5 * width / intrinsics->fx
     float tan_half_vfov = tan(v_fov / 2.0);
 
-    for (int i = 0; i < width * height; i++) {
-        rgba_cloud[i].x = HUGE_VALF;
-        rgba_cloud[i].y = HUGE_VALF;
-        rgba_cloud[i].z = HUGE_VALF;
-        rgba_cloud[i].rgba = 0x00000000;
+    if (cloud_copy && !copy_is_dense) {
+        foreach_xy_off(width, height) {
+            cloud_copy[off].x = HUGE_DEPTH;
+            cloud_copy[off].y = HUGE_DEPTH;
+            cloud_copy[off].z = HUGE_DEPTH;
+            cloud_copy[off].rgba = 0;
+        }
+    }
+    if (op == DEPTH_INTO_BUFFER) {
+        foreach_xy_off(width, height) {
+            ((half*)buffer)[off] = HUGE_DEPTH;
+        }
     }
 
-    /* XXX: curious to measure what impact there might be with using a soft
-     * float16 implementation for representing intermediate depth buffers
-     * so just naively duplicating the code for now, for profiling...
+    /* XXX: we don't assume that cloud->width/height are the same as
+     * width/height. The pcl point cloud might not be 2d and if it is
+     * we might be projecting a high resolution point cloud into a
+     * low resolution depth buffer according to our training camera
+     * intrinsics
      */
-    struct image *ret = (struct image *)xmalloc(sizeof(*ret));
-    if (fmt == IMAGE_FORMAT_XFLOAT) {
-        float *img;
+    int n_points = 0;
+    for (uint32_t p = 0; p < cloud->points.size(); p++) {
+        pcl::PointXYZRGBA *point = &cloud->points[p];
+        glm::vec2 ndc_point;
 
-        ret->format = IMAGE_FORMAT_XFLOAT;
-        ret->width = width;
-        ret->height = height;
-        ret->byte_stride = sizeof(float) * width;
-        ret->data_float = (float *)xmalloc(sizeof(float) * width * height);
+        if (isnan(point->x) || isinf(point->x) ||
+            isnan(point->y) || isinf(point->y) ||
+            !isnormal(point->z) || point->z >= HUGE_DEPTH)
+            continue;
 
-        img = ret->data_float;
+        float hfield_width = tan_half_hfov * point->z;
+        float vfield_height = -tan_half_vfov * point->z;
 
-        /* Our training set had a background depth of 1000 */
-        for (int i = 0; i < width * height; i++)
-            img[i] = HUGE_DEPTH;
+        ndc_point.x = point->x / hfield_width;
+        ndc_point.y = point->y / vfield_height;
 
-        /* XXX: we don't assume that cloud->width/height are the same as
-         * width/height. The pcl point cloud might not be 2d and if it is
-         * we might be projecting a high resolution point cloud into a
-         * low resolution depth buffer according to our training camera
-         * intrinsics
-         */
-        for (unsigned cy = 0; cy < cloud->height; cy++) {
-            pcl::PointXYZ *row = &cloud->points[cy * cloud->width];
-            for (unsigned cx = 0; cx < cloud->width; cx++) {
-                glm::vec3 point(row[cx].x, row[cx].y, row[cx].z);
-                glm::vec2 ndc_point;
-                glm::vec2 pos;
+        if (ndc_point.x < -1.0f || ndc_point.x >= 1.0f ||
+            ndc_point.y < -1.0f || ndc_point.y >= 1.0f)
+            continue;
 
-                if (isnan(point.x) || isinf(point.x) ||
-                    isnan(point.y) || isinf(point.y) ||
-                    !isnormal(point.z) || point.z >= HUGE_DEPTH)
-                    continue;
+        int x = (int)((ndc_point.x + 1.0f) * half_width);
+        int y = (int)((ndc_point.y + 1.0f) * half_height);
+        int off = width * y + x;
 
-                float hfield_width = tan_half_hfov * point.z;
-                float vfield_height = -tan_half_vfov * point.z;
+        switch(op) {
+        case RGBA_INTO_CLOUD:
+            point->rgba = ((uint32_t*)buffer)[off];
+            break;
 
-                ndc_point.x = point.x / hfield_width;
-                ndc_point.y = point.y / vfield_height;
-
-                if (ndc_point.x < -1.0f || ndc_point.x >= 1.0f ||
-                    ndc_point.y < -1.0f || ndc_point.y >= 1.0f)
-                    continue;
-
-                pos.x = (ndc_point.x + 1.0f) * half_width;
-                pos.y = (ndc_point.y + 1.0f) * half_height;
-                int x = pos.x;
-                int y = pos.y;
-
-                int off = width * y + x;
-                img[off] = point.z;
-                rgba_cloud[off].x = point.x;
-                rgba_cloud[off].y = point.y;
-                rgba_cloud[off].z = point.z;
-                rgba_cloud[off].rgba = 0xffffffff;
-            }
+        case RGB_INTO_CLOUD: {
+            uint8_t r = ((uint8_t*)buffer)[off * 3];
+            uint8_t g = ((uint8_t*)buffer)[off * 3 + 1];
+            uint8_t b = ((uint8_t*)buffer)[off * 3 + 2];
+            uint32_t col = r << 24 | g << 16 | b << 8 | 0xFF;
+            point->rgba = col;
+            break;
         }
-    } else if (fmt == IMAGE_FORMAT_XHALF) {
-        half *img;
 
-        ret->format = IMAGE_FORMAT_XHALF;
-        ret->width = width;
-        ret->height = height;
-        ret->byte_stride = sizeof(half) * width;
-        ret->data_half = (half *)xmalloc(sizeof(half) * width * height);
-
-        img = ret->data_half;
-
-        /* Our training set had a background depth of 1000 */
-        for (int i = 0; i < width * height; i++)
-            img[i] = HUGE_DEPTH;
-
-        /* XXX: we don't assume that cloud->width/height are the same as
-         * width/height. The pcl point cloud might not be 2d and if it is
-         * we might be projecting a high resolution point cloud into a
-         * low resolution depth buffer according to our training camera
-         * intrinsics
-         */
-        for (unsigned cy = 0; cy < cloud->height; cy++) {
-            pcl::PointXYZ *row = &cloud->points[cy * cloud->width];
-            for (unsigned cx = 0; cx < cloud->width; cx++) {
-                glm::vec3 point(row[cx].x, row[cx].y, row[cx].z);
-                glm::vec2 ndc_point;
-                glm::vec2 pos;
-
-                if (isnan(point.x) || isinf(point.x) ||
-                    isnan(point.y) || isinf(point.y) ||
-                    !isnormal(point.z) || point.z >= HUGE_DEPTH)
-                    continue;
-
-                float hfield_width = tan_half_hfov * point.z;
-                float vfield_height = -tan_half_vfov * point.z;
-
-                ndc_point.x = point.x / hfield_width;
-                ndc_point.y = point.y / vfield_height;
-
-                if (ndc_point.x < -1.0f || ndc_point.x >= 1.0f ||
-                    ndc_point.y < -1.0f || ndc_point.y >= 1.0f)
-                    continue;
-
-                pos.x = (ndc_point.x + 1.0f) * half_width;
-                pos.y = (ndc_point.y + 1.0f) * half_height;
-                int x = pos.x;
-                int y = pos.y;
-
-                int off = width * y + x;
-                img[off] = point.z;
-                rgba_cloud[off].x = point.x;
-                rgba_cloud[off].y = point.y;
-                rgba_cloud[off].z = point.z;
-                rgba_cloud[off].rgba = 0xffffffff;
-            }
+        case DEPTH_INTO_BUFFER:
+            ((half*)buffer)[off] = (half)point->z;
+            break;
         }
-    } else {
-        assert(!"reached");
+
+        if (cloud_copy) {
+            int cloud_off = copy_is_dense ? n_points : off;
+            cloud_copy[cloud_off].x = point->x;
+            cloud_copy[cloud_off].y = point->y;
+            cloud_copy[cloud_off].z = point->z;
+            cloud_copy[cloud_off].rgba = point->rgba;
+        }
+
+        ++n_points;
     }
 
-    return ret;
-}
-
-void
-free_image(struct image *image)
-{
-    free(image->data_u8);
-    free(image);
+    if (cloud_size) {
+        *cloud_size = copy_is_dense ? n_points : (width * height);
+    }
 }
 
 void
@@ -952,40 +891,93 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Y increases upwards
     // Z increases outwards
 
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = tracking->cloud;
-
-#if 0
-    pcl::CropBox<pcl::PointXYZ> crop;
-    crop.setInputCloud(cloud);
-    crop.setMin(Eigen::Vector4f(-5, -5, ctx->min_depth, 1));
-    crop.setMax(Eigen::Vector4f(5, 5, ctx->max_depth, 1));
-    crop.filter(*cloud);
-#endif
-
-    LOGI("Processing cloud with %d points\n", (int)cloud->points.size());
     start = get_time();
+    LOGI("Projecting point cloud and reprojecting video data");
+
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud(
+        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    cloud->width = 0;
+    cloud->height = 1;
+    cloud->is_dense = true;
+
+    float inv_fx = 1.0f / ctx->depth_camera_intrinsics.fx;
+    float inv_fy = -1.0f / ctx->depth_camera_intrinsics.fy;
+    float cx = ctx->depth_camera_intrinsics.cx;
+    float cy = ctx->depth_camera_intrinsics.cy;
+
+    cloud->points.clear();
+    foreach_xy_off(ctx->depth_camera_intrinsics.width,
+                   ctx->depth_camera_intrinsics.height) {
+        float depth = tracking->depth[off];
+        if (isnormal(depth) && (depth < HUGE_DEPTH)) {
+            float dx = (x - cx) * depth * inv_fx;
+            float dy = (y - cy) * depth * inv_fy;
+            pcl::PointXYZRGBA point;
+            point.x = dx;
+            point.y = dy;
+            point.z = depth;
+            point.rgba = 0;
+            cloud->points.push_back(point);
+        }
+    }
+
+    cloud->width = cloud->points.size();
+
+    reproject_cloud(cloud, (void *)tracking->video,
+                    &ctx->video_camera_intrinsics,
+                    RGBA_INTO_CLOUD,
+                    tracking->cloud, &tracking->cloud_size, false);
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Projections took %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+    LOGI("Processing cloud with %d points", (int)cloud->points.size());
 
 #if 1
-    pcl::PassThrough<pcl::PointXYZ> passZ(true);
+    // Filter out points that are too near or too far
+    start = get_time();
+    pcl::PassThrough<pcl::PointXYZRGBA> passZ(true);
     passZ.setInputCloud(cloud);
     passZ.setFilterFieldName ("z");
     passZ.setFilterLimits(ctx->min_depth, ctx->max_depth);
     passZ.filter(*cloud);
 
-    LOGI("Cloud has %d points after depth filter\n", (int)cloud->points.size());
+    end = get_time();
+    duration = end - start;
+    LOGI("Cloud has %d points after depth filter (%.3f%s)",
+         (int)cloud->points.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 #endif
 
 #if 1
-    pcl::VoxelGrid<pcl::PointXYZ> vg;
+    // Simplify point cloud by putting it through a 1cm voxel grid
+    start = get_time();
+    pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
     vg.setInputCloud(cloud);
     vg.setLeafSize(0.01, 0.01, 0.01);
     vg.filter(*cloud);
-    LOGI("Cloud has %d points after voxel grid\n", (int)cloud->points.size());
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
+         (int)cloud->points.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 #endif
 
-#if 1
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PassThrough<pcl::PointXYZ> passY;
+    // Detect ground plane.
+    // Only consider points below the camera to be the floor.
+    // TODO: Rotate point cloud based on device sensors so that the floor is
+    //       level. Currently if the camera is pointing downwards, we may end
+    //       up filtering out floor points here.
+    start = get_time();
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_floor(
+        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    pcl::PassThrough<pcl::PointXYZRGBA> passY;
     passY.setInputCloud(cloud);
     passY.setUserFilterValue(HUGE_DEPTH);
     passY.setKeepOrganized(true);
@@ -999,14 +991,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     int n_floor_points = cloud->points.size() -
       passY.getRemovedIndices()->size();
-    LOGI("Cloud possible floor subset has %d points\n", n_floor_points);
-#endif
+    LOGI("Cloud possible floor subset has %d points", n_floor_points);
 
-#if 1
     // Create the segmentation object
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
+    pcl::SACSegmentation<pcl::PointXYZRGBA> seg;
     // Optional
-    seg.setOptimizeCoefficients(false);
+    seg.setOptimizeCoefficients(true);
     // Mandatory
     seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
@@ -1021,51 +1011,72 @@ gm_context_track_skeleton(struct gm_context *ctx)
     seg.setAxis(Eigen::Vector3f(0.f, 1.f, 0.f));
     seg.setEpsAngle(M_PI/180.0 * 15.0);
 
-    // Create the filtering object
-    pcl::ExtractIndices<pcl::PointXYZ> extract;
-    extract.setUserFilterValue(HUGE_DEPTH);
-    extract.setKeepOrganized(true);
-
-    pcl::ModelCoefficients::Ptr coefficients(new pcl::ModelCoefficients);
+    pcl::ModelCoefficients::Ptr ground_coeffs(new pcl::ModelCoefficients);
     pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
 
-    int n_removed_points = 0;
-    int min_removal_size = n_floor_points * 0.25;
-    do {
-        seg.segment(*inliers, *coefficients);
+    seg.segment(*inliers, *ground_coeffs);
 
-        int n_inliers = (int)inliers->indices.size();
-        if (n_inliers == 0 || n_inliers < min_removal_size) {
-            break;
-        }
-        n_removed_points += n_inliers;
+    int n_inliers = (int)inliers->indices.size();
 
-        LOGI("Removing %d points\n", n_inliers);
-#if 0
-        if (i == 0) {
-            for (uint32_t j = 0; j < inliers->indices.size(); j++) {
-                LOGI("Removing (%.2f, %.2f, %.2f)\n",
-                     (float)cloud_floor->points[inliers->indices[j]].x,
-                     (float)cloud_floor->points[inliers->indices[j]].y,
-                     (float)cloud_floor->points[inliers->indices[j]].z);
-            }
-        }
+    end = get_time();
+    duration = end - start;
+    LOGI("Ground plane has %d points (%.3f%s)\n",
+         n_inliers,
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+#if 1
+    // Remove ground plane
+    pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
+    extract.setInputCloud(cloud);
+    extract.setIndices(inliers);
+    extract.setNegative(true);
+    extract.filter(*cloud);
 #endif
 
-        extract.setNegative(true);
-        extract.setIndices(inliers);
-        extract.filterDirectly(cloud);
-        extract.filterDirectly(cloud_floor);
-    } while (n_removed_points < n_floor_points * 0.5);
+#if 0
+    // Use pcl's GroundBasedPeopleDetectionApp
+    // NOTE: You likely want to disable the voxel grid and ground plane removal
+    //       above, and the Euclidean clustering below to use this block.
+    start = get_time();
+    Eigen::VectorXf eigen_ground_coeffs;
+    eigen_ground_coeffs.resize(4);
+    eigen_ground_coeffs[0] = ground_coeffs->values[0];
+    eigen_ground_coeffs[1] = ground_coeffs->values[1];
+    eigen_ground_coeffs[2] = ground_coeffs->values[2];
+    eigen_ground_coeffs[3] = ground_coeffs->values[3];
 
-    // Remove HUGE_DEPTH points
-    passZ.setInputCloud(cloud);
-    passZ.setKeepOrganized(false);
-    passZ.setFilterLimits(HUGE_DEPTH, FLT_MAX);
-    passZ.setFilterLimitsNegative(true);
-    passZ.filter(*cloud);
+    std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>> clusters;
+    ctx->people_detector.setInputCloud(cloud);
+    ctx->people_detector.setGround(eigen_ground_coeffs);
+    ctx->people_detector.compute(clusters);
 
-    LOGI("Removed %d floor candidate points\n", n_removed_points);
+    cloud = ctx->people_detector.getNoGroundCloud();
+
+    for(std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>>::iterator
+        it = clusters.begin(); it != clusters.end(); ++it) {
+        float confidence = it->getPersonConfidence();
+        LOGI("Person cluster with %f", confidence);
+
+        if (confidence <= -1.5) { continue; }
+
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr person_cloud(
+            new pcl::PointCloud<pcl::PointXYZRGBA>);
+        std::vector<int> indices = it->getIndices().indices;
+        for (uint32_t i = 0; i < indices.size(); i++) {
+            pcl::PointXYZRGBA *point = &cloud->points[indices[i]];
+            person_cloud->push_back(*point);
+        }
+
+        cloud.swap(person_cloud);
+        break;
+    }
+
+    end = get_time();
+    duration = end - start;
+    LOGI("People detection took %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 #endif
 
 #if 1
@@ -1073,23 +1084,31 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // points (which we hope is the human)
 
     // Creating the KdTree object for the search method of the extraction
-    /*pcl::search::KdTree<pcl::PointXYZ>::Ptr
-      tree(new pcl::search::KdTree<pcl::PointXYZ>);*/
+    /*pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
+      tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);*/
 
     // Seems Octree is faster than KdTree for this use-case. This appears to
     // be highly dependent on the resolution, which I assume should be
     // tweaked alongside the voxel-grid resolution above and the minimum
     // cluster size below.
-    pcl::search::Octree<pcl::PointXYZ>::Ptr
-      tree(new pcl::search::Octree<pcl::PointXYZ>(0.1));
+    pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
+      tree(new pcl::search::Octree<pcl::PointXYZRGBA>(0.1));
 
     tree->setInputCloud (cloud);
 
+    // Note that these values don't really correspond to human size like you
+    // might think. This is what PCL does, and it's as good a measure as any,
+    // but take it with a huge pinch of salt.
+    float min_height = 1.3;
+    float max_height = 2.15;
+    float min_width = 0.3;
+    float max_width = 1.5;
+
     std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance (0.03);
-    ec.setMinClusterSize (cloud->points.size() * 0.1);
-    ec.setMaxClusterSize (cloud->points.size());
+    pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
+    ec.setClusterTolerance (0.03f);
+    ec.setMinClusterSize (min_height * min_width / 0.01f / 0.01f);
+    ec.setMaxClusterSize (max_height * max_width / 0.01f / 0.01f);
     ec.setSearchMethod (tree);
     ec.setInputCloud (cloud);
     ec.extract (cluster_indices);
@@ -1105,8 +1124,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
         LOGI("Largest cluster size: %d\n", (int)largest_cluster->indices.size());
 
-        pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_cluster(
-            new pcl::PointCloud<pcl::PointXYZ>);
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster(
+            new pcl::PointCloud<pcl::PointXYZRGBA>);
         for (std::vector<int>::const_iterator it =
              largest_cluster->indices.begin();
              it != largest_cluster->indices.end (); ++it) {
@@ -1120,12 +1139,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
     }
 #endif
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Human segmentation took %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
     if (ctx->depth_camera_intrinsics.width == 0 ||
         ctx->depth_camera_intrinsics.height == 0)
     {
@@ -1138,13 +1151,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
     }
 
     start = get_time();
-    struct image *depth_img =
-        reproject_point_cloud(cloud,
-                              tracking->label_cloud,
-                              &ctx->training_camera_intrinsics,
-                              IMAGE_FORMAT_XHALF);
-    int width = depth_img->width;
-    int height = depth_img->height;
+    int width = ctx->training_camera_intrinsics.width;
+    int height = ctx->training_camera_intrinsics.height;
+    half *depth_img = (half *)xmalloc(width * height * sizeof(half));
+
+    reproject_cloud(cloud, (void *)depth_img, &ctx->training_camera_intrinsics,
+                    DEPTH_INTO_BUFFER);
 
     if (width == 0 || height == 0) {
         LOGE("Skipping detection: bad re-projected depth image size: %dx%d\n",
@@ -1162,15 +1174,15 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
 
     if (!ctx->decision_trees) {
-        LOGE("People detector: exiting: No decision trees loaded");
+        LOGE("People detector: exiting: No decision trees loaded\n");
         return;
     }
-    LOGI("People Detector: starting label inference: n_trees=%d, w=%d, h=%d, data=%p\n",
-         ctx->n_decision_trees, width, height, depth_img->data_half);
+    LOGI("People Detector: starting label inference: n_trees=%d, w=%d, h=%d, data=%p",
+         ctx->n_decision_trees, width, height, depth_img);
     start = get_time();
     infer_labels(ctx->decision_trees,
                  ctx->n_decision_trees,
-                 depth_img->data_half,
+                 depth_img,
                  width,
                  height,
                  tracking->label_probs);
@@ -1183,7 +1195,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     uint8_t n_labels = ctx->decision_trees[0]->header.n_labels;
 
     start = get_time();
-    float *weights = calc_pixel_weights(depth_img->data_half,
+    float *weights = calc_pixel_weights(depth_img,
                                         tracking->label_probs,
                                         width, height,
                                         ctx->n_labels,
@@ -1200,7 +1212,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         float vfov =  (2.0f * atanf(0.5 * height /
                                     ctx->training_camera_intrinsics.fy)) *
           180 / M_PI;
-        infer_joints_fast(depth_img->data_half,
+        infer_joints_fast(depth_img,
                           tracking->label_probs,
                           weights,
                           width, height,
@@ -1218,43 +1230,56 @@ gm_context_track_skeleton(struct gm_context *ctx)
 #endif
     free(weights);
     weights = NULL;
+    free(depth_img);
+    depth_img = NULL;
 
-    LOGI("People Detector: colorizing most probable labels. n_labels=%d, data=%p\n",
-         n_labels, tracking->label_probs);
-
+    start = get_time();
     uint8_t *label_map = tracking->label_map;
     uint8_t *rgb_label_map = tracking->label_map_rgb;
 
-    // colorize cloud based on labels for debug
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            uint8_t label = 0;
-            float pr = -1.0;
-            int pos = y * width + x;
-            float *pr_table = &tracking->label_probs[pos * n_labels];
-            for (uint8_t l = 0; l < n_labels; l++) {
-                if (pr_table[l] > pr) {
-                    label = l;
-                    pr = pr_table[l];
-                }
+    // Create an rgb label map
+    foreach_xy_off(width, height) {
+        uint8_t label = 0;
+        float pr = -1.0;
+        int pos = y * width + x;
+        float *pr_table = &tracking->label_probs[pos * n_labels];
+        for (uint8_t l = 0; l < n_labels; l++) {
+            if (pr_table[l] > pr) {
+                label = l;
+                pr = pr_table[l];
             }
-            label_map[pos] = label;
-
-            uint8_t r = default_palette[label].red;
-            uint8_t g = default_palette[label].green;
-            uint8_t b = default_palette[label].blue;
-
-            uint32_t col = r<<24|g<<16|b<<8|0xff;
-            tracking->label_cloud[pos].rgba = col;
-            //tracking->label_cloud[pos].rgba = 0xffff80ff;
-
-            rgb_label_map[pos * 3] = r;
-            rgb_label_map[pos * 3 + 1] = g;
-            rgb_label_map[pos * 3 + 2] = b;
         }
+        label_map[pos] = label;
+
+        uint8_t r = default_palette[label].red;
+        uint8_t g = default_palette[label].green;
+        uint8_t b = default_palette[label].blue;
+
+        rgb_label_map[pos * 3] = r;
+        rgb_label_map[pos * 3 + 1] = g;
+        rgb_label_map[pos * 3 + 2] = b;
     }
 
-    free_image(depth_img);
+    end = get_time();
+    duration = end - start;
+    LOGI("Created RGB label map in %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+    // Colourise cloud based on labels for debug
+    start = get_time();
+    reproject_cloud(cloud, (void*)rgb_label_map,
+                    &ctx->training_camera_intrinsics,
+                    RGB_INTO_CLOUD,
+                    tracking->label_cloud,
+                    &tracking->label_cloud_size,
+                    true);
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Reprojected RGB label map in %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 }
 
 static struct gm_event *
@@ -1390,8 +1415,11 @@ free_tracking(struct gm_tracking *tracking)
     free(tracking->joints);
     free(tracking->label_cloud);
 
+    free(tracking->depth);
     free(tracking->depth_rgb);
+    free(tracking->cloud);
 
+    free(tracking->video);
     free(tracking->face_detect_buf);
 
     delete tracking;
@@ -1416,18 +1444,23 @@ alloc_tracking(struct gm_context *ctx)
     tracking->label_cloud = (GlimpsePointXYZRGBA *)
         xcalloc(labels_width * labels_height, sizeof(GlimpsePointXYZRGBA));
 
-    tracking->cloud.reset(new pcl::PointCloud<pcl::PointXYZ>);
-
     int depth_width = ctx->depth_camera_intrinsics.width;
     int depth_height = ctx->depth_camera_intrinsics.height;
 
     assert(depth_width);
     assert(depth_height);
 
+    tracking->depth = (float *)
+      xcalloc(depth_width * depth_height, sizeof(float));
     tracking->depth_rgb = (uint8_t *)xcalloc(depth_width * depth_height, 3);
+    tracking->cloud = (GlimpsePointXYZRGBA *)
+        xcalloc(depth_width * depth_height, sizeof(GlimpsePointXYZRGBA));
 
     int video_width = ctx->video_camera_intrinsics.width;
     int video_height = ctx->video_camera_intrinsics.height;
+
+    tracking->video = (uint32_t *)
+      xcalloc(video_width * video_height, sizeof(uint32_t));
 
 #ifdef DOWNSAMPLE_1_2
 #ifdef DOWNSAMPLE_1_4
@@ -1759,6 +1792,41 @@ gm_context_new(struct gm_logger *logger,
 
     alloc_rgb_color_stops(ctx);
 
+    AAsset *svm_asset = AAssetManager_open(ctx->asset_manager, "svm.json",
+                                           AASSET_MODE_BUFFER);
+    if (svm_asset) {
+        // XXX: We're assuming svm.json is well-formed (we provide it, so it is)
+        const void *buf = AAsset_getBuffer(svm_asset);
+        JSON_Value *svm_json = json_parse_string((char *)buf);
+        JSON_Object *svm_root = json_value_get_object(svm_json);
+
+        std::vector<float> weights;
+        JSON_Array *weights_array = json_object_get_array(svm_root, "weights");
+        for (size_t i = 0; i < json_array_get_count(weights_array); i++) {
+            weights.push_back((float)json_array_get_number(weights_array, i));
+        }
+
+        pcl::people::PersonClassifier<pcl::RGB> person_classifier;
+        person_classifier.setSVM(
+            (int)json_object_get_number(svm_root, "window_height"),
+            (int)json_object_get_number(svm_root, "window_width"),
+            weights,
+            (float)json_object_get_number(svm_root, "offset"));
+
+        Eigen::Matrix3f eigen_intrinsics;
+        eigen_intrinsics <<
+            (float)ctx->depth_camera_intrinsics.fx, 0.f,
+            (float)ctx->depth_camera_intrinsics.fy, 0.f,
+            (float)ctx->depth_camera_intrinsics.cx,
+            (float)ctx->depth_camera_intrinsics.cy,
+            0.f, 0.f, 0.1f;
+
+        ctx->people_detector.setVoxelSize(0.01);
+        ctx->people_detector.setIntrinsics(eigen_intrinsics);
+        ctx->people_detector.setClassifier(person_classifier);
+        ctx->people_detector.setPersonClusterLimits(1.3, 2.15, 0.3, 1.5);
+    }
+
     return ctx;
 }
 
@@ -1787,6 +1855,11 @@ update_tracking_luminance(struct gm_context *ctx,
     int height = ctx->video_camera_intrinsics.height;
 
     assert(format == GM_FORMAT_LUMINANCE_U8);
+
+    foreach_xy_off(width, height) {
+        uint8_t lum = luminance[off];
+        tracking->video[off] = (lum << 24) | (lum << 16) | (lum << 8) | 0xFF;
+    }
 
     if (!ctx->grey_width) {
         ctx->grey_width = width;
@@ -1878,51 +1951,20 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
                                   void *depth,
                                   uint64_t timestamp)
 {
-    struct gm_intrinsics *intrinsics = &ctx->depth_camera_intrinsics;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud = tracking->cloud;
-
     int width = ctx->depth_camera_intrinsics.width;
     int height = ctx->depth_camera_intrinsics.height;
 
-    uint64_t start = get_time();
-
-    cloud->points.clear();
-    cloud->width = 0;
-    cloud->height = 1;
-    cloud->is_dense = true;
-
-    float inv_fx = 1.0f / intrinsics->fx;
-    float inv_fy = -1.0f / intrinsics->fy;
-    float cx = intrinsics->cx;
-    float cy = intrinsics->cy;
-
-
-    /* With this foreach macro the following block of code will have access to
-     * x, y, z, off and depth_m variables. (off = y * width + x)
-     */
-#define foreach_xy_off(width, height) \
-    for (int y = 0; y < height; y++) \
-        for (int x = 0, off = 0; x < width && (off = y * width + x); x++)
-
-#define VALIDATE_AND_APPEND_POINT(CLOUD, X, Y, Z) \
-    do { \
-        if (isnormal(Z) && Z < HUGE_DEPTH) { \
-            pcl::PointXYZ point((float)((X - cx) * Z * inv_fx), \
-                                (float)((Y - cy) * Z * inv_fy), \
-                                Z); \
-            CLOUD->points.push_back(point); \
-        } \
-    } while (0)
-
-#define MAP_DEPTH_TO_RGB(DEPTH_RGB_BUF, OFF, DEPTH) \
+#define COPY_AND_MAP_DEPTH_TO_RGB(DEPTH_COPY, DEPTH_RGB_BUF, OFF, DEPTH) \
     do { \
         struct color rgb = get_color_from_stops(ctx, DEPTH); \
         uint8_t *depth_rgb = DEPTH_RGB_BUF + OFF * 3; \
         depth_rgb[0] = rgb.r; \
         depth_rgb[1] = rgb.g; \
         depth_rgb[2] = rgb.b; \
+        depth_copy[OFF] = DEPTH; \
     } while (0)
 
+    float *depth_copy = tracking->depth;
     uint8_t *depth_rgb_back = tracking->depth_rgb;
 
     switch (format) {
@@ -1933,38 +1975,24 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
     case GM_FORMAT_Z_U16_MM:
         foreach_xy_off(width, height) {
             float depth_m = ((uint16_t *)depth)[off] / 1000.f;
-            VALIDATE_AND_APPEND_POINT(cloud, x, y, depth_m);
-            MAP_DEPTH_TO_RGB(depth_rgb_back, off, depth_m);
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
         }
         break;
     case GM_FORMAT_Z_F32_M:
         foreach_xy_off(width, height) {
             float depth_m = ((float *)depth)[off];
-            VALIDATE_AND_APPEND_POINT(cloud, x, y, depth_m);
-            MAP_DEPTH_TO_RGB(depth_rgb_back, off, depth_m);
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
         }
         break;
     case GM_FORMAT_Z_F16_M:
         foreach_xy_off(width, height) {
             float depth_m = ((half *)depth)[off];
-            VALIDATE_AND_APPEND_POINT(cloud, x, y, depth_m);
-            MAP_DEPTH_TO_RGB(depth_rgb_back, off, depth_m);
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
         }
         break;
     }
 
-#undef MAP_DEPTH_TO_RGB
-#undef VALIDATE_AND_APPEND_POINT
-#undef foreach_xy_off
-
-    cloud->width = cloud->points.size();
-
-    uint64_t end = get_time();
-    uint64_t duration = end - start;
-
-    LOGI("gm_context_update_depth: projected depth buffer into pcl cloud in %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+#undef COPY_AND_MAP_DEPTH_TO_RGB
 
     tracking->depth_capture_timestamp = timestamp;
 }
@@ -1978,12 +2006,20 @@ gm_tracking_get_rgb_depth(struct gm_tracking *tracking)
 }
 
 const GlimpsePointXYZRGBA *
+gm_tracking_get_rgb_cloud(struct gm_tracking *tracking,
+                          int *n_points)
+{
+    if (n_points)
+      *n_points = tracking->cloud_size;
+    return tracking->cloud;
+}
+
+const GlimpsePointXYZRGBA *
 gm_tracking_get_rgb_label_cloud(struct gm_tracking *tracking,
                                 int *n_points)
 {
     if (n_points)
-      *n_points = tracking->ctx->training_camera_intrinsics.width *
-                  tracking->ctx->training_camera_intrinsics.height;
+      *n_points = tracking->label_cloud_size;
     return tracking->label_cloud;
 }
 
