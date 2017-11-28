@@ -53,6 +53,10 @@ if use_system_libs
     pcl_deps += dependency('pcl_stereo-1.8')
     pcl_deps += dependency('pcl_surface-1.8')
     pcl_deps += dependency('pcl_tracking-1.8')
+
+    vtk_cpp_args = run_command(['cmake', '--find-package', '-DNAME=VTK', '-DLANGUAGE=CXX', '-DCOMPILER_ID=gcc', '-DMODE=COMPILE']).stdout().strip().split()
+    vtk_common_dep = declare_dependency(compile_args: vtk_cpp_args,
+                                        link_args: '-lvtkCommonCore')
 else
     # TODO 
 endif
@@ -89,7 +93,8 @@ client_api_deps = [
     dlib_dep,
     boost_deps,
     pcl_deps,
-    freenect_dep
+    freenect_dep,
+    vtk_common_dep,
 ]
 
 
