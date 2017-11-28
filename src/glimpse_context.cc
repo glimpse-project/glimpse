@@ -1792,13 +1792,19 @@ gm_context_new(struct gm_logger *logger,
 
     alloc_rgb_color_stops(ctx);
 
-    AAsset *svm_asset = AAssetManager_open(ctx->asset_manager, "svm.json",
-                                           AASSET_MODE_BUFFER);
+
+    struct gm_asset *svm_asset = gm_asset_open("svm.json",
+                                               GM_ASSET_MODE_BUFFER,
+                                               &open_err);
     if (svm_asset) {
         // XXX: We're assuming svm.json is well-formed (we provide it, so it is)
-        const void *buf = AAsset_getBuffer(svm_asset);
+        const void *buf = gm_asset_get_buffer(svm_asset);
         JSON_Value *svm_json = json_parse_string((char *)buf);
         JSON_Object *svm_root = json_value_get_object(svm_json);
+
+        gm_asset_close(svm_asset);
+        buf = NULL;
+        svm_asset = NULL;
 
         std::vector<float> weights;
         JSON_Array *weights_array = json_object_get_array(svm_root, "weights");
@@ -1825,6 +1831,11 @@ gm_context_new(struct gm_logger *logger,
         ctx->people_detector.setIntrinsics(eigen_intrinsics);
         ctx->people_detector.setClassifier(person_classifier);
         ctx->people_detector.setPersonClusterLimits(1.3, 2.15, 0.3, 1.5);
+    } else {
+        xasprintf(err, "Failed to open svm.json: %s", open_err);
+        free(open_err);
+        gm_context_destroy(ctx);
+        return NULL;
     }
 
     return ctx;
