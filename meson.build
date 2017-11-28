@@ -1,4 +1,5 @@
 project('glimpse', ['c', 'cpp'],
+        license: 'MIT',
         default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
 use_system_libs = get_option('use_system_libs')
