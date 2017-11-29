@@ -22,6 +22,7 @@
  * SOFTWARE.
  */
 
+//#define USE_PCL_GBPD 1
 
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -62,11 +63,12 @@
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/segmentation/extract_clusters.h>
 
+#ifdef USE_PCL_GBPD
 #include <pcl/people/ground_based_people_detection_app.h>
+#endif
 
-#include <pcl/filters/voxel_grid.h>
-#include <pcl/filters/extract_indices.h>
 #include <pcl/filters/crop_box.h>
+#include <pcl/filters/extract_indices.h>
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/voxel_grid.h>
 
@@ -319,8 +321,10 @@ struct gm_context
 
     void *callback_data;
 
+#ifdef USE_PCL_GBPD
     pcl::people::GroundBasedPeopleDetectionApp<pcl::PointXYZRGBA>
       people_detector;
+#endif
 };
 
 static png_color default_palette[] = {
@@ -934,7 +938,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     LOGI("Processing cloud with %d points", (int)cloud->points.size());
 
-#if 1
     // Filter out points that are too near or too far
     start = get_time();
     pcl::PassThrough<pcl::PointXYZRGBA> passZ(true);
@@ -949,9 +952,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
          (int)cloud->points.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-#endif
 
-#if 1
+#ifndef USE_PCL_GBPD
     // Simplify point cloud by putting it through a 1cm voxel grid
     start = get_time();
     pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
@@ -1023,19 +1025,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-#if 1
-    // Remove ground plane
-    pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
-    extract.setInputCloud(cloud);
-    extract.setIndices(inliers);
-    extract.setNegative(true);
-    extract.filter(*cloud);
-#endif
-
-#if 0
+#ifdef USE_PCL_GBPD
     // Use pcl's GroundBasedPeopleDetectionApp
-    // NOTE: You likely want to disable the voxel grid and ground plane removal
-    //       above, and the Euclidean clustering below to use this block.
     start = get_time();
     Eigen::VectorXf eigen_ground_coeffs;
     eigen_ground_coeffs.resize(4);
@@ -1075,9 +1066,16 @@ gm_context_track_skeleton(struct gm_context *ctx)
     LOGI("People detection took %.3f%s\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-#endif
 
-#if 1
+#else
+
+    // Remove ground plane
+    pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
+    extract.setInputCloud(cloud);
+    extract.setIndices(inliers);
+    extract.setNegative(true);
+    extract.filter(*cloud);
+
     // Use Euclidean cluster extraction to look at only the largest cluster of
     // points (which we hope is the human)
 
@@ -1790,8 +1788,8 @@ gm_context_new(struct gm_logger *logger,
 
     alloc_rgb_color_stops(ctx);
 
-
-    struct gm_asset *svm_asset = gm_asset_open("svm.json",
+#ifdef USE_PCL_GBPD
+    struct gm_asset *svm_asset = gm_asset_open("person-hog-svm.json",
                                                GM_ASSET_MODE_BUFFER,
                                                &open_err);
     if (svm_asset) {
@@ -1835,6 +1833,7 @@ gm_context_new(struct gm_logger *logger,
         gm_context_destroy(ctx);
         return NULL;
     }
+#endif
 
     return ctx;
 }

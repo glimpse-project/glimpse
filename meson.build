@@ -3,6 +3,7 @@ project('glimpse', ['c', 'cpp'],
         default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
 use_system_libs = get_option('use_system_libs')
+use_pcl_gbpd = get_option('use_pcl_ground_based_people_detection')
 
 compiler = meson.get_compiler('c')
 
@@ -15,6 +16,7 @@ inc = include_directories(
 	'src/UnityPluginAPI')
 
 deps = []
+client_api_defines = []
 if use_system_libs
     glm_dep = dependency('glm')
     libpng_dep = dependency('libpng')
@@ -43,7 +45,6 @@ if use_system_libs
     pcl_deps += dependency('pcl_keypoints-1.8')
     pcl_deps += dependency('pcl_ml-1.8')
     pcl_deps += dependency('pcl_octree-1.8')
-    pcl_deps += dependency('pcl_people-1.8')
     pcl_deps += dependency('pcl_recognition-1.8')
     pcl_deps += dependency('pcl_registration-1.8')
     pcl_deps += dependency('pcl_sample_consensus-1.8')
@@ -52,12 +53,20 @@ if use_system_libs
     pcl_deps += dependency('pcl_stereo-1.8')
     pcl_deps += dependency('pcl_surface-1.8')
     pcl_deps += dependency('pcl_tracking-1.8')
+else
+    # TODO 
+endif
+
+if use_pcl_gbpd
+    pcl_deps += dependency('pcl_people-1.8')
 
     vtk_cpp_args = run_command(['cmake', '--find-package', '-DNAME=VTK', '-DLANGUAGE=CXX', '-DCOMPILER_ID=gcc', '-DMODE=COMPILE']).stdout().strip().split()
     vtk_common_dep = declare_dependency(compile_args: vtk_cpp_args,
                                         link_args: '-lvtkCommonCore')
+
+    client_api_defines += '-DUSE_PCL_GBPD'
 else
-    # TODO 
+    vtk_common_dep = []
 endif
 
 imgui_src = [
@@ -204,9 +213,11 @@ shared_library('glimpse',
 shared_library('glimpse-unity-plugin',
                [ 'src/glimpse_unity.cc' ] + client_api_src,
                include_directories: inc,
-               dependencies: client_api_deps)
+               dependencies: client_api_deps,
+               cpp_args: client_api_defines)
 
 executable('glimpse_viewer',
            [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
            include_directories: inc,
-           dependencies: client_api_deps + [ glfw_dep ])
+           dependencies: client_api_deps + [ glfw_dep ],
+           cpp_args: client_api_defines)

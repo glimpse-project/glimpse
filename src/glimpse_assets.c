@@ -114,6 +114,8 @@ gm_asset_open(const char *path, int mode, char **err)
 
     if (!root)
         root = getenv("GLIMPSE_ASSETS_ROOT");
+    if (!root)
+        root = "./";
 
     int max_len = strlen(path) + strlen(root) + 2;
     char *full_path = alloca(max_len);
