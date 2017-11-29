@@ -215,6 +215,7 @@ struct gm_context
     struct gm_intrinsics video_camera_intrinsics;
     struct gm_intrinsics training_camera_intrinsics;
     struct gm_extrinsics depth_to_video_extrinsics;
+    bool extrinsics_set;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -841,15 +842,20 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
             continue;
 
         if (extrinsics) {
-            point_t = (point_t * rotate) + translate;
+            point_t = (rotate * point_t) + translate;
         }
 
         int x = (int)
           ((point_t.x * intrinsics->fx / point_t.z) + intrinsics->cx);
+
+        if (x < 0 || x >= width) {
+            continue;
+        }
+
         int y = height - (int)
           ((point_t.y * intrinsics->fy / point_t.z) + intrinsics->cy);
 
-        if (x < 0 || x >= width || y < 0 || y >= height) {
+        if (y < 0 || y >= height) {
             continue;
         }
 
@@ -935,7 +941,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     reproject_cloud(cloud, (void *)tracking->video,
                     &ctx->video_camera_intrinsics,
-                    &ctx->depth_to_video_extrinsics,
+                    ctx->extrinsics_set ?
+                        &ctx->depth_to_video_extrinsics : NULL,
                     RGBA_INTO_CLOUD,
                     tracking->cloud, &tracking->cloud_size, false);
 
@@ -1866,7 +1873,12 @@ void
 gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
                                                 struct gm_extrinsics *extrinsics)
 {
-    ctx->depth_to_video_extrinsics = *extrinsics;
+    if (extrinsics) {
+        ctx->depth_to_video_extrinsics = *extrinsics;
+        ctx->extrinsics_set = true;
+    } else {
+        ctx->extrinsics_set = false;
+    }
 }
 
 void
