@@ -78,6 +78,9 @@ gm_device_get_depth_intrinsics(struct gm_device *dev);
 struct gm_intrinsics *
 gm_device_get_video_intrinsics(struct gm_device *dev);
 
+struct gm_extrinsics *
+gm_device_get_depth_to_video_extrinsics(struct gm_device *dev);
+
 void
 gm_device_set_event_callback(struct gm_device *dev,
                              void (*event_callback)(struct gm_device *dev,

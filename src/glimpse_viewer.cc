@@ -1144,6 +1144,8 @@ main(int argc, char **argv)
 
     gm_context_set_depth_camera_intrinsics(data.ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data.ctx, video_intrinsics);
+    gm_context_set_depth_to_video_camera_extrinsics(data.ctx,
+        gm_device_get_depth_to_video_extrinsics(data.device));
 
     /* NB: there's no guarantee about what thread these event callbacks
      * might be invoked from...

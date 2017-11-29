@@ -214,6 +214,7 @@ struct gm_context
     struct gm_intrinsics depth_camera_intrinsics;
     struct gm_intrinsics video_camera_intrinsics;
     struct gm_intrinsics training_camera_intrinsics;
+    struct gm_extrinsics depth_to_video_extrinsics;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -787,21 +788,17 @@ void
 reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
                 void *buffer,
                 const struct gm_intrinsics *intrinsics,
+                const struct gm_extrinsics *extrinsics,
                 enum reproject_op op,
                 GlimpsePointXYZRGBA *cloud_copy = NULL,
                 int *cloud_size = NULL,
                 bool copy_is_dense = true)
 {
+    glm::mat3 rotate;
+    glm::vec3 translate;
+
     int width = intrinsics->width;
-    float half_width = width / 2.0f;
     int height = intrinsics->height;
-    float half_height = height / 2.0f;
-
-    float h_fov = 2.0 * atan(0.5 * width / intrinsics->fx);
-    float v_fov = 2.0 * atan(0.5 * height / intrinsics->fy);
-
-    float tan_half_hfov = tan(h_fov / 2.0); // XXX: or just 0.5 * width / intrinsics->fx
-    float tan_half_vfov = tan(v_fov / 2.0);
 
     if (cloud_copy && !copy_is_dense) {
         foreach_xy_off(width, height) {
@@ -817,6 +814,15 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
         }
     }
 
+    if (extrinsics) {
+        const float *r = extrinsics->rotation;
+        rotate = glm::mat3(r[0], r[1], r[2],
+                           r[3], r[4], r[5],
+                           r[6], r[7], r[8]);
+        const float *t = extrinsics->translation;
+        translate = glm::vec3(t[0], t[1], t[2]);
+    }
+
     /* XXX: we don't assume that cloud->width/height are the same as
      * width/height. The pcl point cloud might not be 2d and if it is
      * we might be projecting a high resolution point cloud into a
@@ -826,25 +832,27 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
     int n_points = 0;
     for (uint32_t p = 0; p < cloud->points.size(); p++) {
         pcl::PointXYZRGBA *point = &cloud->points[p];
-        glm::vec2 ndc_point;
+        glm::vec3 point_t(point->x, point->y, point->z);
+        glm::vec2 point_2d;
 
         if (isnan(point->x) || isinf(point->x) ||
             isnan(point->y) || isinf(point->y) ||
             !isnormal(point->z) || point->z >= HUGE_DEPTH)
             continue;
 
-        float hfield_width = tan_half_hfov * point->z;
-        float vfield_height = -tan_half_vfov * point->z;
+        if (extrinsics) {
+            point_t = (point_t * rotate) + translate;
+        }
 
-        ndc_point.x = point->x / hfield_width;
-        ndc_point.y = point->y / vfield_height;
+        int x = (int)
+          ((point_t.x * intrinsics->fx / point_t.z) + intrinsics->cx);
+        int y = height - (int)
+          ((point_t.y * intrinsics->fy / point_t.z) + intrinsics->cy);
 
-        if (ndc_point.x < -1.0f || ndc_point.x >= 1.0f ||
-            ndc_point.y < -1.0f || ndc_point.y >= 1.0f)
+        if (x < 0 || x >= width || y < 0 || y >= height) {
             continue;
+        }
 
-        int x = (int)((ndc_point.x + 1.0f) * half_width);
-        int y = (int)((ndc_point.y + 1.0f) * half_height);
         int off = width * y + x;
 
         switch(op) {
@@ -862,7 +870,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
         }
 
         case DEPTH_INTO_BUFFER:
-            ((half*)buffer)[off] = (half)point->z;
+            ((half*)buffer)[off] = (half)point_t.z;
             break;
         }
 
@@ -927,6 +935,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     reproject_cloud(cloud, (void *)tracking->video,
                     &ctx->video_camera_intrinsics,
+                    &ctx->depth_to_video_extrinsics,
                     RGBA_INTO_CLOUD,
                     tracking->cloud, &tracking->cloud_size, false);
 
@@ -1152,7 +1161,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     half *depth_img = (half *)xmalloc(width * height * sizeof(half));
 
     reproject_cloud(cloud, (void *)depth_img, &ctx->training_camera_intrinsics,
-                    DEPTH_INTO_BUFFER);
+                    NULL, DEPTH_INTO_BUFFER);
 
     if (width == 0 || height == 0) {
         LOGE("Skipping detection: bad re-projected depth image size: %dx%d\n",
@@ -1266,6 +1275,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     start = get_time();
     reproject_cloud(cloud, (void*)rgb_label_map,
                     &ctx->training_camera_intrinsics,
+                    NULL,
                     RGB_INTO_CLOUD,
                     tracking->label_cloud,
                     &tracking->label_cloud_size,
@@ -1850,6 +1860,13 @@ gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
                                        struct gm_intrinsics *intrinsics)
 {
     ctx->video_camera_intrinsics = *intrinsics;
+}
+
+void
+gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
+                                                struct gm_extrinsics *extrinsics)
+{
+    ctx->depth_to_video_extrinsics = *extrinsics;
 }
 
 void

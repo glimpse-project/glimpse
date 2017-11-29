@@ -138,6 +138,11 @@ struct gm_intrinsics {
   /* TODO: add distortion model discription */
 };
 
+struct gm_extrinsics {
+  float rotation[9];    // Column-major 3x3 rotation matrix
+  float translation[3]; // Translation vector, in meters
+};
+
 struct gm_context;
 
 typedef struct {
@@ -165,6 +170,10 @@ gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
 void
 gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
                                        struct gm_intrinsics *intrinsics);
+
+void
+gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
+                                                struct gm_extrinsics *extrinsics);
 
 /* Enable skeletal tracking */
 void

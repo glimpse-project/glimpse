@@ -79,6 +79,7 @@ struct gm_device
 
     struct gm_intrinsics video_camera_intrinsics;
     struct gm_intrinsics depth_camera_intrinsics;
+    struct gm_extrinsics depth_to_video_extrinsics;
 
     void (*frame_callback)(struct gm_device *dev,
                            struct gm_frame *frame,
@@ -269,6 +270,28 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_camera_intrinsics.fy = 591.04053696870778;
     dev->depth_format = GM_FORMAT_Z_U16_MM;
 
+    dev->video_camera_intrinsics.width = 640;
+    dev->video_camera_intrinsics.height = 480;
+    dev->video_camera_intrinsics.cx = 328.94272028759258;
+    dev->video_camera_intrinsics.cy = 267.48068171871557;
+    dev->video_camera_intrinsics.fx = 529.21508098293293;
+    dev->video_camera_intrinsics.fy = 525.56393630057437;
+    dev->video_format = GM_FORMAT_LUMINANCE_U8;
+
+    dev->depth_to_video_extrinsics.rotation[0] = 0.99984628826577793;
+    dev->depth_to_video_extrinsics.rotation[1] = 0.0012635359098409581;
+    dev->depth_to_video_extrinsics.rotation[2] = -0.017487233004436643;
+    dev->depth_to_video_extrinsics.rotation[3] = -0.0014779096108364480;
+    dev->depth_to_video_extrinsics.rotation[4] = 0.99992385683542895;
+    dev->depth_to_video_extrinsics.rotation[5] = -0.012251380107679535;
+    dev->depth_to_video_extrinsics.rotation[6] = 0.017470421412464927;
+    dev->depth_to_video_extrinsics.rotation[7] = 0.012275341476520762;
+    dev->depth_to_video_extrinsics.rotation[8] = 0.99977202419716948;
+
+    dev->depth_to_video_extrinsics.translation[0] = 0.019985242312092553;
+    dev->depth_to_video_extrinsics.translation[1] = -0.00074423738761617583;
+    dev->depth_to_video_extrinsics.translation[2] = -0.010916736334336222;
+
     /* Some alternative intrinsics
      *
      * TODO: we should allow explicit calibrarion and loading these at runtime
@@ -279,10 +302,6 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_camera_intrinsics.fx = 521.179233;
     dev->depth_camera_intrinsics.fy = 493.033034;
 #endif
-
-    /* FIXME: we can't query intrinsics from libfreenect */
-    dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
-    dev->video_format = GM_FORMAT_LUMINANCE_U8;
 
     /* Allocated large enough got _U16_MM data */
     int depth_width = dev->depth_camera_intrinsics.width;
@@ -708,6 +727,12 @@ struct gm_intrinsics *
 gm_device_get_video_intrinsics(struct gm_device *dev)
 {
     return &dev->video_camera_intrinsics;
+}
+
+struct gm_extrinsics *
+gm_device_get_depth_to_video_extrinsics(struct gm_device *dev)
+{
+    return &dev->depth_to_video_extrinsics;
 }
 
 void
