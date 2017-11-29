@@ -15,15 +15,17 @@ inc = include_directories(
 	'src/imgui',
 	'src/UnityPluginAPI')
 
-deps = []
 client_api_defines = []
+
+dlib_sp = subproject('dlib')
+dlib_dep = dlib_sp.get_variable('dlib_dep')
+
 if use_system_libs
     glm_dep = dependency('glm')
     libpng_dep = dependency('libpng')
     freenect_dep = dependency('libfreenect')
     glfw_dep = dependency('glfw3')
     epoxy_dep = dependency('epoxy')
-    dlib_dep = dependency('dlib-1')
 
     boost_modules = [
         'date_time',

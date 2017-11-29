@@ -1,0 +1,4 @@
+[wrap-git]
+directory = dlib
+url = https://gitlab.com/impossible/dlib
+revision = 329028cc539f1fc3b45dc6a2f7474b19b796d0ec
