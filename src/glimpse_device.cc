@@ -270,13 +270,35 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_camera_intrinsics.fy = 591.04053696870778;
     dev->depth_format = GM_FORMAT_Z_U16_MM;
 
+    /* We're going to use Freenect's registered depth mode, which transforms
+     * depth to video space, so we don't need video intrinsics/extrinsics.
+     */
+    dev->video_format = GM_FORMAT_LUMINANCE_U8;
+    dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
+    dev->depth_to_video_extrinsics.rotation[0] = 1.f;
+    dev->depth_to_video_extrinsics.rotation[1] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[2] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[3] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[4] = 1.f;
+    dev->depth_to_video_extrinsics.rotation[5] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[6] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[7] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[8] = 1.f;
+
+    dev->depth_to_video_extrinsics.translation[0] = 0.f;
+    dev->depth_to_video_extrinsics.translation[1] = 0.f;
+    dev->depth_to_video_extrinsics.translation[2] = 0.f;
+
+    /* Alternative video intrinsics/extrinsics when not using registered mode.
+     * Note, these unfortunately don't actually work.
+     */
+#if 0
     dev->video_camera_intrinsics.width = 640;
     dev->video_camera_intrinsics.height = 480;
     dev->video_camera_intrinsics.cx = 328.94272028759258;
     dev->video_camera_intrinsics.cy = 267.48068171871557;
     dev->video_camera_intrinsics.fx = 529.21508098293293;
     dev->video_camera_intrinsics.fy = 525.56393630057437;
-    dev->video_format = GM_FORMAT_LUMINANCE_U8;
 
     dev->depth_to_video_extrinsics.rotation[0] = 0.99984628826577793;
     dev->depth_to_video_extrinsics.rotation[1] = 0.0012635359098409581;
@@ -291,6 +313,9 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_to_video_extrinsics.translation[0] = 0.019985242312092553;
     dev->depth_to_video_extrinsics.translation[1] = -0.00074423738761617583;
     dev->depth_to_video_extrinsics.translation[2] = -0.010916736334336222;
+#endif
+
+    dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
 
     /* Some alternative intrinsics
      *
@@ -301,6 +326,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_camera_intrinsics.cy = 259.055966;
     dev->depth_camera_intrinsics.fx = 521.179233;
     dev->depth_camera_intrinsics.fy = 493.033034;
+
 #endif
 
     /* Allocated large enough got _U16_MM data */
@@ -329,12 +355,12 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
      */
 
     freenect_set_depth_callback(dev->kinect.fdev, kinect_depth_frame_cb);
-    //freenect_set_depth_mode(dev->kinect.fdev,
-    //                        freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM,
-    //                        FREENECT_DEPTH_REGISTERED)); // MM, aligned to RGB
     freenect_set_depth_mode(dev->kinect.fdev,
                             freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM,
-                                                     FREENECT_DEPTH_MM));
+                            FREENECT_DEPTH_REGISTERED)); // MM, aligned to RGB
+    /*freenect_set_depth_mode(dev->kinect.fdev,
+                            freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM,
+                                                     FREENECT_DEPTH_MM));*/
     freenect_set_depth_buffer(dev->kinect.fdev, dev->depth_back);
 
 

@@ -187,6 +187,8 @@ static GLuint gl_cloud_uni_size;
 static GLuint gl_cloud_bo;
 static GLuint gl_joints_bo;
 static GLuint gl_cloud_fbo;
+static GLuint gl_cloud_depth_bo;
+static GLuint gl_cloud_depth_tex;
 static GLuint gl_cloud_tex;
 static bool cloud_tex_valid = false;
 
@@ -332,15 +334,28 @@ draw_ui(Data *data)
 
     // Ensure the framebuffer texture is valid
     if (!cloud_tex_valid) {
+        int width = main_area_size.x/2;
+        int height = main_area_size.y/2;
+
+        // Generate textures
         glBindTexture(GL_TEXTURE_2D, gl_cloud_tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                     main_area_size.x/2, main_area_size.y/2,
-                     0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+                     width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+
         cloud_tex_valid = true;
 
+        // Bind colour/depth to point-cloud fbo
         glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
+
+        glBindRenderbuffer(GL_RENDERBUFFER, gl_cloud_depth_bo);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
+                              width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, gl_cloud_depth_bo);
+
         glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                              gl_cloud_tex, 0);
+
         GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
         glDrawBuffers(1, drawBuffers);
 
@@ -356,7 +371,10 @@ draw_ui(Data *data)
     // Redraw point-clouds to texture
     glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
 
-    glClear(GL_COLOR_BUFFER_BIT);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
+
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     glViewport(0, 0, main_area_size.x/2, main_area_size.y/2);
 
     // Enable point-cloud drawing shader
@@ -380,7 +398,7 @@ draw_ui(Data *data)
 
     if (data->n_points) {
         // Set point size
-        glUniform1f(gl_cloud_uni_size, 1.f);
+        glUniform1f(gl_cloud_uni_size, 2.f);
 
         // Bind point cloud buffer-object
         glBindBuffer(GL_ARRAY_BUFFER, gl_cloud_bo);
@@ -397,6 +415,10 @@ draw_ui(Data *data)
         // Draw labelled point cloud
         glDrawArrays(GL_POINTS, 0, data->n_points);
     }
+
+    // We want joints to appear over the point cloud, but we still want them
+    // to be depth-tested with each other.
+    glClear(GL_DEPTH_BUFFER_BIT);
 
     if (data->n_joints) {
         // Set point size for joints
@@ -424,6 +446,7 @@ draw_ui(Data *data)
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
 
     ImGui::ImageButton((void *)(intptr_t)gl_cloud_tex, win_size,
                        ImVec2(0, 0), ImVec2(1, 1), 0);
@@ -1018,6 +1041,7 @@ init_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glGenFramebuffers(1, &gl_cloud_fbo);
+    glGenRenderbuffers(1, &gl_cloud_depth_bo);
 }
 
 static void
@@ -1144,8 +1168,8 @@ main(int argc, char **argv)
 
     gm_context_set_depth_camera_intrinsics(data.ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data.ctx, video_intrinsics);
-    gm_context_set_depth_to_video_camera_extrinsics(data.ctx,
-        gm_device_get_depth_to_video_extrinsics(data.device));
+    /*gm_context_set_depth_to_video_camera_extrinsics(data.ctx,
+        gm_device_get_depth_to_video_extrinsics(data.device));*/
 
     /* NB: there's no guarantee about what thread these event callbacks
      * might be invoked from...
