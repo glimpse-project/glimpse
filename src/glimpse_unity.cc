@@ -249,7 +249,7 @@ handle_device_frame_updates(struct glimpse_data *data)
          * Note: the requirements may be upgraded to ask for _DEPTH data
          * after the next iteration of skeltal tracking completes.
          */
-        request_device_frame(data, GM_REQUEST_FRAME_LUMINANCE);
+        request_device_frame(data, GM_REQUEST_FRAME_VIDEO);
     }
 
 #if 0
@@ -325,7 +325,7 @@ handle_context_event(struct glimpse_data *data, struct gm_event *event)
         data->context_needs_frame = true;
         request_device_frame(data,
                              (GM_REQUEST_FRAME_DEPTH |
-                              GM_REQUEST_FRAME_LUMINANCE));
+                              GM_REQUEST_FRAME_VIDEO));
         break;
     case GM_EVENT_TRACKING_READY:
         gm_debug(data->log, "GM_EVENT_TRACKING_READY\n");

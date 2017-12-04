@@ -177,7 +177,7 @@ static GLuint uniform_tex_sampler;
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_rgb_tex;
-static GLuint gl_lum_tex;
+static GLuint gl_vid_tex;
 
 static GLuint gl_cloud_program;
 static GLuint gl_cloud_attr_pos;
@@ -289,9 +289,9 @@ draw_ui(Data *data)
     ImGui::Separator();
     ImGui::Spacing();
 
-    static const char* view_items[] = { "Labels", "Luminance" };
-    ImGui::ListBox("Cloud view", &data->selected_view, view_items,
-                   ARRAY_LEN(view_items));
+    static const char* view_items[] = { "Video", "Labels" };
+    ImGui::Combo("Cloud view", &data->selected_view, view_items,
+                 ARRAY_LEN(view_items));
 
     ImGui::End();
 
@@ -308,11 +308,11 @@ draw_ui(Data *data)
 
     ImGui::SetNextWindowPos(ImVec2(left_col, main_menu_size.y + main_area_size.y/2));
     ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
-    ImGui::Begin("Luminance", NULL,
+    ImGui::Begin("Video Buffer", NULL,
                  ImGuiWindowFlags_NoScrollbar |
                  ImGuiWindowFlags_NoResize);
     win_size = ImGui::GetWindowSize();
-    ImGui::Image((void *)(intptr_t)gl_lum_tex, win_size);
+    ImGui::Image((void *)(intptr_t)gl_vid_tex, win_size);
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(left_col + main_area_size.x/2, main_menu_size.y));
@@ -553,16 +553,16 @@ handle_device_frame_updates(Data *data)
          * Note: the requirements may be upgraded to ask for _DEPTH data
          * after the next iteration of skeltal tracking completes.
          */
-        request_device_frame(data, GM_REQUEST_FRAME_LUMINANCE);
+        request_device_frame(data, GM_REQUEST_FRAME_VIDEO);
     }
 
     if (upload) {
         ProfileScopedSection(UploadFrameTextures);
 
         /*
-         * Update luminance from RGB camera
+         * Update video from camera
          */
-        glBindTexture(GL_TEXTURE_2D, gl_lum_tex);
+        glBindTexture(GL_TEXTURE_2D, gl_vid_tex);
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         /* NB: gles2 only allows npot textures with clamp to edge
@@ -574,11 +574,29 @@ handle_device_frame_updates(Data *data)
         void *video_front = gm_frame_get_video_buffer(data->device_frame);
         enum gm_format video_format = gm_frame_get_video_format(data->device_frame);
 
-        assert(video_format == GM_FORMAT_LUMINANCE_U8);
+        switch(video_format) {
+        case GM_FORMAT_LUMINANCE_U8:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                         data->video_width, data->video_height,
+                         0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+            break;
 
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                     data->video_width, data->video_height,
-                     0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+        case GM_FORMAT_RGB:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                         data->video_width, data->video_height,
+                         0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_RGBX:
+        case GM_FORMAT_RGBA:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                         data->video_width, data->video_height,
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        default:
+            break;
+        }
     }
 }
 
@@ -633,8 +651,8 @@ upload_tracking_textures(Data *data)
     data->n_points = 0;
     data->n_joints = 0;
     const GlimpsePointXYZRGBA *cloud = (data->selected_view == 0) ?
-        gm_tracking_get_rgb_label_cloud(data->latest_tracking, &data->n_points) :
-        gm_tracking_get_rgb_cloud(data->latest_tracking, &data->n_points);
+        gm_tracking_get_rgb_cloud(data->latest_tracking, &data->n_points) :
+        gm_tracking_get_rgb_label_cloud(data->latest_tracking, &data->n_points);
     const float *joints =
         gm_tracking_get_joint_positions(data->latest_tracking, &data->n_joints);
 
@@ -708,7 +726,7 @@ handle_context_event(Data *data, struct gm_event *event)
         data->context_needs_frame = true;
         request_device_frame(data,
                              (GM_REQUEST_FRAME_DEPTH |
-                              GM_REQUEST_FRAME_LUMINANCE));
+                              GM_REQUEST_FRAME_VIDEO));
         break;
     case GM_EVENT_TRACKING_READY:
         data->tracking_ready = true;
@@ -1026,8 +1044,8 @@ init_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glGenTextures(1, &gl_lum_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_lum_tex);
+    glGenTextures(1, &gl_vid_tex);
+    glBindTexture(GL_TEXTURE_2D, gl_vid_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 

@@ -110,6 +110,11 @@
     for (int y = 0, off = 0; y < (int)height; y++) \
         for (int x = 0; x < (int)width; x++, off++)
 
+#define CLIPH(X) ((X) > 255 ? 255 : (X))
+#define RGB2Y(R, G, B) ((uint8_t)CLIPH(((66 * (uint32_t)(R) + \
+                                         129 * (uint32_t)(G) + \
+                                         25 * (uint32_t)(B) + 128) >> 8) +  16))
+
 using half_float::half;
 using namespace pcl::common;
 
@@ -135,6 +140,7 @@ enum image_format {
 enum reproject_op {
     RGBA_INTO_CLOUD,
     RGB_INTO_CLOUD,
+    RGB_MIXIN_COPY,
     DEPTH_INTO_BUFFER
 };
 
@@ -878,6 +884,9 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
         case DEPTH_INTO_BUFFER:
             ((half*)buffer)[off] = (half)point_t.z;
             break;
+
+        case RGB_MIXIN_COPY:
+            break;
         }
 
         if (cloud_copy) {
@@ -885,7 +894,28 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
             cloud_copy[cloud_off].x = point->x;
             cloud_copy[cloud_off].y = point->y;
             cloud_copy[cloud_off].z = point->z;
-            cloud_copy[cloud_off].rgba = point->rgba;
+
+            if (op == RGB_MIXIN_COPY) {
+                uint32_t r = (uint32_t)((uint8_t*)buffer)[off * 3];
+                uint32_t g = (uint32_t)((uint8_t*)buffer)[off * 3 + 1];
+                uint32_t b = (uint32_t)((uint8_t*)buffer)[off * 3 + 2];
+
+                uint32_t r2 = (point->rgba >> 24) & 0xFF;
+                uint32_t g2 = (point->rgba >> 16) & 0xFF;
+                uint32_t b2 = (point->rgba >> 8) & 0xFF;
+
+                uint32_t col = ((r + r2)/2) << 24 |
+                               ((g + g2)/2) << 16 |
+                               ((b + b2)/2) << 8 | (point->rgba & 0xFF);
+
+                cloud_copy[cloud_off].rgba = col;
+
+                // To aid visualisation, bump these points a little closer to
+                // the camera so they draw over neighbouring points
+                cloud_copy[cloud_off].z -= 0.005f;
+            } else {
+                cloud_copy[cloud_off].rgba = point->rgba;
+            }
         }
 
         ++n_points;
@@ -1280,6 +1310,17 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     // Colourise cloud based on labels for debug
     start = get_time();
+
+    // This tints the coloured depth cloud with the inferred label colours,
+    // but turns out not to be that useful a visualisation due to the
+    // sparseness of the label cloud vs. the original depth cloud.
+    /*reproject_cloud(cloud, (void *)rgb_label_map,
+                    &ctx->training_camera_intrinsics,
+                    ctx->extrinsics_set ?
+                        &ctx->depth_to_video_extrinsics : NULL,
+                    RGB_MIXIN_COPY,
+                    tracking->cloud, NULL, false);*/
+
     reproject_cloud(cloud, (void*)rgb_label_map,
                     &ctx->training_camera_intrinsics,
                     NULL,
@@ -1318,7 +1359,7 @@ request_frame(struct gm_context *ctx)
     struct gm_event *event = event_alloc(GM_EVENT_REQUEST_FRAME);
 
     event->request_frame.flags =
-        GM_REQUEST_FRAME_DEPTH | GM_REQUEST_FRAME_LUMINANCE;
+        GM_REQUEST_FRAME_DEPTH | GM_REQUEST_FRAME_VIDEO;
 
     ctx->event_callback(ctx, event, ctx->callback_data);
 }
@@ -1475,6 +1516,9 @@ alloc_tracking(struct gm_context *ctx)
     tracking->video = (uint32_t *)
       xcalloc(video_width * video_height, sizeof(uint32_t));
 
+    tracking->face_detect_buf =
+        (uint8_t *)xcalloc(video_width * video_height, 1);
+
 #ifdef DOWNSAMPLE_1_2
 #ifdef DOWNSAMPLE_1_4
     tracking->face_detect_buf_width = video_width / 4;
@@ -1487,10 +1531,6 @@ alloc_tracking(struct gm_context *ctx)
     tracking->face_detect_buf_width = video_width;
     tracking->face_detect_buf_height = video_height;
 #endif
-
-    tracking->face_detect_buf =
-        (uint8_t *)xcalloc(tracking->face_detect_buf_width *
-                           tracking->face_detect_buf_height, 1);
 
     return tracking;
 }
@@ -1882,21 +1922,14 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
 }
 
 void
-update_tracking_luminance(struct gm_context *ctx,
-                          struct gm_tracking *tracking,
-                          enum gm_format format,
-                          uint8_t *luminance,
-                          uint64_t timestamp)
+update_tracking_video(struct gm_context *ctx,
+                      struct gm_tracking *tracking,
+                      enum gm_format format,
+                      uint8_t *video,
+                      uint64_t timestamp)
 {
     int width = ctx->video_camera_intrinsics.width;
     int height = ctx->video_camera_intrinsics.height;
-
-    assert(format == GM_FORMAT_LUMINANCE_U8);
-
-    foreach_xy_off(width, height) {
-        uint8_t lum = luminance[off];
-        tracking->video[off] = (lum << 24) | (lum << 16) | (lum << 8) | 0xFF;
-    }
 
     if (!ctx->grey_width) {
         ctx->grey_width = width;
@@ -1909,18 +1942,65 @@ update_tracking_luminance(struct gm_context *ctx,
 #endif
     }
 
+    glimpse::wrapped_image<unsigned char> orig_grey_img;
+
+    switch(format) {
+    case GM_FORMAT_RGB:
+        foreach_xy_off(width, height) {
+            uint8_t r = video[off * 3];
+            uint8_t g = video[off * 3 + 1];
+            uint8_t b = video[off * 3 + 2];
+            tracking->video[off] = (r << 24) | (g << 16) | (b << 8) | 0xFF;
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+
+    case GM_FORMAT_RGBX:
+        foreach_xy_off(width, height) {
+            uint32_t rgba = ((uint32_t*)video)[off] | 0xFF;
+            tracking->video[off] = rgba;
+
+            uint8_t r = video[off * 3];
+            uint8_t g = video[off * 3 + 1];
+            uint8_t b = video[off * 3 + 2];
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+
+    case GM_FORMAT_RGBA:
+        memcpy(tracking->video, video, width * height * 4);
+        foreach_xy_off(width, height) {
+            uint8_t r = video[off * 3];
+            uint8_t g = video[off * 3 + 1];
+            uint8_t b = video[off * 3 + 2];
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+
+    case GM_FORMAT_LUMINANCE_U8:
+        foreach_xy_off(width, height) {
+            uint8_t lum = video[off];
+            tracking->video[off] = (lum << 24) | (lum << 16) | (lum << 8) | 0xFF;
+        }
+        memcpy(tracking->face_detect_buf, video, width * height);
+        break;
+
+    default:
+        assert(0);
+        return;
+    }
+
+    orig_grey_img.wrap(ctx->grey_width,
+                       ctx->grey_height,
+                       ctx->grey_width, //stride
+                       static_cast<unsigned char *>(tracking->face_detect_buf));
+
 #ifndef DOWNSAMPLE_ON_GPU
     uint64_t start, end, duration_ns;
 
 #ifdef DOWNSAMPLE_1_2
 #ifdef DOWNSAMPLE_1_4
     /* 1/4 resolution */
-    glimpse::wrapped_image<unsigned char> orig_grey_img;
-    orig_grey_img.wrap(ctx->grey_width,
-                       ctx->grey_height,
-                       ctx->grey_width, //stride
-                       static_cast<unsigned char *>(luminance));
-
     glimpse::wrapped_image<unsigned char> grey_1_2_img;
     grey_1_2_img.wrap(width / 2,
                       height / 2,
@@ -1934,21 +2014,12 @@ update_tracking_luminance(struct gm_context *ctx,
                       static_cast<unsigned char *>(tracking->face_detect_buf));
 #else
     /* half resolution */
-    glimpse::wrapped_image<unsigned char> orig_grey_img;
-    orig_grey_img.wrap(ctx->grey_width,
-                       ctx->grey_height,
-                       ctx->grey_width, //stride
-                       static_cast<unsigned char *>(luminance));
-
     glimpse::wrapped_image<unsigned char> grey_1_2_img;
     grey_1_2_img.wrap(width / 2,
                       height / 2,
                       width / 2, //stride
                       static_cast<unsigned char *>(tracking->face_detect_buf));
 #endif
-#else
-    /* full resolution */
-    memcpy(tracking->face_detect_buf, luminance, width * height);
 #endif
 
 #ifdef DOWNSAMPLE_1_2
@@ -2005,10 +2076,6 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
     uint8_t *depth_rgb_back = tracking->depth_rgb;
 
     switch (format) {
-    case GM_FORMAT_UNKNOWN:
-    case GM_FORMAT_LUMINANCE_U8:
-        assert(0);
-        break;
     case GM_FORMAT_Z_U16_MM:
         foreach_xy_off(width, height) {
             float depth_m = ((uint16_t *)depth)[off] / 1000.f;
@@ -2026,6 +2093,9 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
             float depth_m = ((half *)depth)[off];
             COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
         }
+        break;
+    default:
+        assert(0);
         break;
     }
 
@@ -2123,12 +2193,11 @@ gm_context_notify_frame(struct gm_context *ctx,
                                       frame->depth,
                                       frame->timestamp);
 
-    assert(frame->video_format == GM_FORMAT_LUMINANCE_U8);
-    update_tracking_luminance(ctx,
-                              ctx->tracking_back,
-                              frame->video_format,
-                              (uint8_t *)frame->video,
-                              frame->timestamp);
+    update_tracking_video(ctx,
+                          ctx->tracking_back,
+                          frame->video_format,
+                          (uint8_t *)frame->video,
+                          frame->timestamp);
 
     pthread_mutex_lock(&ctx->frame_ready_mutex);
     ctx->frame_ready = true;

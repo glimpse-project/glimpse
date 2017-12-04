@@ -87,7 +87,7 @@ struct gm_device
     void *frame_callback_data;
 
     /* What data is required for the next frame?
-     * E.g. _DEPETH | _LUMINANCE | _COLOR
+     * E.g. _DEPTH | _LUMINANCE | _COLOR
      */
     uint64_t frame_request_requirements;
 
@@ -185,30 +185,22 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 }
 
 static void
-kinect_rgb_frame_cb(freenect_device *fdev, void *yuv, uint32_t timestamp)
+kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 {
     struct gm_device *dev = (struct gm_device *)freenect_get_user(fdev);
 
-    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_LUMINANCE))
+    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO))
         return;
 
     int width = dev->video_camera_intrinsics.width;
     int height = dev->video_camera_intrinsics.height;
 
-    uint8_t *lum_back = (uint8_t *)dev->video_back;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int in_pos = y * width * 2 + x * 2;
-            int out_pos = y * width + x;
-
-            uint8_t lum = ((uint8_t *)yuv)[in_pos + 1];
-            lum_back[out_pos] = lum;
-        }
-    }
+    uint8_t *rgb_back = (uint8_t *)dev->video_back;
+    memcpy(rgb_back, video, width * height * 3);
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
     std::swap(dev->video_mid, dev->video_back);
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_LUMINANCE;
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
     pthread_mutex_lock(&dev->request_requirements_lock);
@@ -273,7 +265,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     /* We're going to use Freenect's registered depth mode, which transforms
      * depth to video space, so we don't need video intrinsics/extrinsics.
      */
-    dev->video_format = GM_FORMAT_LUMINANCE_U8;
+    dev->video_format = GM_FORMAT_RGB;
     dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
     dev->depth_to_video_extrinsics.rotation[0] = 1.f;
     dev->depth_to_video_extrinsics.rotation[1] = 0.f;
@@ -336,17 +328,17 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_mid = xmalloc(depth_width * depth_height * 2);
     dev->depth_back = xmalloc(depth_width * depth_height * 2);
 
-    /* allocated large enough for _LUMINANCE format */
+    /* allocated large enough for _RGB format */
     int video_width = dev->video_camera_intrinsics.width;
     int video_height = dev->video_camera_intrinsics.height;
     dev->video_front = xmalloc(video_width * video_height);
     dev->video_mid = xmalloc(video_width * video_height);
-    dev->video_back = xmalloc(video_width * video_height);
+    dev->video_back = xmalloc(video_width * video_height * 3);
 
     freenect_set_video_callback(dev->kinect.fdev, kinect_rgb_frame_cb);
     freenect_set_video_mode(dev->kinect.fdev,
                             freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM,
-                                                     FREENECT_VIDEO_YUV_RAW));
+                                                     FREENECT_VIDEO_RGB));
     /* XXX: we don't explicitly set a back buffer for video and rely on
      * libfreenect automatically allocating one for us. We are only keeping the
      * luminance which we copy out immediately when notified of a new frame in
@@ -636,7 +628,7 @@ dummy_io_thread_cb(void *userdata)
         half *depth_image = dev->dummy.depth_images[dev->dummy.frame];
         uint8_t *luminance_image = dev->dummy.lum_images[dev->dummy.frame];
 
-        if (dev->frame_request_requirements & GM_REQUEST_FRAME_LUMINANCE) {
+        if (dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
             int video_width = dev->video_camera_intrinsics.width;
             int video_height = dev->video_camera_intrinsics.height;
 
@@ -807,7 +799,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
         frame->depth_format = dev->depth_format;
         assert(frame->depth);
     }
-    if (dev->frame_ready_requirements & GM_REQUEST_FRAME_LUMINANCE) {
+    if (dev->frame_ready_requirements & GM_REQUEST_FRAME_VIDEO) {
         std::swap(dev->video_front, dev->video_mid);
         frame->video = dev->video_front;
         frame->video_format = dev->video_format;

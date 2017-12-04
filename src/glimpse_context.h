@@ -35,6 +35,9 @@ enum gm_format {
     GM_FORMAT_Z_F32_M,
     GM_FORMAT_Z_F16_M,
     GM_FORMAT_LUMINANCE_U8,
+    GM_FORMAT_RGB,
+    GM_FORMAT_RGBX,
+    GM_FORMAT_RGBA
 };
 
 inline int __attribute__((unused))
@@ -49,6 +52,10 @@ gm_format_bytes_per_pixel(enum gm_format format)
     case GM_FORMAT_Z_U16_MM:
     case GM_FORMAT_Z_F16_M:
         return 2;
+    case GM_FORMAT_RGB:
+        return 3;
+    case GM_FORMAT_RGBX:
+    case GM_FORMAT_RGBA:
     case GM_FORMAT_Z_F32_M:
         return 4;
     }
@@ -92,8 +99,8 @@ enum gm_event_type
     GM_EVENT_TRACKING_READY
 };
 
-#define GM_REQUEST_FRAME_DEPTH      1<<0
-#define GM_REQUEST_FRAME_LUMINANCE  1<<1
+#define GM_REQUEST_FRAME_DEPTH  1<<0
+#define GM_REQUEST_FRAME_VIDEO  1<<1
 
 struct gm_event
 {
