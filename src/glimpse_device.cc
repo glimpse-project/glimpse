@@ -30,13 +30,16 @@
 
 #include <vector>
 
+#ifdef USE_FREENECT
 #include <libfreenect.h>
+#endif
 
 #include "half.hpp"
 #include "xalloc.h"
 
 #include "image_utils.h"
 
+#include "glimpse_log.h"
 #include "glimpse_device.h"
 
 #define xsnprintf(dest, n, fmt, ...) do { \
@@ -65,6 +68,7 @@ struct gm_device
             pthread_t io_thread;
         } dummy;
 
+#ifdef USE_FREENECT
         struct {
             freenect_context *fctx;
             freenect_device *fdev;
@@ -75,6 +79,7 @@ struct gm_device
             float mks_accel[3];
             pthread_t io_thread;
         } kinect;
+#endif
     };
 
     struct gm_intrinsics video_camera_intrinsics;
@@ -161,6 +166,7 @@ notify_frame_locked(struct gm_device *dev)
     dev->event_callback(dev, event, dev->callback_data);
 }
 
+#ifdef USE_FREENECT
 static void
 kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 {
@@ -423,6 +429,55 @@ kinect_close(struct gm_device *dev)
     free(dev->depth_back);
 }
 
+static void *
+kinect_io_thread_cb(void *data)
+{
+    struct gm_device *dev = (struct gm_device *)data;
+    int state_check_throttle = 0;
+
+    freenect_set_tilt_degs(dev->kinect.fdev, 0);
+    freenect_set_led(dev->kinect.fdev, LED_RED);
+
+    freenect_start_depth(dev->kinect.fdev);
+    freenect_start_video(dev->kinect.fdev);
+
+    while (freenect_process_events(dev->kinect.fctx) >= 0) {
+        if (state_check_throttle++ >= 2000) {
+            freenect_raw_tilt_state* state;
+            freenect_update_tilt_state(dev->kinect.fdev);
+            state = freenect_get_tilt_state(dev->kinect.fdev);
+
+            dev->kinect.accel[0] = state->accelerometer_x;
+            dev->kinect.accel[1] = state->accelerometer_y;
+            dev->kinect.accel[2] = state->accelerometer_z;
+
+            double mks_dx, mks_dy, mks_dz;
+            freenect_get_mks_accel(state, &mks_dx, &mks_dy, &mks_dz);
+
+            dev->kinect.mks_accel[0] = mks_dx;
+            dev->kinect.mks_accel[1] = mks_dy;
+            dev->kinect.mks_accel[2] = mks_dz;
+
+            dev->kinect.tilt = freenect_get_tilt_degs(state);
+            dev->kinect.ir_brightness = freenect_get_ir_brightness(dev->kinect.fdev);
+
+            state_check_throttle = 0;
+        }
+    }
+
+    return NULL;
+}
+
+static void
+kinect_start(struct gm_device *dev)
+{
+    pthread_create(&dev->kinect.io_thread,
+                   NULL, //attributes
+                   kinect_io_thread_cb,
+                   dev); //data
+}
+#endif // USE_FREENECT
+
 static bool
 directory_recurse(const char *path, const char *ext,
                   std::vector<char *> &files,
@@ -559,54 +614,6 @@ recording_close(struct gm_device *dev)
 }
 
 static void *
-kinect_io_thread_cb(void *data)
-{
-    struct gm_device *dev = (struct gm_device *)data;
-    int state_check_throttle = 0;
-
-    freenect_set_tilt_degs(dev->kinect.fdev, 0);
-    freenect_set_led(dev->kinect.fdev, LED_RED);
-
-    freenect_start_depth(dev->kinect.fdev);
-    freenect_start_video(dev->kinect.fdev);
-
-    while (freenect_process_events(dev->kinect.fctx) >= 0) {
-        if (state_check_throttle++ >= 2000) {
-            freenect_raw_tilt_state* state;
-            freenect_update_tilt_state(dev->kinect.fdev);
-            state = freenect_get_tilt_state(dev->kinect.fdev);
-
-            dev->kinect.accel[0] = state->accelerometer_x;
-            dev->kinect.accel[1] = state->accelerometer_y;
-            dev->kinect.accel[2] = state->accelerometer_z;
-
-            double mks_dx, mks_dy, mks_dz;
-            freenect_get_mks_accel(state, &mks_dx, &mks_dy, &mks_dz);
-
-            dev->kinect.mks_accel[0] = mks_dx;
-            dev->kinect.mks_accel[1] = mks_dy;
-            dev->kinect.mks_accel[2] = mks_dz;
-
-            dev->kinect.tilt = freenect_get_tilt_degs(state);
-            dev->kinect.ir_brightness = freenect_get_ir_brightness(dev->kinect.fdev);
-
-            state_check_throttle = 0;
-        }
-    }
-
-    return NULL;
-}
-
-static void
-kinect_start(struct gm_device *dev)
-{
-    pthread_create(&dev->kinect.io_thread,
-                   NULL, //attributes
-                   kinect_io_thread_cb,
-                   dev); //data
-}
-
-static void *
 dummy_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
@@ -681,7 +688,11 @@ gm_device_open(struct gm_logger *log,
 
     switch (config->type) {
     case GM_DEVICE_KINECT:
+#ifdef USE_FREENECT
         status = kinect_open(dev, config, err);
+#else
+        gm_assert(log, 0, "Kinect support not enabled");
+#endif
         break;
     case GM_DEVICE_RECORDING:
         status = recording_open(dev, config, err);
@@ -701,7 +712,11 @@ gm_device_close(struct gm_device *dev)
 {
     switch (dev->type) {
     case GM_DEVICE_KINECT:
+#ifdef USE_FREENECT
         kinect_close(dev);
+#else
+        gm_assert(dev->log, 0, "Kinect support not enabled");
+#endif
         break;
     case GM_DEVICE_RECORDING:
         recording_close(dev);
@@ -727,7 +742,11 @@ gm_device_start(struct gm_device *dev)
 {
     switch (dev->type) {
     case GM_DEVICE_KINECT:
+#ifdef USE_FREENECT
         kinect_start(dev);
+#else
+        gm_assert(dev->log, 0, "Kinect support not enabled");
+#endif
         break;
     case GM_DEVICE_RECORDING:
         recording_start(dev);

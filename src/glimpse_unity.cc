@@ -29,7 +29,10 @@
 #include <IUnityInterface.h>
 #include <IUnityGraphics.h>
 
-#ifndef ANDROID
+#ifdef __ANDROID__
+#include <GLES3/gl3.h>
+#include <GLES2/gl2ext.h>
+#else
 #include <epoxy/gl.h>
 #endif
 

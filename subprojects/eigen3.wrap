@@ -1,0 +1,10 @@
+[wrap-file]
+directory = eigen-eigen-5a0156e40feb
+
+source_url = http://bitbucket.org/eigen/eigen/get/3.3.4.tar.bz2
+source_filename = eigen-eigen-5a0156e40feb.tar.bz2
+source_hash = dd254beb0bafc695d0f62ae1a222ff85b52dbaa3a16f76e781dce22d0d20a4a6
+
+patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
+patch_filename = eigen-wrap-3.3.4.tar
+patch_hash = 1ca6061ed285afab557e977d2269e8df5cba8d35225632702dda455ee9f60c3f

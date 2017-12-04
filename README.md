@@ -32,12 +32,37 @@ In terms of understanding that paper then:
     * Comparison of mean shift tracking methods (inc. camshift): http://old.cescg.org/CESCG-2008/papers/Hagenberg-Artner-Nicole.pdf
 
 
-# Building Dependencies
+# Building
 
-See build-third-party/build-third-party.sh
+*Note: it's currently necessary to use Meson from git until the 0.44.0 release
+due to a bug with the handling of .wrap based subprojects*
 
-TODO: explain how to use
+## Debug
+```
+mkdir build
+cd build
+meson.py ..
+ninja
+```
+*Note: it's currently necessary to use Meson from git until the 0.44.0 release
+due to a bug with the handling of .wrap based subprojects*
 
+## Release
+```
+mkdir build
+cd build
+CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson.py .. --buildtype=release
+ninja
+```
+
+# Building for Android
+
+```
+$ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py --install-dir ~/local/android-arm64-toolchain-21 --arch arm64 --api 21 --stl libc++
+export PATH=~/local/android-arm64-toolchain-21:$PATH
+mkdir build-android-debug
+meson.py --cross-file ../android-arm64-cross-file.txt .. -Ddlib:support_gui=false -Ddlib:use_blas=false -Ddlib:use_lapack=false
+```
 
 # References
 

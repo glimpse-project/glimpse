@@ -308,7 +308,8 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
 
   // Now iteratively connect the scanline clusters
   bool changed;
-  bool finished[n_joints] = { false, };
+  bool finished[n_joints];
+  memset(finished, 0, sizeof(bool) * n_joints);
   do
     {
       changed = false;
