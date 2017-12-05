@@ -304,9 +304,9 @@ thread_body(void* userdata)
                 &ctx->joints[((i * ctx->n_joints) + j) * 3];
               // XXX: Current joint z positions are negated
               float distance =
-                sqrtf(pow(inferred_joint[0] - actual_joint[0], 2.f) +
-                      pow(inferred_joint[1] - actual_joint[1], 2.f) +
-                      pow(inferred_joint[2] + actual_joint[2], 2.f));
+                sqrtf(powf(inferred_joint[0] - actual_joint[0], 2.f) +
+                      powf(inferred_joint[1] - actual_joint[1], 2.f) +
+                      powf(inferred_joint[2] + actual_joint[2], 2.f));
 
               // Accumulate
               acc_distance[j] += distance;

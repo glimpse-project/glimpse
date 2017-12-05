@@ -153,6 +153,17 @@ executable('train_rdt',
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
+executable('train_joint_dist',
+           [ 'src/train_joint_dist.cc',
+             'src/train_utils.cc',
+             'src/image_utils.cc',
+             'src/tinyexr.cc',
+             'src/parson.c',
+             'src/llist.c',
+             'src/xalloc.c' ],
+           include_directories: inc,
+           dependencies: [ libpng_dep, threads_dep ])
+
 executable('train_joint_params',
            [ 'src/train_joint_params.cc',
              'src/infer.cc',
