@@ -71,32 +71,39 @@ from priodict import priorityDictionary
 
 def Dijkstra(G,start,end=None):
 	"""
-	Find shortest paths from the  start vertex to all vertices nearer than or equal to the end.
+        Find shortest paths from the  start vertex to all vertices nearer than
+        or equal to the end.
 
 	The input graph G is assumed to have the following representation:
-	A vertex can be any object that can be used as an index into a dictionary.
-	G is a dictionary, indexed by vertices.  For any vertex v, G[v] is itself a dictionary,
-	indexed by the neighbors of v.  For any edge v->w, G[v][w] is the length of the edge.
-	This is related to the representation in <http://www.python.org/doc/essays/graphs.html>
-	where Guido van Rossum suggests representing graphs as dictionaries mapping vertices
-	to lists of outgoing edges, however dictionaries of edges have many advantages over lists:
-	they can store extra information (here, the lengths), they support fast existence tests,
-	and they allow easy modification of the graph structure by edge insertion and removal.
-	Such modifications are not needed here but are important in many other graph algorithms.
-	Since dictionaries obey iterator protocol, a graph represented as described here could
-	be handed without modification to an algorithm expecting Guido's graph representation.
+        A vertex can be any object that can be used as an index into a
+        dictionary.  G is a dictionary, indexed by vertices.  For any vertex v,
+        G[v] is itself a dictionary, indexed by the neighbors of v.  For any
+        edge v->w, G[v][w] is the length of the edge.  This is related to the
+        representation in <http://www.python.org/doc/essays/graphs.html> where
+        Guido van Rossum suggests representing graphs as dictionaries mapping
+        vertices to lists of outgoing edges, however dictionaries of edges have
+        many advantages over lists: they can store extra information (here, the
+        lengths), they support fast existence tests, and they allow easy
+        modification of the graph structure by edge insertion and removal.
+        Such modifications are not needed here but are important in many other
+        graph algorithms.  Since dictionaries obey iterator protocol, a graph
+        represented as described here could be handed without modification to
+        an algorithm expecting Guido's graph representation.
 
-	Of course, G and G[v] need not be actual Python dict objects, they can be any other
-	type of object that obeys dict protocol, for instance one could use a wrapper in which vertices
-	are URLs of web pages and a call to G[v] loads the web page and finds its outgoing links.
+        Of course, G and G[v] need not be actual Python dict objects, they can
+        be any other type of object that obeys dict protocol, for instance one
+        could use a wrapper in which vertices are URLs of web pages and a call
+        to G[v] loads the web page and finds its outgoing links.
 
-	The output is a pair (D,P) where D[v] is the distance from start to v and P[v] is the
-	predecessor of v along the shortest path from s to v.
+        The output is a pair (D,P) where D[v] is the distance from start to v
+        and P[v] is the predecessor of v along the shortest path from s to v.
 
-	Dijkstra's algorithm is only guaranteed to work correctly when all edge lengths are positive.
-	This code does not verify this property for all edges (only the edges examined until the end
-	vertex is reached), but will correctly compute shortest paths even for some graphs with negative
-	edges, and will raise an exception if it discovers that a negative edge has caused it to make a mistake.
+        Dijkstra's algorithm is only guaranteed to work correctly when all edge
+        lengths are positive.  This code does not verify this property for all
+        edges (only the edges examined until the end vertex is reached), but
+        will correctly compute shortest paths even for some graphs with
+        negative edges, and will raise an exception if it discovers that a
+        negative edge has caused it to make a mistake.
 	"""
 
 	D = {}	# dictionary of final distances
