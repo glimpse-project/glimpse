@@ -64,7 +64,9 @@
 #include <pcl/segmentation/extract_clusters.h>
 
 #ifdef USE_PCL_GBPD
-#include <pcl/people/ground_based_people_detection_app.h>
+#include <pcl/people/head_based_subcluster.h>
+#include <pcl/people/person_classifier.h>
+#include <pcl/people/person_cluster.h>
 #endif
 
 #include <pcl/filters/crop_box.h>
@@ -330,8 +332,7 @@ struct gm_context
     void *callback_data;
 
 #ifdef USE_PCL_GBPD
-    pcl::people::GroundBasedPeopleDetectionApp<pcl::PointXYZRGBA>
-      people_detector;
+    pcl::people::PersonClassifier<pcl::RGB> person_classifier;
 #endif
 };
 
@@ -858,7 +859,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
             continue;
         }
 
-        int y = height - (int)
+        int y = (int)
           ((point_t.y * intrinsics->fy / point_t.z) + intrinsics->cy);
 
         if (y < 0 || y >= height) {
@@ -892,7 +893,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
         if (cloud_copy) {
             int cloud_off = copy_is_dense ? n_points : off;
             cloud_copy[cloud_off].x = point->x;
-            cloud_copy[cloud_off].y = point->y;
+            cloud_copy[cloud_off].y = -point->y;
             cloud_copy[cloud_off].z = point->z;
 
             if (op == RGB_MIXIN_COPY) {
@@ -934,7 +935,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     uint64_t start, end, duration;
 
     // X increases to the right
-    // Y increases upwards
+    // Y increases downwards
     // Z increases outwards
 
     start = get_time();
@@ -957,7 +958,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         float depth = tracking->depth[off];
         if (isnormal(depth) && (depth < HUGE_DEPTH)) {
             float dx = (x - cx) * depth * inv_fx;
-            float dy = (y - cy) * depth * inv_fy;
+            float dy = -(y - cy) * depth * inv_fy;
             pcl::PointXYZRGBA point;
             point.x = dx;
             point.y = dy;
@@ -999,7 +1000,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-#ifndef USE_PCL_GBPD
     // Simplify point cloud by putting it through a 1cm voxel grid
     start = get_time();
     pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
@@ -1013,7 +1013,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
          (int)cloud->points.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-#endif
 
     // Detect ground plane.
     // Only consider points below the camera to be the floor.
@@ -1030,7 +1029,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     passY.setFilterFieldName ("y");
     // XXX: Here we're assuming the camera may be on the ground, but ideally
     //      we'd use a height sensor reading here (minus a threshold).
-    passY.setFilterLimits(-FLT_MAX, 0.0);
+    passY.setFilterLimits(0.0, FLT_MAX);
     passY.filter(*cloud_floor);
 
     assert(cloud_floor->points.size() == cloud->points.size());
@@ -1054,7 +1053,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // XXX: We're assuming that the camera here is perpendicular to the floor
     //      and give a generous threshold, but ideally we'd use device sensors
     //      to detect orientation and use a slightly less broad angle here.
-    seg.setAxis(Eigen::Vector3f(0.f, 1.f, 0.f));
+    seg.setAxis(Eigen::Vector3f(0.f, -1.f, 0.f));
     seg.setEpsAngle(M_PI/180.0 * 15.0);
 
     pcl::ModelCoefficients::Ptr ground_coeffs(new pcl::ModelCoefficients);
@@ -1071,51 +1070,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-#ifdef USE_PCL_GBPD
-    // Use pcl's GroundBasedPeopleDetectionApp
-    start = get_time();
-    Eigen::VectorXf eigen_ground_coeffs;
-    eigen_ground_coeffs.resize(4);
-    eigen_ground_coeffs[0] = ground_coeffs->values[0];
-    eigen_ground_coeffs[1] = ground_coeffs->values[1];
-    eigen_ground_coeffs[2] = ground_coeffs->values[2];
-    eigen_ground_coeffs[3] = ground_coeffs->values[3];
-
-    std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>> clusters;
-    ctx->people_detector.setInputCloud(cloud);
-    ctx->people_detector.setGround(eigen_ground_coeffs);
-    ctx->people_detector.compute(clusters);
-
-    cloud = ctx->people_detector.getNoGroundCloud();
-
-    for(std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>>::iterator
-        it = clusters.begin(); it != clusters.end(); ++it) {
-        float confidence = it->getPersonConfidence();
-        LOGI("Person cluster with %f", confidence);
-
-        if (confidence <= -1.5) { continue; }
-
-        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr person_cloud(
-            new pcl::PointCloud<pcl::PointXYZRGBA>);
-        std::vector<int> indices = it->getIndices().indices;
-        for (uint32_t i = 0; i < indices.size(); i++) {
-            pcl::PointXYZRGBA *point = &cloud->points[indices[i]];
-            person_cloud->push_back(*point);
-        }
-
-        cloud.swap(person_cloud);
-        break;
-    }
-
-    end = get_time();
-    duration = end - start;
-    LOGI("People detection took %.3f%s\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-#else
-
     // Remove ground plane
+    start = get_time();
     pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
     extract.setInputCloud(cloud);
     extract.setIndices(inliers);
@@ -1125,16 +1081,18 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Use Euclidean cluster extraction to look at only the largest cluster of
     // points (which we hope is the human)
 
+#if 0
     // Creating the KdTree object for the search method of the extraction
-    /*pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
-      tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);*/
-
+    pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
+      tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
+#else
     // Seems Octree is faster than KdTree for this use-case. This appears to
     // be highly dependent on the resolution, which I assume should be
     // tweaked alongside the voxel-grid resolution above and the minimum
     // cluster size below.
     pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
       tree(new pcl::search::Octree<pcl::PointXYZRGBA>(0.1));
+#endif
 
     tree->setInputCloud (cloud);
 
@@ -1146,15 +1104,26 @@ gm_context_track_skeleton(struct gm_context *ctx)
     float min_width = 0.3;
     float max_width = 1.5;
 
+    int min_points = (int)(min_height * min_width / 0.01f / 0.01f);
+    int max_points = (int)(max_height * max_width / 0.01f / 0.01f);
+
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
-    ec.setClusterTolerance (0.03f);
-    ec.setMinClusterSize (min_height * min_width / 0.01f / 0.01f);
-    ec.setMaxClusterSize (max_height * max_width / 0.01f / 0.01f);
-    ec.setSearchMethod (tree);
-    ec.setInputCloud (cloud);
-    ec.extract (cluster_indices);
+    ec.setClusterTolerance(0.03f);
+    ec.setMinClusterSize(min_points);
+    ec.setMaxClusterSize(max_points);
+    ec.setSearchMethod(tree);
+    ec.setInputCloud(cloud);
+    ec.extract(cluster_indices);
 
+    end = get_time();
+    duration = end - start;
+    LOGI("Euclidean clustering took %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+#ifndef USE_PCL_GBPD
+    // Assume the largest cluster is a person
     if (cluster_indices.size() > 0) {
         const pcl::PointIndices* largest_cluster = &cluster_indices[0];
         for (uint32_t i = 1; i < cluster_indices.size(); i++) {
@@ -1179,6 +1148,88 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
         cloud.swap(cloud_cluster);
     }
+#else
+    // Use pcl's HeadBasedSubclustering and PersonClassifier
+    // We do this because pcl doesn't call setDimensionLimits on the
+    // HeadBasedSubclustering object, and also it makes it easier to integrate
+    // and toggle it off/on for comparison.
+    start = get_time();
+    Eigen::VectorXf eigen_ground_coeffs;
+    eigen_ground_coeffs.resize(4);
+    eigen_ground_coeffs[0] = ground_coeffs->values[0];
+    eigen_ground_coeffs[1] = ground_coeffs->values[1];
+    eigen_ground_coeffs[2] = ground_coeffs->values[2];
+    eigen_ground_coeffs[3] = ground_coeffs->values[3];
+
+    pcl::people::HeadBasedSubclustering<pcl::PointXYZRGBA> subclustering;
+    subclustering.setDimensionLimits(min_points, max_points);
+    subclustering.setInputCloud(cloud);
+    subclustering.setGround(eigen_ground_coeffs);
+    subclustering.setInitialClusters(cluster_indices);
+    subclustering.setHeightLimits(min_height, max_height);
+
+    std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>> clusters;
+    subclustering.subcluster(clusters);
+
+    // Use the person classifier to add confidence to the person clusters
+    pcl::PointCloud<pcl::RGB>::Ptr rgb_image(new pcl::PointCloud<pcl::RGB>);
+    rgb_image->width = ctx->depth_camera_intrinsics.width;
+    rgb_image->height = ctx->depth_camera_intrinsics.height;
+    rgb_image->points.resize(rgb_image->width * rgb_image->height);
+    foreach_xy_off(rgb_image->width, rgb_image->height) {
+        int target_off = (rgb_image->height - y - 1) * rgb_image->width + x;
+        rgb_image->points[target_off].rgb = tracking->video[off] >> 8;
+    }
+
+    Eigen::Matrix3f eigen_intrinsics;
+    eigen_intrinsics <<
+        (float)ctx->video_camera_intrinsics.fx, 0.f,
+        (float)ctx->video_camera_intrinsics.fy, 0.f,
+        (float)ctx->video_camera_intrinsics.cx,
+        (float)ctx->video_camera_intrinsics.cy,
+        0.f, 0.f, 0.1f;
+
+    for (std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>>::iterator it = clusters.begin();
+        it != clusters.end(); ++it) {
+        // Evaluate confidence for the current PersonCluster:
+        Eigen::Vector3f centroid = eigen_intrinsics * (it->getTCenter());
+        centroid /= centroid(2);
+
+        Eigen::Vector3f top = eigen_intrinsics * (it->getTTop());
+        top /= top(2);
+
+        Eigen::Vector3f bottom = eigen_intrinsics * (it->getTBottom());
+        bottom /= bottom(2);
+
+        it->setPersonConfidence(ctx->person_classifier.evaluate(
+            rgb_image, bottom, top, centroid, false));
+    }
+
+    float max_confidence = -FLT_MAX;
+    for (std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>>::iterator
+        it = clusters.begin(); it != clusters.end(); ++it) {
+        float confidence = it->getPersonConfidence();
+        LOGI("Person cluster with %f", confidence);
+
+        if (confidence <= max_confidence) { continue; }
+
+        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr person_cloud(
+            new pcl::PointCloud<pcl::PointXYZRGBA>);
+        std::vector<int> indices = it->getIndices().indices;
+        for (uint32_t i = 0; i < indices.size(); i++) {
+            pcl::PointXYZRGBA *point = &cloud->points[indices[i]];
+            person_cloud->push_back(*point);
+        }
+
+        cloud.swap(person_cloud);
+        max_confidence = confidence;
+    }
+
+    end = get_time();
+    duration = end - start;
+    LOGI("People detection took %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 #endif
 
     if (ctx->depth_camera_intrinsics.width == 0 ||
@@ -1865,25 +1916,11 @@ gm_context_new(struct gm_logger *logger,
             weights.push_back((float)json_array_get_number(weights_array, i));
         }
 
-        pcl::people::PersonClassifier<pcl::RGB> person_classifier;
-        person_classifier.setSVM(
+        ctx->person_classifier.setSVM(
             (int)json_object_get_number(svm_root, "window_height"),
             (int)json_object_get_number(svm_root, "window_width"),
             weights,
             (float)json_object_get_number(svm_root, "offset"));
-
-        Eigen::Matrix3f eigen_intrinsics;
-        eigen_intrinsics <<
-            (float)ctx->depth_camera_intrinsics.fx, 0.f,
-            (float)ctx->depth_camera_intrinsics.fy, 0.f,
-            (float)ctx->depth_camera_intrinsics.cx,
-            (float)ctx->depth_camera_intrinsics.cy,
-            0.f, 0.f, 0.1f;
-
-        ctx->people_detector.setVoxelSize(0.01);
-        ctx->people_detector.setIntrinsics(eigen_intrinsics);
-        ctx->people_detector.setClassifier(person_classifier);
-        ctx->people_detector.setPersonClusterLimits(1.3, 2.15, 0.3, 1.5);
     } else {
         xasprintf(err, "Failed to open svm.json: %s", open_err);
         free(open_err);

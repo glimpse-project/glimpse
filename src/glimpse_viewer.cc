@@ -188,7 +188,6 @@ static GLuint gl_cloud_bo;
 static GLuint gl_joints_bo;
 static GLuint gl_cloud_fbo;
 static GLuint gl_cloud_depth_bo;
-static GLuint gl_cloud_depth_tex;
 static GLuint gl_cloud_tex;
 static bool cloud_tex_valid = false;
 
