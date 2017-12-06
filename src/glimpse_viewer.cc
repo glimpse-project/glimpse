@@ -67,6 +67,11 @@
 
 #define TOOLBAR_LEFT_WIDTH 300
 
+#define xsnprintf(dest, n, fmt, ...) do { \
+        if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
+            exit(1); \
+    } while(0)
+
 using half_float::half;
 
 enum event_type
@@ -1175,7 +1180,19 @@ main(int argc, char **argv)
     glfwSetCharCallback(data.window, ImGui_ImplGlfwGLES3_CharCallback);
 
     ImGuiIO& io = ImGui::GetIO();
-    io.Fonts->AddFontFromFileTTF("Roboto-Medium.ttf", 16.0f);
+
+    const char *font_ttf = "Roboto-Medium.ttf";
+    char font_asset_path[512];
+    const char *font_path = NULL;
+    if (getenv("GLIMPSE_ASSETS_ROOT")) {
+        xsnprintf(font_asset_path, sizeof(font_asset_path), "%s/%s",
+                  getenv("GLIMPSE_ASSETS_ROOT"),
+                  font_ttf);
+        font_path = font_asset_path;
+    } else
+        font_path = font_ttf;
+
+    io.Fonts->AddFontFromFileTTF(font_path, 16.0f);
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
