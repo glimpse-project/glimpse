@@ -7,4 +7,4 @@ source_hash = c0e4d12d242cfd08a02bff114c9ac5e0892ac6f54a116168b7d9faa8b89350bc
 
 patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
 patch_filename = glm-wrap-0.9.9-a2.tar
-patch_hash = db774afcfc2c2939f8b24e07d653a9d99270a34cac46dbedfde87a4b44f49b3f
+patch_hash = 16b799178fc0aaa9e7562eb5301b89c357b2c79dbcae627a3442e003285be6da
