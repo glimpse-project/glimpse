@@ -150,66 +150,6 @@ class AddClothingOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
-class AddHoodieOperator(bpy.types.Operator):
-    """Adds a hoodie to the active body"""
-
-    bl_idname = "glimpse.add_hoodie"
-    bl_label = "Add Hoodie"
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
-
-    def execute(self, context):
-        add_clothing(self, context, "hooded_cardigan")
-        return {'FINISHED'}
-
-
-class AddMTrousers01Operator(bpy.types.Operator):
-    """Adds m_trousers_01 clothing to the active body"""
-
-    bl_idname = "glimpse.add_m_trousers_01"
-    bl_label = "Add M Trousers 01"
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
-
-    def execute(self, context):
-        add_clothing(self, context, "m_trousers_01")
-        return {'FINISHED'}
-
-
-class AddPatrolCapOperator(bpy.types.Operator):
-    """Adds a patrol cap to the active body"""
-
-    bl_idname = "glimpse.add_patrol_cap"
-    bl_label = "Add Patrol Cap"
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
-
-    def execute(self, context):
-        add_clothing(self, context, "patrol_cap")
-        return {'FINISHED'}
-
-
-class AddGlassesOperator(bpy.types.Operator):
-    """Adds a glasses to the active body"""
-
-    bl_idname = "glimpse.add_glasses"
-    bl_label = "Add Glasses"
-
-    @classmethod
-    def poll(cls, context):
-        return context.active_object is not None and "BodyHelperMeshObject" in context.active_object.name
-
-    def execute(self, context):
-        add_clothing(self, context, "glasses")
-        return {'FINISHED'}
-
-
 # The data generator operator expects that each body has previously had all
 # possible clothing items added to the body. This avoids the cost of loading
 # the clothing at runtime and also clothing that's not applicable to a
@@ -361,26 +301,16 @@ class GeneratorPreLoadOperator(bpy.types.Operator):
 
         return {'FINISHED'}
 
+
 def mkdir_p(path):
     os.makedirs(path, exist_ok=True)
+
 
 class GeneratorOperator(bpy.types.Operator):
     """Generates Glimpse training data"""
 
     bl_idname = "glimpse.generate_data"
     bl_label = "Generate Glimpse training data"
-
-    my_debug_bool = BoolProperty(
-            name="Debug Boolean",
-            description="Debug Knob",
-            default=True,
-            )
-
-    my_debug_float = FloatProperty(
-            name="Debug float",
-            min=0.01, max=1000.0,
-            default=1.0,
-            )
 
     @classmethod
     def poll(cls, context):
@@ -675,14 +605,6 @@ class GeneratorOperator(bpy.types.Operator):
             render_bvh_index(idx)
 
         return {'FINISHED'}
-
-
-    def draw(self, context):
-        layout = self.layout
-
-        row = layout.row()
-        row.prop(self, "my_debug_bool")
-        row.prop(self, "my_debug_float")
 
 
 class GeneratePanel(bpy.types.Panel):
