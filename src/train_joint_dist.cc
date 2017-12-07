@@ -110,7 +110,6 @@ print_usage(FILE* stream)
 "\n"
 "  -l, --limit=NUMBER[,NUMBER] Limit training data to this many images.\n"
 "                              Optionally, skip the first N images.\n"
-"  -s, --shuffle               Shuffle order of training images\n"
 "  -m, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
 "  -p, --pretty                Output prettified JSON\n"
 "  -v, --verbose               Verbose output\n"
@@ -129,16 +128,14 @@ main (int argc, char** argv)
 
   uint32_t limit = UINT32_MAX;
   uint32_t skip = 0;
-  bool shuffle = false;
   bool pretty = false;
 
   TrainContext ctx = { 0, };
   ctx.n_threads = std::thread::hardware_concurrency();
 
-  const char *short_opts="+l:smpvh";
+  const char *short_opts="+l:mpvh";
   const struct option long_opts[] = {
     {"limit",           required_argument,  0, 'l'},
-    {"shuffle",         no_argument,        0, 's'},
     {"threads",         required_argument,  0, 'm'},
     {"pretty",          no_argument,        0, 'p'},
     {"verbose",         no_argument,        0, 'v'},
@@ -159,10 +156,6 @@ main (int argc, char** argv)
             {
               skip = (uint32_t)strtol(value + 1, NULL, 10);
             }
-          break;
-
-        case 's':
-          shuffle = true;
           break;
 
         case 'm':
@@ -198,7 +191,7 @@ main (int argc, char** argv)
   gather_train_data(data_dir,
                     index_name,
                     joint_map_path,
-                    limit, skip, shuffle,
+                    limit, skip, false,
                     &ctx.n_sets,
                     &ctx.n_joints,
                     NULL, NULL, // width, height
