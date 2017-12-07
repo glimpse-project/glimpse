@@ -98,23 +98,27 @@ To know which bones from the training data are of interest, and what body
 labels they are associated with, these tools need a joint-map file.  This is a
 human-readable JSON text file that describes what bones map to which labels.
 
-It's an array of objects where each object specifies a joint and an array of
-label indices. A joint name is comprised of a bone name follow by `.head` or
-`.tail` to specify which end of the bone. For example:
+It's an array of objects where each object specifies a joint, an array of
+label indices and an array of other joints it connects to. A joint name is
+comprised of a bone name follow by `.head` or `.tail` to specify which end of
+the bone. For example:
 
 ```
 [
     {
         "joint": "head.tail",
-        "labels": [ 2, 3 ]
+        "labels": [ 2, 3 ],
+        "connections": [ "neck_01.head" ]
     },
     {
         "joint": "neck_01.head",
-        "labels": [ 4 ]
+        "labels": [ 4 ],
+        "connections": [ "upperarm_l.head" ]
     },
     {
         "joint": "upperarm_l.head",
-        "labels": [ 7 ]
+        "labels": [ 7 ],
+        "connections": []
     },
     ...
 ]

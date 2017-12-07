@@ -56,6 +56,7 @@
 #include <profiler.h>
 
 #include "half.hpp"
+#include "parson.h"
 
 #include "glimpse_log.h"
 #include "glimpse_context.h"
@@ -114,9 +115,11 @@ typedef struct _Data
     /* A convenience for accessing number of points/joints in latest tracking */
     int n_points;
     int n_joints;
+    int n_bones;
 
     glm::vec3 focal_point;
     float camera_rot_yx[2];
+    JSON_Value *joint_map;
 
     /* When we request gm_device for a frame we set requirements for what the
      * frame should include. We track the requirements so we avoid sending
@@ -191,6 +194,7 @@ static GLuint gl_cloud_uni_mvp;
 static GLuint gl_cloud_uni_size;
 static GLuint gl_cloud_bo;
 static GLuint gl_joints_bo;
+static GLuint gl_bones_bo;
 static GLuint gl_cloud_fbo;
 static GLuint gl_cloud_depth_bo;
 static GLuint gl_cloud_tex;
@@ -412,19 +416,34 @@ draw_ui(Data *data)
                               sizeof(GlimpsePointXYZRGBA), // stride
                               nullptr); // bo offset
         glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                              GL_TRUE,
-                              sizeof(GlimpsePointXYZRGBA),
+                              GL_TRUE, sizeof(GlimpsePointXYZRGBA),
                               (void *)offsetof(GlimpsePointXYZRGBA, rgba));
 
         // Draw labelled point cloud
         glDrawArrays(GL_POINTS, 0, data->n_points);
     }
 
-    // We want joints to appear over the point cloud, but we still want them
-    // to be depth-tested with each other.
-    glClear(GL_DEPTH_BUFFER_BIT);
-
     if (data->n_joints) {
+        // Have bones appear over everything, but depth test them against each
+        // other.
+        glClear(GL_DEPTH_BUFFER_BIT);
+
+        // Bind bones buffer-object
+        glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
+
+        glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
+                              GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
+        glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                              GL_TRUE, sizeof(GlimpsePointXYZRGBA),
+                              (void *)offsetof(GlimpsePointXYZRGBA, rgba));
+
+        // Draw bone lines
+        glDrawArrays(GL_LINES, 0, data->n_bones * 2);
+
+        // Have joint points appear over everything, but depth test them
+        // against each other.
+        glClear(GL_DEPTH_BUFFER_BIT);
+
         // Set point size for joints
         glUniform1f(gl_cloud_uni_size, 6.f);
 
@@ -432,12 +451,9 @@ draw_ui(Data *data)
         glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
 
         glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
-                              GL_FALSE, // normalized
-                              sizeof(GlimpsePointXYZRGBA), // stride
-                              nullptr); // bo offset
+                              GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
         glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                              GL_TRUE,
-                              sizeof(GlimpsePointXYZRGBA),
+                              GL_TRUE, sizeof(GlimpsePointXYZRGBA),
                               (void *)offsetof(GlimpsePointXYZRGBA, rgba));
 
         // Draw joint points
@@ -660,12 +676,20 @@ upload_tracking_textures(Data *data)
     const float *joints =
         gm_tracking_get_joint_positions(data->latest_tracking, &data->n_joints);
 
+    // TODO: At some point, the API needs to return a list of joints with ids,
+    //       possibly with confidences, so in the situation that a joint isn't
+    //       visible (or possible to determine), we can indicate that.
+    if (data->n_joints) {
+        assert((size_t)data->n_joints ==
+               json_array_get_count(json_array(data->joint_map)));
+    }
+
     if (data->n_points) {
         // Copy point cloud data to GPU
         glBindBuffer(GL_ARRAY_BUFFER, gl_cloud_bo);
         glBufferData(GL_ARRAY_BUFFER,
                      sizeof(GlimpsePointXYZRGBA) * data->n_points,
-                     &cloud[0], GL_DYNAMIC_DRAW);
+                     cloud, GL_DYNAMIC_DRAW);
 
         // Reformat and copy over joint data
         GlimpsePointXYZRGBA colored_joints[data->n_joints];
@@ -678,7 +702,34 @@ upload_tracking_textures(Data *data)
         glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
         glBufferData(GL_ARRAY_BUFFER,
                      sizeof(GlimpsePointXYZRGBA) * data->n_joints,
-                     &colored_joints[0], GL_DYNAMIC_DRAW);
+                     colored_joints, GL_DYNAMIC_DRAW);
+
+        // Reformat and copy over bone data
+        // TODO: Don't parse this JSON structure here
+        GlimpsePointXYZRGBA colored_bones[data->n_bones * 2];
+        for (int i = 0, b = 0; i < data->n_joints; i++) {
+            JSON_Object *joint =
+                json_array_get_object(json_array(data->joint_map), i);
+            JSON_Array *connections =
+                json_object_get_array(joint, "connections");
+            for (size_t c = 0; c < json_array_get_count(connections); c++) {
+                const char *joint_name = json_array_get_string(connections, c);
+                for (int j = 0; j < data->n_joints; j++) {
+                    JSON_Object *joint2 = json_array_get_object(
+                        json_array(data->joint_map), j);
+                    if (strcmp(joint_name,
+                               json_object_get_string(joint2, "joint")) == 0) {
+                        colored_bones[b++] = colored_joints[i];
+                        colored_bones[b++] = colored_joints[j];
+                        break;
+                    }
+                }
+            }
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(GlimpsePointXYZRGBA) * data->n_bones * 2,
+                     colored_bones, GL_DYNAMIC_DRAW);
 
         // Clean-up
         glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -1029,6 +1080,7 @@ init_opengl(Data *data)
     gl_cloud_uni_size = glGetUniformLocation(gl_cloud_program, "size");
     glGenBuffers(1, &gl_cloud_bo);
     glGenBuffers(1, &gl_joints_bo);
+    glGenBuffers(1, &gl_bones_bo);
 
     glUseProgram(0);
 
@@ -1184,15 +1236,38 @@ main(int argc, char **argv)
     const char *font_ttf = "Roboto-Medium.ttf";
     char font_asset_path[512];
     const char *font_path = NULL;
-    if (getenv("GLIMPSE_ASSETS_ROOT")) {
+
+    const char *joint_map_json = "joint-map.json";
+    char joint_map_asset_path[512];
+    const char *joint_map_path = NULL;
+
+    char *assets_root = getenv("GLIMPSE_ASSETS_ROOT");
+    if (assets_root) {
         xsnprintf(font_asset_path, sizeof(font_asset_path), "%s/%s",
-                  getenv("GLIMPSE_ASSETS_ROOT"),
-                  font_ttf);
+                  assets_root, font_ttf);
         font_path = font_asset_path;
-    } else
+        xsnprintf(joint_map_asset_path, sizeof(joint_map_asset_path), "%s/%s",
+                  assets_root, joint_map_json);
+    } else {
         font_path = font_ttf;
+        joint_map_path = joint_map_json;
+    }
 
     io.Fonts->AddFontFromFileTTF(font_path, 16.0f);
+
+    // TODO: Might be nice to be able to retrieve this information via the API
+    //       rather than reading it separately here.
+    data.joint_map = json_parse_file(joint_map_path);
+
+    // Count the number of bones defined by connections in the joint map.
+    data.n_bones = 0;
+    for (size_t i = 0; i < json_array_get_count(json_array(data.joint_map));
+         i++) {
+        JSON_Object *joint =
+            json_array_get_object(json_array(data.joint_map), i);
+        data.n_bones += json_array_get_count(
+            json_object_get_array(joint, "connections"));
+    }
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
