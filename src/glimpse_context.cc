@@ -112,8 +112,8 @@
  * x, y, z and off variables. (off = y * width + x)
  */
 #define foreach_xy_off(width, height) \
-    for (int y = 0, off = 0; y < (int)height; y++) \
-        for (int x = 0; x < (int)width; x++, off++)
+    for (int y = 0, off = 0; y < (int)height; ++y) \
+        for (int x = 0; x < (int)width; ++x, ++off)
 
 #define CLIPH(X) ((X) > 255 ? 255 : (X))
 #define RGB2Y(R, G, B) ((uint8_t)CLIPH(((66 * (uint32_t)(R) + \
@@ -930,6 +930,11 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
     }
 }
 
+static bool
+sort_indices(pcl::PointIndices a, pcl::PointIndices b) {
+    return (a.indices.size() > b.indices.size());
+}
+
 void
 gm_context_track_skeleton(struct gm_context *ctx)
 {
@@ -941,9 +946,9 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Y increases downwards
     // Z increases outwards
 
+    // Project depth buffer into cloud and filter out points that are too
+    // near/far.
     start = get_time();
-    LOGI("Projecting point cloud and reprojecting video data");
-
     pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud(
         new pcl::PointCloud<pcl::PointXYZRGBA>);
     cloud->width = 0;
@@ -955,38 +960,46 @@ gm_context_track_skeleton(struct gm_context *ctx)
     float cx = ctx->depth_camera_intrinsics.cx;
     float cy = ctx->depth_camera_intrinsics.cy;
 
-    cloud->points.clear();
+    cloud->points.resize(ctx->depth_camera_intrinsics.width *
+                         ctx->depth_camera_intrinsics.height);
+    int n_points = 0;
+
     foreach_xy_off(ctx->depth_camera_intrinsics.width,
                    ctx->depth_camera_intrinsics.height) {
         float depth = tracking->depth[off];
-        if (isnormal(depth) && (depth < HUGE_DEPTH)) {
+        if (isnormal(depth)) {
             float dx = (x - cx) * depth * inv_fx;
             float dy = -(y - cy) * depth * inv_fy;
-            pcl::PointXYZRGBA point;
-            point.x = dx;
-            point.y = dy;
-            point.z = depth;
-            point.rgba = 0;
-            cloud->points.push_back(point);
+            cloud->points[n_points].x = dx;
+            cloud->points[n_points].y = dy;
+            cloud->points[n_points].z = depth;
+            cloud->points[n_points].rgba = 0;
+            ++n_points;
         }
     }
 
-    cloud->width = cloud->points.size();
+    cloud->width = n_points;
 
+    end = get_time();
+    duration = end - start;
+    LOGI("Projection (%d points) took (%.3f%s)\n",
+         (int)cloud->points.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+    // Reproject colour information into cloud
+    start = get_time();
     reproject_cloud(cloud, (void *)tracking->video,
                     &ctx->video_camera_intrinsics,
                     ctx->extrinsics_set ?
                         &ctx->depth_to_video_extrinsics : NULL,
                     RGBA_INTO_CLOUD,
                     tracking->cloud, &tracking->cloud_size, false);
-
     end = get_time();
     duration = end - start;
-    LOGI("Projections took %.3f%s\n",
+    LOGI("Reprojection of colour information took (%.3f%s)\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-
-    LOGI("Processing cloud with %d points", (int)cloud->points.size());
 
     // Filter out points that are too near or too far
     start = get_time();
@@ -999,20 +1012,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
     end = get_time();
     duration = end - start;
     LOGI("Cloud has %d points after depth filter (%.3f%s)",
-         (int)cloud->points.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-    // Simplify point cloud by putting it through a 1cm voxel grid
-    start = get_time();
-    pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
-    vg.setInputCloud(cloud);
-    vg.setLeafSize(0.01, 0.01, 0.01);
-    vg.filter(*cloud);
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
          (int)cloud->points.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
@@ -1042,6 +1041,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     LOGI("Cloud possible floor subset has %d points", n_floor_points);
 
     // Create the segmentation object
+    start = get_time();
     pcl::SACSegmentation<pcl::PointXYZRGBA> seg;
     // Optional
     seg.setOptimizeCoefficients(true);
@@ -1068,36 +1068,70 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     end = get_time();
     duration = end - start;
-    LOGI("Ground plane has %d points (%.3f%s)\n",
-         n_inliers,
+    LOGI("Looking for ground plane took (%.3f%s)\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    // Remove ground plane
+    if (n_inliers >= (int)(n_floor_points * 0.25f)) {
+        // Remove ground plane
+        start = get_time();
+        pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
+        extract.setInputCloud(cloud);
+        extract.setIndices(inliers);
+        extract.setNegative(true);
+        extract.filter(*cloud);
+
+        end = get_time();
+        duration = end - start;
+        LOGI("Ground plane has %d points (%.3f%s)\n",
+             n_inliers,
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
+    }
+
+    // Simplify point cloud by putting it through a 1cm voxel grid and then
+    // reproject colour information into it.
     start = get_time();
-    pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
-    extract.setInputCloud(cloud);
-    extract.setIndices(inliers);
-    extract.setNegative(true);
-    extract.filter(*cloud);
+    pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
+    vg.setInputCloud(cloud);
+    vg.setLeafSize(0.01f, 0.01f, 0.01f);
 
-    // Use Euclidean cluster extraction to look at only the largest cluster of
-    // points (which we hope is the human)
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr dense_cloud(
+        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    vg.filter(*dense_cloud);
+    dense_cloud.swap(cloud);
 
-#if 0
+    end = get_time();
+    duration = end - start;
+    LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
+         (int)cloud->points.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+    // Use Euclidean clustering to split the cloud into possible human clusters.
+    start = get_time();
+
+#ifndef USE_PCL_GBPD
+    float grid_size = 0.05f;
+    vg.setLeafSize(grid_size, grid_size, grid_size);
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr orig_cloud(
+        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    vg.filter(*orig_cloud);
+    orig_cloud.swap(cloud);
+#endif
+
+#if 1
     // Creating the KdTree object for the search method of the extraction
     pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
       tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
 #else
-    // Seems Octree is faster than KdTree for this use-case. This appears to
-    // be highly dependent on the resolution, which I assume should be
-    // tweaked alongside the voxel-grid resolution above and the minimum
-    // cluster size below.
+    // Octree is faster in debug mode oddly.
     pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
       tree(new pcl::search::Octree<pcl::PointXYZRGBA>(0.1));
 #endif
 
-    tree->setInputCloud (cloud);
+    tree->setSortedResults(false);
+    tree->setInputCloud(cloud);
 
     // Note that these values don't really correspond to human size like you
     // might think. This is what PCL does, and it's as good a measure as any,
@@ -1107,12 +1141,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
     float min_width = 0.3;
     float max_width = 1.5;
 
-    int min_points = (int)(min_height * min_width / 0.01f / 0.01f);
-    int max_points = (int)(max_height * max_width / 0.01f / 0.01f);
+    int min_points = (int)(min_height * min_width / grid_size / grid_size);
+    int max_points = (int)(max_height * max_width / grid_size / grid_size);
 
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
-    ec.setClusterTolerance(0.03f);
+    ec.setClusterTolerance(std::max(0.03f, grid_size * 2));
     ec.setMinClusterSize(min_points);
     ec.setMaxClusterSize(max_points);
     ec.setSearchMethod(tree);
@@ -1121,42 +1155,85 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     end = get_time();
     duration = end - start;
-    LOGI("Euclidean clustering took %.3f%s\n",
+    LOGI("Euclidean clustering took (%.3f%s)\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
+    start = get_time();
 #ifndef USE_PCL_GBPD
-    // Assume the largest cluster is a person
-    if (cluster_indices.size() > 0) {
-        const pcl::PointIndices* largest_cluster = &cluster_indices[0];
-        for (uint32_t i = 1; i < cluster_indices.size(); i++) {
-            if (cluster_indices[i].indices.size() >
-                largest_cluster->indices.size()) {
-                largest_cluster = &cluster_indices[i];
-            }
-        }
+    // Assume the largest cluster that contains its centroid may be a person
+    bool person_found = false;
 
-        LOGI("Largest cluster size: %d\n", (int)largest_cluster->indices.size());
+    std::sort(cluster_indices.begin(), cluster_indices.end(), sort_indices);
+
+    pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
+      dense_tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
+    dense_tree->setInputCloud(dense_cloud);
+    dense_tree->setSortedResults(false);
+
+    for (std::vector<pcl::PointIndices>::const_iterator point_it =
+            cluster_indices.begin();
+         point_it != cluster_indices.end(); ++point_it) {
+        const pcl::PointIndices cluster = *point_it;
+
+        // Work out the centroid of the cloud and see if there's a point
+        // near there. A human, unless they're falling, ought to contain
+        // their center of gravity. If they're jumping or falling, we can
+        // probably interpolate joint positions (TODO: Interpolation...)
+        Eigen::VectorXf centroid;
+        pcl::computeNDCentroid(*cloud, *point_it, centroid);
+
+        // Make sure the centroid is in the mass
+        std::vector<int>centroid_indices;
+        std::vector<float>centroid_distances;
+        pcl::PointXYZRGBA centroid_pt;
+        centroid_pt.x = centroid[0];
+        centroid_pt.y = centroid[1];
+        centroid_pt.z = centroid[2];
+        dense_tree->radiusSearch(centroid_pt, grid_size,
+                                centroid_indices, centroid_distances);
+
+        // Do a radius search on each point from the sparse tree to rebuild the
+        // dense cloud cluster.
+        std::list<int> indices;
+        for (std::vector<int>::const_iterator it = cluster.indices.begin();
+             it != cluster.indices.end (); ++it) {
+            std::vector<int> pt_indices;
+            std::vector<float> pt_distances;
+            dense_tree->radiusSearch(cloud->points[*it], grid_size,
+                                    pt_indices, pt_distances);
+            std::copy(pt_indices.begin(), pt_indices.end(),
+                      std::back_inserter(indices));
+        }
+        indices.sort();
+        indices.unique();
 
         pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster(
             new pcl::PointCloud<pcl::PointXYZRGBA>);
-        for (std::vector<int>::const_iterator it =
-             largest_cluster->indices.begin();
-             it != largest_cluster->indices.end (); ++it) {
-            cloud_cluster->points.push_back (cloud->points[*it]);
+        for (std::list<int>::const_iterator it = indices.begin();
+             it != indices.end (); ++it) {
+            cloud_cluster->points.push_back(dense_cloud->points[*it]);
         }
-        cloud_cluster->width = cloud_cluster->points.size();
+        cloud_cluster->width = indices.size();
         cloud_cluster->height = 1;
         cloud_cluster->is_dense = true;
 
         cloud.swap(cloud_cluster);
+        person_found = true;
+        break;
     }
+
+    // If we didn't find a likely person cluster, just pass the whole cloud
+    // through inference and see what happens...
+    if (!person_found) {
+        cloud.swap(dense_cloud);
+    }
+
 #else
     // Use pcl's HeadBasedSubclustering and PersonClassifier
     // We do this because pcl doesn't call setDimensionLimits on the
     // HeadBasedSubclustering object, and also it makes it easier to integrate
     // and toggle it off/on for comparison.
-    start = get_time();
     Eigen::VectorXf eigen_ground_coeffs;
     eigen_ground_coeffs.resize(4);
     eigen_ground_coeffs[0] = ground_coeffs->values[0];
@@ -1227,13 +1304,13 @@ gm_context_track_skeleton(struct gm_context *ctx)
         cloud.swap(person_cloud);
         max_confidence = confidence;
     }
+#endif
 
     end = get_time();
     duration = end - start;
     LOGI("People detection took %.3f%s\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-#endif
 
     if (ctx->depth_camera_intrinsics.width == 0 ||
         ctx->depth_camera_intrinsics.height == 0)
