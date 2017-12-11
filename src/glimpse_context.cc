@@ -163,7 +163,7 @@ struct color
 
 struct color_stop
 {
-    float depth;
+    float val;
     struct color color;
 };
 
@@ -299,6 +299,12 @@ struct gm_context
     int grey_debug_height;
     std::vector<uint8_t> grey_debug_buffer;
 
+    /*
+     * -1 means to visualize the most probable labels. Any other value
+     *  says to visualize the probability of specific labels...
+     */
+    int debug_label;
+
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
 
@@ -317,9 +323,13 @@ struct gm_context
     float min_depth;
     float max_depth;
 
-    int n_color_stops;
-    float color_stops_range;
-    struct color_stop *color_stops;
+    int n_depth_color_stops;
+    float depth_color_stops_range;
+    struct color_stop *depth_color_stops;
+
+    int n_heat_color_stops;
+    float heat_color_stops_range;
+    struct color_stop *heat_color_stops;
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -414,21 +424,19 @@ get_duration_ns_print_scale(uint64_t duration_ns)
 }
 
 static struct color
-get_color_from_stops(struct gm_context *ctx, float depth)
+stops_color_from_val(struct color_stop *stops,
+                     int n_stops,
+                     float range,
+                     float val)
 {
-    struct color_stop *stops = ctx->color_stops;
-    int n_stops = ctx->n_color_stops;
-    float range = ctx->color_stops_range;
-
-    int i = (int)((fmax(0, fmin(range, depth)) / range) * n_stops) + 1;
+    int i = (int)((fmax(0, fmin(range, val)) / range) * n_stops) + 1;
 
     if (i < 1)
         i = 1;
     else if (i >= n_stops)
         i = n_stops - 1;
 
-    float t = (depth - stops[i - 1].depth) /
-        (stops[i].depth - stops[i - 1].depth);
+    float t = (val - stops[i - 1].val) / (stops[i].val - stops[i - 1].val);
 
     struct color col0 = stops[i - 1].color;
     struct color col1 = stops[i].color;
@@ -440,20 +448,30 @@ get_color_from_stops(struct gm_context *ctx, float depth)
     return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
 }
 
-static struct color
-color_from_depth(float depth, float range, int n_stops)
-{
-    static const uint32_t rainbow[] = {
-        0xffff00ff, //yellow
-        0x0000ffff, //blue
-        0x00ff00ff, //green
-        0xff0000ff, //red
-        0x00ffffff, //cyan
-    };
+static const uint32_t depth_rainbow[] = {
+    0xffff00ff, //yellow
+    0x0000ffff, //blue
+    0x00ff00ff, //green
+    0xff0000ff, //red
+    0x00ffffff, //cyan
+};
 
-    int stop = (int)((fmax(0, fmin(range, depth)) / range) * n_stops);
-    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
-    int band = ((int)stop) % ARRAY_LEN(rainbow);
+static const uint32_t heat_map_rainbow[] = {
+    0x00000000, //black
+    0xff0000ff, //red
+    0xffff00ff, //yellow
+    0x0000ffff, //blue
+    0xffffffff, //white
+};
+
+static struct color
+rainbow_stop_from_val(const uint32_t *rainbow, int n_rainbow_bands,
+                       float val,
+                       float range,
+                       int n_stops) // can be > n_rainbow_bands and each cycle gets darker
+{
+    int stop = (int)((fmax(0, fmin(range, val)) / range) * n_stops);
+    int band = ((int)stop) % n_rainbow_bands;
 
     uint32_t rgba = rainbow[band];
 
@@ -461,32 +479,35 @@ color_from_depth(float depth, float range, int n_stops)
     float g = ((rgba & 0xff0000) >> 16) / 255.0f;
     float b = ((rgba & 0xff00) >> 8) / 255.0f;
 
+    /* Repeated cycles through the ranbow_bands will look darker and darker... */
+    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
     r *= f;
     g *= f;
     b *= f;
 
-    return { (uint8_t)(r * 255.f),
-             (uint8_t)(g * 255.f),
-             (uint8_t)(b * 255.f) };
+    return { (uint8_t)(r * 255.f), (uint8_t)(g * 255.f), (uint8_t)(b * 255.f) };
 }
 
 static void
-alloc_rgb_color_stops(struct gm_context *ctx)
+alloc_rgb_color_stops(struct color_stop **color_stops,
+                      int *n_color_stops,
+                      const uint32_t *rainbow,
+                      int n_rainbow_bands,
+                      float range,
+                      float step)
 {
-    int range = 5000;
-    float range_m = 5.f;
-    int step = 250;
     int n_stops = range / step;
 
-    ctx->n_color_stops = n_stops;
-    ctx->color_stops_range = range_m;
-    ctx->color_stops = (struct color_stop *)xcalloc(sizeof(struct color_stop), n_stops);
+    *n_color_stops = n_stops;
+    *color_stops = (struct color_stop *)xcalloc(sizeof(struct color_stop), n_stops);
 
-    struct color_stop *stops = ctx->color_stops;
+    struct color_stop *stops = *color_stops;
 
     for (int i = 0; i < n_stops; i++) {
-        stops[i].depth = (i * step) / 1000.f;
-        stops[i].color = color_from_depth(stops[i].depth, range_m, n_stops);
+        stops[i].val = i * step;
+        stops[i].color = rainbow_stop_from_val(rainbow,
+                                               n_rainbow_bands,
+                                               stops[i].val, range, n_stops);
     }
 }
 
@@ -1013,6 +1034,56 @@ sort_indices(pcl::PointIndices a, pcl::PointIndices b) {
     return (a.indices.size() > b.indices.size());
 }
 
+static void
+tracking_create_rgb_label_map(struct gm_context *ctx,
+                              struct gm_tracking *tracking,
+                              int debug_label)
+{
+    int width = ctx->training_camera_intrinsics.width;
+    int height = ctx->training_camera_intrinsics.height;
+    uint8_t n_labels = ctx->n_labels;
+    uint8_t *rgb_label_map = tracking->label_map_rgb;
+
+    gm_assert(ctx->log, debug_label < n_labels,
+              "Can't create RGB map of invalid label %u",
+              debug_label);
+
+    foreach_xy_off(width, height) {
+        uint8_t label = 0;
+        float pr = -1.0;
+        int pos = y * width + x;
+        float *pr_table = &tracking->label_probs[pos * n_labels];
+        for (uint8_t l = 0; l < n_labels; l++) {
+            if (pr_table[l] > pr) {
+                label = l;
+                pr = pr_table[l];
+            }
+        }
+
+        uint8_t r;
+        uint8_t g;
+        uint8_t b;
+
+        if (debug_label == -1) {
+            r = default_palette[label].red;
+            g = default_palette[label].green;
+            b = default_palette[label].blue;
+        } else {
+            struct color col = stops_color_from_val(ctx->heat_color_stops,
+                                                    ctx->n_heat_color_stops,
+                                                    1,
+                                                    pr_table[debug_label]);
+            r = col.r;
+            g = col.g;
+            b = col.b;
+        }
+
+        rgb_label_map[pos * 3] = r;
+        rgb_label_map[pos * 3 + 1] = g;
+        rgb_label_map[pos * 3 + 2] = b;
+    }
+}
+
 void
 gm_context_track_skeleton(struct gm_context *ctx)
 {
@@ -1501,32 +1572,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     depth_img = NULL;
 
     start = get_time();
-    uint8_t *label_map = tracking->label_map;
-    uint8_t *rgb_label_map = tracking->label_map_rgb;
-
-    // Create an rgb label map
-    foreach_xy_off(width, height) {
-        uint8_t label = 0;
-        float pr = -1.0;
-        int pos = y * width + x;
-        float *pr_table = &tracking->label_probs[pos * n_labels];
-        for (uint8_t l = 0; l < n_labels; l++) {
-            if (pr_table[l] > pr) {
-                label = l;
-                pr = pr_table[l];
-            }
-        }
-        label_map[pos] = label;
-
-        uint8_t r = default_palette[label].red;
-        uint8_t g = default_palette[label].green;
-        uint8_t b = default_palette[label].blue;
-
-        rgb_label_map[pos * 3] = r;
-        rgb_label_map[pos * 3 + 1] = g;
-        rgb_label_map[pos * 3 + 2] = b;
-    }
-
+    tracking_create_rgb_label_map(ctx, tracking, ctx->debug_label);
     end = get_time();
     duration = end - start;
     LOGI("Created RGB label map in %.3f%s\n",
@@ -1546,7 +1592,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
                     RGB_MIXIN_COPY,
                     tracking->cloud, NULL, false);*/
 
-    reproject_cloud(cloud, (void*)rgb_label_map,
+    reproject_cloud(cloud, (void*)tracking->label_map_rgb,
                     &ctx->training_camera_intrinsics,
                     NULL,
                     RGB_INTO_CLOUD,
@@ -1743,7 +1789,10 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
 
 #define COPY_AND_MAP_DEPTH_TO_RGB(DEPTH_COPY, DEPTH_RGB_BUF, OFF, DEPTH) \
     do { \
-        struct color rgb = get_color_from_stops(ctx, DEPTH); \
+        struct color rgb = stops_color_from_val(ctx->depth_color_stops, \
+                                                ctx->n_depth_color_stops, \
+                                                ctx->depth_color_stops_range, \
+                                                DEPTH); \
         uint8_t *depth_rgb = DEPTH_RGB_BUF + OFF * 3; \
         depth_rgb[0] = rgb.r; \
         depth_rgb[1] = rgb.g; \
@@ -1895,7 +1944,6 @@ detector_thread_cb(void *data)
 static void
 free_tracking(struct gm_tracking *tracking)
 {
-    free(tracking->label_map);
     free(tracking->label_map_rgb);
     free(tracking->label_probs);
     free(tracking->joints);
@@ -1921,7 +1969,6 @@ alloc_tracking(struct gm_context *ctx)
     int labels_width = ctx->training_camera_intrinsics.width;
     int labels_height = ctx->training_camera_intrinsics.height;
 
-    tracking->label_map = (uint8_t *)xcalloc(labels_width * labels_height, 1);
     tracking->label_map_rgb = (uint8_t *)xcalloc(labels_width * labels_height, 3);
     tracking->label_probs = (float *)xcalloc(labels_width *
                                              labels_height *
@@ -1975,7 +2022,7 @@ gm_context_destroy(struct gm_context *ctx)
     free_tracking(ctx->tracking_mid);
     free_tracking(ctx->tracking_back);
 
-    free(ctx->color_stops);
+    free(ctx->depth_color_stops);
 
     for (int i = 0; i < ctx->n_decision_trees; i++)
         free_tree(ctx->decision_trees[i]);
@@ -1998,32 +2045,6 @@ gm_context_new(struct gm_logger *logger,
     struct gm_context *ctx = new gm_context();
 
     ctx->log = logger;
-
-    struct gm_ui_property prop;
-
-    ctx->min_depth = 0.5;
-    prop = gm_ui_property();
-    prop.name = "min_depth";
-    prop.desc = "throw away points nearer than this";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_ptr = &ctx->min_depth;
-    prop.min = 0.0;
-    prop.max = 10;
-    ctx->properties.push_back(prop);
-
-    ctx->max_depth = 3.5;
-    prop = gm_ui_property();
-    prop.name = "max_depth";
-    prop.desc = "throw away points further than this";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_ptr = &ctx->max_depth;
-    prop.min = 0.5;
-    prop.max = 10;
-    ctx->properties.push_back(prop);
-
-    ctx->properties_state.n_properties = ctx->properties.size();
-    pthread_mutex_init(&ctx->properties_state.lock, NULL);
-    ctx->properties_state.properties = &ctx->properties[0];
 
     pthread_cond_init(&ctx->skel_track_cond, NULL);
     pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
@@ -2198,7 +2219,21 @@ gm_context_new(struct gm_logger *logger,
         return NULL;
     }
 
-    alloc_rgb_color_stops(ctx);
+    ctx->depth_color_stops_range = 5; // meters
+    alloc_rgb_color_stops(&ctx->depth_color_stops,
+                          &ctx->n_depth_color_stops,
+                          depth_rainbow,
+                          ARRAY_LEN(depth_rainbow),
+                          ctx->depth_color_stops_range,
+                          0.25); // steps
+
+    ctx->heat_color_stops_range = 1; // normalised probability
+    alloc_rgb_color_stops(&ctx->heat_color_stops,
+                          &ctx->n_heat_color_stops,
+                          heat_map_rainbow,
+                          ARRAY_LEN(heat_map_rainbow),
+                          ctx->heat_color_stops_range, // range
+                          1.f / ARRAY_LEN(heat_map_rainbow)); // step
 
 #ifdef USE_PCL_GBPD
     struct gm_asset *svm_asset = gm_asset_open("person-hog-svm.json",
@@ -2232,6 +2267,42 @@ gm_context_new(struct gm_logger *logger,
         return NULL;
     }
 #endif
+
+    struct gm_ui_property prop;
+
+    ctx->min_depth = 0.5;
+    prop = gm_ui_property();
+    prop.name = "min_depth";
+    prop.desc = "throw away points nearer than this";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_ptr = &ctx->min_depth;
+    prop.min = 0.0;
+    prop.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->max_depth = 3.5;
+    prop = gm_ui_property();
+    prop.name = "max_depth";
+    prop.desc = "throw away points further than this";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_ptr = &ctx->max_depth;
+    prop.min = 0.5;
+    prop.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->debug_label = -1;
+    prop = gm_ui_property();
+    prop.name = "debug_label";
+    prop.desc = "visualize specific label probabilities";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_ptr = &ctx->debug_label;
+    prop.min = -1;
+    prop.max = ctx->n_labels - 1;
+    ctx->properties.push_back(prop);
+
+    ctx->properties_state.n_properties = ctx->properties.size();
+    pthread_mutex_init(&ctx->properties_state.lock, NULL);
+    ctx->properties_state.properties = &ctx->properties[0];
 
     return ctx;
 }
@@ -2307,19 +2378,6 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
     *height = ctx->training_camera_intrinsics.height;
 
     return tracking->label_map_rgb;
-}
-
-const uint8_t *
-gm_tracking_get_label_map(struct gm_tracking *tracking,
-                          int *width,
-                          int *height)
-{
-    struct gm_context *ctx = tracking->ctx;
-
-    *width = ctx->training_camera_intrinsics.width;
-    *height = ctx->training_camera_intrinsics.height;
-
-    return tracking->label_map;
 }
 
 const float *

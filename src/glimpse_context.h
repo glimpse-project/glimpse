@@ -309,11 +309,6 @@ gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
                                     int *height);
 
 const uint8_t *
-gm_tracking_get_label_map(struct gm_tracking *tracking,
-                          int *width,
-                          int *height);
-
-const uint8_t *
 gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
                               int *width,
                               int *height);
