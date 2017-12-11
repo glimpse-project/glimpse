@@ -964,6 +964,11 @@ gm_context_track_skeleton(struct gm_context *ctx)
                          ctx->depth_camera_intrinsics.height);
     int n_points = 0;
 
+    // Person detection will happen in a voxel grid of this resolution. A
+    // smaller voxel grid may improve results, at the cost of performance.
+    float detect_res = 0.06f;
+    float half_detect_res = detect_res / 2.f;
+
     foreach_xy_off(ctx->depth_camera_intrinsics.width,
                    ctx->depth_camera_intrinsics.height) {
         float depth = tracking->depth[off];
@@ -1000,8 +1005,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
     LOGI("Reprojection of colour information took (%.3f%s)\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-
-    float detect_res = 0.06f;
 
     // Simplify point cloud by putting it through a voxel grid
     start = get_time();
@@ -1071,7 +1074,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     seg.setInputCloud(cloud_floor);
 
     seg.setMaxIterations(250);
-    seg.setDistanceThreshold(0.03);
+    seg.setDistanceThreshold(std::max(0.03f, detect_res));
 
     // XXX: We're assuming that the camera here is perpendicular to the floor
     //      and give a generous threshold, but ideally we'd use device sensors
@@ -1112,12 +1115,14 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Use Euclidean clustering to split the cloud into possible human clusters.
     start = get_time();
 
+    // The search method used depends a fair bit on the density of the cloud
+    // being searched and the number of searches being performed. A KdTree is
+    // usually faster for this particular use-case than an Octree, but this can
+    // vary depending on situation and compile options.
 #if 1
-    // Creating the KdTree object for the search method of the extraction
     pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
       tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
 #else
-    // Octree is faster in debug mode oddly.
     pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
       tree(new pcl::search::Octree<pcl::PointXYZRGBA>(0.1));
 #endif
@@ -1158,11 +1163,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Create a search tree so we can reconstruct the dense person cloud
     // We use an octree here as the time it takes to build a KdTree vastly
     // outweighs the speed benefit searching it.
-    // TODO: If we had our own Octree structure, we could build it up-front
-    //       when projecting the tree and we could query it faster as we don't
-    //       actually need radius search.
     pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
-      dense_tree(new pcl::search::Octree<pcl::PointXYZRGBA>(detect_res * 2));
+      dense_tree(new pcl::search::Octree<pcl::PointXYZRGBA>(detect_res));
     dense_tree->setSortedResults(false);
     dense_tree->setInputCloud(dense_cloud);
 
@@ -1290,9 +1292,17 @@ gm_context_track_skeleton(struct gm_context *ctx)
     for (std::vector<int>::const_iterator it = person_indices.indices.begin();
          it != person_indices.indices.end (); ++it) {
         std::vector<int> pt_indices;
-        std::vector<float> pt_distances;
-        dense_tree->radiusSearch(cloud->points[*it], detect_res,
-                                 pt_indices, pt_distances);
+
+        Eigen::Vector3f pt_min, pt_max;
+        pcl::PointXYZRGBA point = cloud->points[*it];
+        pt_min[0] = point.x - half_detect_res;
+        pt_min[1] = point.y - half_detect_res;
+        pt_min[2] = point.z - half_detect_res;
+        pt_max[0] = point.x + half_detect_res;
+        pt_max[1] = point.y + half_detect_res;
+        pt_max[2] = point.z + half_detect_res;
+
+        dense_tree->tree_->boxSearch(pt_min, pt_max, pt_indices);
         std::copy(pt_indices.begin(), pt_indices.end(),
                   std::back_inserter(indices));
     }
