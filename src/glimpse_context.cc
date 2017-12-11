@@ -1006,6 +1006,21 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
+    // Filter out points that are too near or too far
+    start = get_time();
+    pcl::PassThrough<pcl::PointXYZRGBA> passZ(true);
+    passZ.setInputCloud(cloud);
+    passZ.setFilterFieldName ("z");
+    passZ.setFilterLimits(ctx->min_depth, ctx->max_depth);
+    passZ.filter(*cloud);
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Cloud has %d points after depth filter (%.3f%s)",
+         (int)cloud->points.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
     // Simplify point cloud by putting it through a voxel grid
     start = get_time();
     pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
@@ -1020,21 +1035,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
     end = get_time();
     duration = end - start;
     LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
-         (int)cloud->points.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-    // Filter out points that are too near or too far
-    start = get_time();
-    pcl::PassThrough<pcl::PointXYZRGBA> passZ(true);
-    passZ.setInputCloud(cloud);
-    passZ.setFilterFieldName ("z");
-    passZ.setFilterLimits(ctx->min_depth, ctx->max_depth);
-    passZ.filter(*cloud);
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Cloud has %d points after depth filter (%.3f%s)",
          (int)cloud->points.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
