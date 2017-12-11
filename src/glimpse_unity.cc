@@ -223,7 +223,7 @@ handle_device_frame_updates(struct glimpse_data *data)
 
     if (data->device_frame) {
         //ProfileScopedSection(FreeFrame);
-        gm_device_free_frame(data->device, data->device_frame);
+        gm_frame_unref(data->device_frame);
     }
 
     {
@@ -363,17 +363,20 @@ process_events(struct glimpse_data *data)
 
     handle_device_frame_updates(data);
     handle_context_tracking_updates(data);
-
-    gm_context_render_thread_hook(data->ctx);
 }
 
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_process_events(void)
+{
+    process_events(plugin_data);
+}
 
 static void UNITY_INTERFACE_API
 on_render_event_cb(int event)
 {
     gm_debug(plugin_data->log, "Render Event %d DEBUG\n", event);
 
-    process_events(plugin_data);
+    gm_context_render_thread_hook(plugin_data->ctx);
 }
 
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API

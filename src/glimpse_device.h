@@ -109,10 +109,6 @@ gm_device_request_frame(struct gm_device *dev, uint64_t requirements);
 struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev);
 
-void
-gm_device_free_frame(struct gm_device *dev,
-                     struct gm_frame *frame);
-
 #ifdef __cplusplus
 }
 #endif

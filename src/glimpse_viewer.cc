@@ -529,26 +529,14 @@ handle_device_frame_updates(Data *data)
     if (!data->device_frame_ready)
         return;
 
-    /* XXX We have to consider that a gm_frame currently only remains valid
-     * to access until the next call to gm_device_get_latest_frame().
-     *
-     * Conceptually we have two decoupled consumers: 1) this redraw/render
-     * loop 2) skeletal tracking so we need to be careful about
-     * understanding the required gm_frame lifetime.
-     *
-     * Since we can currently assume gm_context_notify_frame() will
-     * internally copy whatever frame data it requires then so long as we
-     * synchronize these calls with the redraw loop we know it's safe to
-     * free the last gm_frame once we have received a new one.
-     */
-
     if (data->device_frame) {
         ProfileScopedSection(FreeFrame);
-        gm_device_free_frame(data->device, data->device_frame);
+        gm_frame_unref(data->device_frame);
     }
 
     {
         ProfileScopedSection(GetLatestFrame);
+        /* NB: gm_device_get_latest_frame will give us a _ref() */
         data->device_frame = gm_device_get_latest_frame(data->device);
         assert(data->device_frame);
         upload = true;
@@ -591,10 +579,10 @@ handle_device_frame_updates(Data *data)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        void *video_front = gm_frame_get_video_buffer(data->device_frame);
-        enum gm_format video_format = gm_frame_get_video_format(data->device_frame);
+        void *video_front = data->device_frame->video->data;
+        enum gm_format video_format = data->device_frame->video_format;
 
-        switch(video_format) {
+        switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
                          data->video_width, data->video_height,
@@ -614,7 +602,11 @@ handle_device_frame_updates(Data *data)
                          0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
             break;
 
-        default:
+        case GM_FORMAT_UNKNOWN:
+        case GM_FORMAT_Z_U16_MM:
+        case GM_FORMAT_Z_F32_M:
+        case GM_FORMAT_Z_F16_M:
+            gm_assert(data->log, 0, "Unexpected format for video buffer");
             break;
         }
     }

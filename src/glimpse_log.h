@@ -94,7 +94,7 @@ gm_log(struct gm_logger *logger,
 } while(0)
 
 #define gm_assert(logger, condition, args...) do { \
-    if (__builtin_expect((condition), 1)) { \
+    if (!__builtin_expect((condition), 1)) { \
         gm_log(logger, GM_LOG_ASSERT, GM_LOG_CONTEXT, args); \
         abort(); \
     } \

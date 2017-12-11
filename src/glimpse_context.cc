@@ -325,8 +325,9 @@ struct gm_context
     std::vector<struct gm_ui_property> properties;
 
     pthread_mutex_t frame_ready_mutex;
-    bool frame_ready;
     pthread_cond_t frame_ready_cond;
+    struct gm_frame *frame_ready;
+    struct gm_frame *frame_front;
 
     void (*event_callback)(struct gm_context *ctx,
                            struct gm_event *event,
@@ -410,6 +411,83 @@ get_duration_ns_print_scale(uint64_t duration_ns)
         return duration_ns / 1e3;
     else
         return duration_ns;
+}
+
+static struct color
+get_color_from_stops(struct gm_context *ctx, float depth)
+{
+    struct color_stop *stops = ctx->color_stops;
+    int n_stops = ctx->n_color_stops;
+    float range = ctx->color_stops_range;
+
+    int i = (int)((fmax(0, fmin(range, depth)) / range) * n_stops) + 1;
+
+    if (i < 1)
+        i = 1;
+    else if (i >= n_stops)
+        i = n_stops - 1;
+
+    float t = (depth - stops[i - 1].depth) /
+        (stops[i].depth - stops[i - 1].depth);
+
+    struct color col0 = stops[i - 1].color;
+    struct color col1 = stops[i].color;
+
+    float r = (1.0f - t) * col0.r + t * col1.r;
+    float g = (1.0f - t) * col0.g + t * col1.g;
+    float b = (1.0f - t) * col0.b + t * col1.b;
+
+    return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
+}
+
+static struct color
+color_from_depth(float depth, float range, int n_stops)
+{
+    static const uint32_t rainbow[] = {
+        0xffff00ff, //yellow
+        0x0000ffff, //blue
+        0x00ff00ff, //green
+        0xff0000ff, //red
+        0x00ffffff, //cyan
+    };
+
+    int stop = (int)((fmax(0, fmin(range, depth)) / range) * n_stops);
+    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
+    int band = ((int)stop) % ARRAY_LEN(rainbow);
+
+    uint32_t rgba = rainbow[band];
+
+    float r = ((rgba & 0xff000000) >> 24) / 255.0f;
+    float g = ((rgba & 0xff0000) >> 16) / 255.0f;
+    float b = ((rgba & 0xff00) >> 8) / 255.0f;
+
+    r *= f;
+    g *= f;
+    b *= f;
+
+    return { (uint8_t)(r * 255.f),
+             (uint8_t)(g * 255.f),
+             (uint8_t)(b * 255.f) };
+}
+
+static void
+alloc_rgb_color_stops(struct gm_context *ctx)
+{
+    int range = 5000;
+    float range_m = 5.f;
+    int step = 250;
+    int n_stops = range / step;
+
+    ctx->n_color_stops = n_stops;
+    ctx->color_stops_range = range_m;
+    ctx->color_stops = (struct color_stop *)xcalloc(sizeof(struct color_stop), n_stops);
+
+    struct color_stop *stops = ctx->color_stops;
+
+    for (int i = 0; i < n_stops; i++) {
+        stops[i].depth = (i * step) / 1000.f;
+        stops[i].color = color_from_depth(stops[i].depth, range_m, n_stops);
+    }
 }
 
 static GLuint __attribute__((unused))
@@ -1519,6 +1597,197 @@ notify_tracking(struct gm_context *ctx)
     ctx->event_callback(ctx, event, ctx->callback_data);
 }
 
+void
+update_tracking_video(struct gm_context *ctx,
+                      struct gm_tracking *tracking,
+                      enum gm_format format,
+                      uint8_t *video,
+                      uint64_t timestamp)
+{
+    int width = ctx->video_camera_intrinsics.width;
+    int height = ctx->video_camera_intrinsics.height;
+
+    if (!ctx->grey_width) {
+        ctx->grey_width = width;
+        ctx->grey_height = height;
+
+#ifndef DOWNSAMPLE_ON_GPU
+#ifdef DOWNSAMPLE_1_4
+        ctx->grey_buffer_1_2.resize((width / 2) * (height / 2));
+#endif
+#endif
+    }
+
+    glimpse::wrapped_image<unsigned char> orig_grey_img;
+
+    switch(format) {
+    case GM_FORMAT_RGB:
+        foreach_xy_off(width, height) {
+            uint8_t r = video[off * 3];
+            uint8_t g = video[off * 3 + 1];
+            uint8_t b = video[off * 3 + 2];
+            tracking->video[off] = (r << 24) | (g << 16) | (b << 8) | 0xFF;
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+
+    case GM_FORMAT_RGBX:
+        foreach_xy_off(width, height) {
+            uint32_t rgba = ((uint32_t*)video)[off] | 0xFF;
+            tracking->video[off] = rgba;
+
+            uint8_t r = video[off * 3];
+            uint8_t g = video[off * 3 + 1];
+            uint8_t b = video[off * 3 + 2];
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+
+    case GM_FORMAT_RGBA:
+        memcpy(tracking->video, video, width * height * 4);
+        foreach_xy_off(width, height) {
+            uint8_t r = video[off * 3];
+            uint8_t g = video[off * 3 + 1];
+            uint8_t b = video[off * 3 + 2];
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+
+    case GM_FORMAT_LUMINANCE_U8:
+        foreach_xy_off(width, height) {
+            uint8_t lum = video[off];
+            tracking->video[off] = (lum << 24) | (lum << 16) | (lum << 8) | 0xFF;
+        }
+        memcpy(tracking->face_detect_buf, video, width * height);
+        break;
+
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_Z_U16_MM:
+    case GM_FORMAT_Z_F32_M:
+    case GM_FORMAT_Z_F16_M:
+        gm_assert(ctx->log, 0, "Unexpected format for video buffer");
+        return;
+    }
+
+    orig_grey_img.wrap(ctx->grey_width,
+                       ctx->grey_height,
+                       ctx->grey_width, //stride
+                       static_cast<unsigned char *>(tracking->face_detect_buf));
+
+#ifndef DOWNSAMPLE_ON_GPU
+    uint64_t start, end, duration_ns;
+
+#ifdef DOWNSAMPLE_1_2
+#ifdef DOWNSAMPLE_1_4
+    /* 1/4 resolution */
+    glimpse::wrapped_image<unsigned char> grey_1_2_img;
+    grey_1_2_img.wrap(width / 2,
+                      height / 2,
+                      width / 2, //stride
+                      static_cast<unsigned char *>(ctx->grey_buffer_1_2.data()));
+
+    glimpse::wrapped_image<unsigned char> grey_1_4_img;
+    grey_1_4_img.wrap(width / 4,
+                      height / 4,
+                      width / 4, //stride
+                      static_cast<unsigned char *>(tracking->face_detect_buf));
+#else
+    /* half resolution */
+    glimpse::wrapped_image<unsigned char> grey_1_2_img;
+    grey_1_2_img.wrap(width / 2,
+                      height / 2,
+                      width / 2, //stride
+                      static_cast<unsigned char *>(tracking->face_detect_buf));
+#endif
+#endif
+
+#ifdef DOWNSAMPLE_1_2
+    LOGI("Started resizing frame");
+    start = get_time();
+    dlib::resize_image(orig_grey_img, grey_1_2_img,
+                       dlib::interpolate_bilinear());
+    end = get_time();
+    duration_ns = end - start;
+    LOGI("Frame scaled to 1/2 size on CPU in %.3f%s",
+         get_duration_ns_print_scale(duration_ns),
+         get_duration_ns_print_scale_suffix(duration_ns));
+
+#ifdef DOWNSAMPLE_1_4
+    start = get_time();
+    dlib::resize_image(grey_1_2_img, grey_1_4_img,
+                       dlib::interpolate_bilinear());
+    end = get_time();
+    duration_ns = end - start;
+
+    LOGI("Frame scaled to 1/4 size on CPU in %.3f%s",
+         get_duration_ns_print_scale(duration_ns),
+         get_duration_ns_print_scale_suffix(duration_ns));
+#endif // DOWNSAMPLE_1_4
+#endif // DOWNSAMPLE_1_2
+
+
+#endif // !DOWNSAMPLE_ON_GPU
+
+    tracking->video_capture_timestamp = timestamp;
+}
+
+static void
+update_tracking_depth_from_buffer(struct gm_context *ctx,
+                                  struct gm_tracking *tracking,
+                                  enum gm_format format,
+                                  void *depth,
+                                  uint64_t timestamp)
+{
+    int width = ctx->depth_camera_intrinsics.width;
+    int height = ctx->depth_camera_intrinsics.height;
+
+#define COPY_AND_MAP_DEPTH_TO_RGB(DEPTH_COPY, DEPTH_RGB_BUF, OFF, DEPTH) \
+    do { \
+        struct color rgb = get_color_from_stops(ctx, DEPTH); \
+        uint8_t *depth_rgb = DEPTH_RGB_BUF + OFF * 3; \
+        depth_rgb[0] = rgb.r; \
+        depth_rgb[1] = rgb.g; \
+        depth_rgb[2] = rgb.b; \
+        depth_copy[OFF] = DEPTH; \
+    } while (0)
+
+    float *depth_copy = tracking->depth;
+    uint8_t *depth_rgb_back = tracking->depth_rgb;
+
+    switch (format) {
+    case GM_FORMAT_Z_U16_MM:
+        foreach_xy_off(width, height) {
+            float depth_m = ((uint16_t *)depth)[off] / 1000.f;
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
+        }
+        break;
+    case GM_FORMAT_Z_F32_M:
+        foreach_xy_off(width, height) {
+            float depth_m = ((float *)depth)[off];
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
+        }
+        break;
+    case GM_FORMAT_Z_F16_M:
+        foreach_xy_off(width, height) {
+            float depth_m = ((half *)depth)[off];
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
+        }
+        break;
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_LUMINANCE_U8:
+    case GM_FORMAT_RGB:
+    case GM_FORMAT_RGBX:
+    case GM_FORMAT_RGBA:
+        gm_assert(ctx->log, 0, "Unexpected format for depth buffer");
+        break;
+    }
+
+#undef COPY_AND_MAP_DEPTH_TO_RGB
+
+    tracking->depth_capture_timestamp = timestamp;
+}
+
+
 static void *
 detector_thread_cb(void *data)
 {
@@ -1568,8 +1837,24 @@ detector_thread_cb(void *data)
         while (!ctx->frame_ready) {
             pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
         }
-        ctx->frame_ready = false;
+        if (ctx->frame_front)
+            gm_frame_unref(ctx->frame_front);
+        ctx->frame_front = ctx->frame_ready;
+        ctx->frame_ready = NULL;
         pthread_mutex_unlock(&ctx->frame_ready_mutex);
+
+        struct gm_frame *frame = ctx->frame_front;
+        update_tracking_depth_from_buffer(ctx,
+                                          ctx->tracking_back,
+                                          frame->depth_format,
+                                          frame->depth->data,
+                                          frame->timestamp);
+
+        update_tracking_video(ctx,
+                              ctx->tracking_back,
+                              frame->video_format,
+                              (uint8_t *)frame->video->data,
+                              frame->timestamp);
 
         /* While downsampling on the CPU we currently do that synchronosuly
          * when we are notified of a new frame.
@@ -1701,83 +1986,6 @@ gm_context_destroy(struct gm_context *ctx)
     json_value_free(ctx->joint_map);
 
     delete ctx;
-}
-
-static struct color
-get_color_from_stops(struct gm_context *ctx, float depth)
-{
-    struct color_stop *stops = ctx->color_stops;
-    int n_stops = ctx->n_color_stops;
-    float range = ctx->color_stops_range;
-
-    int i = (int)((fmax(0, fmin(range, depth)) / range) * n_stops) + 1;
-
-    if (i < 1)
-        i = 1;
-    else if (i >= n_stops)
-        i = n_stops - 1;
-
-    float t = (depth - stops[i - 1].depth) /
-        (stops[i].depth - stops[i - 1].depth);
-
-    struct color col0 = stops[i - 1].color;
-    struct color col1 = stops[i].color;
-
-    float r = (1.0f - t) * col0.r + t * col1.r;
-    float g = (1.0f - t) * col0.g + t * col1.g;
-    float b = (1.0f - t) * col0.b + t * col1.b;
-
-    return { (uint8_t)r, (uint8_t)g, (uint8_t)b };
-}
-
-static struct color
-color_from_depth(float depth, float range, int n_stops)
-{
-    static const uint32_t rainbow[] = {
-        0xffff00ff, //yellow
-        0x0000ffff, //blue
-        0x00ff00ff, //green
-        0xff0000ff, //red
-        0x00ffffff, //cyan
-    };
-
-    int stop = (int)((fmax(0, fmin(range, depth)) / range) * n_stops);
-    float f = powf(0.8, floorf(stop / ARRAY_LEN(rainbow)));
-    int band = ((int)stop) % ARRAY_LEN(rainbow);
-
-    uint32_t rgba = rainbow[band];
-
-    float r = ((rgba & 0xff000000) >> 24) / 255.0f;
-    float g = ((rgba & 0xff0000) >> 16) / 255.0f;
-    float b = ((rgba & 0xff00) >> 8) / 255.0f;
-
-    r *= f;
-    g *= f;
-    b *= f;
-
-    return { (uint8_t)(r * 255.f),
-             (uint8_t)(g * 255.f),
-             (uint8_t)(b * 255.f) };
-}
-
-static void
-alloc_rgb_color_stops(struct gm_context *ctx)
-{
-    int range = 5000;
-    float range_m = 5.f;
-    int step = 250;
-    int n_stops = range / step;
-
-    ctx->n_color_stops = n_stops;
-    ctx->color_stops_range = range_m;
-    ctx->color_stops = (struct color_stop *)xcalloc(sizeof(struct color_stop), n_stops);
-
-    struct color_stop *stops = ctx->color_stops;
-
-    for (int i = 0; i < n_stops; i++) {
-        stops[i].depth = (i * step) / 1000.f;
-        stops[i].color = color_from_depth(stops[i].depth, range_m, n_stops);
-    }
 }
 
 struct gm_context *
@@ -2054,189 +2262,6 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
     }
 }
 
-void
-update_tracking_video(struct gm_context *ctx,
-                      struct gm_tracking *tracking,
-                      enum gm_format format,
-                      uint8_t *video,
-                      uint64_t timestamp)
-{
-    int width = ctx->video_camera_intrinsics.width;
-    int height = ctx->video_camera_intrinsics.height;
-
-    if (!ctx->grey_width) {
-        ctx->grey_width = width;
-        ctx->grey_height = height;
-
-#ifndef DOWNSAMPLE_ON_GPU
-#ifdef DOWNSAMPLE_1_4
-        ctx->grey_buffer_1_2.resize((width / 2) * (height / 2));
-#endif
-#endif
-    }
-
-    glimpse::wrapped_image<unsigned char> orig_grey_img;
-
-    switch(format) {
-    case GM_FORMAT_RGB:
-        foreach_xy_off(width, height) {
-            uint8_t r = video[off * 3];
-            uint8_t g = video[off * 3 + 1];
-            uint8_t b = video[off * 3 + 2];
-            tracking->video[off] = (r << 24) | (g << 16) | (b << 8) | 0xFF;
-            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
-        }
-        break;
-
-    case GM_FORMAT_RGBX:
-        foreach_xy_off(width, height) {
-            uint32_t rgba = ((uint32_t*)video)[off] | 0xFF;
-            tracking->video[off] = rgba;
-
-            uint8_t r = video[off * 3];
-            uint8_t g = video[off * 3 + 1];
-            uint8_t b = video[off * 3 + 2];
-            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
-        }
-        break;
-
-    case GM_FORMAT_RGBA:
-        memcpy(tracking->video, video, width * height * 4);
-        foreach_xy_off(width, height) {
-            uint8_t r = video[off * 3];
-            uint8_t g = video[off * 3 + 1];
-            uint8_t b = video[off * 3 + 2];
-            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
-        }
-        break;
-
-    case GM_FORMAT_LUMINANCE_U8:
-        foreach_xy_off(width, height) {
-            uint8_t lum = video[off];
-            tracking->video[off] = (lum << 24) | (lum << 16) | (lum << 8) | 0xFF;
-        }
-        memcpy(tracking->face_detect_buf, video, width * height);
-        break;
-
-    default:
-        assert(0);
-        return;
-    }
-
-    orig_grey_img.wrap(ctx->grey_width,
-                       ctx->grey_height,
-                       ctx->grey_width, //stride
-                       static_cast<unsigned char *>(tracking->face_detect_buf));
-
-#ifndef DOWNSAMPLE_ON_GPU
-    uint64_t start, end, duration_ns;
-
-#ifdef DOWNSAMPLE_1_2
-#ifdef DOWNSAMPLE_1_4
-    /* 1/4 resolution */
-    glimpse::wrapped_image<unsigned char> grey_1_2_img;
-    grey_1_2_img.wrap(width / 2,
-                      height / 2,
-                      width / 2, //stride
-                      static_cast<unsigned char *>(ctx->grey_buffer_1_2.data()));
-
-    glimpse::wrapped_image<unsigned char> grey_1_4_img;
-    grey_1_4_img.wrap(width / 4,
-                      height / 4,
-                      width / 4, //stride
-                      static_cast<unsigned char *>(tracking->face_detect_buf));
-#else
-    /* half resolution */
-    glimpse::wrapped_image<unsigned char> grey_1_2_img;
-    grey_1_2_img.wrap(width / 2,
-                      height / 2,
-                      width / 2, //stride
-                      static_cast<unsigned char *>(tracking->face_detect_buf));
-#endif
-#endif
-
-#ifdef DOWNSAMPLE_1_2
-    LOGI("Started resizing frame");
-    start = get_time();
-    dlib::resize_image(orig_grey_img, grey_1_2_img,
-                       dlib::interpolate_bilinear());
-    end = get_time();
-    duration_ns = end - start;
-    LOGI("Frame scaled to 1/2 size on CPU in %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
-
-#ifdef DOWNSAMPLE_1_4
-    start = get_time();
-    dlib::resize_image(grey_1_2_img, grey_1_4_img,
-                       dlib::interpolate_bilinear());
-    end = get_time();
-    duration_ns = end - start;
-
-    LOGI("Frame scaled to 1/4 size on CPU in %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
-#endif // DOWNSAMPLE_1_4
-#endif // DOWNSAMPLE_1_2
-
-
-#endif // !DOWNSAMPLE_ON_GPU
-
-    tracking->video_capture_timestamp = timestamp;
-}
-
-static void
-update_tracking_depth_from_buffer(struct gm_context *ctx,
-                                  struct gm_tracking *tracking,
-                                  enum gm_format format,
-                                  void *depth,
-                                  uint64_t timestamp)
-{
-    int width = ctx->depth_camera_intrinsics.width;
-    int height = ctx->depth_camera_intrinsics.height;
-
-#define COPY_AND_MAP_DEPTH_TO_RGB(DEPTH_COPY, DEPTH_RGB_BUF, OFF, DEPTH) \
-    do { \
-        struct color rgb = get_color_from_stops(ctx, DEPTH); \
-        uint8_t *depth_rgb = DEPTH_RGB_BUF + OFF * 3; \
-        depth_rgb[0] = rgb.r; \
-        depth_rgb[1] = rgb.g; \
-        depth_rgb[2] = rgb.b; \
-        depth_copy[OFF] = DEPTH; \
-    } while (0)
-
-    float *depth_copy = tracking->depth;
-    uint8_t *depth_rgb_back = tracking->depth_rgb;
-
-    switch (format) {
-    case GM_FORMAT_Z_U16_MM:
-        foreach_xy_off(width, height) {
-            float depth_m = ((uint16_t *)depth)[off] / 1000.f;
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
-        }
-        break;
-    case GM_FORMAT_Z_F32_M:
-        foreach_xy_off(width, height) {
-            float depth_m = ((float *)depth)[off];
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
-        }
-        break;
-    case GM_FORMAT_Z_F16_M:
-        foreach_xy_off(width, height) {
-            float depth_m = ((half *)depth)[off];
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
-        }
-        break;
-    default:
-        assert(0);
-        break;
-    }
-
-#undef COPY_AND_MAP_DEPTH_TO_RGB
-
-    tracking->depth_capture_timestamp = timestamp;
-}
-
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *tracking)
 {
@@ -2320,20 +2345,10 @@ gm_context_notify_frame(struct gm_context *ctx,
     if (frame->depth == NULL || frame->video == NULL)
         return false;
 
-    update_tracking_depth_from_buffer(ctx,
-                                      ctx->tracking_back,
-                                      frame->depth_format,
-                                      frame->depth,
-                                      frame->timestamp);
-
-    update_tracking_video(ctx,
-                          ctx->tracking_back,
-                          frame->video_format,
-                          (uint8_t *)frame->video,
-                          frame->timestamp);
-
     pthread_mutex_lock(&ctx->frame_ready_mutex);
-    ctx->frame_ready = true;
+    if (ctx->frame_ready)
+        gm_frame_unref(ctx->frame_ready);
+    ctx->frame_ready = gm_frame_ref(frame);
     pthread_cond_signal(&ctx->frame_ready_cond);
     pthread_mutex_unlock(&ctx->frame_ready_mutex);
 

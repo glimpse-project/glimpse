@@ -113,25 +113,108 @@ struct gm_event
     };
 };
 
-
-/* FIXME put gm_frame in a glimpse_internal.h. These should be
- * exposed to glimpse_cameras.c but not to apps/middleware
+/* A reference to a single data buffer
+ *
+ * Used to reference count buffers attached to frames where we want to abstract
+ * away the life-cycle management of the underlying allocation/storage.
+ *
+ * Frames will be comprised of multiple buffers which themselves may be the
+ * product of more than one device (e.g. depth + rgb cameras and accelerometer
+ * data buffers) Each type of buffer might be associated with a different pool
+ * or swapchain for recylcing the underlying allocations and so it's not enough
+ * to do buffer management of complete frames.
  */
+struct gm_buffer_vtable
+{
+    void (*free)(struct gm_buffer *self);
+};
+
+struct gm_buffer
+{
+    int ref;
+
+    struct gm_buffer_vtable *api;
+
+    /* XXX: currently assuming heap allocated buffers, but probably generalised
+     * later.
+     *
+     * TODO: consider moving state behing buffer->api in case we want a stable
+     * ABI.
+     */
+    size_t len;
+    void *data;
+};
+
+inline struct gm_buffer *
+gm_buffer_ref(struct gm_buffer *buffer)
+{
+    buffer->ref++;
+    return buffer;
+}
+
+inline void
+gm_buffer_unref(struct gm_buffer *buffer)
+{
+    if (__builtin_expect(--(buffer->ref) < 1, 0))
+        buffer->api->free(buffer);
+}
+
+/* A reference to an immutable frame comprised of multiple buffers
+ *
+ * When the frame is no longer needed then gm_frame_unref() should be called to
+ * free/recycle the storage when there are no longer any users of the data.
+ *
+ * This design is intended to abstract an underlying swapchain for recycling
+ * the allocations used to hold a frame such that there may be multiple
+ * decoupled/unsynchronized consumers of a single frame (such as a rendering
+ * thread and an image processing thread).
+ *
+ * So long as you hold a reference to a frame then it's safe to use the
+ * embedded function pointers and safe to read the underlying buffers.
+ *
+ * Never modify the contents of buffers, make a new frame for modifications if
+ * necessary.
+ *
+ * Aim to release references promptly considing that the production of new
+ * frames may eventually become throttled waiting for previous frames to be
+ * released.
+ */
+
+struct gm_frame_vtable
+{
+    void (*free)(struct gm_frame *self);
+};
 
 struct gm_frame
 {
-    uint64_t timestamp; // CLOCK_MONOTONIC
-    enum gm_format depth_format;
-    void *depth;
-    enum gm_format video_format;
-    void *video;
+    int ref;
 
-    //TODO
-#if 0
-    enum gm_rotation rotation;
-    float down[3];
-#endif
+    struct gm_frame_vtable *api;
+
+    /* TODO: consider putting some of this behind frame->api in case we
+     * want a stable ABI.
+     */
+    uint64_t timestamp;
+    enum gm_format depth_format;
+    struct gm_buffer *depth;
+    enum gm_format video_format;
+    struct gm_buffer *video;
 };
+
+inline struct gm_frame *
+gm_frame_ref(struct gm_frame *frame)
+{
+    frame->ref++;
+    return frame;
+}
+
+inline void
+gm_frame_unref(struct gm_frame *frame)
+{
+    if (__builtin_expect(--(frame->ref) < 1, 0))
+        frame->api->free(frame);
+}
+
 
 struct gm_intrinsics {
   uint32_t width;
@@ -142,7 +225,7 @@ struct gm_intrinsics {
   double cx;
   double cy;
 
-  /* TODO: add distortion model discription */
+  /* TODO: add distortion model description */
 };
 
 struct gm_extrinsics {
@@ -215,12 +298,6 @@ struct gm_tracking;
 
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
-
-void *
-gm_frame_get_video_buffer(struct gm_frame *frame);
-
-enum gm_format
-gm_frame_get_video_format(struct gm_frame *frame);
 
 /* XXX: not really a good approach since you can't fetch the latest state
  * atomically...

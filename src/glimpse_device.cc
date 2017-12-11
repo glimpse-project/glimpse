@@ -50,6 +50,48 @@
 
 using half_float::half;
 
+struct gm_mem_pool {
+    struct gm_device *dev;
+
+    const char *name;
+
+    pthread_mutex_t lock;
+    pthread_cond_t available_cond;
+    unsigned max_size;
+    std::vector<void *> available;
+    std::vector<void *> busy;
+
+    void *(*alloc_mem)(struct gm_mem_pool *pool);
+    void (*free_mem)(struct gm_mem_pool *pool, void *mem);
+};
+
+struct gm_device_buffer
+{
+    struct gm_buffer base;
+
+    struct gm_buffer_vtable vtable;
+
+    struct gm_device *dev;
+    struct gm_mem_pool *pool;
+};
+
+struct gm_device_frame
+{
+    struct gm_frame base;
+
+    struct gm_frame_vtable vtable;
+
+    struct gm_device *dev;
+    struct gm_mem_pool *pool;
+
+    //TODO
+#if 0
+    enum gm_rotation rotation;
+    float down[3];
+#endif
+};
+
+
 struct gm_device
 {
     enum gm_device_type type;
@@ -92,21 +134,30 @@ struct gm_device
     void *frame_callback_data;
 
     /* What data is required for the next frame?
-     * E.g. _DEPTH | _LUMINANCE | _COLOR
+     * E.g. _DEPTH | _VIDEO
      */
     uint64_t frame_request_requirements;
 
     pthread_mutex_t swap_buffers_lock;
 
     enum gm_format depth_format;
-    void *depth_back;
-    void *depth_mid;
-    void *depth_front;
 
     enum gm_format video_format;
-    void *video_back;
-    void *video_mid;
-    void *video_front;
+
+    /* Here 'ready' buffers are one that are ready to be collected into a
+     * frame if requested. The 'back' buffers are the ones that the hardware
+     * is currently writing into.
+     */
+    struct gm_mem_pool video_buf_pool;
+    struct gm_device_buffer *video_buf_ready;
+    struct gm_device_buffer *video_buf_back;
+
+    struct gm_mem_pool depth_buf_pool;
+    struct gm_device_buffer *depth_buf_ready;
+    struct gm_device_buffer *depth_buf_back;
+
+    struct gm_mem_pool frame_pool;
+    struct gm_frame *last_frame;
 
     /* If depth_mid buffer is valid then corresponding _DEPTH bit is set */
     uint64_t frame_ready_requirements;
@@ -149,6 +200,206 @@ gm_device_event_free(struct gm_device_event *event)
     free(event);
 }
 
+static void *
+mem_pool_acquire_resource(struct gm_mem_pool *pool)
+{
+    struct gm_device *dev = pool->dev;
+    void *resource;
+
+    pthread_mutex_lock(&pool->lock);
+
+    /* Sanity check with arbitrary upper limit for the number of allocations */
+    gm_assert(dev->log,
+              (pool->busy.size() + pool->available.size()) < 100,
+              "'%s' memory pool growing out of control (%lu allocations)",
+              pool->name,
+              (pool->busy.size() + pool->available.size()));
+
+    if (pool->available.size()) {
+        resource = pool->available.back();
+        pool->available.pop_back();
+    } else if (pool->busy.size() + pool->available.size() > pool->max_size) {
+
+        gm_debug(dev->log,
+                 "Throttling \"%s\" pool acquisition, waiting for old %s object to be released\n",
+                 pool->name, pool->name);
+
+        while (!pool->available.size())
+            pthread_cond_wait(&pool->available_cond, &pool->lock);
+
+        resource = pool->available.back();
+        pool->available.pop_back();
+    } else {
+        resource = pool->alloc_mem(pool);
+    }
+
+    pool->busy.push_back(resource);
+
+    pthread_mutex_unlock(&pool->lock);
+
+    return resource;
+}
+
+static void
+mem_pool_recycle_resource(struct gm_mem_pool *pool, void *resource)
+{
+    pthread_mutex_lock(&pool->lock);
+
+    unsigned size = pool->busy.size();
+    for (unsigned i = 0; i < size; i++) {
+        if (pool->busy[i] == resource) {
+            pool->busy[i] = pool->busy.back();
+            pool->busy.pop_back();
+            break;
+        }
+    }
+
+    gm_assert(pool->dev->log,
+              pool->busy.size() == (size - 1),
+              "Didn't find recycled resource %p in %s pool's busy list",
+              resource,
+              pool->name);
+
+    pool->available.push_back(resource);
+    pthread_cond_broadcast(&pool->available_cond);
+    pthread_mutex_unlock(&pool->lock);
+}
+
+static void
+mem_pool_free_resources(struct gm_mem_pool *pool)
+{
+    gm_assert(pool->dev->log,
+              pool->busy.size() == 0,
+              "Shouldn't be freeing a pool with resources still in use");
+
+    while (pool->available.size()) {
+        void *resource = pool->available.back();
+        pool->available.pop_back();
+        pool->free_mem(pool, resource);
+    }
+}
+
+static struct gm_device_frame *
+mem_pool_acquire_frame(struct gm_mem_pool *pool)
+{
+    struct gm_device_frame *frame = (struct gm_device_frame *)
+        mem_pool_acquire_resource(pool);
+    frame->base.ref = 1;
+    return frame;
+}
+
+static struct gm_device_buffer *
+mem_pool_acquire_buffer(struct gm_mem_pool *pool)
+{
+    struct gm_device_buffer *buffer = (struct gm_device_buffer *)
+        mem_pool_acquire_resource(pool);
+    buffer->base.ref = 1;
+    return buffer;
+}
+
+static void
+device_frame_recycle(struct gm_frame *self)
+{
+    struct gm_device_frame *frame = (struct gm_device_frame *)self;
+    struct gm_device *dev = frame->dev;
+    struct gm_mem_pool *pool = frame->pool;
+
+    gm_assert(frame->dev->log, frame->base.ref == 0, "Unbalanced frame unref");
+
+    mem_pool_recycle_resource(&dev->video_buf_pool, self->video);
+    mem_pool_recycle_resource(&dev->depth_buf_pool, self->depth);
+    mem_pool_recycle_resource(pool, frame);
+}
+
+static void
+device_frame_free(struct gm_mem_pool *pool, void *resource)
+{
+    struct gm_device_frame *frame = (struct gm_device_frame *)resource;
+
+    xfree(frame);
+}
+
+static void *
+device_frame_alloc(struct gm_mem_pool *pool)
+{
+    struct gm_device *dev = pool->dev;
+    struct gm_device_frame *frame =
+        (struct gm_device_frame *)xcalloc(sizeof(*frame), 1);
+
+    frame->vtable.free = device_frame_recycle;
+    frame->dev = dev;
+    frame->pool = pool;
+
+    frame->base.ref = 1;
+    frame->base.api = &frame->vtable;
+
+    return frame;
+}
+
+static void
+device_buffer_recycle(struct gm_buffer *self)
+{
+    struct gm_device_buffer *buf = (struct gm_device_buffer *)self;
+    struct gm_mem_pool *pool = buf->pool;
+
+    gm_assert(buf->dev->log, buf->base.ref == 0, "Unbalanced buffer unref");
+
+    mem_pool_recycle_resource(pool, buf);
+}
+
+static void *
+device_video_buf_alloc(struct gm_mem_pool *pool)
+{
+    struct gm_device *dev = pool->dev;
+    struct gm_device_buffer *buf =
+        (struct gm_device_buffer *)xcalloc(sizeof(*buf), 1);
+
+    buf->vtable.free = device_buffer_recycle;
+    buf->dev = dev;
+    buf->pool = pool;
+
+    buf->base.ref = 1;
+    buf->base.api = &buf->vtable;
+
+    /* allocated large enough for _RGB format */
+    int video_width = dev->video_camera_intrinsics.width;
+    int video_height = dev->video_camera_intrinsics.height;
+    buf->base.len = video_width * video_height * 3;
+    buf->base.data = xmalloc(buf->base.len);
+
+    return buf;
+}
+
+static void
+device_buffer_free(struct gm_mem_pool *pool, void *resource)
+{
+    struct gm_buffer *buf = (struct gm_buffer *)resource;
+    xfree(buf);
+}
+
+static void *
+device_depth_buf_alloc(struct gm_mem_pool *pool)
+{
+    struct gm_device *dev = pool->dev;
+    struct gm_device_buffer *buf =
+        (struct gm_device_buffer *)xcalloc(sizeof(*buf), 1);
+
+    buf->vtable.free = device_buffer_recycle;
+    buf->dev = dev;
+    buf->pool = pool;
+
+    buf->base.ref = 1;
+    buf->base.api = &buf->vtable;
+
+    /* Allocated large enough got _U16_MM data */
+    int depth_width = dev->depth_camera_intrinsics.width;
+    int depth_height = dev->depth_camera_intrinsics.height;
+    buf->base.len = depth_width * depth_height * 2;
+    buf->base.data = xmalloc(buf->base.len);
+
+    return buf;
+}
+
 /* XXX: the request_requirements_lock must be held while calling this.
  *
  * Note: this implies that it's not currently safe for the reciever of the
@@ -176,9 +427,16 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
         return;
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
-    std::swap(dev->depth_mid, dev->depth_back);
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
-    freenect_set_depth_buffer(fdev, dev->depth_back);
+
+    struct gm_device_buffer *old = dev->depth_buf_ready;
+    dev->depth_buf_ready = dev->depth_buf_back;
+    dev->depth_buf_back = mem_pool_acquire_buffer(&dev->depth_buf_pool);
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+
+    freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
+    if (old)
+        gm_buffer_unref(&old->base);
+
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
     pthread_mutex_lock(&dev->request_requirements_lock);
@@ -198,15 +456,17 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO))
         return;
 
-    int width = dev->video_camera_intrinsics.width;
-    int height = dev->video_camera_intrinsics.height;
-
-    uint8_t *rgb_back = (uint8_t *)dev->video_back;
-    memcpy(rgb_back, video, width * height * 3);
-
     pthread_mutex_lock(&dev->swap_buffers_lock);
-    std::swap(dev->video_mid, dev->video_back);
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+
+    struct gm_device_buffer *old = dev->video_buf_ready;
+    dev->video_buf_ready = dev->video_buf_back;
+    dev->video_buf_back = mem_pool_acquire_buffer(&dev->video_buf_pool);
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+
+    freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
+    if (old)
+        gm_buffer_unref(&old->base);
+
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
     pthread_mutex_lock(&dev->request_requirements_lock);
@@ -327,30 +587,12 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
 
 #endif
 
-    /* Allocated large enough got _U16_MM data */
-    int depth_width = dev->depth_camera_intrinsics.width;
-    int depth_height = dev->depth_camera_intrinsics.height;
-    dev->depth_front = xmalloc(depth_width * depth_height * 2);
-    dev->depth_mid = xmalloc(depth_width * depth_height * 2);
-    dev->depth_back = xmalloc(depth_width * depth_height * 2);
-
-    /* allocated large enough for _RGB format */
-    int video_width = dev->video_camera_intrinsics.width;
-    int video_height = dev->video_camera_intrinsics.height;
-    dev->video_front = xmalloc(video_width * video_height);
-    dev->video_mid = xmalloc(video_width * video_height);
-    dev->video_back = xmalloc(video_width * video_height * 3);
-
     freenect_set_video_callback(dev->kinect.fdev, kinect_rgb_frame_cb);
     freenect_set_video_mode(dev->kinect.fdev,
                             freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM,
                                                      FREENECT_VIDEO_RGB));
-    /* XXX: we don't explicitly set a back buffer for video and rely on
-     * libfreenect automatically allocating one for us. We are only keeping the
-     * luminance which we copy out immediately when notified of a new frame in
-     * kinect_rgb_frame_cb which means the mid and front buffers have a
-     * different size to the back buffer.
-     */
+    dev->video_buf_back = mem_pool_acquire_buffer(&dev->video_buf_pool);
+    freenect_set_video_buffer(dev->kinect.fdev, dev->video_buf_back->base.data);
 
     freenect_set_depth_callback(dev->kinect.fdev, kinect_depth_frame_cb);
     freenect_set_depth_mode(dev->kinect.fdev,
@@ -359,7 +601,8 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     /*freenect_set_depth_mode(dev->kinect.fdev,
                             freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM,
                                                      FREENECT_DEPTH_MM));*/
-    freenect_set_depth_buffer(dev->kinect.fdev, dev->depth_back);
+    dev->depth_buf_back = mem_pool_acquire_buffer(&dev->depth_buf_pool);
+    freenect_set_depth_buffer(dev->kinect.fdev, dev->depth_buf_back->base.data);
 
 
     struct gm_ui_property prop;
@@ -420,13 +663,9 @@ kinect_close(struct gm_device *dev)
     freenect_close_device(dev->kinect.fdev);
     freenect_shutdown(dev->kinect.fctx);
 
-    free(dev->video_front);
-    free(dev->video_mid);
-    free(dev->video_back);
-
-    free(dev->depth_front);
-    free(dev->depth_mid);
-    free(dev->depth_back);
+    mem_pool_free_resources(&dev->depth_buf_pool);
+    mem_pool_free_resources(&dev->video_buf_pool);
+    mem_pool_free_resources(&dev->frame_pool);
 }
 
 static void *
@@ -632,32 +871,57 @@ dummy_io_thread_cb(void *userdata)
             }
         } while (true);
 
-        half *depth_image = dev->dummy.depth_images[dev->dummy.frame];
-        uint8_t *luminance_image = dev->dummy.lum_images[dev->dummy.frame];
-
-        if (dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
-            int video_width = dev->video_camera_intrinsics.width;
-            int video_height = dev->video_camera_intrinsics.height;
-
-            memcpy(dev->video_back, luminance_image,
-                   video_width * video_height);
-        }
-
+        /* more or less the same as kinect_depth_frame_cb() */
         if (dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
-            int depth_width = dev->depth_camera_intrinsics.width;
-            int depth_height = dev->depth_camera_intrinsics.height;
+            half *depth_image = dev->dummy.depth_images[dev->dummy.frame];
 
-            memcpy(dev->depth_back, depth_image,
-                   depth_width * depth_height);
+            memcpy(dev->depth_buf_back->base.data, depth_image,
+                   dev->depth_buf_back->base.len);
+
+            pthread_mutex_lock(&dev->swap_buffers_lock);
+
+            if (dev->depth_buf_ready)
+                gm_buffer_unref(&dev->depth_buf_ready->base);
+            dev->depth_buf_ready = dev->depth_buf_back;
+            dev->depth_buf_back = mem_pool_acquire_buffer(&dev->depth_buf_pool);
+            dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+
+            pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+            pthread_mutex_lock(&dev->request_requirements_lock);
+            if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
+                dev->frame_request_requirements)
+            {
+                notify_frame_locked(dev);
+            }
+            pthread_mutex_unlock(&dev->request_requirements_lock);
         }
 
-        pthread_mutex_lock(&dev->request_requirements_lock);
-        if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-            dev->frame_request_requirements)
-        {
-            notify_frame_locked(dev);
+        /* more or less the same as kinect_rgb_frame_cb() */
+        if (dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
+            uint8_t *video_image = dev->dummy.lum_images[dev->dummy.frame];
+
+            memcpy(dev->video_buf_back->base.data, video_image,
+                   dev->video_buf_back->base.len);
+
+            pthread_mutex_lock(&dev->swap_buffers_lock);
+
+            if (dev->video_buf_ready)
+                gm_buffer_unref(&dev->video_buf_ready->base);
+            dev->video_buf_ready = dev->video_buf_back;
+            dev->video_buf_back = mem_pool_acquire_buffer(&dev->video_buf_pool);
+            dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+
+            pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+            pthread_mutex_lock(&dev->request_requirements_lock);
+            if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
+                dev->frame_request_requirements)
+            {
+                notify_frame_locked(dev);
+            }
+            pthread_mutex_unlock(&dev->request_requirements_lock);
         }
-        pthread_mutex_unlock(&dev->request_requirements_lock);
 
         dev->dummy.frame = (dev->dummy.frame + 1) % dev->dummy.n_images;
     }
@@ -685,6 +949,24 @@ gm_device_open(struct gm_logger *log,
     bool status;
 
     dev->log = log;
+
+    dev->video_buf_pool.dev = dev;
+    dev->video_buf_pool.name = "video";
+    dev->video_buf_pool.max_size = 5;
+    dev->video_buf_pool.alloc_mem = device_video_buf_alloc;
+    dev->video_buf_pool.free_mem = device_buffer_free;
+
+    dev->depth_buf_pool.dev = dev;
+    dev->depth_buf_pool.name = "depth";
+    dev->depth_buf_pool.max_size = INT_MAX;
+    dev->depth_buf_pool.alloc_mem = device_depth_buf_alloc;
+    dev->depth_buf_pool.free_mem = device_buffer_free;
+
+    dev->frame_pool.dev = dev;
+    dev->frame_pool.name = "frame";
+    dev->frame_pool.max_size = INT_MAX;
+    dev->frame_pool.alloc_mem = device_frame_alloc;
+    dev->frame_pool.free_mem = device_frame_free;
 
     switch (config->type) {
     case GM_DEVICE_KINECT:
@@ -797,7 +1079,7 @@ recording_update_frame(struct gm_device *dev, struct gm_frame *frame)
 struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev)
 {
-    struct gm_frame *frame = (struct gm_frame *)xcalloc(sizeof(*frame), 1);
+    struct gm_device_frame *frame = mem_pool_acquire_frame(&dev->frame_pool);
 
 #if 0
     switch (dev->type) {
@@ -812,32 +1094,41 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
 
+    if (dev->last_frame)
+        gm_frame_unref(dev->last_frame);
+
+    dev->last_frame = &frame->base;
+
     if (dev->frame_ready_requirements & GM_REQUEST_FRAME_DEPTH) {
-        std::swap(dev->depth_front, dev->depth_mid);
-        frame->depth = dev->depth_front;
-        frame->depth_format = dev->depth_format;
-        assert(frame->depth);
+        frame->base.depth = &dev->depth_buf_ready->base;
+        dev->depth_buf_ready = NULL;
+        frame->base.depth_format = dev->depth_format;
+        gm_assert(dev->log, frame->base.depth != NULL,
+                  "Depth ready flag set but buffer missing");
     }
     if (dev->frame_ready_requirements & GM_REQUEST_FRAME_VIDEO) {
-        std::swap(dev->video_front, dev->video_mid);
-        frame->video = dev->video_front;
-        frame->video_format = dev->video_format;
-        assert(frame->video);
+        frame->base.video = &dev->video_buf_ready->base;
+        dev->video_buf_ready = NULL;
+        frame->base.video_format = dev->video_format;
+        gm_assert(dev->log, frame->base.video != NULL,
+                  "Video ready flag set but buffer missing");
     } else
         assert(0);
 
     dev->frame_ready_requirements = 0;
 
+    /* Get a ref() for the caller */
+    gm_frame_ref(&frame->base);
+
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    return frame;
-}
-
-void
-gm_device_free_frame(struct gm_device *dev,
-                     struct gm_frame *frame)
-{
-    free(frame);
+    /* We should have one ref for dev->last_frame and return a _ref() to the
+     * caller so there's no race between the caller claiming a reference and us
+     * possibly dropping our own ref.
+     */
+    gm_assert(dev->log, frame->base.ref == 2,
+              "Spurious ref counting for new frame");
+    return &frame->base;
 }
 
 struct gm_ui_properties *
