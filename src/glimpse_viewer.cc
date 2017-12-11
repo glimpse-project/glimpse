@@ -1248,6 +1248,7 @@ main(int argc, char **argv)
         font_path = font_asset_path;
         xsnprintf(joint_map_asset_path, sizeof(joint_map_asset_path), "%s/%s",
                   assets_root, joint_map_json);
+        joint_map_path = joint_map_asset_path;
     } else {
         font_path = font_ttf;
         joint_map_path = joint_map_json;
