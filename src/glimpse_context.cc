@@ -1001,6 +1001,26 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
+    float detect_res = 0.06f;
+
+    // Simplify point cloud by putting it through a voxel grid
+    start = get_time();
+    pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
+    vg.setInputCloud(cloud);
+    vg.setLeafSize(detect_res, detect_res, detect_res);
+
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr dense_cloud(
+        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    vg.filter(*dense_cloud);
+    dense_cloud.swap(cloud);
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
+         (int)cloud->points.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
     // Filter out points that are too near or too far
     start = get_time();
     pcl::PassThrough<pcl::PointXYZRGBA> passZ(true);
@@ -1089,36 +1109,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
              get_duration_ns_print_scale_suffix(duration));
     }
 
-    // Simplify point cloud by putting it through a 1cm voxel grid and then
-    // reproject colour information into it.
-    start = get_time();
-    pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
-    vg.setInputCloud(cloud);
-    vg.setLeafSize(0.01f, 0.01f, 0.01f);
-
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr dense_cloud(
-        new pcl::PointCloud<pcl::PointXYZRGBA>);
-    vg.filter(*dense_cloud);
-    dense_cloud.swap(cloud);
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
-         (int)cloud->points.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
     // Use Euclidean clustering to split the cloud into possible human clusters.
     start = get_time();
-
-#ifndef USE_PCL_GBPD
-    float grid_size = 0.05f;
-    vg.setLeafSize(grid_size, grid_size, grid_size);
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr orig_cloud(
-        new pcl::PointCloud<pcl::PointXYZRGBA>);
-    vg.filter(*orig_cloud);
-    orig_cloud.swap(cloud);
-#endif
 
 #if 1
     // Creating the KdTree object for the search method of the extraction
@@ -1141,12 +1133,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
     float min_width = 0.3;
     float max_width = 1.5;
 
-    int min_points = (int)(min_height * min_width / grid_size / grid_size);
-    int max_points = (int)(max_height * max_width / grid_size / grid_size);
+    int min_points = (int)(min_height * min_width / detect_res / detect_res);
+    int max_points = (int)(max_height * max_width / detect_res / detect_res);
 
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
-    ec.setClusterTolerance(std::max(0.03f, grid_size * 2));
+    ec.setClusterTolerance(std::max(0.03f, detect_res * 2));
     ec.setMinClusterSize(min_points);
     ec.setMaxClusterSize(max_points);
     ec.setSearchMethod(tree);
@@ -1160,16 +1152,24 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale_suffix(duration));
 
     start = get_time();
+    bool person_found = false;
+    pcl::PointIndices person_indices;
+
+    // Create a search tree so we can reconstruct the dense person cloud
+    // We use an octree here as the time it takes to build a KdTree vastly
+    // outweighs the speed benefit searching it.
+    // TODO: If we had our own Octree structure, we could build it up-front
+    //       when projecting the tree and we could query it faster as we don't
+    //       actually need radius search.
+    pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
+      dense_tree(new pcl::search::Octree<pcl::PointXYZRGBA>(detect_res * 2));
+    dense_tree->setSortedResults(false);
+    dense_tree->setInputCloud(dense_cloud);
+
 #ifndef USE_PCL_GBPD
     // Assume the largest cluster that contains its centroid may be a person
-    bool person_found = false;
 
     std::sort(cluster_indices.begin(), cluster_indices.end(), sort_indices);
-
-    pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
-      dense_tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
-    dense_tree->setInputCloud(dense_cloud);
-    dense_tree->setSortedResults(false);
 
     for (std::vector<pcl::PointIndices>::const_iterator point_it =
             cluster_indices.begin();
@@ -1190,45 +1190,17 @@ gm_context_track_skeleton(struct gm_context *ctx)
         centroid_pt.x = centroid[0];
         centroid_pt.y = centroid[1];
         centroid_pt.z = centroid[2];
-        dense_tree->radiusSearch(centroid_pt, grid_size,
+        dense_tree->radiusSearch(centroid_pt, detect_res * 2,
                                 centroid_indices, centroid_distances);
 
-        // Do a radius search on each point from the sparse tree to rebuild the
-        // dense cloud cluster.
-        std::list<int> indices;
-        for (std::vector<int>::const_iterator it = cluster.indices.begin();
-             it != cluster.indices.end (); ++it) {
-            std::vector<int> pt_indices;
-            std::vector<float> pt_distances;
-            dense_tree->radiusSearch(cloud->points[*it], grid_size,
-                                    pt_indices, pt_distances);
-            std::copy(pt_indices.begin(), pt_indices.end(),
-                      std::back_inserter(indices));
+        if (centroid_indices.size() <= 0) {
+            continue;
         }
-        indices.sort();
-        indices.unique();
 
-        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_cluster(
-            new pcl::PointCloud<pcl::PointXYZRGBA>);
-        for (std::list<int>::const_iterator it = indices.begin();
-             it != indices.end (); ++it) {
-            cloud_cluster->points.push_back(dense_cloud->points[*it]);
-        }
-        cloud_cluster->width = indices.size();
-        cloud_cluster->height = 1;
-        cloud_cluster->is_dense = true;
-
-        cloud.swap(cloud_cluster);
+        person_indices = *point_it;
         person_found = true;
         break;
     }
-
-    // If we didn't find a likely person cluster, just pass the whole cloud
-    // through inference and see what happens...
-    if (!person_found) {
-        cloud.swap(dense_cloud);
-    }
-
 #else
     // Use pcl's HeadBasedSubclustering and PersonClassifier
     // We do this because pcl doesn't call setDimensionLimits on the
@@ -1293,15 +1265,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
         if (confidence <= max_confidence) { continue; }
 
-        pcl::PointCloud<pcl::PointXYZRGBA>::Ptr person_cloud(
-            new pcl::PointCloud<pcl::PointXYZRGBA>);
-        std::vector<int> indices = it->getIndices().indices;
-        for (uint32_t i = 0; i < indices.size(); i++) {
-            pcl::PointXYZRGBA *point = &cloud->points[indices[i]];
-            person_cloud->push_back(*point);
-        }
-
-        cloud.swap(person_cloud);
+        person_indices = it->getIndices();
+        person_found = true;
         max_confidence = confidence;
     }
 #endif
@@ -1309,6 +1274,47 @@ gm_context_track_skeleton(struct gm_context *ctx)
     end = get_time();
     duration = end - start;
     LOGI("People detection took %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+
+    if (!person_found) {
+        LOGE("Skipping detection: Could not find a person cluster\n");
+        return;
+    }
+
+    // Do a radius search on each point from the sparse tree to rebuild the
+    // dense cloud cluster.
+    start = get_time();
+
+    std::list<int> indices;
+    for (std::vector<int>::const_iterator it = person_indices.indices.begin();
+         it != person_indices.indices.end (); ++it) {
+        std::vector<int> pt_indices;
+        std::vector<float> pt_distances;
+        dense_tree->radiusSearch(cloud->points[*it], detect_res,
+                                 pt_indices, pt_distances);
+        std::copy(pt_indices.begin(), pt_indices.end(),
+                  std::back_inserter(indices));
+    }
+    indices.sort();
+    indices.unique();
+
+    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr person_cluster(
+        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    for (std::list<int>::const_iterator it = indices.begin();
+         it != indices.end (); ++it) {
+        person_cluster->points.push_back(dense_cloud->points[*it]);
+    }
+    person_cluster->width = indices.size();
+    person_cluster->height = 1;
+    person_cluster->is_dense = true;
+
+    cloud.swap(person_cluster);
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Person reconstruction (%d points) took (%.3f%s)\n",
+         (int)person_cluster->width,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
