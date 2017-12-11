@@ -255,22 +255,11 @@ draw_ui(Data *data)
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize);
 
-    struct gm_ui_properties *props = gm_context_get_ui_properties(data->ctx);
-
-    for (int i = 0; i < props->n_properties; i++) {
-        struct gm_ui_property *prop = &props->properties[i];
-
-        if (prop->type == GM_PROPERTY_INT)
-            ImGui::SliderInt(prop->name, prop->int_ptr, prop->min, prop->max);
-        if (prop->type == GM_PROPERTY_FLOAT)
-            ImGui::SliderFloat(prop->name, prop->float_ptr, prop->min, prop->max);
-    }
-
-    ImGui::Spacing();
+    ImGui::TextDisabled("Device properties...");
     ImGui::Separator();
     ImGui::Spacing();
 
-    props = gm_device_get_ui_properties(data->device);
+    struct gm_ui_properties *props = gm_device_get_ui_properties(data->device);
 
     for (int i = 0; i < props->n_properties; i++) {
         struct gm_ui_property *prop = &props->properties[i];
@@ -294,6 +283,26 @@ draw_ui(Data *data)
     }
 
     ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("Mo-Cap properties...");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    props = gm_context_get_ui_properties(data->ctx);
+
+    for (int i = 0; i < props->n_properties; i++) {
+        struct gm_ui_property *prop = &props->properties[i];
+
+        if (prop->type == GM_PROPERTY_INT)
+            ImGui::SliderInt(prop->name, prop->int_ptr, prop->min, prop->max);
+        if (prop->type == GM_PROPERTY_FLOAT)
+            ImGui::SliderFloat(prop->name, prop->float_ptr, prop->min, prop->max);
+    }
+
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextDisabled("Viewer properties...");
     ImGui::Separator();
     ImGui::Spacing();
 
