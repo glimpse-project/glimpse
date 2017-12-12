@@ -208,15 +208,32 @@ JointMap::inferJoints(Forest* aForest, DepthImage* aDepthImage,
                                       pr_table, width, height, n_labels,
                                       mJointMap);
 
-  *aJoints = infer_joints(aDepthImage->mDepthImage, pr_table, weights,
-                          aDepthImage->mWidth, aDepthImage->mHeight,
-                          aForest->mForest[0]->header.n_labels,
-                          mJointMap,
-                          aForest->mForest[0]->header.fov,
-                          mParams->joint_params);
+  InferredJoints* result =
+    infer_joints(aDepthImage->mDepthImage, pr_table, weights,
+                 aDepthImage->mWidth, aDepthImage->mHeight,
+                 aForest->mForest[0]->header.n_labels,
+                 mJointMap,
+                 aForest->mForest[0]->header.fov,
+                 mParams->joint_params);
 
   xfree(weights);
   xfree(pr_table);
+
+  // TODO: Create an object equivalent of InferredJoints for bindings
+  *aJoints = (float*)xcalloc(result->n_joints, sizeof(float) * 3);
+  for (int i = 0; i < result->n_joints; i++)
+    {
+      if (!result->joints[i])
+        {
+          continue;
+        }
+
+      (*aJoints)[i * 3] = ((Joint*)result->joints[i]->data)->x;
+      (*aJoints)[i * 3 + 1] = ((Joint*)result->joints[i]->data)->y;
+      (*aJoints)[i * 3 + 2] = ((Joint*)result->joints[i]->data)->z;
+    }
+
+  free_joints(result);
 
   *aOutNJoints = mParams->header.n_joints;
   *aOutNDims = 3;

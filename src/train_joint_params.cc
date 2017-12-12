@@ -290,30 +290,41 @@ thread_body(void* userdata)
           float* weights = &ctx->weights[weight_idx];
 
           // Get joint positions
-          float* joints = infer_joints(depth_image, pr_table, weights,
-                                       ctx->width, ctx->height, n_labels,
-                                       ctx->joint_map,
-                                       ctx->forest[0]->header.fov,
-                                       params);
+          InferredJoints* result =
+            infer_joints(depth_image, pr_table, weights,
+                         ctx->width, ctx->height, n_labels,
+                         ctx->joint_map,
+                         ctx->forest[0]->header.fov,
+                         params);
 
           // Calculate distance from expected joint position and accumulate
           for (uint8_t j = 0; j < ctx->n_joints; j++)
             {
-              float* inferred_joint = &joints[j * 3];
+              if (!result->joints[j])
+                {
+                  // If there's no predicted joint, just add a large number to
+                  // the accumulated distance. Note that distances are in
+                  // meters, so 10 is pretty large.
+                  acc_distance[j] += 10.f;
+                  continue;
+                }
+
+              Joint* inferred_joint = (Joint*)result->joints[j]->data;
               float* actual_joint =
                 &ctx->joints[((i * ctx->n_joints) + j) * 3];
+
               // XXX: Current joint z positions are negated
               float distance =
-                sqrtf(powf(inferred_joint[0] - actual_joint[0], 2.f) +
-                      powf(inferred_joint[1] - actual_joint[1], 2.f) +
-                      powf(inferred_joint[2] + actual_joint[2], 2.f));
+                sqrtf(powf(inferred_joint->x - actual_joint[0], 2.f) +
+                      powf(inferred_joint->y - actual_joint[1], 2.f) +
+                      powf(inferred_joint->z + actual_joint[2], 2.f));
 
               // Accumulate
               acc_distance[j] += distance;
             }
 
           // Free joint positions
-          xfree(joints);
+          free_joints(result);
         }
 
       // See if this combination is better than the current best for any

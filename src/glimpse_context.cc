@@ -1586,15 +1586,26 @@ gm_context_track_skeleton(struct gm_context *ctx)
         float vfov =  (2.0f * atanf(0.5 * height /
                                     ctx->training_camera_intrinsics.fy)) *
           180 / M_PI;
-        infer_joints_fast(depth_img,
-                          tracking->label_probs,
-                          weights,
-                          width, height,
-                          ctx->n_labels,
-                          ctx->joint_map,
-                          vfov,
-                          ctx->joint_params->joint_params,
-                          tracking->joints);
+        InferredJoints *result =
+            infer_joints_fast(depth_img,
+                              tracking->label_probs,
+                              weights,
+                              width, height,
+                              ctx->n_labels,
+                              ctx->joint_map,
+                              vfov,
+                              ctx->joint_params->joint_params);
+        // TODO: Use heuristics to decide whether to reject certain joint
+        //       clusters in favour of others.
+        for (int j = 0; j < result->n_joints; j++) {
+            if (result->joints[j]) {
+                tracking->joints[j*3] = ((Joint*)result->joints[j]->data)->x;
+                tracking->joints[j*3+1] = ((Joint*)result->joints[j]->data)->y;
+                tracking->joints[j*3+2] = ((Joint*)result->joints[j]->data)->z;
+            }
+        }
+        free_joints(result);
+
         end = get_time();
         duration = end - start;
         LOGI("People Detector: inferred joints in %.3f%s\n",

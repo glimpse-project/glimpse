@@ -33,6 +33,18 @@
 
 #define HUGE_DEPTH 1000.f
 
+typedef struct {
+  float x;
+  float y;
+  float z;
+  float confidence;
+} Joint;
+
+typedef struct {
+  int     n_joints;
+  LList** joints;
+} InferredJoints;
+
 float* infer_labels(RDTree** forest,
                     uint8_t n_trees,
                     half_float::half* depth_image,
@@ -48,27 +60,27 @@ float* calc_pixel_weights(half_float::half* depth_image,
                           JSON_Value* joint_map,
                           float* out_weights = NULL);
 
-float* infer_joints_fast(half_float::half* depth_image,
-                         float* pr_table,
-                         float* weights,
-                         int32_t width,
-                         int32_t height,
-                         uint8_t n_labels,
-                         JSON_Value* joint_map,
-                         float vfov,
-                         JIParam* params,
-                         float* out_joints = NULL);
+InferredJoints* infer_joints_fast(half_float::half* depth_image,
+                                  float* pr_table,
+                                  float* weights,
+                                  int32_t width,
+                                  int32_t height,
+                                  uint8_t n_labels,
+                                  JSON_Value* joint_map,
+                                  float vfov,
+                                  JIParam* params);
 
-float* infer_joints(half_float::half* depth_image,
-                    float* pr_table,
-                    float* weights,
-                    int32_t width,
-                    int32_t height,
-                    uint8_t n_labels,
-                    JSON_Value* joint_map,
-                    float vfov,
-                    JIParam* params,
-                    float* out_joints = NULL);
+InferredJoints* infer_joints(half_float::half* depth_image,
+                             float* pr_table,
+                             float* weights,
+                             int32_t width,
+                             int32_t height,
+                             uint8_t n_labels,
+                             JSON_Value* joint_map,
+                             float vfov,
+                             JIParam* params);
+
+void free_joints(InferredJoints* joints);
 
 float* reproject(half_float::half* depth_image,
                  int32_t width,

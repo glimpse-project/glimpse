@@ -199,11 +199,18 @@ calc_pixel_weights(half* depth_image, float* pr_table,
   return weights;
 }
 
-float*
+static int
+compare_joints(LList* a, LList* b, void* userdata)
+{
+  Joint* ja = (Joint*)a->data;
+  Joint* jb = (Joint*)b->data;
+  return ja->confidence - jb->confidence;
+}
+
+InferredJoints*
 infer_joints_fast(half* depth_image, float* pr_table, float* weights,
                   int32_t width, int32_t height, uint8_t n_labels,
-                  JSON_Value* joint_map, float vfov, JIParam* params,
-                  float* out_joints)
+                  JSON_Value* joint_map, float vfov, JIParam* params)
 {
   int n_joints = json_array_get_count(json_array(joint_map));
   JointMapEntry map[n_joints];
@@ -404,68 +411,62 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
 
   //float root_2pi = sqrtf(2.f * M_PI);
 
-  // Allocate/clear joints array
-  size_t joints_size = n_joints * 3 * sizeof(float);
-  float* joints = out_joints ? out_joints : (float*)xmalloc(joints_size);
-  memset(joints, 0, joints_size);
+  // Allocate/clear joints structure
+  InferredJoints* result = (InferredJoints*)xmalloc(sizeof(InferredJoints));
+  result->n_joints = n_joints;
+  result->joints = (LList**)xcalloc(n_joints, sizeof(LList*));
 
-  Cluster* best_clusters[n_joints];
   for (int j = 0; j < n_joints; j++)
     {
-      best_clusters[j] = NULL;
-      float best_confidence = -1.f;
-
       for (LList* c = clusters[j]; c; c = c->next)
         {
-          float confidence = 0.f;
           Cluster* cluster = (Cluster*)c->data;
+          Joint* joint = (Joint*)xmalloc(sizeof(Joint));
+
+          // Calculate the center-point of the cluster
+          int n_points = 0;
+          int x = 0;
+          int y = 0;
+          for (LList* s = cluster->scanlines; s; s = s->next)
+            {
+              ScanlineCluster* scanline = (ScanlineCluster*)s->data;
+              for (int i = scanline->left; i <= scanline->right; i++, n_points++)
+                {
+                  x += i;
+                  y += scanline->y;
+                }
+            }
+
+          x = (int)roundf(x / (float)n_points);
+          y = (int)roundf(y / (float)n_points);
+
+          // Reproject and offset point
+          float s = (x / half_width) - 1.f;
+          float t = -((y / half_height) - 1.f);
+          float depth = (float)depth_image[y * width + x];
+          joint->x = (tan_half_hfov * depth) * s;
+          joint->y = (tan_half_vfov * depth) * t;
+          joint->z = depth + params[j].offset;
+
+          // Calculate the confidence of the cluster
+          joint->confidence = 0.f;
           for (LList* s = cluster->scanlines; s; s = s->next)
             {
               ScanlineCluster* scanline = (ScanlineCluster*)s->data;
               int idx = scanline->y * width;
               for (int i = scanline->left; i <= scanline->right; i++)
                 {
-                  confidence +=
+                  joint->confidence +=
                     weights[(idx + i) * n_joints + j];
                 }
             }
 
-          if (confidence > best_confidence)
-            {
-              best_confidence = confidence;
-              best_clusters[j] = cluster;
-            }
+          // Add the joint to the list
+          result->joints[j] = llist_insert_before(result->joints[j],
+                                                  llist_new(joint));
         }
 
-      if (!best_clusters[j])
-        {
-          continue;
-        }
-
-      // Now calculate the center-point of the best cluster
-      int n_points = 0;
-      int x = 0;
-      int y = 0;
-      for (LList* sl = best_clusters[j]->scanlines; sl; sl = sl->next)
-        {
-          ScanlineCluster* scanline = (ScanlineCluster*)sl->data;
-          for (int i = scanline->left; i <= scanline->right; i++, n_points++)
-            {
-              x += i;
-              y += scanline->y;
-            }
-        }
-
-      x = (int)roundf(x / (float)n_points);
-      y = (int)roundf(y / (float)n_points);
-
-      // Reproject and offset point
-      float s = (x / half_width) - 1.f;
-      float t = -((y / half_height) - 1.f);
-      float depth = (float)depth_image[y * width + x];
-      joints[j * 3] = (tan_half_hfov * depth) * s;
-      joints[j * 3 + 1] = (tan_half_vfov * depth) * t;
-      joints[j * 3 + 2] = depth + params[j].offset;
+      llist_sort(result->joints[j], compare_joints, NULL);
 
       // Free this joint's clusters
       for (LList* c = clusters[j]; c; c = c->next)
@@ -481,14 +482,14 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
       llist_free(clusters[j], NULL, NULL);
     }
 
-  return joints;
+  return result;
 }
 
-float*
+InferredJoints*
 infer_joints(half* depth_image, float* pr_table, float* weights,
              int32_t width, int32_t height,
              uint8_t n_labels, JSON_Value* joint_map,
-             float vfov, JIParam* params, float* out_joints)
+             float vfov, JIParam* params)
 {
   int n_joints = json_array_get_count(json_array(joint_map));
 
@@ -560,9 +561,9 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
         }
     }
 
-  size_t joints_size = n_joints * 3 * sizeof(float);
-  float* joints = out_joints ? out_joints : (float*)xmalloc(joints_size);
-  memset(joints, 0, joints_size);
+  InferredJoints* result = (InferredJoints*)xmalloc(sizeof(InferredJoints));
+  result->n_joints = n_joints;
+  result->joints = (LList**)xcalloc(n_joints, sizeof(LList*));
 
   // Means shift to find joint modes
   for (uint8_t j = 0; j < n_joints; j++)
@@ -623,12 +624,14 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
 
           if (!moved || s == N_SHIFTS - 1)
             {
-              // Find the mode we're most confident of
+              // Calculate the confidence of all modes found
               float* last_point = &points[joint_idx * 3];
-              float confidence = 0;
-
-              float* best_point = last_point;
-              float best_confidence = 0;
+              Joint* joint = (Joint*)xmalloc(sizeof(Joint));
+              joint->x = last_point[0];
+              joint->y = last_point[1];
+              joint->z = last_point[2] + offset;
+              joint->confidence = 0;
+              result->joints[j] = llist_new(joint);
 
               //uint32_t unique_points = 1;
 
@@ -639,25 +642,20 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
                       fabs(point[1]-last_point[1]) >= SHIFT_THRESHOLD ||
                       fabs(point[2]-last_point[2]) >= SHIFT_THRESHOLD)
                     {
-                      if (confidence > best_confidence)
-                        {
-                          best_point = last_point;
-                          best_confidence = confidence;
-                        }
                       //unique_points++;
                       last_point = point;
-                      confidence = 0;
+                      joint = (Joint*)xmalloc(sizeof(Joint));
+                      joint->x = last_point[0];
+                      joint->y = last_point[1];
+                      joint->z = last_point[2] + offset;
+                      joint->confidence = 0;
+                      result->joints[j] = llist_insert_before(result->joints[j],
+                                                              llist_new(joint));
                     }
-                  confidence += density[joint_idx + p];
+                  joint->confidence += density[joint_idx + p];
                 }
 
-              // Offset into the body
-              best_point[2] += offset;
-
-              // Store joint
-              joints[j * 3] = best_point[0];
-              joints[j * 3 + 1] = best_point[1];
-              joints[j * 3 + 2] = best_point[2];
+              llist_sort(result->joints[j], compare_joints, NULL);
 
               break;
             }
@@ -668,7 +666,18 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
   xfree(points);
   xfree(n_pixels);
 
-  return joints;
+  return result;
+}
+
+void
+free_joints(InferredJoints* joints)
+{
+  for (int i = 0; i < joints->n_joints; i++)
+    {
+      llist_free(joints->joints[i], llist_free_cb, NULL);
+    }
+  xfree(joints->joints);
+  xfree(joints);
 }
 
 float*
