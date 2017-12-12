@@ -8,7 +8,7 @@ Requirements
   - This .blend file is pre-loaded with lots of mocap data and a set
     of makehuman models and clothing.
 * Glimpse/Make{human,clothes} addons set up
-  - You must have followed the instructions in glimpse-sdk/blender/README.md
+  - You must have followed the instructions in blender/README.md
     to set up Blender so it knows where to find the Glimpse addon when it
     loads as well as the makehuman and makeclothes addons
 * mocap data
@@ -23,12 +23,21 @@ Unfortunately --help as an argument name clashes with another addon but
 you can see an overview of the interface with --glimpse-help like:
 
 ```
-blender -b \                            # run in the background
-    /path/to/glimpse-training.blend \   # .blend file *before* .py script
-    -P blender/glimpse-cmd.py \         # command line interface script
-    -- \                                # remaining args for script
-    --glimpse-help
+blender -b \
+    /path/to/glimpse-training-data/glimpse-training.blend \
+    -P blender/glimpse-cli.py \
+    -- \
+    --help-glimpse
 ```
+*Note: `-b` means to run in the background.*
+
+*Note: the .blend file must be specified before the .py script since the python
+script depends on data within the .blend file*
+
+*Note: we had to use `--help-glimpse` instead of `--help` because we can't
+predict whether there will be some other plugin/component that will parse and
+handle `--help`.*
+
 
 The amount to render is measured in terms of indexed motion capture files
 (re: index.json in the directory of mocap files)
