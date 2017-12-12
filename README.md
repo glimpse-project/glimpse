@@ -1,83 +1,100 @@
-Early playground for Glimpse Project
+# Glimpse — Communicating with the richness of our physical selves
+
+We are building a real-time motion capture system for the body using mobile
+devices such as phones and AR/VR headsets.
+
+It's important to us that this kind of technology not be locked within walled
+gardens as the ability to interact and express with our bodies is most
+interesting when that can include everyone.
+
+Our rendering pipeline (for generating training data) is based on open source
+projects including [Blender](https://www.blender.org) and
+[Makehuman](https://www.makehuman.org), and all our code for training and
+runtime motion capture is under the permissive
+[MIT](https://en.wikipedia.org/wiki/MIT_License) license.
+
 
 # Status
 
-The early direction to get started with this project is to look at technically
-implementing some of the capabilities demoed in this teaser video:
+The early direction of this project has been to implement some of the
+capabilities demoed in our
+['Glimpse — a sneak peek into your creative self'](https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2e656ff6)
+teaser video.
 
-https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2e656ff6
+The current focus is on skeletal tracking and on reproducing the capabilities
+of Microsoft's Kinect based skeletal tracking, but using mobile phones instead
+of the Kinect sensor.
 
-The first aspect looked at was supporting real-time (frontal) face detection
-which we now have working well enough to move on:
-
-https://medium.com/impossible/building-make-believe-tech-glimpse-in-progress-ecb9bbc113a1
-
-There are still lots of opportunities to improve what we do for face tracking
-but it's good enough to work with for now so we can start looking at the more
-tricky problem of skeletal tracking.
-
-The current focus is on skeletal tracking. The current aim is to reproduce the
-R&D done by Microsoft for skeleton tracking with their Kinect cameras, which
-provide similar data to Google Tango phones. Their research was published as a paper titled: [Real-Time Human Pose Recognition in Parts from Single Depth Images](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/BodyPartRecognition.pdf)
-
-In terms of understanding that paper then:
-
-* Some reminders about set theory notation: http://byjus.com/maths/set-theory-symbols/
-    * Also a reminder on set-builder notation: http://www.mathsisfun.com/sets/set-builder-notation.html
-* How to calculate Shannon Entropy: http://www.bearcave.com/misl/misl_tech/wavelets/compression/shannon.html
-* A key referenced paper on randomized trees for keypoint recognition: https://pdfs.semanticscholar.org/f637/a3357444112d0d2c21765949409848a5cba3.pdf
-    * A related technical report (more implementation details): http://cvlabwww.epfl.ch/~lepetit/papers/lepetit_tr04.pdf
-* Referenced paper on using meanshift: https://courses.csail.mit.edu/6.869/handouts/PAMIMeanshift.pdf
-    * Simple intuitive description of meanshift: http://docs.opencv.org/trunk/db/df8/tutorial_py_meanshift.html
-    * Comparison of mean shift tracking methods (inc. camshift): http://old.cescg.org/CESCG-2008/papers/Hagenberg-Artner-Nicole.pdf
+See this paper on [Real-Time Human Pose Recognition in Parts from Single Depth
+Images](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/BodyPartRecognition.pdf)
+before delving into the code for more details on our initial approach.
 
 
 # Building
 
-*Note: it's currently necessary to use Meson from git until the 0.44.0 release
-due to a bug with the handling of .wrap based subprojects*
+So far we've been developing on Linux and we're also targeting cross-compilation
+to Android. If someone wants to help port to Windows or OSX, that
+would be greatly appreciated and probably wouldn't be too tricky.
+
+We're using [Meson](https://mesonbuild.com) and [Ninja](https://ninja-build.org/)
+for building. If you don't already have Meson, it can typically be installed by
+running:
+```
+pip3 install --user meson
+```
+
+*Make sure you have Meson >= 0.44.0 if you want to try cross-compiling Glimpse:*
+```
+pip3 install --user meson --upgrade
+meson --version
+```
 
 ## Debug
+
+By default Meson will compile without optimizations and with debug symbols:
+
 ```
-mkdir build
-cd build
-meson.py ..
+mkdir build-debug
+cd build-debug
+meson ..
 ninja
 ```
-*Note: it's currently necessary to use Meson from git until the 0.44.0 release
-due to a bug with the handling of .wrap based subprojects*
 
 ## Release
+
+An optimized build can be compiled as follows:
 ```
-mkdir build
-cd build
+mkdir build-release
+cd build-release
 CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson.py .. --buildtype=release
 ninja
 ```
 
 # Building for Android
 
+We've only tested cross-compiling with NDK r16 and have certainly had problems
+with earlier versions so would strongly recommend using a version >= r16.
+
+For ease of integration with Meson we create a standalone toolchain like so:
+
 ```
 $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py --install-dir ~/local/android-arm64-toolchain-21 --arch arm64 --api 21 --stl libc++
 export PATH=~/local/android-arm64-toolchain-21:$PATH
+```
+*(We've only been targeting arm64 devices so far)*
+
+Then to compile Glimpse:
+```
 mkdir build-android-debug
-meson.py --cross-file ../android-arm64-cross-file.txt .. -Ddlib:support_gui=false -Ddlib:use_blas=false -Ddlib:use_lapack=false
+cd build-android-debug
+meson.py --cross-file ../android-arm64-cross-file.txt .. -Ddlib:support_gui=false
+ninja
 ```
 
-# References
-
-https://github.com/betars/Face-Resources
-
-This repo has a scalar implementation of the same feature extraction algorithm used
-in DLib that's a bit simpler to review for understanding what it's doing:
-https://github.com/rbgirshick/voc-dpm (see features/features.cc) (though also
-note there's the scalar code in fhog.h that has to handle the border pixels that
-don't neatly fit into simd registers)
-
-## Papers
-
-[Histograms of Oriented Gradients for Human Detection by Navneet Dalal and Bill Triggs, CVPR 2005](http://vc.cs.nthu.edu.tw/home/paper/codfiles/hkchiu/201205170946/Histograms%20of%20Oriented%20Gradients%20for%20Human%20Detection.pdf)
-
-[Object Detection with Discriminatively Trained Part Based Models by P. Felzenszwalb, R. Girshick, D. McAllester, D. Ramanan IEEE Transactions on Pattern Analysis and Machine Intelligence, Vol. 32, No. 9, Sep. 2010](https://cs.brown.edu/~pff/papers/lsvm-pami.pdf)
-
-[Real-Time Human Pose Recognition in Parts from Single Depth Images](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/BodyPartRecognition.pdf)
+or release:
+```
+mkdir build-android-release
+cd build-android-release
+meson.py --cross-file ../android-arm64-cross-file.txt .. -Ddlib:support_gui=false --buildtype=release
+ninja
+```
