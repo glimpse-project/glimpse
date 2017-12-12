@@ -121,17 +121,6 @@ shared_library('glimpse-unity-plugin',
 
 if not meson.is_cross_build()
 
-shared_library('glimpse',
-               [ 'src/image_utils.cc',
-                 'src/infer.cc',
-                 'src/loader.cc',
-                 'src/tinyexr.cc',
-                 'src/parson.c',
-                 'src/llist.c',
-                 'src/xalloc.c' ],
-               include_directories: inc,
-               dependencies: [ libpng_dep, threads_dep ])
-
 executable('image-pre-processor',
            [ 'src/image-pre-processor.cc',
              'src/tinyexr.cc',
