@@ -116,7 +116,8 @@ struct gm_device
             freenect_device *fdev;
 
             int ir_brightness;
-            float tilt;
+            float req_tilt; // tilt requested via UI
+            float phys_tilt; // tilt currently reported by HW
             float accel[3];
             float mks_accel[3];
             pthread_t io_thread;
@@ -514,7 +515,8 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     freenect_update_tilt_state(dev->kinect.fdev);
     tilt_state = freenect_get_tilt_state(dev->kinect.fdev);
 
-    dev->kinect.tilt = freenect_get_tilt_degs(tilt_state);
+    dev->kinect.phys_tilt = freenect_get_tilt_degs(tilt_state);
+    dev->kinect.req_tilt = dev->kinect.phys_tilt;
 
     /* libfreenect doesn't give us a way to query camera intrinsics so just
      * using these random/plausible intrinsics found on the internet to avoid
@@ -607,43 +609,56 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
 
     struct gm_ui_property prop;
 
-    /* FIXME: need an explicit setter function so we can call
-     * freenect_set_ir_brightness()
-     */
     prop = gm_ui_property();
+    prop.object = dev;
     prop.name = "ir_brightness";
     prop.desc = "IR Brightness";
     prop.type = GM_PROPERTY_INT;
-    prop.int_ptr = &dev->kinect.ir_brightness;
-    prop.min = 0;
-    prop.max = 50;
+    prop.int_state.ptr = &dev->kinect.ir_brightness;
+    prop.int_state.min = 0;
+    prop.int_state.max = 50;
     dev->properties.push_back(prop);
 
-    /* FIXME: need an explicit setter function so we can call
-     * freenect_set_tilt_degs()
-     */
     prop = gm_ui_property();
-    prop.name = "tilt";
-    prop.desc = "Tilt";
+    prop.object = dev;
+    prop.name = "request_tilt";
+    prop.desc = "Requested Tilt";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_ptr = &dev->kinect.tilt;
-    prop.min = -30;
-    prop.max = 30;
+    prop.float_state.ptr = &dev->kinect.req_tilt;
+    prop.float_state.min = -30;
+    prop.float_state.max = 30;
     dev->properties.push_back(prop);
 
     prop = gm_ui_property();
-    prop.name = "accel";
-    prop.desc = "Accel";
-    prop.type = GM_PROPERTY_FLOAT_VEC3;
-    prop.float_vec3 = dev->kinect.accel;
+    prop.object = dev;
+    prop.name = "physical tilt";
+    prop.desc = "Current Physical Tilt";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &dev->kinect.phys_tilt;
     prop.read_only = true;
     dev->properties.push_back(prop);
 
     prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "accel";
+    prop.desc = "Accel";
+    prop.type = GM_PROPERTY_FLOAT_VEC3;
+    prop.vec3_state.ptr = dev->kinect.accel;
+    prop.vec3_state.components[0] = "x";
+    prop.vec3_state.components[1] = "y";
+    prop.vec3_state.components[2] = "z";
+    prop.read_only = true;
+    dev->properties.push_back(prop);
+
+    prop = gm_ui_property();
+    prop.object = dev;
     prop.name = "mks_accel";
     prop.desc = "MKS Accel";
     prop.type = GM_PROPERTY_FLOAT_VEC3;
-    prop.float_vec3 = dev->kinect.mks_accel;
+    prop.vec3_state.ptr = dev->kinect.mks_accel;
+    prop.vec3_state.components[0] = "x";
+    prop.vec3_state.components[1] = "y";
+    prop.vec3_state.components[2] = "z";
     prop.read_only = true;
     dev->properties.push_back(prop);
 
@@ -697,8 +712,16 @@ kinect_io_thread_cb(void *data)
             dev->kinect.mks_accel[1] = mks_dy;
             dev->kinect.mks_accel[2] = mks_dz;
 
-            dev->kinect.tilt = freenect_get_tilt_degs(state);
-            dev->kinect.ir_brightness = freenect_get_ir_brightness(dev->kinect.fdev);
+            dev->kinect.phys_tilt = freenect_get_tilt_degs(state);
+            if (dev->kinect.phys_tilt != dev->kinect.req_tilt) {
+                freenect_set_tilt_degs(dev->kinect.fdev, dev->kinect.req_tilt);
+            }
+
+            int brightness = freenect_get_ir_brightness(dev->kinect.fdev);
+            if (brightness != dev->kinect.ir_brightness) {
+                freenect_set_ir_brightness(dev->kinect.fdev,
+                                           dev->kinect.ir_brightness);
+            }
 
             state_check_throttle = 0;
         }

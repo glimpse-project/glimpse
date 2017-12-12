@@ -331,6 +331,7 @@ struct gm_context
     float heat_color_stops_range;
     struct color_stop *heat_color_stops;
 
+    std::vector<struct gm_ui_enumerant> label_enumerants;
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 
@@ -348,6 +349,43 @@ struct gm_context
 #ifdef USE_PCL_GBPD
     pcl::people::PersonClassifier<pcl::RGB> person_classifier;
 #endif
+};
+
+static const char *label_names[] = {
+    "head, left-side",
+    "head, right-side",
+    "head, top-left",
+    "head, top-right",
+    "neck",
+    "clavicle, left",
+    "clavicle, right",
+    "shoulder, left",
+    "upper-arm, left",
+    "shoulder, right",
+    "upper arm, right",
+    "elbow, left",
+    "forearm, left",
+    "elbow, right",
+    "forearm, right",
+    "wrist, left",
+    "hand, left",
+    "wrist, right",
+    "hand, right",
+    "hip, left",
+    "thigh, left",
+    "hip, right",
+    "thigh, right",
+    "knee, left",
+    "shin, left",
+    "knee, right",
+    "shin, right",
+    "ankle, left",
+    "toes, left",
+    "ankle, right",
+    "toes, right",
+    "waist, left",
+    "waist, right",
+    "background",
 };
 
 static png_color default_palette[] = {
@@ -1530,8 +1568,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    uint8_t n_labels = ctx->decision_trees[0]->header.n_labels;
-
     start = get_time();
     float *weights = calc_pixel_weights(depth_img,
                                         tracking->label_probs,
@@ -2272,32 +2308,55 @@ gm_context_new(struct gm_logger *logger,
 
     ctx->min_depth = 0.5;
     prop = gm_ui_property();
+    prop.object = ctx;
     prop.name = "min_depth";
     prop.desc = "throw away points nearer than this";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_ptr = &ctx->min_depth;
-    prop.min = 0.0;
-    prop.max = 10;
+    prop.float_state.ptr = &ctx->min_depth;
+    prop.float_state.min = 0.0;
+    prop.float_state.max = 10;
     ctx->properties.push_back(prop);
 
     ctx->max_depth = 3.5;
     prop = gm_ui_property();
+    prop.object = ctx;
     prop.name = "max_depth";
     prop.desc = "throw away points further than this";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_ptr = &ctx->max_depth;
-    prop.min = 0.5;
-    prop.max = 10;
+    prop.float_state.ptr = &ctx->max_depth;
+    prop.float_state.min = 0.5;
+    prop.float_state.max = 10;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
     prop = gm_ui_property();
+    prop.object = ctx;
     prop.name = "debug_label";
     prop.desc = "visualize specific label probabilities";
     prop.type = GM_PROPERTY_INT;
-    prop.int_ptr = &ctx->debug_label;
-    prop.min = -1;
-    prop.max = ctx->n_labels - 1;
+    prop.enum_state.ptr = &ctx->debug_label;
+
+    struct gm_ui_enumerant enumerant;
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "most likely";
+    enumerant.desc = "Visualize Most Probable Labels";
+    prop.type = GM_PROPERTY_ENUM;
+    enumerant.val = -1;
+    ctx->label_enumerants.push_back(enumerant);
+
+    gm_assert(ctx->log,
+              ctx->n_labels == ARRAY_LEN(label_names),
+              "Mismatched label name count");
+
+    for (int i = 0; i < ctx->n_labels; i++) {
+        enumerant = gm_ui_enumerant();
+        enumerant.name = label_names[i];
+        enumerant.desc = label_names[i];
+        enumerant.val = i;
+        ctx->label_enumerants.push_back(enumerant);
+    }
+    prop.enum_state.n_enumerants = ctx->label_enumerants.size();
+    prop.enum_state.enumerants = ctx->label_enumerants.data();
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();

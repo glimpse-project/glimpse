@@ -228,6 +228,72 @@ intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
 }
 
 static void
+draw_properties(struct gm_ui_properties *props)
+{
+    for (int i = 0; i < props->n_properties; i++) {
+        struct gm_ui_property *prop = &props->properties[i];
+
+        switch (prop->type) {
+        case GM_PROPERTY_INT:
+            {
+                int current_val = gm_prop_get_int(prop), save_val = current_val;
+                ImGui::SliderInt(prop->name, &current_val,
+                                 prop->int_state.min, prop->int_state.max);
+                if (current_val != save_val)
+                    gm_prop_set_int(prop, current_val);
+            }
+            break;
+        case GM_PROPERTY_ENUM:
+            {
+                int current_enumerant = 0, save_enumerant = 0;
+                int current_val = gm_prop_get_enum(prop);
+
+                for (int j = 0; j < prop->enum_state.n_enumerants; j++) {
+                    if (prop->enum_state.enumerants[j].val == current_val) {
+                        current_enumerant = save_enumerant = j;
+                        break;
+                    }
+                }
+
+                std::vector<const char*> labels(prop->enum_state.n_enumerants);
+                for (int j = 0; j < prop->enum_state.n_enumerants; j++) {
+                    labels[j] = prop->enum_state.enumerants[j].name;
+                }
+
+                ImGui::Combo(prop->name, &current_enumerant, labels.data(),
+                             labels.size());
+
+                if (current_enumerant != save_enumerant) {
+                    int e = current_enumerant;
+                    gm_prop_set_enum(prop, prop->enum_state.enumerants[e].val);
+                }
+            }
+            break;
+        case GM_PROPERTY_FLOAT:
+            {
+                float current_val = gm_prop_get_float(prop), save_val = current_val;
+                ImGui::SliderFloat(prop->name, &current_val,
+                                   prop->float_state.min, prop->float_state.max);
+                if (current_val != save_val)
+                    gm_prop_set_float(prop, current_val);
+            }
+            break;
+        case GM_PROPERTY_FLOAT_VEC3:
+            if (prop->read_only) {
+                ImGui::LabelText(prop->name, "%.3f,%.3f,%.3f",
+                                 //prop->vec3_state.components[0],
+                                 prop->vec3_state.ptr[0],
+                                 //prop->vec3_state.components[1],
+                                 prop->vec3_state.ptr[1],
+                                 //prop->vec3_state.components[2],
+                                 prop->vec3_state.ptr[2]);
+            } // else TODO
+            break;
+        }
+    }
+}
+
+static void
 draw_ui(Data *data)
 {
     float left_col = TOOLBAR_LEFT_WIDTH;
@@ -260,27 +326,7 @@ draw_ui(Data *data)
     ImGui::Spacing();
 
     struct gm_ui_properties *props = gm_device_get_ui_properties(data->device);
-
-    for (int i = 0; i < props->n_properties; i++) {
-        struct gm_ui_property *prop = &props->properties[i];
-
-        switch (prop->type) {
-        case GM_PROPERTY_INT:
-            ImGui::SliderInt(prop->name, prop->int_ptr, prop->min, prop->max);
-            break;
-        case GM_PROPERTY_FLOAT:
-            ImGui::SliderFloat(prop->name, prop->float_ptr, prop->min, prop->max);
-            break;
-        case GM_PROPERTY_FLOAT_VEC3:
-            if (prop->read_only) {
-                ImGui::LabelText(prop->name, "%.3f,%.3f,%.3f",
-                                 prop->float_vec3[0],
-                                 prop->float_vec3[1],
-                                 prop->float_vec3[2]);
-            } // else TODO
-            break;
-        }
-    }
+    draw_properties(props);
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -289,16 +335,7 @@ draw_ui(Data *data)
     ImGui::Spacing();
 
     props = gm_context_get_ui_properties(data->ctx);
-
-    for (int i = 0; i < props->n_properties; i++) {
-        struct gm_ui_property *prop = &props->properties[i];
-
-        if (prop->type == GM_PROPERTY_INT)
-            ImGui::SliderInt(prop->name, prop->int_ptr, prop->min, prop->max);
-        if (prop->type == GM_PROPERTY_FLOAT)
-            ImGui::SliderFloat(prop->name, prop->float_ptr, prop->min, prop->max);
-    }
-
+    draw_properties(props);
 
     ImGui::Spacing();
     ImGui::Separator();
