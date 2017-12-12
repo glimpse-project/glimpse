@@ -40,6 +40,10 @@ typedef bool (*LListIterCallback)(LList*   node,
                                   uint32_t index,
                                   void*    userdata);
 
+typedef int (*LListSearchCallback)(LList*   a,
+                                   LList*   b,
+                                   void*    userdata);
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -49,6 +53,10 @@ LList*   llist_new(void* data);
 void     llist_foreach(LList*            list,
                        LListIterCallback cb,
                        void*             userdata);
+
+bool     llist_free_cb(LList*   node,
+                       uint32_t index,
+                       void*    userdata);
 
 void     llist_free(LList*            list,
                     LListIterCallback free_cb,
@@ -87,6 +95,10 @@ LList*   llist_slice(LList*            node,
 void*    llist_pop(LList**           node,
                    LListIterCallback free_cb,
                    void*             userdata);
+
+LList*   llist_sort(LList*              node,
+                    LListSearchCallback sort_cb,
+                    void*               userdata);
 
 #ifdef __cplusplus
 };

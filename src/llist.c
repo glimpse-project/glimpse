@@ -46,6 +46,13 @@ llist_foreach(LList* list, LListIterCallback cb, void* userdata)
     }
 }
 
+bool
+llist_free_cb(LList* node, uint32_t index, void* userdata)
+{
+  xfree(node->data);
+  return true;
+}
+
 void
 llist_free(LList* list, LListIterCallback free_cb, void* userdata)
 {
@@ -258,4 +265,23 @@ llist_pop(LList** node, LListIterCallback cb, void* userdata)
   llist_free(llist_remove(remove), cb, userdata);
 
   return data;
+}
+
+LList*
+llist_sort(LList* node, LListSearchCallback sort_cb, void* userdata)
+{
+  for (LList* last = llist_last(node); last; last = last->prev)
+    {
+      for (LList* i = node; i != last; i = i->next)
+        {
+          if (sort_cb(i, i->next, userdata) < 0)
+            {
+              void* tmp = i->next->data;
+              i->next->data = i->data;
+              i->data = tmp;
+            }
+        }
+    }
+
+  return node;
 }
