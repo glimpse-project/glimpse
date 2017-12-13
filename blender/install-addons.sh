@@ -87,4 +87,5 @@ echo ""
 #    fi
 #done
 
+blender -b -P enable-addons.py -- --set-scripts-dir
 blender -b -P enable-addons.py

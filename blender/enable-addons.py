@@ -48,6 +48,7 @@ parser = argparse.ArgumentParser(prog="enable-addons", add_help=False,
         """))
 parser.add_argument('--help-script', help='Show this help message and exit', action='help')
 parser.add_argument('--info', help='Print various blender config paths and exit', action='store_true')
+parser.add_argument('--set-scripts-dir', help='Set scripts directory in user preferences and exit', action='store_true')
 
 args = parser.parse_args(argv)
 
@@ -56,34 +57,36 @@ if args.info:
     print("BLENDER_USER_SCRIPTS=\"" + prefs_scripts_dir + "\"")
     print("BLENDER_USER_CONFIG=\"" + bpy.utils.script_path_user() + "\"")
     bpy.ops.wm.quit_blender()
-    sys.exit(1)
+    sys.exit(0)
 
-glimpse_script_path = os.getcwd()
+if args.set_scripts_dir:
+    glimpse_script_path = os.getcwd()
 
-if prefs_scripts_dir != "" and prefs_scripts_dir != glimpse_script_path:
-    print("\n")
-    print("Error:\n")
-    print("Your Blender user preferences already set a script directory which")
-    print("we don't want to trample:")
-    print("\n")
-    print("  dir = \"" + bpy.context.user_preferences.filepaths.script_directory + "\"");
-    print("\n")
-    print("An alternative approach to installing this addon is to create a symlink like:")
-    print("\n")
-    print("  $  mkdir -p " + os.path.join(bpy.utils.script_path_user(), "addons"))
-    print("  $  cd " + os.path.join(bpy.utils.script_path_user(), "addons"))
-    print("  $  ln -s " + os.path.join(os.getcwd(), "addons", "glimpse_data_generator"))
-    print("\n")
-    bpy.ops.wm.quit_blender()
-    sys.exit(1)
+    if prefs_scripts_dir != "" and prefs_scripts_dir != glimpse_script_path:
+        print("\n")
+        print("Error:\n")
+        print("Your Blender user preferences already set a script directory which")
+        print("we don't want to trample:")
+        print("\n")
+        print("  dir = \"" + bpy.context.user_preferences.filepaths.script_directory + "\"");
+        print("\n")
+        print("An alternative approach to installing this addon is to create a symlink like:")
+        print("\n")
+        print("  $  mkdir -p " + os.path.join(bpy.utils.script_path_user(), "addons"))
+        print("  $  cd " + os.path.join(bpy.utils.script_path_user(), "addons"))
+        print("  $  ln -s " + os.path.join(os.getcwd(), "addons", "glimpse_data_generator"))
+        print("\n")
+        bpy.ops.wm.quit_blender()
+        sys.exit(1)
 
-
-print("\n")
-print("Setting Blender user preferences, script directory = " + glimpse_script_path)
-print("\n")
-print("Enabling required addons in user preferences...\n")
-print("\n")
-bpy.context.user_preferences.filepaths.script_directory = glimpse_script_path
+    print("\n")
+    print("Setting Blender user preferences, script directory = " + glimpse_script_path)
+    print("\n")
+    print("Enabling required addons in user preferences...\n")
+    print("\n")
+    bpy.context.user_preferences.filepaths.script_directory = glimpse_script_path
+    bpy.ops.wm.save_userpref()
+    sys.exit(0)
 
 addon_dependencies = [
     'glimpse_data_generator',
