@@ -681,7 +681,7 @@ def load_bvh_file(bvh_state):
 
     bpy.context.scene.McpStartFrame = 1
     bpy.context.scene.McpEndFrame = 1000
-    bpy.ops.mcp.load_and_retarget(filepath = bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + ntpath_to_os(bvh_state['file'])))
+    bpy.ops.mcp.load_and_retarget(filepath = bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseBvhRoot,ntpath_to_os(bvh_state['file']))))
 
     if 'end' not in bvh_state:
         if bpy.context.object.animation_data:
@@ -706,7 +706,7 @@ def load_mocap_index():
     bvh_index = []
 
     try:
-        with open(bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + "index.json")) as fp:
+        with open(bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseBvhRoot, "index.json"))) as fp:
             bvh_index = json.load(fp)
 
         # early version might have indexed non-bvh files...
@@ -899,7 +899,7 @@ class VIEW3D_MoCap_SaveBvhIndexButton(bpy.types.Operator):
             update_current_bvh_state(self)
 
             try: 
-                with open(bpy.path.abspath(bpy.context.scene.GlimpseBvhRoot + "index.json"), "w", encoding="utf-8") as fp:
+                with open(bpy.path.abspath(os.path.join(bpy.context.scene.GlimpseBvhRoot, "index.json")), "w", encoding="utf-8") as fp:
                     json.dump(bvh_index, fp)
             except IOError as e:
                 self.report({'ERROR'}, str(e))
