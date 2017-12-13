@@ -167,6 +167,20 @@ struct color_stop
     struct color color;
 };
 
+struct joint_dist
+{
+    float min;
+    float mean;
+    float max;
+};
+
+struct joint_info
+{
+    int n_connections;
+    int *connections;
+    struct joint_dist *dist;
+};
+
 struct gm_tracking
 {
     struct gm_context *ctx;
@@ -318,6 +332,7 @@ struct gm_context
 
     JSON_Value *joint_map;
     JIParams *joint_params;
+    struct joint_info *joint_stats;
     int n_joints;
 
     float min_depth;
@@ -1595,14 +1610,80 @@ gm_context_track_skeleton(struct gm_context *ctx)
                               ctx->joint_map,
                               vfov,
                               ctx->joint_params->joint_params);
-        // TODO: Use heuristics to decide whether to reject certain joint
-        //       clusters in favour of others.
-        for (int j = 0; j < result->n_joints; j++) {
+
+        assert(result->n_joints = ctx->n_joints);
+        LList *joint_ptrs[ctx->n_joints];
+        for (int j = 0; j < ctx->n_joints; j++) {
             if (result->joints[j]) {
-                tracking->joints[j*3] = ((Joint*)result->joints[j]->data)->x;
-                tracking->joints[j*3+1] = ((Joint*)result->joints[j]->data)->y;
-                tracking->joints[j*3+2] = ((Joint*)result->joints[j]->data)->z;
+                Joint *joint = (Joint *)result->joints[j]->data;
+                tracking->joints[j*3] = joint->x;
+                tracking->joints[j*3+1] = joint->y;
+                tracking->joints[j*3+2] = joint->z;
+                joint_ptrs[j] = result->joints[j];
             }
+        }
+        // Try to see if there are better joint predictions based on statistics
+        // of distances between joints.
+        if (ctx->joint_stats) {
+            // XXX: Maybe put a limit on the number of passes this does(?)
+            //      It's pretty inexpensive though.
+            bool changed;
+            do {
+                changed = false;
+                for (int j = 0; j < ctx->n_joints; j++) {
+                    // If we have < 2 joint candidates, skip over this joint.
+                    if (!result->joints[j] || !result->joints[j]->next) {
+                        continue;
+                    }
+
+                    LList *best_joint = NULL;
+                    float best_dist = FLT_MAX;
+                    int best_error = INT_MAX;
+
+                    for (LList *l = result->joints[j]; l; l = l->next) {
+                        Joint *joint = (Joint *)l->data;
+                        float dist_acc = 0;
+                        int error = 0;
+                        for (int k = 0; k < ctx->joint_stats[j].n_connections;
+                             k++) {
+                            struct joint_dist *joint_dist =
+                                &ctx->joint_stats[j].dist[k];
+                            int c = ctx->joint_stats[j].connections[k];
+                            float dist = sqrtf(
+                                powf(tracking->joints[c*3] - joint->x, 2.f) +
+                                powf(tracking->joints[c*3+1] - joint->y, 2.f) +
+                                powf(tracking->joints[c*3+2] - joint->z, 2.f));
+                            dist = fabsf(dist - joint_dist->mean);
+                            dist_acc += dist;
+                            if (dist < joint_dist->min ||
+                                dist > joint_dist->max) {
+                                ++error;
+                            }
+                        }
+                        if (error < best_error && dist_acc <= best_dist) {
+                            best_dist = dist_acc;
+                            best_error = error;
+                            best_joint = l;
+                        }
+                    }
+
+                    if (best_joint && joint_ptrs[j] != best_joint) {
+                        // Null out the original data so we don't end up with
+                        // situations where we oscillate between two choices
+                        Joint *joint = (Joint *)joint_ptrs[j]->data;
+                        joint->x = 0.f;
+                        joint->y = 0.f;
+                        joint->z = HUGE_DEPTH * 2;
+
+                        joint_ptrs[j] = best_joint;
+                        joint = (Joint *)best_joint->data;
+                        tracking->joints[j*3] = joint->x;
+                        tracking->joints[j*3+1] = joint->y;
+                        tracking->joints[j*3+2] = joint->z;
+                        changed = true;
+                    }
+                }
+            } while (changed);
         }
         free_joints(result);
 
@@ -2079,6 +2160,14 @@ gm_context_destroy(struct gm_context *ctx)
 
     json_value_free(ctx->joint_map);
 
+    if (ctx->joint_stats) {
+        for (int i = 0; i < ctx->n_joints; i++) {
+            xfree(ctx->joint_stats[i].connections);
+            xfree(ctx->joint_stats[i].dist);
+        }
+        xfree(ctx->joint_stats);
+    }
+
     delete ctx;
 }
 
@@ -2219,6 +2308,7 @@ gm_context_new(struct gm_logger *logger,
         }
 
         ctx->n_joints = json_array_get_count(json_array(ctx->joint_map));
+
     } else {
         xasprintf(err, "Failed to open joint-map.json: %s", open_err);
         free(open_err);
@@ -2266,6 +2356,81 @@ gm_context_new(struct gm_logger *logger,
         return NULL;
     }
 
+    // Load joint statistics for improving the quality of predicted joint
+    // positions.
+    ctx->joint_stats = NULL;
+
+    struct gm_asset *joint_stats_asset =
+        gm_asset_open("joint-dist.json", GM_ASSET_MODE_BUFFER, &open_err);
+    if (joint_stats_asset) {
+        ctx->joint_stats = (struct joint_info *)
+            xcalloc(ctx->n_joints, sizeof(struct joint_info));
+        for (int i = 0; i < ctx->n_joints; i++) {
+            ctx->joint_stats[i].connections = (int *)
+                xmalloc(ctx->n_joints * sizeof(int));
+            ctx->joint_stats[i].dist = (struct joint_dist *)
+                xmalloc(ctx->n_joints * sizeof(struct joint_dist));
+        }
+
+        // Discover joint connections
+        for (int i = 0; i < ctx->n_joints; i++) {
+            JSON_Object *joint =
+                json_array_get_object(json_array(ctx->joint_map), i);
+            JSON_Array *connections =
+                json_object_get_array(joint, "connections");
+            for (int c = 0; c < json_array_get_count(connections); c++) {
+                const char *name = json_array_get_string(connections, c);
+                for (int j = 0; j < ctx->n_joints; j++) {
+                    JSON_Object *connection =
+                        json_array_get_object(json_array(ctx->joint_map), j);
+                    if (strcmp(json_object_get_string(connection, "joint"),
+                               name) != 0) { continue; }
+
+                    // Add the connection to this joint and add the reverse
+                    // connection.
+                    int idx = ctx->joint_stats[i].n_connections;
+                    ctx->joint_stats[i].connections[idx] = j;
+                    ++ctx->joint_stats[i].n_connections;
+
+                    idx = ctx->joint_stats[j].n_connections;
+                    ctx->joint_stats[j].connections[idx] = i;
+                    ++ctx->joint_stats[j].n_connections;
+
+                    break;
+                }
+            }
+        }
+
+        const void *buf = gm_asset_get_buffer(joint_stats_asset);
+        JSON_Value *json = json_parse_string((char *)buf);
+
+        assert(json_array_get_count(json_array(json)) == ctx->n_joints);
+        for (int i = 0; i < ctx->n_joints; i++) {
+            JSON_Array *stats = json_array_get_array(json_array(json), i);
+            assert(json_array_get_count(stats) == ctx->n_joints);
+
+            for (int j = 0; j < ctx->joint_stats[i].n_connections; i++) {
+                int c = ctx->joint_stats[i].connections[j];
+                JSON_Object *stat = json_array_get_object(stats, c);
+                ctx->joint_stats[i].dist[j].min = (float)
+                    json_object_get_number(stat, "min");
+                ctx->joint_stats[i].dist[j].mean = (float)
+                    json_object_get_number(stat, "mean");
+                ctx->joint_stats[i].dist[j].max = (float)
+                    json_object_get_number(stat, "max");
+            }
+        }
+
+        gm_asset_close(joint_stats_asset);
+        json_value_free(json);
+    } else {
+        xasprintf(err, "Failed to open joint-dist.json: %s", open_err);
+        free(open_err);
+
+        // We can continue without the joint stats asset, just results may be
+        // poorer quality.
+    }
+
     ctx->depth_color_stops_range = 5; // meters
     alloc_rgb_color_stops(&ctx->depth_color_stops,
                           &ctx->n_depth_color_stops,
@@ -2307,6 +2472,8 @@ gm_context_new(struct gm_logger *logger,
             (int)json_object_get_number(svm_root, "window_width"),
             weights,
             (float)json_object_get_number(svm_root, "offset"));
+
+        json_value_free(svm_json);
     } else {
         xasprintf(err, "Failed to open svm.json: %s", open_err);
         free(open_err);
