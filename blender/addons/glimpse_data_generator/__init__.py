@@ -263,6 +263,7 @@ class GeneratorPurgeActionsOperator(bpy.types.Operator):
 
             if action_name in bpy.data.actions:
                 action = bpy.data.actions[action_name]
+                action.use_fake_user = False
                 print(" > Purging %s" % bvh_name)
 
         return {'FINISHED'}

@@ -96,8 +96,7 @@ if args.preload:
     
 if args.purge:
     bpy.ops.glimpse.purge_mocap_actions()
-    basename = bpy.path.basename(bpy.context.blend_data.filepath)
-    bpy.ops.wm.save_as_mainfile(filepath=bpy.path.abspath('//%s-purged.blend' % basename[:-6]))
+    bpy.ops.wm.save_as_mainfile(filepath=bpy.context.blend_data.filepath)
     bpy.ops.wm.quit_blender()
 
 if args.dest == "":
