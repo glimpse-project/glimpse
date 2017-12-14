@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/glimpse-project/glimpse.svg?branch=master)](https://travis-ci.org/glimpse-project/glimpse)
+
 # Glimpse — Communicating with the richness of our physical selves
 
 We are building a real-time motion capture system for the body using mobile
@@ -33,46 +35,65 @@ before delving into the code for more details on our initial approach.
 
 # Fetching
 
-Firstly, not only should you fetch this repository but you'll also need to fetch the [Glimpse Training Data](https://github.com/glimpse-project/glimpse-training-data) and/or the [Glimpse Pre-Trained Models](https://github.com/glimpse-project/glimpse-models) as follows:
+Along with this repository you'll also need to fetch the [Glimpse Training
+Data](https://github.com/glimpse-project/glimpse-training-data) and/or the
+[Glimpse Pre-Trained Models](https://github.com/glimpse-project/glimpse-models)
+as follows:
 
 ```
 git clone https://github.com/glimpse-project/glimpse
 git clone --depth=1 https://github.com/glimpse-project/glimpse-training-data
 git clone --depth=1 https://github.com/glimpse-project/glimpse-models
 ```
-*Note: We recommend you clone the later repositories with --depth=1 since they contain large resources whose history is rarely required so you can save a lot of time/bandwidth this way* 
+*Note: We recommend you clone the later repositories with --depth=1 since they
+contain large resources whose history is rarely required so you can save a lot
+of time/bandwidth this way*
 
-Once cloned, please check the respective README.md files in each repo for the latest instructions but it's expected you will need to also run:
+Once cloned, please check the respective README.md files in each repo for the
+latest instructions but it's expected you will need to also run:
 
 ```
 cd glimpse-training-data
-./fetch.sh
+./unpack.sh
 cd blender
 ./install-addons.py
 ```
-*(to download the CMU motion capture data that we use in our rendering pipeline and to configure Blender with all the required addons for rendering via blender/glimpse-cli.py)*
+*(to decompress the CMU motion capture data that we use in our rendering pipeline
+and to configure Blender with all the required addons for rendering via
+blender/glimpse-cli.py)*
+
+and in the glimpse-models repo run:
 
 ```
+cd glimpse-models
+./unpack.sh
 ```
+*(to decompress the CMU motion capture data)*
+
+# Environment variable
+
+Further instructions assume the following environment variables are set
+
+`GLIMPSE_TRAINING_DATA` is set to the absolute path for the
+glimpse-training-data repository cloned above.
+
+`GLIMPSE_MODELS` is set to the absolute path for the glimpse-models repository
+above.
 
 # Building
 
-So far we've been developing on Linux and we're also targeting cross-compilation
-to Android. If someone wants to help port to Windows or OSX, that
-would be greatly appreciated and probably wouldn't be too tricky.
+Currently we only support building and running Glimpse on Linux and/or
+cross-compiling for Android. If someone wants to help port to Windows or OSX,
+that would be greatly appreciated and probably wouldn't be too tricky.
 
 We're using [Meson](https://mesonbuild.com) and [Ninja](https://ninja-build.org/)
 for building. If you don't already have Meson, it can typically be installed by
 running:
 ```
-pip3 install --user meson
+pip3 install --user --upgrade meson
 ```
 
 *Make sure you have Meson >= 0.44.0 if you want to try cross-compiling Glimpse:*
-```
-pip3 install --user meson --upgrade
-meson --version
-```
 
 ## Debug
 
@@ -91,7 +112,7 @@ An optimized build can be compiled as follows:
 ```
 mkdir build-release
 cd build-release
-CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson.py .. --buildtype=release
+CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson.py --buildtype=release ..
 ninja
 ```
 
@@ -108,11 +129,16 @@ export PATH=~/local/android-arm64-toolchain-21:$PATH
 ```
 *(We've only been targeting arm64 devices so far)*
 
+Make sure you have Meson >= 0.44.0, since earlier versions had a bug when
+building subprojects whose directory didn't exactly match the subproject name.
+
+`meson --version`
+
 Then to compile Glimpse:
 ```
 mkdir build-android-debug
 cd build-android-debug
-meson.py --cross-file ../android-arm64-cross-file.txt .. -Ddlib:support_gui=false
+meson.py --cross-file ../android-arm64-cross-file.txt ..
 ninja
 ```
 
@@ -120,6 +146,6 @@ or release:
 ```
 mkdir build-android-release
 cd build-android-release
-meson.py --cross-file ../android-arm64-cross-file.txt .. -Ddlib:support_gui=false --buildtype=release
+meson.py --cross-file ../android-arm64-cross-file.txt --buildtype=release ..
 ninja
 ```

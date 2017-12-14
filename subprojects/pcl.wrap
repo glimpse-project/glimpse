@@ -1,4 +1,4 @@
 [wrap-git]
 directory = pcl
-url = git@gitlab.com:impossible/pcl.git
+url = https://github.com/glimpse-project/pcl.git
 revision = 6b6769dd304a20a06cb4c6d2548089aebbcfe85c

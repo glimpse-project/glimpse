@@ -22,28 +22,43 @@ client_api_defines = [
 dlib_sp = subproject('dlib')
 dlib_dep = dlib_sp.get_variable('dlib_dep')
 
+# It's convenient to be able to link with distro packages, but also somewhat
+# unpredictable.  We want a way of pinning down our dependencies to subprojects
+# when we need to be able to compare results...
 if use_system_libs
     glm_dep = dependency('glm', fallback: [ 'glm', 'glm_dep'])
     libpng_dep = dependency('libpng', fallback: [ 'libpng', 'png_dep' ])
 
     pcl_deps = []
-    pcl_deps += dependency('pcl_common-1.8', fallback: [ 'pcl', 'common_dep' ])
-    pcl_deps += dependency('pcl_features-1.8', fallback: [ 'pcl', 'features_dep' ])
-    pcl_deps += dependency('pcl_filters-1.8', fallback: [ 'pcl', 'filters_dep' ])
-    pcl_deps += dependency('pcl_kdtree-1.8', fallback: [ 'pcl', 'kdtree_dep' ])
-    pcl_deps += dependency('pcl_ml-1.8', fallback: [ 'pcl', 'ml_dep' ])
-    pcl_deps += dependency('pcl_octree-1.8', fallback: [ 'pcl', 'octree_dep' ])
-    pcl_deps += dependency('pcl_sample_consensus-1.8', fallback: [ 'pcl', 'sample_consensus_dep' ])
-    pcl_deps += dependency('pcl_search-1.8', fallback: [ 'pcl', 'search_dep' ])
-    pcl_deps += dependency('pcl_segmentation-1.8', fallback: [ 'pcl', 'segmentation_dep' ])
 
-#    pcl_deps += dependency('pcl_io-1.8', fallback: [ 'pcl', 'io_dep' ])
-#    pcl_deps += dependency('pcl_keypoints-1.8', fallback: [ 'pcl', 'keypoints_dep' ])
-#    pcl_deps += dependency('pcl_recognition-1.8', fallback: [ 'pcl', 'recognition_dep' ])
-#    pcl_deps += dependency('pcl_registration-1.8', fallback: [ 'pcl', 'registration_dep' ])
-#    pcl_deps += dependency('pcl_stereo-1.8', fallback: [ 'pcl', 'stereo_dep' ])
-#    pcl_deps += dependency('pcl_surface-1.8', fallback: [ 'pcl', 'surface_dep' ])
-#    pcl_deps += dependency('pcl_tracking-1.8', fallback: [ 'pcl', 'tracking_dep' ])
+    # XXX: we don't just have multiple dependency() lines with fallbacks
+    # because we want to be sure we don't end up resolving one pcl sub-package
+    # via pkg-config and another via the 'pcl' subproject.
+    #
+    # This specific problem arrose for us when building on Ubuntu due to a
+    # packaging bug which means many of the pcl_foo-1.8.pc files are dependent
+    # on a non-existent pcl_2d-1.8.pc and when Meson runs:
+    # `pkg-config --cflags pcl_segmentation-1.8` it fails and falls back to
+    # the pcl subproject.
+    #
+    pcl_common_dep = dependency('pcl_common-1.8', required: false)
+    if pcl_common_dep.found()
+        pcl_deps += pcl_common_dep
+        pcl_dep = dependency('pcl_segmentation-1.8', required: false)
+        if not pcl_dep.found()
+            error('libpcl pkg-config inconsistency\n' +
+                  'If you\'re running Ubuntu then it\'s probably due to these pcl packaging bugs:\n\n' +
+                  '  https://bugs.launchpad.net/ubuntu/+source/pcl/+bug/1738902\n\n' +
+                  'Workaround:\n\n' +
+                  '  $ sudo sed -i \'s/pcl_2d-1.8//\' /usr/lib/x86_64-linux-gnu/pkgconfig/pcl_features-1.8.pc' +
+                  '  $ sudo sed -i \'s/Requires:/Requires: eigen3 /g\' /usr/lib/x86_64-linux-gnu/pkgconfig/pcl_common-1.8.pc\n\n')
+        endif
+        pcl_deps += pcl_dep
+    else
+        pcl_sp = subproject('pcl')
+        pcl_deps += pcl_sp.get_variable('common_dep')
+        pcl_deps += pcl_sp.get_variable('segmentation_dep')
+    endif
 else
     glm_sp = subproject('glm')
     glm_dep = glm_sp.get_variable('glm_dep')

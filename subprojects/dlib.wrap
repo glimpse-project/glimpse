@@ -1,4 +1,4 @@
 [wrap-git]
 directory = dlib
-url = git@gitlab.com:impossible/dlib
-revision = abb1287ad638f105c146fc23c867f440239ef488
+url = https://github.com/glimpse-project/dlib.git
+revision = a6be2c9136a13c9eaaa6e1e2e7abdb0fd8b3fb69

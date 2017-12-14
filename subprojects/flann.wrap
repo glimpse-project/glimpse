@@ -7,4 +7,4 @@ source_hash = b23b5f4e71139faa3bcb39e6bbcc76967fbaf308c4ee9d4f5bfbeceaa76cc5d3
 
 patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
 patch_filename = flann-wrap-1.9.1.tar
-patch_hash = 4fcec27743be5a210ced76f0acdd31817b374e354bb356da79809371e629e364
+patch_hash = ab55865b80ac5819b8a31c318155186ab04e3fee622d0573f5dd4ff42d90b71d
