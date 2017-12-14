@@ -31,6 +31,29 @@ See this paper on [Real-Time Human Pose Recognition in Parts from Single Depth
 Images](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/BodyPartRecognition.pdf)
 before delving into the code for more details on our initial approach.
 
+# Fetching
+
+Firstly, not only should you fetch this repository but you'll also need to fetch the [Glimpse Training Data](https://github.com/glimpse-project/glimpse-training-data) and/or the [Glimpse Pre-Trained Models](https://github.com/glimpse-project/glimpse-models) as follows:
+
+```
+git clone https://github.com/glimpse-project/glimpse
+git clone --depth=1 https://github.com/glimpse-project/glimpse-training-data
+git clone --depth=1 https://github.com/glimpse-project/glimpse-models
+```
+*Note: We recommend you clone the later repositories with --depth=1 since they contain large resources whose history is rarely required so you can save a lot of time/bandwidth this way* 
+
+Once cloned, please check the respective README.md files in each repo for the latest instructions but it's expected you will need to also run:
+
+```
+cd glimpse-training-data
+./fetch.sh
+cd blender
+./install-addons.py
+```
+*(to download the CMU motion capture data that we use in our rendering pipeline and to configure Blender with all the required addons for rendering via blender/glimpse-cli.py)*
+
+```
+```
 
 # Building
 
