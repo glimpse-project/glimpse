@@ -16,6 +16,8 @@ runtime motion capture is under the permissive
 
 # Status
 
+![](https://raw.githubusercontent.com/wiki/glimpse-project/glimpse/images/screenshot-2017-12-07.png)
+
 The early direction of this project has been to implement some of the
 capabilities demoed in our
 ['Glimpse — a sneak peek into your creative self'](https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2e656ff6)
