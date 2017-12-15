@@ -157,6 +157,8 @@ struct gm_device
     struct gm_device_buffer *depth_buf_ready;
     struct gm_device_buffer *depth_buf_back;
 
+    uint64_t frame_time;
+
     struct gm_mem_pool frame_pool;
     struct gm_frame *last_frame;
 
@@ -432,6 +434,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = dev->depth_buf_back;
     dev->depth_buf_back = mem_pool_acquire_buffer(&dev->depth_buf_pool);
+    dev->frame_time = (uint64_t)timestamp;
     dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
 
     freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
@@ -462,6 +465,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     struct gm_device_buffer *old = dev->video_buf_ready;
     dev->video_buf_ready = dev->video_buf_back;
     dev->video_buf_back = mem_pool_acquire_buffer(&dev->video_buf_pool);
+    dev->frame_time = (uint64_t)timestamp;
     dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
 
     freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
@@ -907,6 +911,7 @@ dummy_io_thread_cb(void *userdata)
                 gm_buffer_unref(&dev->depth_buf_ready->base);
             dev->depth_buf_ready = dev->depth_buf_back;
             dev->depth_buf_back = mem_pool_acquire_buffer(&dev->depth_buf_pool);
+            dev->frame_time = dev->dummy.time;
             dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
 
             pthread_mutex_unlock(&dev->swap_buffers_lock);
@@ -1137,6 +1142,8 @@ gm_device_get_latest_frame(struct gm_device *dev)
                   "Video ready flag set but buffer missing");
     } else
         assert(0);
+
+    frame->base.timestamp = dev->frame_time;
 
     dev->frame_ready_requirements = 0;
 
