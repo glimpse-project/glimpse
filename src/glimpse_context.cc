@@ -136,6 +136,8 @@ using namespace pcl::common;
 
 #endif
 
+#define TRACK_FRAMES 4
+
 enum image_format {
     IMAGE_FORMAT_X8,
     IMAGE_FORMAT_XHALF,
@@ -208,6 +210,8 @@ struct gm_tracking
 
     // Inferred joint positions
     float *joints;
+    float *joints_processed;
+    bool *joints_predicted;
 
     // Coloured point cloud
     GlimpsePointXYZRGBA* cloud;
@@ -327,6 +331,7 @@ struct gm_context
     struct gm_tracking *tracking_front;
     struct gm_tracking *tracking_mid;
     struct gm_tracking *tracking_back;
+    struct gm_tracking *tracking_buffer[TRACK_FRAMES];
 
     int n_labels;
 
@@ -1137,7 +1142,176 @@ tracking_create_rgb_label_map(struct gm_context *ctx,
     }
 }
 
-void
+static bool
+predict_from_previous_frames(struct gm_context *ctx, int joint,
+                             uint64_t timestamp, float *prediction)
+{
+    // Use Catmull-rom interpolation to determine what the next joint position
+    // might be.
+    // TODO: We assume that joint positions come at regular intervals,
+    // which may not be true... Figure out something else for this.
+
+    // Find the four nearest points in time. We assume the tracking buffers
+    // are ordered.
+    int start, end;
+    start = end = 0;
+    for (end = 0; end < TRACK_FRAMES; end++) {
+        struct gm_tracking *tracking = ctx->tracking_buffer[end];
+        uint64_t current = tracking->depth_capture_timestamp;
+        if (current > timestamp) {
+            break;
+        }
+    }
+    end = std::min(TRACK_FRAMES-1, end + 1);
+    start = std::max(0, end - 3);
+    end = start + 3;
+    if (end >= TRACK_FRAMES) {
+        return false;
+    }
+
+    glm::vec3 p[4];
+    for (int i = 0; i < 4; i++) {
+        struct gm_tracking *tracking = ctx->tracking_buffer[i + start];
+        if (tracking->depth_capture_timestamp <= 0) {
+            return false;
+        }
+        p[i].x = tracking->joints_processed[joint*3];
+        p[i].y = tracking->joints_processed[joint*3+1];
+        p[i].z = tracking->joints_processed[joint*3+2];
+    }
+
+    float t = (timestamp -
+               ctx->tracking_buffer[start]->depth_capture_timestamp) /
+      (ctx->tracking_buffer[end]->depth_capture_timestamp -
+       ctx->tracking_buffer[start]->depth_capture_timestamp);
+    glm::vec3 q = 0.5f *
+        ((2.f * p[1]) +
+         (-p[0] + p[2]) * t +
+         (2.f*p[0] - 5.f*p[1] + 4.f*p[2] - p[3]) * powf(t, 2.f) +
+         (-p[0] + 3.f * p[1] - 3.f * p[2] + p[3]) * powf(t, 3.f));
+
+    prediction[0] = q.x;
+    prediction[1] = q.y;
+    prediction[2] = q.z;
+
+    return true;
+}
+
+static void
+process_raw_joint_predictions(struct gm_context *ctx)
+{
+    struct gm_tracking *tracking = ctx->tracking_back;
+
+    float distance_threshold = 0.05f;
+    float scale_threshold = 4.0f;
+    for (int j = 0; j < ctx->n_joints; j++) {
+        int idx = j * 3;
+        tracking->joints_processed[idx] = tracking->joints[idx];
+        tracking->joints_processed[idx+1] = tracking->joints[idx+1];
+        tracking->joints_processed[idx+2] = tracking->joints[idx+2];
+        tracking->joints_predicted[j] = false;
+
+        int n_predictions = 0;
+        for (int i = 0; i < TRACK_FRAMES; i++) {
+            if (ctx->tracking_buffer[i]->joints_predicted[j]) {
+                ++n_predictions;
+            }
+        }
+
+        // Don't predict more than half a buffer's worth of frames
+        if (n_predictions >= TRACK_FRAMES / 2) {
+            continue;
+        }
+
+        struct gm_tracking *p_tracking[2] = {
+            ctx->tracking_buffer[TRACK_FRAMES-1],
+            ctx->tracking_buffer[TRACK_FRAMES-2]
+        };
+
+        float dist1 = sqrtf(
+            powf(tracking->joints[idx] -
+                 p_tracking[0]->joints_processed[idx], 2.f) +
+            powf(tracking->joints[idx+1] -
+                 p_tracking[0]->joints_processed[idx+1], 2.f) +
+            powf(tracking->joints[idx+2] -
+                 p_tracking[0]->joints_processed[idx+2], 2.f));
+
+        if (dist1 > distance_threshold) {
+            float dist2 = sqrtf(
+                powf(p_tracking[0]->joints_processed[idx] -
+                     p_tracking[1]->joints_processed[idx], 2.f) +
+                powf(p_tracking[0]->joints_processed[idx+1] -
+                     p_tracking[1]->joints_processed[idx+1], 2.f) +
+                powf(p_tracking[0]->joints_processed[idx+2] -
+                     p_tracking[1]->joints_processed[idx+2], 2.f));
+            float diff = (dist2 * scale_threshold) - dist1;
+            if (dist1 > dist2 * scale_threshold) {
+                float prediction[3];
+                if (!predict_from_previous_frames(
+                        ctx, j, tracking->depth_capture_timestamp,
+                        prediction)) {
+                    continue;
+                }
+
+                // Try not to replace a result with a worse prediction
+                float new_dist1 = sqrtf(
+                    powf(prediction[0] -
+                         p_tracking[0]->joints_processed[idx], 2.f) +
+                    powf(prediction[1] -
+                         p_tracking[0]->joints_processed[idx+1], 2.f) +
+                    powf(prediction[2] -
+                         p_tracking[0]->joints_processed[idx+2], 2.f));
+                if (new_dist1 < dist1) {
+                    tracking->joints_processed[idx] = prediction[0];
+                    tracking->joints_processed[idx+1] = prediction[1];
+                    tracking->joints_processed[idx+2] = prediction[2];
+                    tracking->joints_predicted[j] = true;
+                }
+            }
+        }
+    }
+}
+
+static void
+copy_tracking(struct gm_tracking *src, struct gm_tracking *dst)
+{
+    int labels_width = src->ctx->training_camera_intrinsics.width;
+    int labels_height = src->ctx->training_camera_intrinsics.height;
+    int depth_width = src->ctx->depth_camera_intrinsics.width;
+    int depth_height = src->ctx->depth_camera_intrinsics.height;
+    int video_width = src->ctx->video_camera_intrinsics.width;
+    int video_height = src->ctx->video_camera_intrinsics.height;
+
+    dst->ctx = src->ctx;
+    dst->depth_capture_timestamp = src->depth_capture_timestamp;
+    dst->video_capture_timestamp = src->video_capture_timestamp;
+    dst->cloud_size = src->cloud_size;
+    dst->label_cloud_size = src->label_cloud_size;
+    dst->face_detect_buf_width = src->face_detect_buf_width;
+    dst->face_detect_buf_height = src->face_detect_buf_height;
+
+    memcpy(dst->label_map_rgb, src->label_map_rgb,
+           labels_width * labels_height * 3);
+    memcpy(dst->label_probs, src->label_probs, labels_width *
+           labels_height * dst->ctx->n_labels * sizeof(float));
+    memcpy(dst->joints, src->joints, dst->ctx->n_joints * 3 * sizeof(float));
+    memcpy(dst->joints_processed, src->joints_processed,
+           dst->ctx->n_joints * 3 * sizeof(float));
+    memcpy(dst->joints_predicted, src->joints_predicted,
+           dst->ctx->n_joints * sizeof(bool));
+    memcpy(dst->label_cloud, src->label_cloud,
+           src->label_cloud_size * sizeof(GlimpsePointXYZRGBA));
+    memcpy(dst->depth, src->depth, depth_width * depth_height * sizeof(float));
+    memcpy(dst->depth_rgb, src->depth_rgb, depth_width * depth_height * 3);
+    memcpy(dst->cloud, src->cloud,
+           src->cloud_size * sizeof(GlimpsePointXYZRGBA));
+    memcpy(dst->video, src->video, video_width * video_height *
+           sizeof(uint32_t));
+    memcpy(dst->face_detect_buf, src->face_detect_buf,
+           src->face_detect_buf_width * src->face_detect_buf_height);
+}
+
+static void
 gm_context_track_skeleton(struct gm_context *ctx)
 {
     struct gm_tracking *tracking = ctx->tracking_back;
@@ -1482,11 +1656,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale_suffix(duration));
 
     if (!person_found) {
+        // TODO: We should do an interpolation step here.
         LOGE("Skipping detection: Could not find a person cluster\n");
         return;
     }
 
-    // Do a radius search on each point from the sparse tree to rebuild the
+    // Do a box search on each point from the sparse tree to rebuild the
     // dense cloud cluster.
     start = get_time();
 
@@ -1508,6 +1683,10 @@ gm_context_track_skeleton(struct gm_context *ctx)
         std::copy(pt_indices.begin(), pt_indices.end(),
                   std::back_inserter(indices));
     }
+
+    // Duplicate indices seem to cause memory corruption, and I guess the box
+    // search above is inclusive on each boundary (or maybe we shouldn't be
+    // centering around the point?)
     indices.sort();
     indices.unique();
 
@@ -1646,9 +1825,9 @@ gm_context_track_skeleton(struct gm_context *ctx)
                         int error = 0;
                         for (int k = 0; k < ctx->joint_stats[j].n_connections;
                              k++) {
-                            struct joint_dist *joint_dist =
-                                &ctx->joint_stats[j].dist[k];
                             int c = ctx->joint_stats[j].connections[k];
+                            struct joint_dist *joint_dist =
+                                &ctx->joint_stats[j].dist[c];
                             float dist = sqrtf(
                                 powf(tracking->joints[c*3] - joint->x, 2.f) +
                                 powf(tracking->joints[c*3+1] - joint->y, 2.f) +
@@ -1687,6 +1866,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
         }
         free_joints(result);
 
+        process_raw_joint_predictions(ctx);
+
         end = get_time();
         duration = end - start;
         LOGI("People Detector: inferred joints in %.3f%s\n",
@@ -1713,7 +1894,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // This tints the coloured depth cloud with the inferred label colours,
     // but turns out not to be that useful a visualisation due to the
     // sparseness of the label cloud vs. the original depth cloud.
-    /*reproject_cloud(cloud, (void *)rgb_label_map,
+    /*reproject_cloud(cloud, (void *)tracking->label_map_rgb,
                     &ctx->training_camera_intrinsics,
                     ctx->extrinsics_set ?
                         &ctx->depth_to_video_extrinsics : NULL,
@@ -2045,12 +2226,19 @@ detector_thread_cb(void *data)
         pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 #endif
 
-        LOGI("Starting tracking iteration\n");
+        LOGI("Starting tracking iteration (%ld)\n",
+             ctx->tracking_back->depth_capture_timestamp);
 
         //gm_context_detect_faces(ctx);
 
         gm_context_track_skeleton(ctx);
         LOGI("Finished skeletal tracking");
+
+        // Buffer the last tracking frame
+        for (int i = 0; i < TRACK_FRAMES - 1; i++) {
+            std::swap(ctx->tracking_buffer[i], ctx->tracking_buffer[i + 1]);
+        }
+        copy_tracking(ctx->tracking_back, ctx->tracking_buffer[TRACK_FRAMES - 1]);
 
         pthread_mutex_lock(&ctx->tracking_swap_mutex);
         std::swap(ctx->tracking_back, ctx->tracking_mid);
@@ -2075,6 +2263,8 @@ free_tracking(struct gm_tracking *tracking)
     free(tracking->label_map_rgb);
     free(tracking->label_probs);
     free(tracking->joints);
+    free(tracking->joints_processed);
+    free(tracking->joints_predicted);
     free(tracking->label_cloud);
 
     free(tracking->depth);
@@ -2100,8 +2290,16 @@ alloc_tracking(struct gm_context *ctx)
     tracking->label_map_rgb = (uint8_t *)xcalloc(labels_width * labels_height, 3);
     tracking->label_probs = (float *)xcalloc(labels_width *
                                              labels_height *
-                                             sizeof(float) * ctx->n_labels, 1);
+                                             ctx->n_labels, sizeof(float));
+
     tracking->joints = (float *)xcalloc(ctx->n_joints, 3 * sizeof(float));
+    tracking->joints_processed = (float *)
+      xcalloc(ctx->n_joints, 3 * sizeof(float));
+    tracking->joints_predicted = (bool *)xmalloc(ctx->n_joints * sizeof(bool));
+    for (int i = 0; i < ctx->n_joints; i++) {
+        tracking->joints_predicted[i] = true;
+    }
+
     tracking->label_cloud = (GlimpsePointXYZRGBA *)
         xcalloc(labels_width * labels_height, sizeof(GlimpsePointXYZRGBA));
 
@@ -2142,13 +2340,15 @@ alloc_tracking(struct gm_context *ctx)
     return tracking;
 }
 
-
 void
 gm_context_destroy(struct gm_context *ctx)
 {
     free_tracking(ctx->tracking_front);
     free_tracking(ctx->tracking_mid);
     free_tracking(ctx->tracking_back);
+    for (int i = 0; i < TRACK_FRAMES; i++) {
+        free_tracking(ctx->tracking_buffer[i]);
+    }
 
     free(ctx->depth_color_stops);
 
@@ -2316,7 +2516,6 @@ gm_context_new(struct gm_logger *logger,
         return NULL;
     }
 
-
     ctx->joint_params = NULL;
 
     struct gm_asset *joint_params_asset =
@@ -2409,9 +2608,8 @@ gm_context_new(struct gm_logger *logger,
             JSON_Array *stats = json_array_get_array(json_array(json), i);
             assert(json_array_get_count(stats) == ctx->n_joints);
 
-            for (int j = 0; j < ctx->joint_stats[i].n_connections; i++) {
-                int c = ctx->joint_stats[i].connections[j];
-                JSON_Object *stat = json_array_get_object(stats, c);
+            for (int j = 0; j < ctx->n_joints; j++) {
+                JSON_Object *stat = json_array_get_object(stats, j);
                 ctx->joint_stats[i].dist[j].min = (float)
                     json_object_get_number(stat, "min");
                 ctx->joint_stats[i].dist[j].mean = (float)
@@ -2601,7 +2799,7 @@ gm_tracking_get_joint_positions(struct gm_tracking *tracking,
                                 int *n_joints)
 {
     if (n_joints) *n_joints = tracking->ctx->n_joints;
-    return tracking->joints;
+    return tracking->joints_processed;
 }
 
 const uint8_t *
@@ -3144,6 +3342,9 @@ gm_context_enable(struct gm_context *ctx)
     ctx->tracking_front = alloc_tracking(ctx);
     ctx->tracking_mid = alloc_tracking(ctx);
     ctx->tracking_back = alloc_tracking(ctx);
+    for (int i = 0; i < TRACK_FRAMES; i++) {
+        ctx->tracking_buffer[i] = alloc_tracking(ctx);
+    }
 
     request_frame(ctx);
 }
