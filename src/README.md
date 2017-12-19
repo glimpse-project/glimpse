@@ -4,21 +4,49 @@ Training a decision forest and joint inference parameters
 Requirements
 ============
 
-* Depth training images
-  - Images in EXR format with a single, half-float 'Y' channel representing
-    depth in meters.
-* Body-part label images
-  - 8-bit palettised or grayscale images with each pixel colour representing
-    a particular body-part label.
-* Bone position JSON files
-  - See 'example-bones.json'
-* A top-level training data meta.json
-  - For determining the camera properties used to render the training data and
-    looks like { 'camera': { 'width': 172, 'height':224, 'vertical_fov':60 }}
-* An index.xyz file
-  - For specifying which frames to train with, an index should be created
-    with the indexer.py script.
-    E.g. `./indexer.py -i tree0 100000 path/to/rendered-training-data`
+At this point it's assumed that you've used `glimpse-cli.py` to render some
+training images. If not, please see the
+[glimpse-training-data/README.md](https://github.com/glimpse-project/glimpse-training-data/blob/master/README.md)
+for further details first.
+
+
+Pre-process rendered images
+===========================
+
+Before starting training we process the images rendered by Blender so we can
+increase the amount of training data we have by e.g. mirroring images and we
+e.g add noise to make the data more represented of images captured by a
+camera instead of being rendered.
+
+If we have rendered data via glimpse-cli.py under
+`/path/to/glimpse-training-data/render/generated/test-render` then these images
+can be processed as follows:
+
+```
+./image-pre-processor \
+    /path/to/glimpse-training-data/render/generated/test-render \
+    /path/to/glimpse-training-data/render/pre-processed/test-render
+```
+
+
+Index frames to train with
+==========================
+
+For specifying which frames to train with, an index should be created with the
+indexer.py script.
+
+This script builds an index of all available rendered frames in a given
+directory and can then split that into multiple sub sets with no overlap. For
+example you could index three sets of 300k images out of a larger set of 1
+million images for training three separate decision trees.
+
+For example to create a single 'tree0' index of 100000 images you could run:
+```
+./indexer.py -i tree0 100000 /path/to/glimpse-training-data/render/pre-processed/test-render
+```
+
+This would create an `index.full` and `index.tree0` under the
+`pre-processed/test-render/` directory.
 
 
 Training a decision tree
@@ -68,7 +96,7 @@ the bone. For example:
 ]
 ```
 
-By default the revision controlled `training/joint-map.json` file should be used
+By default the revision controlled `src/joint-map.json` file should be used
 
 Generating joint files
 ======================
