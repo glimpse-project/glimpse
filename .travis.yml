@@ -12,86 +12,105 @@ language: c
 jobs:
     include:
 
+        # XXX: We have to be carefull about using env: as a hack for giving
+        # jobs names that are visible in the travis web ui. It turns out that
+        # the environment forms part of the key used to look up caches which we
+        # sometimes need to share between stages.
+        #
+        # See this issue requesting a better way of naming jobs:
+        # https://github.com/travis-ci/travis-ci/issues/5898
+        #
+        # It also looks like upstream are tracking a related request
+        # for future iterations of the (beta) stages feature:
+        #
+        #  "Making the native cache feature more configurable by specifying
+        #   cache keys per job. This would allow you to reuse caches in more
+        #   flexible ways in subsequent stages."
+        #
+        # https://github.com/travis-ci/beta-features/issues/28
+
+        # XXX: without lots of copy & paste it's awkward to avoid using the
+        # shared before_install: rules here which effectively adds ~3 minutes
+        # to the NOP case where the cache already exists...
+        - stage: render training data cache
+          script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
+            -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CFLAGS="-march=native -mtune=native"
+            -e CXXFLAGS="-march=native -mtune=native"
+            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
+            final-travis-ci-image ./travis/travis-ci-render.sh
+
         # The 'quick build' stage avoids needing to compile the pcl subproject
         # and instead links with the ubuntu packaged libpcl. It also doesn't
         # install blender or clone the glimpse-training-data + glimpse-models
         # repos...
         - stage: quick checks
-          env:
-              - _="Debug Build"
-              - CONFIG_OPTS="--buildtype=debug -Duse_system_libs=true"
+          env: _="Quick Debug Build (distro provided dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e BUILD_ONLY=1
-            -e CONFIG_OPTS="$CONFIG_OPTS"
+            -e CONFIG_OPTS="--buildtype=debug -Duse_system_libs=true"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: quick checks
-          env:
-              - _="Release Build"
-              - CFLAGS="-march=native -mtune=native"
-              - CXXFLAGS="-march=native -mtune=native"
-              - CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
+          env: _="Quick Release Build (distro provided dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e BUILD_ONLY=1
-            -e CONFIG_OPTS="$CONFIG_OPTS"
+            -e CFLAGS="-march=native -mtune=native"
+            -e CXXFLAGS="-march=native -mtune=native"
+            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
             final-travis-ci-image ./travis/travis-ci-build.sh
 
         # Verify that the Blender addon can be set up and glimpse-cli.py --info runs
         - stage: quick checks
-          env:
-              - _="Blender Addon Check"
+          # XXX: can't use env: here because we need to share the cache with
+          # 'render training data cache' stage
+          #env: _="Mini Training Run"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            final-travis-ci-image ./travis/travis-ci-check-training-data.sh
+            -e CFLAGS="-march=native -mtune=native"
+            -e CXXFLAGS="-march=native -mtune=native"
+            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
+            final-travis-ci-image ./travis/travis-ci-train.sh
 
         # Only if the quick builds pass we will do a full compilation of
         # our dependencies as subprojects and test our blender addon and
         # pre-trained model
         - stage: build
-          env:
-              - _="Debug Build"
-              - CONFIG_OPTS="--buildtype=debug -Duse_system_libs=false"
+          env: _="Debug Build (subproject dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e CONFIG_OPTS="$CONFIG_OPTS"
+            -e CONFIG_OPTS="--buildtype=debug -Duse_system_libs=false"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
-          env:
-              - _="Release Build"
-              - CFLAGS="-march=native -mtune=native"
-              - CXXFLAGS="-march=native -mtune=native"
-              - CONFIG_OPTS="--buildtype=release -Duse_system_libs=false"
+          env: _="Release Build (subproject dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e CONFIG_OPTS="$CONFIG_OPTS"
+            -e CFLAGS="-march=native -mtune=native"
+            -e CXXFLAGS="-march=native -mtune=native"
+            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=false"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
-          env:
-              - _="Android Debug Build"
-              - ANDROID=1
-              - CONFIG_OPTS="--cross-file=../android-arm64-cross-file.txt --buildtype=debug -Ddlib:support_gui=no"
+          env: _="Android Debug Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e ANDROID_BUILD=1
             -e BUILD_ONLY=1
-            -e CONFIG_OPTS="$CONFIG_OPTS"
+            -e CONFIG_OPTS="--cross-file=../android-arm64-cross-file.txt --buildtype=debug -Ddlib:support_gui=no"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
-          env:
-              - _="Android Release Build"
-              - ANDROID=1
-              - CONFIG_OPTS="--cross-file=../android-arm64-cross-file.txt --buildtype=release -Ddlib:support_gui=no"
+          env: _="Android Release Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e ANDROID_BUILD=1
             -e BUILD_ONLY=1
-            -e CONFIG_OPTS="$CONFIG_OPTS"
+            -e CONFIG_OPTS="--cross-file=../android-arm64-cross-file.txt --buildtype=release -Ddlib:support_gui=no"
             final-travis-ci-image ./travis/travis-ci-build.sh
 
 cache:
     directories:
         - blender-2.79-linux-glibc219-x86_64
+        - rendered-training-data
 
 before_install:
     - docker pull rib1/glimpse-travis

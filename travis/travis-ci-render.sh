@@ -3,8 +3,13 @@
 set -e
 set -x
 
+if test -d rendered-training-data/generated; then
+    exit 0
+fi
+
 python3 --version
 pip3 --version
+ninja --version
 
 sudo pip3 install virtualenv
 
@@ -12,6 +17,7 @@ virtualenv glimpse-py3-env
 source glimpse-py3-env/bin/activate
 
 python --version
+pip install meson
 
 # Even though it's an out-of-date version we install Blender via apt-get
 # as an easy way of installing dependencies
@@ -31,14 +37,25 @@ pushd glimpse-training-data
 popd
 pushd glimpse-training-data/blender
     ./install-addons.sh
-    ./glimpse-cli.py --help
-    echo "Trying to run glimpse-cli.py --info ../:"
-    ./glimpse-cli.py --info ../|grep -q "75_18: Uncached" && echo "Ran glimpse-cli.py --info OK"
 popd
 
-git clone --depth=1 https://github.com/glimpse-project/glimpse-models
-pushd glimpse-models
-    ./unpack.sh
-popd
+export PATH=$PWD/glimpse-training-data/blender:$PATH
+
+mkdir -p rendered-training-data
+
+glimpse-cli.py \
+    --start 25 \
+    --end 26 \
+    --preload \
+    glimpse-training-data
+
+glimpse-cli.py \
+    --start 25 \
+    --end 26 \
+    --dest rendered-training-data \
+    --name test-render \
+    glimpse-training-data
+
+find rendered-training-data
 
 deactivate
