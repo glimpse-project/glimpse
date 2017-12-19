@@ -1326,8 +1326,8 @@ static_assert(BACKGROUND_ID == 33, "");
     }
     JSON_Value *cam = json_object_get_value(json_object(meta), "camera");
     expected_width = json_object_get_number(json_object(cam), "width");
-    expected_height = json_object_get_number(json_object(cam), "width");
-    expected_fov = json_object_get_number(json_object(cam), "width");
+    expected_height = json_object_get_number(json_object(cam), "height");
+    expected_fov = json_object_get_number(json_object(cam), "vertical_fov");
     printf("Data rendered at %dx%d with fov = %.3f\n",
            expected_width,
            expected_height,
