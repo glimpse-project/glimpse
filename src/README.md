@@ -1,61 +1,3 @@
-Rendering training data
-=======================
-
-Requirements
-============
-
-* glimpse-training.blend
-  - This .blend file is pre-loaded with lots of mocap data and a set
-    of makehuman models and clothing.
-* Glimpse/Make{human,clothes} addons set up
-  - You must have followed the instructions in blender/README.md
-    to set up Blender so it knows where to find the Glimpse addon when it
-    loads as well as the makehuman and makeclothes addons
-* mocap data
-  - We're using mocap data from Carnegie Mellon university converted to
-    .bvh files which Blender understands and then indexed so we can
-    potentially blacklist or tweak rendering parameters per-file
-
-To render a new data set with blender we have a glimpse-cli.py script that
-provides a basic command line interface to glimpse-training.blend
-
-Unfortunately --help as an argument name clashes with another addon but
-you can see an overview of the interface with --glimpse-help like:
-
-```
-blender -b \
-    /path/to/glimpse-training-data/glimpse-training.blend \
-    -P blender/glimpse-cli.py \
-    -- \
-    --help-glimpse
-```
-*Note: `-b` means to run in the background.*
-
-*Note: the .blend file must be specified before the .py script since the python
-script depends on data within the .blend file*
-
-*Note: we had to use `--help-glimpse` instead of `--help` because we can't
-predict whether there will be some other plugin/component that will parse and
-handle `--help`.*
-
-
-The amount to render is measured in terms of indexed motion capture files
-(re: index.json in the directory of mocap files)
-
-To render mocap files from 0 to 100 you could run:
-
-```
-blender -b \
-    /path/to/glimpse-training.blend \
-    -P blender/glimpse-cmd.py \
-    -- \
-    --start 0 \
-    --end 100 \
-    --dest /path/to/render \
-    --name "test-render" \
-    /path/to/mocap/files/
-```
-
 Training a decision forest and joint inference parameters
 =========================================================
 
@@ -71,20 +13,13 @@ Requirements
 * Bone position JSON files
   - See 'example-bones.json'
 * A top-level training data meta.json
-  - For determing the camera properties used to render the training data and
+  - For determining the camera properties used to render the training data and
     looks like { 'camera': { 'width': 172, 'height':224, 'vertical_fov':60 }}
 * An index.xyz file
   - For specifying which frames to train with, an index should be created
-    with the training/indexer.py script.
-    E.g. `./indexer.py -i tree0 100000 path/to/training-data`
+    with the indexer.py script.
+    E.g. `./indexer.py -i tree0 100000 path/to/rendered-training-data`
 
-Building
-========
-
-The default make target will build all tools, but you likely want to build with
-optimisations enabled:
-
-make RELEASE=1
 
 Training a decision tree
 ========================
