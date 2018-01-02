@@ -3,7 +3,6 @@ project('glimpse', ['c', 'cpp'],
         default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
 use_system_libs = get_option('use_system_libs')
-use_pcl_gbpd = get_option('use_pcl_ground_based_people_detection')
 
 compiler = meson.get_compiler('c')
 
@@ -81,18 +80,6 @@ glfw_dep = dependency('glfw3', required: false)
 epoxy_dep = dependency('epoxy', required: false)
 snappy_dep = dependency('snappy', required: false)
 
-if use_pcl_gbpd
-    pcl_deps += dependency('pcl_people-1.8')
-
-    vtk_cpp_args = run_command(['cmake', '--find-package', '-DNAME=VTK', '-DLANGUAGE=CXX', '-DCOMPILER_ID=gcc', '-DMODE=COMPILE']).stdout().strip().split()
-    vtk_common_dep = declare_dependency(compile_args: vtk_cpp_args,
-                                        link_args: '-lvtkCommonCore')
-
-    client_api_defines += '-DUSE_PCL_GBPD'
-else
-    vtk_common_dep = []
-endif
-
 imgui_src = [
     'src/imgui/imgui.cpp',
     'src/imgui/imgui_demo.cpp',
@@ -125,7 +112,6 @@ client_api_deps = [
     dlib_dep,
     pcl_deps,
     freenect_dep,
-    vtk_common_dep,
 ]
 
 shared_library('glimpse-unity-plugin',

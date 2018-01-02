@@ -22,8 +22,6 @@
  * SOFTWARE.
  */
 
-//#define USE_PCL_GBPD 1
-
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -62,12 +60,6 @@
 
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/segmentation/extract_clusters.h>
-
-#ifdef USE_PCL_GBPD
-#include <pcl/people/head_based_subcluster.h>
-#include <pcl/people/person_classifier.h>
-#include <pcl/people/person_cluster.h>
-#endif
 
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/extract_indices.h>
@@ -365,10 +357,6 @@ struct gm_context
                            void *user_data);
 
     void *callback_data;
-
-#ifdef USE_PCL_GBPD
-    pcl::people::PersonClassifier<pcl::RGB> person_classifier;
-#endif
 };
 
 static const char *label_names[] = {
@@ -953,7 +941,7 @@ gm_context_detect_faces(struct gm_context *ctx)
 }
 
 void
-reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
+reproject_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
                 void *buffer,
                 const struct gm_intrinsics *intrinsics,
                 const struct gm_extrinsics *extrinsics,
@@ -999,7 +987,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
      */
     int n_points = 0;
     for (uint32_t p = 0; p < cloud->points.size(); p++) {
-        pcl::PointXYZRGBA *point = &cloud->points[p];
+        pcl::PointXYZ *point = &cloud->points[p];
         glm::vec3 point_t(point->x, point->y, point->z);
         glm::vec2 point_2d;
 
@@ -1028,9 +1016,10 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
 
         int off = width * y + x;
 
+        uint32_t rgba = 0;
         switch(op) {
         case RGBA_INTO_CLOUD:
-            point->rgba = ((uint32_t*)buffer)[off];
+            rgba = ((uint32_t*)buffer)[off];
             break;
 
         case RGB_INTO_CLOUD: {
@@ -1038,7 +1027,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
             uint8_t g = ((uint8_t*)buffer)[off * 3 + 1];
             uint8_t b = ((uint8_t*)buffer)[off * 3 + 2];
             uint32_t col = r << 24 | g << 16 | b << 8 | 0xFF;
-            point->rgba = col;
+            rgba = col;
             break;
         }
 
@@ -1061,13 +1050,13 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
                 uint32_t g = (uint32_t)((uint8_t*)buffer)[off * 3 + 1];
                 uint32_t b = (uint32_t)((uint8_t*)buffer)[off * 3 + 2];
 
-                uint32_t r2 = (point->rgba >> 24) & 0xFF;
-                uint32_t g2 = (point->rgba >> 16) & 0xFF;
-                uint32_t b2 = (point->rgba >> 8) & 0xFF;
+                uint32_t r2 = (rgba >> 24) & 0xFF;
+                uint32_t g2 = (rgba >> 16) & 0xFF;
+                uint32_t b2 = (rgba >> 8) & 0xFF;
 
                 uint32_t col = ((r + r2)/2) << 24 |
                                ((g + g2)/2) << 16 |
-                               ((b + b2)/2) << 8 | (point->rgba & 0xFF);
+                               ((b + b2)/2) << 8 | (rgba & 0xFF);
 
                 cloud_copy[cloud_off].rgba = col;
 
@@ -1075,7 +1064,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud,
                 // the camera so they draw over neighbouring points
                 cloud_copy[cloud_off].z -= 0.005f;
             } else {
-                cloud_copy[cloud_off].rgba = point->rgba;
+                cloud_copy[cloud_off].rgba = rgba;
             }
         }
 
@@ -1244,7 +1233,6 @@ process_raw_joint_predictions(struct gm_context *ctx)
                      p_tracking[1]->joints_processed[idx+1], 2.f) +
                 powf(p_tracking[0]->joints_processed[idx+2] -
                      p_tracking[1]->joints_processed[idx+2], 2.f));
-            float diff = (dist2 * scale_threshold) - dist1;
             if (dist1 > dist2 * scale_threshold) {
                 float prediction[3];
                 if (!predict_from_previous_frames(
@@ -1285,8 +1273,6 @@ copy_tracking(struct gm_tracking *src, struct gm_tracking *dst)
     dst->ctx = src->ctx;
     dst->depth_capture_timestamp = src->depth_capture_timestamp;
     dst->video_capture_timestamp = src->video_capture_timestamp;
-    dst->cloud_size = src->cloud_size;
-    dst->label_cloud_size = src->label_cloud_size;
     dst->face_detect_buf_width = src->face_detect_buf_width;
     dst->face_detect_buf_height = src->face_detect_buf_height;
 
@@ -1299,12 +1285,8 @@ copy_tracking(struct gm_tracking *src, struct gm_tracking *dst)
            dst->ctx->n_joints * 3 * sizeof(float));
     memcpy(dst->joints_predicted, src->joints_predicted,
            dst->ctx->n_joints * sizeof(bool));
-    memcpy(dst->label_cloud, src->label_cloud,
-           src->label_cloud_size * sizeof(GlimpsePointXYZRGBA));
     memcpy(dst->depth, src->depth, depth_width * depth_height * sizeof(float));
     memcpy(dst->depth_rgb, src->depth_rgb, depth_width * depth_height * 3);
-    memcpy(dst->cloud, src->cloud,
-           src->cloud_size * sizeof(GlimpsePointXYZRGBA));
     memcpy(dst->video, src->video, video_width * video_height *
            sizeof(uint32_t));
     memcpy(dst->face_detect_buf, src->face_detect_buf,
@@ -1325,8 +1307,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Project depth buffer into cloud and filter out points that are too
     // near/far.
     start = get_time();
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud(
-        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
     cloud->width = 0;
     cloud->height = 1;
     cloud->is_dense = true;
@@ -1348,13 +1330,14 @@ gm_context_track_skeleton(struct gm_context *ctx)
     foreach_xy_off(ctx->depth_camera_intrinsics.width,
                    ctx->depth_camera_intrinsics.height) {
         float depth = tracking->depth[off];
-        if (isnormal(depth)) {
+        if (isnormal(depth) &&
+            depth >= ctx->min_depth &&
+            depth < ctx->max_depth) {
             float dx = (x - cx) * depth * inv_fx;
             float dy = -(y - cy) * depth * inv_fy;
             cloud->points[n_points].x = dx;
             cloud->points[n_points].y = dy;
             cloud->points[n_points].z = depth;
-            cloud->points[n_points].rgba = 0;
             ++n_points;
         }
     }
@@ -1368,6 +1351,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
+#if 0
     // Reproject colour information into cloud
     start = get_time();
     reproject_cloud(cloud, (void *)tracking->video,
@@ -1381,30 +1365,16 @@ gm_context_track_skeleton(struct gm_context *ctx)
     LOGI("Reprojection of colour information took (%.3f%s)\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-
-    // Filter out points that are too near or too far
-    start = get_time();
-    pcl::PassThrough<pcl::PointXYZRGBA> passZ(true);
-    passZ.setInputCloud(cloud);
-    passZ.setFilterFieldName ("z");
-    passZ.setFilterLimits(ctx->min_depth, ctx->max_depth);
-    passZ.filter(*cloud);
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Cloud has %d points after depth filter (%.3f%s)",
-         (int)cloud->points.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+#endif
 
     // Simplify point cloud by putting it through a voxel grid
     start = get_time();
-    pcl::VoxelGrid<pcl::PointXYZRGBA> vg;
+    pcl::VoxelGrid<pcl::PointXYZ> vg;
     vg.setInputCloud(cloud);
     vg.setLeafSize(detect_res, detect_res, detect_res);
 
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr dense_cloud(
-        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr dense_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
     vg.filter(*dense_cloud);
     dense_cloud.swap(cloud);
 
@@ -1421,9 +1391,9 @@ gm_context_track_skeleton(struct gm_context *ctx)
     //       level. Currently if the camera is pointing downwards, we may end
     //       up filtering out floor points here.
     start = get_time();
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr cloud_floor(
-        new pcl::PointCloud<pcl::PointXYZRGBA>);
-    pcl::PassThrough<pcl::PointXYZRGBA> passY;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    pcl::PassThrough<pcl::PointXYZ> passY;
     passY.setInputCloud(cloud);
     passY.setUserFilterValue(HUGE_DEPTH);
     passY.setKeepOrganized(true);
@@ -1441,7 +1411,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     // Create the segmentation object
     start = get_time();
-    pcl::SACSegmentation<pcl::PointXYZRGBA> seg;
+    pcl::SACSegmentation<pcl::PointXYZ> seg;
     // Optional
     seg.setOptimizeCoefficients(true);
     // Mandatory
@@ -1474,7 +1444,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     if (n_inliers >= (int)(n_floor_points * 0.25f)) {
         // Remove ground plane
         start = get_time();
-        pcl::ExtractIndices<pcl::PointXYZRGBA> extract;
+        pcl::ExtractIndices<pcl::PointXYZ> extract;
         extract.setInputCloud(cloud);
         extract.setIndices(inliers);
         extract.setNegative(true);
@@ -1496,11 +1466,11 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // usually faster for this particular use-case than an Octree, but this can
     // vary depending on situation and compile options.
 #if 1
-    pcl::search::KdTree<pcl::PointXYZRGBA>::Ptr
-      tree(new pcl::search::KdTree<pcl::PointXYZRGBA>);
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr
+      tree(new pcl::search::KdTree<pcl::PointXYZ>);
 #else
-    pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
-      tree(new pcl::search::Octree<pcl::PointXYZRGBA>(0.1));
+    pcl::search::Octree<pcl::PointXYZ>::Ptr
+      tree(new pcl::search::Octree<pcl::PointXYZ>(0.1));
 #endif
 
     tree->setSortedResults(false);
@@ -1518,7 +1488,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     int max_points = (int)(max_height * max_width / detect_res / detect_res);
 
     std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZRGBA> ec;
+    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
     ec.setClusterTolerance(std::max(0.03f, detect_res * 2));
     ec.setMinClusterSize(min_points);
     ec.setMaxClusterSize(max_points);
@@ -1539,14 +1509,12 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Create a search tree so we can reconstruct the dense person cloud
     // We use an octree here as the time it takes to build a KdTree vastly
     // outweighs the speed benefit searching it.
-    pcl::search::Octree<pcl::PointXYZRGBA>::Ptr
-      dense_tree(new pcl::search::Octree<pcl::PointXYZRGBA>(detect_res));
+    pcl::search::Octree<pcl::PointXYZ>::Ptr
+      dense_tree(new pcl::search::Octree<pcl::PointXYZ>(detect_res));
     dense_tree->setSortedResults(false);
     dense_tree->setInputCloud(dense_cloud);
 
-#ifndef USE_PCL_GBPD
     // Assume the largest cluster that contains its centroid may be a person
-
     std::sort(cluster_indices.begin(), cluster_indices.end(), sort_indices);
 
     for (std::vector<pcl::PointIndices>::const_iterator point_it =
@@ -1564,7 +1532,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         // Make sure the centroid is in the mass
         std::vector<int>centroid_indices;
         std::vector<float>centroid_distances;
-        pcl::PointXYZRGBA centroid_pt;
+        pcl::PointXYZ centroid_pt;
         centroid_pt.x = centroid[0];
         centroid_pt.y = centroid[1];
         centroid_pt.z = centroid[2];
@@ -1579,75 +1547,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
         person_found = true;
         break;
     }
-#else
-    // Use pcl's HeadBasedSubclustering and PersonClassifier
-    // We do this because pcl doesn't call setDimensionLimits on the
-    // HeadBasedSubclustering object, and also it makes it easier to integrate
-    // and toggle it off/on for comparison.
-    Eigen::VectorXf eigen_ground_coeffs;
-    eigen_ground_coeffs.resize(4);
-    eigen_ground_coeffs[0] = ground_coeffs->values[0];
-    eigen_ground_coeffs[1] = ground_coeffs->values[1];
-    eigen_ground_coeffs[2] = ground_coeffs->values[2];
-    eigen_ground_coeffs[3] = ground_coeffs->values[3];
-
-    pcl::people::HeadBasedSubclustering<pcl::PointXYZRGBA> subclustering;
-    subclustering.setDimensionLimits(min_points, max_points);
-    subclustering.setInputCloud(cloud);
-    subclustering.setGround(eigen_ground_coeffs);
-    subclustering.setInitialClusters(cluster_indices);
-    subclustering.setHeightLimits(min_height, max_height);
-
-    std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>> clusters;
-    subclustering.subcluster(clusters);
-
-    // Use the person classifier to add confidence to the person clusters
-    pcl::PointCloud<pcl::RGB>::Ptr rgb_image(new pcl::PointCloud<pcl::RGB>);
-    rgb_image->width = ctx->depth_camera_intrinsics.width;
-    rgb_image->height = ctx->depth_camera_intrinsics.height;
-    rgb_image->points.resize(rgb_image->width * rgb_image->height);
-    foreach_xy_off(rgb_image->width, rgb_image->height) {
-        int target_off = (rgb_image->height - y - 1) * rgb_image->width + x;
-        rgb_image->points[target_off].rgb = tracking->video[off] >> 8;
-    }
-
-    Eigen::Matrix3f eigen_intrinsics;
-    eigen_intrinsics <<
-        (float)ctx->video_camera_intrinsics.fx, 0.f,
-        (float)ctx->video_camera_intrinsics.fy, 0.f,
-        (float)ctx->video_camera_intrinsics.cx,
-        (float)ctx->video_camera_intrinsics.cy,
-        0.f, 0.f, 0.1f;
-
-    for (std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>>::iterator it = clusters.begin();
-        it != clusters.end(); ++it) {
-        // Evaluate confidence for the current PersonCluster:
-        Eigen::Vector3f centroid = eigen_intrinsics * (it->getTCenter());
-        centroid /= centroid(2);
-
-        Eigen::Vector3f top = eigen_intrinsics * (it->getTTop());
-        top /= top(2);
-
-        Eigen::Vector3f bottom = eigen_intrinsics * (it->getTBottom());
-        bottom /= bottom(2);
-
-        it->setPersonConfidence(ctx->person_classifier.evaluate(
-            rgb_image, bottom, top, centroid, false));
-    }
-
-    float max_confidence = -FLT_MAX;
-    for (std::vector<pcl::people::PersonCluster<pcl::PointXYZRGBA>>::iterator
-        it = clusters.begin(); it != clusters.end(); ++it) {
-        float confidence = it->getPersonConfidence();
-        LOGI("Person cluster with %f", confidence);
-
-        if (confidence <= max_confidence) { continue; }
-
-        person_indices = it->getIndices();
-        person_found = true;
-        max_confidence = confidence;
-    }
-#endif
 
     end = get_time();
     duration = end - start;
@@ -1671,7 +1570,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         std::vector<int> pt_indices;
 
         Eigen::Vector3f pt_min, pt_max;
-        pcl::PointXYZRGBA point = cloud->points[*it];
+        pcl::PointXYZ point = cloud->points[*it];
         pt_min[0] = point.x - half_detect_res;
         pt_min[1] = point.y - half_detect_res;
         pt_min[2] = point.z - half_detect_res;
@@ -1690,8 +1589,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
     indices.sort();
     indices.unique();
 
-    pcl::PointCloud<pcl::PointXYZRGBA>::Ptr person_cluster(
-        new pcl::PointCloud<pcl::PointXYZRGBA>);
+    pcl::PointCloud<pcl::PointXYZ>::Ptr person_cluster(
+        new pcl::PointCloud<pcl::PointXYZ>);
     for (std::list<int>::const_iterator it = indices.begin();
          it != indices.end (); ++it) {
         person_cluster->points.push_back(dense_cloud->points[*it]);
@@ -1885,33 +1784,6 @@ gm_context_track_skeleton(struct gm_context *ctx)
     end = get_time();
     duration = end - start;
     LOGI("Created RGB label map in %.3f%s\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-    // Colourise cloud based on labels for debug
-    start = get_time();
-
-    // This tints the coloured depth cloud with the inferred label colours,
-    // but turns out not to be that useful a visualisation due to the
-    // sparseness of the label cloud vs. the original depth cloud.
-    /*reproject_cloud(cloud, (void *)tracking->label_map_rgb,
-                    &ctx->training_camera_intrinsics,
-                    ctx->extrinsics_set ?
-                        &ctx->depth_to_video_extrinsics : NULL,
-                    RGB_MIXIN_COPY,
-                    tracking->cloud, NULL, false);*/
-
-    reproject_cloud(cloud, (void*)tracking->label_map_rgb,
-                    &ctx->training_camera_intrinsics,
-                    NULL,
-                    RGB_INTO_CLOUD,
-                    tracking->label_cloud,
-                    &tracking->label_cloud_size,
-                    true);
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Reprojected RGB label map in %.3f%s\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 }
@@ -2265,11 +2137,9 @@ free_tracking(struct gm_tracking *tracking)
     free(tracking->joints);
     free(tracking->joints_processed);
     free(tracking->joints_predicted);
-    free(tracking->label_cloud);
 
     free(tracking->depth);
     free(tracking->depth_rgb);
-    free(tracking->cloud);
 
     free(tracking->video);
     free(tracking->face_detect_buf);
@@ -2300,9 +2170,6 @@ alloc_tracking(struct gm_context *ctx)
         tracking->joints_predicted[i] = true;
     }
 
-    tracking->label_cloud = (GlimpsePointXYZRGBA *)
-        xcalloc(labels_width * labels_height, sizeof(GlimpsePointXYZRGBA));
-
     int depth_width = ctx->depth_camera_intrinsics.width;
     int depth_height = ctx->depth_camera_intrinsics.height;
 
@@ -2312,8 +2179,6 @@ alloc_tracking(struct gm_context *ctx)
     tracking->depth = (float *)
       xcalloc(depth_width * depth_height, sizeof(float));
     tracking->depth_rgb = (uint8_t *)xcalloc(depth_width * depth_height, 3);
-    tracking->cloud = (GlimpsePointXYZRGBA *)
-        xcalloc(depth_width * depth_height, sizeof(GlimpsePointXYZRGBA));
 
     int video_width = ctx->video_camera_intrinsics.width;
     int video_height = ctx->video_camera_intrinsics.height;
@@ -2577,7 +2442,7 @@ gm_context_new(struct gm_logger *logger,
                 json_array_get_object(json_array(ctx->joint_map), i);
             JSON_Array *connections =
                 json_object_get_array(joint, "connections");
-            for (int c = 0; c < json_array_get_count(connections); c++) {
+            for (int c = 0; c < (int)json_array_get_count(connections); c++) {
                 const char *name = json_array_get_string(connections, c);
                 for (int j = 0; j < ctx->n_joints; j++) {
                     JSON_Object *connection =
@@ -2603,10 +2468,10 @@ gm_context_new(struct gm_logger *logger,
         const void *buf = gm_asset_get_buffer(joint_stats_asset);
         JSON_Value *json = json_parse_string((char *)buf);
 
-        assert(json_array_get_count(json_array(json)) == ctx->n_joints);
+        assert((int)json_array_get_count(json_array(json)) == ctx->n_joints);
         for (int i = 0; i < ctx->n_joints; i++) {
             JSON_Array *stats = json_array_get_array(json_array(json), i);
-            assert(json_array_get_count(stats) == ctx->n_joints);
+            assert((int)json_array_get_count(stats) == ctx->n_joints);
 
             for (int j = 0; j < ctx->n_joints; j++) {
                 JSON_Object *stat = json_array_get_object(stats, j);
@@ -2644,41 +2509,6 @@ gm_context_new(struct gm_logger *logger,
                           ARRAY_LEN(heat_map_rainbow),
                           ctx->heat_color_stops_range, // range
                           1.f / ARRAY_LEN(heat_map_rainbow)); // step
-
-#ifdef USE_PCL_GBPD
-    struct gm_asset *svm_asset = gm_asset_open("person-hog-svm.json",
-                                               GM_ASSET_MODE_BUFFER,
-                                               &open_err);
-    if (svm_asset) {
-        // XXX: We're assuming svm.json is well-formed (we provide it, so it is)
-        const void *buf = gm_asset_get_buffer(svm_asset);
-        JSON_Value *svm_json = json_parse_string((char *)buf);
-        JSON_Object *svm_root = json_value_get_object(svm_json);
-
-        gm_asset_close(svm_asset);
-        buf = NULL;
-        svm_asset = NULL;
-
-        std::vector<float> weights;
-        JSON_Array *weights_array = json_object_get_array(svm_root, "weights");
-        for (size_t i = 0; i < json_array_get_count(weights_array); i++) {
-            weights.push_back((float)json_array_get_number(weights_array, i));
-        }
-
-        ctx->person_classifier.setSVM(
-            (int)json_object_get_number(svm_root, "window_height"),
-            (int)json_object_get_number(svm_root, "window_width"),
-            weights,
-            (float)json_object_get_number(svm_root, "offset"));
-
-        json_value_free(svm_json);
-    } else {
-        xasprintf(err, "Failed to open svm.json: %s", open_err);
-        free(open_err);
-        gm_context_destroy(ctx);
-        return NULL;
-    }
-#endif
 
     struct gm_ui_property prop;
 
@@ -2776,22 +2606,16 @@ gm_tracking_get_rgb_depth(struct gm_tracking *tracking)
     return tracking->depth_rgb;
 }
 
-const GlimpsePointXYZRGBA *
-gm_tracking_get_rgb_cloud(struct gm_tracking *tracking,
-                          int *n_points)
+const float *
+gm_tracking_get_depth(struct gm_tracking *tracking)
 {
-    if (n_points)
-      *n_points = tracking->cloud_size;
-    return tracking->cloud;
+    return tracking->depth;
 }
 
-const GlimpsePointXYZRGBA *
-gm_tracking_get_rgb_label_cloud(struct gm_tracking *tracking,
-                                int *n_points)
+const uint32_t *
+gm_tracking_get_video(struct gm_tracking *tracking)
 {
-    if (n_points)
-      *n_points = tracking->label_cloud_size;
-    return tracking->label_cloud;
+    return tracking->video;
 }
 
 const float *

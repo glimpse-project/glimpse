@@ -100,10 +100,6 @@ typedef struct _Data
     int win_width;
     int win_height;
 
-    int attr_pos;
-    int attr_tex_coord;
-    int attr_color;
-
     /* A convenience for accessing the depth_camera_intrinsics.width/height */
     int depth_width;
     int depth_height;
@@ -112,8 +108,7 @@ typedef struct _Data
     int video_width;
     int video_height;
 
-    /* A convenience for accessing number of points/joints in latest tracking */
-    int n_points;
+    /* A convenience for accessing number of joints in latest tracking */
     int n_joints;
     int n_bones;
 
@@ -158,9 +153,6 @@ typedef struct _Data
     pthread_mutex_t event_queue_lock;
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
-
-    /* UI data */
-    int selected_view;
 } Data;
 
 static uint32_t joint_palette[] = {
@@ -180,24 +172,35 @@ static uint32_t joint_palette[] = {
     0xFF3333FF, // foot_r.head
 };
 
-static GLuint gl_tex_program;
-static GLuint uniform_tex_sampler;
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_rgb_tex;
 static GLuint gl_vid_tex;
+
+static GLuint gl_db_program;
+static GLuint gl_db_attr_coords;
+static GLuint gl_db_attr_depth;
+static GLuint gl_db_uni_mvp;
+static GLuint gl_db_uni_pt_size;
+static GLuint gl_db_uni_depth_size;
+static GLuint gl_db_uni_depth_intrinsics;
+static GLuint gl_db_uni_video_intrinsics;
+static GLuint gl_db_uni_video_size;
+static GLuint gl_db_vid_tex;
+static GLuint gl_db_coords_bo;
+static GLuint gl_db_depth_bo;
 
 static GLuint gl_cloud_program;
 static GLuint gl_cloud_attr_pos;
 static GLuint gl_cloud_attr_col;
 static GLuint gl_cloud_uni_mvp;
 static GLuint gl_cloud_uni_size;
-static GLuint gl_cloud_bo;
 static GLuint gl_joints_bo;
 static GLuint gl_bones_bo;
 static GLuint gl_cloud_fbo;
 static GLuint gl_cloud_depth_bo;
 static GLuint gl_cloud_tex;
+
 static bool cloud_tex_valid = false;
 
 static bool pause_profile;
@@ -337,16 +340,6 @@ draw_ui(Data *data)
     props = gm_context_get_ui_properties(data->ctx);
     draw_properties(props);
 
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::TextDisabled("Viewer properties...");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    static const char* view_items[] = { "Video", "Labels" };
-    ImGui::Combo("Cloud view", &data->selected_view, view_items,
-                 ARRAY_LEN(view_items));
-
     ImGui::End();
 
     ImVec2 main_area_size = ImVec2(data->win_width - left_col, data->win_height - main_menu_size.y);
@@ -422,19 +415,7 @@ draw_ui(Data *data)
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
 
-    // Redraw point-clouds to texture
-    glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
-
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
-
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glViewport(0, 0, main_area_size.x/2, main_area_size.y/2);
-
-    // Enable point-cloud drawing shader
-    glUseProgram(gl_cloud_program);
-
-    // Set projection transform
+    // Calculate the projection matrix
     struct gm_intrinsics *intrinsics =
       gm_device_get_depth_intrinsics(data->device);
     glm::mat4 proj = intrinsics_to_project_matrix(intrinsics, 0.01f, 10);
@@ -444,32 +425,43 @@ draw_ui(Data *data)
     mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
     mvp = glm::translate(mvp, -data->focal_point);
 
-    glUniformMatrix4fv(gl_cloud_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+    // Redraw depth buffer as point-cloud to texture
+    glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
 
-    // Enable vertex arrays for drawing point-clouds
-    glEnableVertexAttribArray(gl_cloud_attr_pos);
-    glEnableVertexAttribArray(gl_cloud_attr_col);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LESS);
 
-    if (data->n_points) {
-        // Set point size
-        glUniform1f(gl_cloud_uni_size, 2.f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    glViewport(0, 0, main_area_size.x/2, main_area_size.y/2);
 
-        // Bind point cloud buffer-object
-        glBindBuffer(GL_ARRAY_BUFFER, gl_cloud_bo);
+    glUseProgram(gl_db_program);
+    glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+    glUniform1f(gl_db_uni_pt_size, 2.f);
 
-        glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
-                              GL_FALSE, // normalized
-                              sizeof(GlimpsePointXYZRGBA), // stride
-                              nullptr); // bo offset
-        glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                              GL_TRUE, sizeof(GlimpsePointXYZRGBA),
-                              (void *)offsetof(GlimpsePointXYZRGBA, rgba));
+    glEnableVertexAttribArray(gl_db_attr_coords);
+    glEnableVertexAttribArray(gl_db_attr_depth);
+    glBindBuffer(GL_ARRAY_BUFFER, gl_db_coords_bo);
+    glVertexAttribIPointer(gl_db_attr_coords, 2, GL_INT, 0, nullptr);
+    glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
+    glVertexAttribPointer(gl_db_attr_depth, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-        // Draw labelled point cloud
-        glDrawArrays(GL_POINTS, 0, data->n_points);
-    }
+    glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
+    glDrawArrays(GL_POINTS, 0, data->video_width * data->video_height);
 
+    glDisableVertexAttribArray(gl_db_attr_coords);
+    glDisableVertexAttribArray(gl_db_attr_depth);
+
+    // Redraw joints/bones to texture
     if (data->n_joints) {
+        glUseProgram(gl_cloud_program);
+
+        // Set projection transform
+        glUniformMatrix4fv(gl_cloud_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+
+        // Enable vertex arrays for drawing joints/bones
+        glEnableVertexAttribArray(gl_cloud_attr_pos);
+        glEnableVertexAttribArray(gl_cloud_attr_col);
+
         // Have bones appear over everything, but depth test them against each
         // other.
         glClear(GL_DEPTH_BUFFER_BIT);
@@ -504,20 +496,23 @@ draw_ui(Data *data)
 
         // Draw joint points
         glDrawArrays(GL_POINTS, 0, data->n_joints);
+
+        // Clean-up
+        glDisableVertexAttribArray(gl_cloud_attr_pos);
+        glDisableVertexAttribArray(gl_cloud_attr_col);
     }
 
     // Clean-up
-    glDisableVertexAttribArray(gl_cloud_attr_pos);
-    glDisableVertexAttribArray(gl_cloud_attr_col);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glDisable(GL_DEPTH_TEST);
 
-    ImGui::ImageButton((void *)(intptr_t)gl_cloud_tex, win_size,
-                       ImVec2(0, 0), ImVec2(1, 1), 0);
+    // Draw buffer
+    ImGui::Image((void *)(intptr_t)gl_cloud_tex, win_size,
+                 ImVec2(0, 0), ImVec2(1, 1));
 
-    if (ImGui::IsItemActive()) {
+    if (ImGui::IsWindowHovered()) {
         if (ImGui::IsMouseDragging()) {
             ImVec2 drag_delta = ImGui::GetMouseDragDelta();
             data->camera_rot_yx[0] += (drag_delta.x * M_PI / 180.f) * 0.2f;
@@ -680,6 +675,24 @@ upload_tracking_textures(Data *data)
                  data->depth_width, data->depth_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
 
+    /* Update depth buffer and colour buffer */
+    const float *depth = gm_tracking_get_depth(data->latest_tracking);
+    glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(float) * data->depth_width * data->depth_height,
+                 depth, GL_DYNAMIC_DRAW);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    const uint32_t *color = gm_tracking_get_video(data->latest_tracking);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                 data->video_width, data->video_height,
+                 0, GL_RGBA, GL_UNSIGNED_BYTE, color);
+
     /*
      * Update inferred label map
      */
@@ -706,11 +719,7 @@ upload_tracking_textures(Data *data)
     /*
      * Update labelled point cloud
      */
-    data->n_points = 0;
     data->n_joints = 0;
-    const GlimpsePointXYZRGBA *cloud = (data->selected_view == 0) ?
-        gm_tracking_get_rgb_cloud(data->latest_tracking, &data->n_points) :
-        gm_tracking_get_rgb_label_cloud(data->latest_tracking, &data->n_points);
     const float *joints =
         gm_tracking_get_joint_positions(data->latest_tracking, &data->n_joints);
 
@@ -722,13 +731,7 @@ upload_tracking_textures(Data *data)
                json_array_get_count(json_array(data->joint_map)));
     }
 
-    if (data->n_points) {
-        // Copy point cloud data to GPU
-        glBindBuffer(GL_ARRAY_BUFFER, gl_cloud_bo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     sizeof(GlimpsePointXYZRGBA) * data->n_points,
-                     cloud, GL_DYNAMIC_DRAW);
-
+    if (data->n_joints) {
         // Reformat and copy over joint data
         GlimpsePointXYZRGBA colored_joints[data->n_joints];
         for (int i = 0, off = 0; i < data->n_joints; i++) {
@@ -1028,35 +1031,6 @@ link_program(GLuint firstShader, ...)
 static void
 init_opengl(Data *data)
 {
-    static const char *vertShaderText =
-        "#version 300 es\n"
-        "precision mediump float;\n"
-        "precision mediump int;\n"
-        "in vec4 pos;\n"
-        "in vec4 color;\n"
-        "in vec4 tex_coord;\n"
-        "out vec4 v_tex_coord;\n"
-        "out vec4 v_color;\n"
-        "\n"
-        "void main () {\n"
-        "  gl_Position = pos;\n"
-        "  v_tex_coord = tex_coord;\n"
-        "  v_color = color;\n"
-        "}\n";
-
-    static const char *fragShaderText =
-        "#version 300 es\n"
-        "precision mediump float;\n"
-        "precision mediump int;\n"
-        "in vec4 v_tex_coord;\n"
-        "in vec4 v_color;\n"
-        "out vec4 frag_color;\n"
-        "uniform sampler2D texture;\n"
-        "\n"
-        "void main () {\n"
-        "  frag_color = texture2D(texture, v_tex_coord.st) * v_color;\n"
-        "}\n";
-
     static const char *vertShaderCloud =
         "#version 300 es\n"
         "precision mediump float;\n"
@@ -1081,28 +1055,136 @@ init_opengl(Data *data)
         "  color = v_color.abgr;\n"
         "}\n";
 
-    GLuint textFragShader, textVertShader, cloudFragShader, cloudVertShader;
+    static const char *vertShaderDepth =
+        "#version 300 es\n"
+        "precision mediump float;\n\n"
+        "precision mediump int;\n\n"
 
-    glClearColor(0.0, 0.0, 0.0, 1.0);
+        "uniform mat4 mvp;\n"
+        "uniform float pt_size;\n"
+        "uniform ivec2 depth_size;\n"
+        "uniform vec4 depth_intrinsics;\n"
+        "uniform vec4 video_intrinsics;\n"
+        "uniform vec2 video_size;\n\n"
+
+        "in ivec2 coords;\n"
+        "in float depth;\n"
+        "out vec2 v_tex_coord;\n\n"
+
+        "void main() {\n"
+        // Unproject the depth information into 3d space
+        "  float fx = depth_intrinsics.x;\n"
+        "  float fy = depth_intrinsics.y;\n"
+        "  float cx = depth_intrinsics.z;\n"
+        "  float cy = depth_intrinsics.w;\n\n"
+
+        // It'd be great to do something like this, but unfortunately it
+        // doesn't seem to work. gl_VertexID doesn't appear to be a straight
+        // incremental count from zero.
+        //"  int x = int(gl_VertexID) % depth_size.x;\n"
+        //"  int y = int(gl_VertexID) / depth_size.y;\n"
+
+        "  int x = coords.x;\n"
+        "  int y = coords.y;\n"
+        "  float dx = ((float(x) - cx) * depth) / fx;\n"
+        "  float dy = (-(float(y) - cy) * depth) / fy;\n\n"
+
+        // Reproject the depth coordinates into video space
+        // TODO: Support extrinsics
+        "  fx = video_intrinsics.x;\n"
+        "  fy = video_intrinsics.y;\n"
+        "  cx = video_intrinsics.z;\n"
+        "  cy = video_intrinsics.w;\n"
+        "  float tx = ((dx * fx / depth) + cx) / video_size.x;\n"
+        "  float ty = ((dy * fy / depth) + cy) / video_size.y;\n"
+
+        // Output values for the fragment shader
+        "  gl_PointSize = pt_size;\n"
+        "  gl_Position =  mvp * vec4(dx, dy, depth, 1.0);\n"
+        "  v_tex_coord = vec2(tx, 1.0 - ty);\n"
+        "}\n";
+
+    static const char *fragShaderDepth =
+        "#version 300 es\n"
+        "precision mediump float;\n"
+        "precision mediump int;\n\n"
+
+        "uniform sampler2D texture;\n\n"
+
+        "in vec2 v_tex_coord;\n"
+        "layout(location = 0) out vec4 color;\n\n"
+
+        "void main() {\n"
+        "  color = texture2D(texture, v_tex_coord.st).abgr;\n"
+        "}\n";
+
+    GLuint cloudFragShader, cloudVertShader, depthFragShader, depthVertShader;
+
+    glClearColor(0.0, 0.0, 0.0, 0.0);
     glClearStencil(0);
 
-    // Create texture shader
-    textFragShader = compile_shader(GL_FRAGMENT_SHADER, fragShaderText);
-    textVertShader = compile_shader(GL_VERTEX_SHADER, vertShaderText);
-    gl_tex_program = link_program(textFragShader, textVertShader, 0);
+    // Create depth-buffer point shader
+    depthFragShader = compile_shader(GL_FRAGMENT_SHADER, fragShaderDepth);
+    depthVertShader = compile_shader(GL_VERTEX_SHADER, vertShaderDepth);
+    gl_db_program = link_program(depthFragShader, depthVertShader, 0);
 
-    glUseProgram(gl_tex_program);
+    glUseProgram(gl_db_program);
 
-    uniform_tex_sampler = glGetUniformLocation(gl_tex_program, "texture");
+    gl_db_attr_coords = glGetAttribLocation(gl_db_program, "coords");
+    gl_db_attr_depth = glGetAttribLocation(gl_db_program, "depth");
+    gl_db_uni_mvp = glGetUniformLocation(gl_db_program, "mvp");
+    gl_db_uni_pt_size = glGetUniformLocation(gl_db_program, "pt_size");
+    gl_db_uni_depth_size = glGetUniformLocation(gl_db_program, "depth_size");
+    gl_db_uni_depth_intrinsics = glGetUniformLocation(gl_db_program,
+                                                      "depth_intrinsics");
+    gl_db_uni_video_intrinsics = glGetUniformLocation(gl_db_program,
+                                                      "video_intrinsics");
+    gl_db_uni_video_size = glGetUniformLocation(gl_db_program, "video_size");
+    glGenBuffers(1, &gl_db_coords_bo);
+    glGenBuffers(1, &gl_db_depth_bo);
+
+    GLuint uniform_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
     glUniform1i(uniform_tex_sampler, 0);
 
-    glBindAttribLocation(gl_tex_program, 0, "pos");
-    data->attr_pos = 0;
+    // Update camera intrinsics
+    struct gm_intrinsics *depth_intrinsics =
+      gm_device_get_depth_intrinsics(data->device);
+    struct gm_intrinsics *video_intrinsics =
+      gm_device_get_video_intrinsics(data->device);
 
-    //data->attr_pos = glGetAttribLocation (gl_tex_program, "pos");
-    data->attr_tex_coord = glGetAttribLocation(gl_tex_program, "tex_coord");
-    data->attr_color = glGetAttribLocation(gl_tex_program, "color");
+    glUniform2i(gl_db_uni_depth_size,
+                (GLint)depth_intrinsics->width,
+                (GLint)depth_intrinsics->height);
+    glUniform2f(gl_db_uni_video_size,
+                (GLfloat)video_intrinsics->width,
+                (GLfloat)video_intrinsics->height);
+    glUniform4f(gl_db_uni_depth_intrinsics,
+                (GLfloat)depth_intrinsics->fx,
+                (GLfloat)depth_intrinsics->fy,
+                (GLfloat)depth_intrinsics->cx,
+                (GLfloat)depth_intrinsics->cy);
+    glUniform4f(gl_db_uni_video_intrinsics,
+                (GLfloat)video_intrinsics->fx,
+                (GLfloat)video_intrinsics->fy,
+                (GLfloat)video_intrinsics->cx,
+                (GLfloat)video_intrinsics->cy);
 
+    // Update pixel coordinate buffer
+    int *coords = (int*)malloc(
+        depth_intrinsics->width * depth_intrinsics->height * 2 * sizeof(int));
+    for (int y = 0, off = 0; y < (int)depth_intrinsics->height; y++) {
+        for (int x = 0; x < (int)depth_intrinsics->width; x++) {
+            coords[off++] = x;
+            coords[off++] = y;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, gl_db_coords_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 2 * sizeof(int) * depth_intrinsics->width *
+                 depth_intrinsics->height, coords, GL_DYNAMIC_DRAW);
+    free(coords);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
 
     // Create point-cloud shader
@@ -1116,7 +1198,6 @@ init_opengl(Data *data)
     gl_cloud_attr_col = glGetAttribLocation(gl_cloud_program, "color_in");
     gl_cloud_uni_mvp = glGetUniformLocation(gl_cloud_program, "mvp");
     gl_cloud_uni_size = glGetUniformLocation(gl_cloud_program, "size");
-    glGenBuffers(1, &gl_cloud_bo);
     glGenBuffers(1, &gl_joints_bo);
     glGenBuffers(1, &gl_bones_bo);
 
@@ -1145,6 +1226,11 @@ init_opengl(Data *data)
 
     glGenTextures(1, &gl_labels_tex);
     glBindTexture(GL_TEXTURE_2D, gl_labels_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glGenTextures(1, &gl_db_vid_tex);
+    glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 

@@ -388,13 +388,11 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *tracking);
 
-const GlimpsePointXYZRGBA *
-gm_tracking_get_rgb_cloud(struct gm_tracking *tracking,
-                          int *n_points);
+const float *
+gm_tracking_get_depth(struct gm_tracking *tracking);
 
-const GlimpsePointXYZRGBA *
-gm_tracking_get_rgb_label_cloud(struct gm_tracking *tracking,
-                                int *n_points);
+const uint32_t *
+gm_tracking_get_video(struct gm_tracking *tracking);
 
 const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,
