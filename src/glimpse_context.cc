@@ -32,6 +32,7 @@
 #include <unistd.h>
 #include <inttypes.h>
 #include <string.h>
+#include <cmath>
 
 #include <pthread.h>
 
@@ -1307,47 +1308,91 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // Project depth buffer into cloud and filter out points that are too
     // near/far.
     start = get_time();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr dense_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    cloud->width = 0;
-    cloud->height = 1;
-    cloud->is_dense = true;
+    dense_cloud->width = ctx->depth_camera_intrinsics.width;
+    dense_cloud->height = ctx->depth_camera_intrinsics.height;
+    dense_cloud->points.resize(dense_cloud->width * dense_cloud->height);
+    dense_cloud->is_dense = false;
+
+    // Person detection will happen in a sparser cloud made from a downscaled
+    // version of the depth buffer. This is significantly cheaper than using a
+    // voxel grid, which would produce better results but take a lot longer
+    // doing so and give us less useful data structures.
+    int detect_res = 2.f;
+    float tolerance = 0.03f;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr sparse_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    sparse_cloud->width = dense_cloud->width / detect_res;
+    sparse_cloud->height = dense_cloud->height / detect_res;
+    sparse_cloud->points.resize(sparse_cloud->width * sparse_cloud->height);
+    sparse_cloud->is_dense = false;
+
+    // While generating the dense/sparse clouds, we'll also run a pass-through
+    // filter to generate a candidate floor points cloud
+    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    cloud_floor->width = sparse_cloud->width;
+    cloud_floor->height = sparse_cloud->height;
+    cloud_floor->points.resize(cloud_floor->width * cloud_floor->height);
+    cloud_floor->is_dense = false;
+
+    int n_points = 0;
 
     float inv_fx = 1.0f / ctx->depth_camera_intrinsics.fx;
     float inv_fy = -1.0f / ctx->depth_camera_intrinsics.fy;
     float cx = ctx->depth_camera_intrinsics.cx;
     float cy = ctx->depth_camera_intrinsics.cy;
 
-    cloud->points.resize(ctx->depth_camera_intrinsics.width *
-                         ctx->depth_camera_intrinsics.height);
-    int n_points = 0;
-
-    // Person detection will happen in a voxel grid of this resolution. A
-    // smaller voxel grid may improve results, at the cost of performance.
-    float detect_res = 0.06f;
-    float half_detect_res = detect_res / 2.f;
-
-    foreach_xy_off(ctx->depth_camera_intrinsics.width,
-                   ctx->depth_camera_intrinsics.height) {
+    foreach_xy_off(dense_cloud->width, dense_cloud->height) {
         float depth = tracking->depth[off];
         if (isnormal(depth) &&
             depth >= ctx->min_depth &&
             depth < ctx->max_depth) {
             float dx = (x - cx) * depth * inv_fx;
             float dy = -(y - cy) * depth * inv_fy;
-            cloud->points[n_points].x = dx;
-            cloud->points[n_points].y = dy;
-            cloud->points[n_points].z = depth;
+            dense_cloud->points[off].x = dx;
+            dense_cloud->points[off].y = dy;
+            dense_cloud->points[off].z = depth;
             ++n_points;
+        } else {
+            dense_cloud->points[off].x = NAN;
+            dense_cloud->points[off].y = NAN;
+            dense_cloud->points[off].z = NAN;
         }
     }
 
-    cloud->width = n_points;
+    int n_sparse_points = 0;
+    boost::shared_ptr<std::vector<int>> floor_points(new std::vector<int>());
+
+    foreach_xy_off(sparse_cloud->width, sparse_cloud->height) {
+        int dense_off = (int)
+            ((y * detect_res * dense_cloud->width) + (x * detect_res));
+        sparse_cloud->points[off] = dense_cloud->points[dense_off];
+
+        if (!isnan(sparse_cloud->points[off].z)) {
+            ++n_sparse_points;
+
+            // Only consider points below the camera to be the floor.
+            // TODO: Rotate point cloud based on device sensors so that the
+            //       floor is level. Currently if the camera is pointing
+            //       downwards, we may end up filtering out floor points here.
+            if (sparse_cloud->points[off].y >= 0.f) {
+                cloud_floor->points[off] = sparse_cloud->points[off];
+                floor_points->push_back(off);
+                continue;
+            }
+        }
+
+        cloud_floor->points[off].x = NAN;
+        cloud_floor->points[off].y = NAN;
+        cloud_floor->points[off].z = NAN;
+    }
 
     end = get_time();
     duration = end - start;
-    LOGI("Projection (%d points) took (%.3f%s)\n",
-         (int)cloud->points.size(),
+    LOGI("Projection (%d points, %d sparse, %d floor) took (%.3f%s)\n",
+         n_points, n_sparse_points, (int)floor_points->size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -1367,48 +1412,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale_suffix(duration));
 #endif
 
-    // Simplify point cloud by putting it through a voxel grid
-    start = get_time();
-    pcl::VoxelGrid<pcl::PointXYZ> vg;
-    vg.setInputCloud(cloud);
-    vg.setLeafSize(detect_res, detect_res, detect_res);
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr dense_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    vg.filter(*dense_cloud);
-    dense_cloud.swap(cloud);
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Cloud has %d points after voxel grid (%.3f%s)\n",
-         (int)cloud->points.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
     // Detect ground plane.
-    // Only consider points below the camera to be the floor.
-    // TODO: Rotate point cloud based on device sensors so that the floor is
-    //       level. Currently if the camera is pointing downwards, we may end
-    //       up filtering out floor points here.
-    start = get_time();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    pcl::PassThrough<pcl::PointXYZ> passY;
-    passY.setInputCloud(cloud);
-    passY.setUserFilterValue(HUGE_DEPTH);
-    passY.setKeepOrganized(true);
-    passY.setFilterFieldName ("y");
-    // XXX: Here we're assuming the camera may be on the ground, but ideally
-    //      we'd use a height sensor reading here (minus a threshold).
-    passY.setFilterLimits(0.0, FLT_MAX);
-    passY.filter(*cloud_floor);
-
-    assert(cloud_floor->points.size() == cloud->points.size());
-
-    int n_floor_points = cloud->points.size() -
-      passY.getRemovedIndices()->size();
-    LOGI("Cloud possible floor subset has %d points", n_floor_points);
-
     // Create the segmentation object
     start = get_time();
     pcl::SACSegmentation<pcl::PointXYZ> seg;
@@ -1418,9 +1422,10 @@ gm_context_track_skeleton(struct gm_context *ctx)
     seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
     seg.setInputCloud(cloud_floor);
+    seg.setIndices(floor_points);
 
     seg.setMaxIterations(250);
-    seg.setDistanceThreshold(std::max(0.03f, detect_res));
+    seg.setDistanceThreshold(tolerance);
 
     // XXX: We're assuming that the camera here is perpendicular to the floor
     //      and give a generous threshold, but ideally we'd use device sensors
@@ -1441,14 +1446,16 @@ gm_context_track_skeleton(struct gm_context *ctx)
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    if (n_inliers >= (int)(n_floor_points * 0.25f)) {
+    if (n_inliers >= (int)(floor_points->size() * 0.25f)) {
         // Remove ground plane
         start = get_time();
         pcl::ExtractIndices<pcl::PointXYZ> extract;
-        extract.setInputCloud(cloud);
+        extract.setInputCloud(sparse_cloud);
         extract.setIndices(inliers);
         extract.setNegative(true);
-        extract.filter(*cloud);
+        extract.setUserFilterValue(NAN);
+        extract.setKeepOrganized(true);
+        extract.filter(*sparse_cloud);
 
         end = get_time();
         duration = end - start;
@@ -1456,10 +1463,30 @@ gm_context_track_skeleton(struct gm_context *ctx)
              n_inliers,
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
+        n_sparse_points -= n_inliers;
     }
 
     // Use Euclidean clustering to split the cloud into possible human clusters.
     start = get_time();
+
+    // KdTree can't handle sparse clouds and ignores the indices param, so
+    // we need to build a dense cloud and a mapping to get back to it.
+    boost::shared_ptr<std::vector<int>> sparse_points(
+        new std::vector<int>(n_sparse_points));
+    pcl::PointCloud<pcl::PointXYZ>::Ptr search_cloud(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    search_cloud->points.resize(n_sparse_points);
+    int n_search_points = 0;
+    foreach_xy_off(sparse_cloud->width, sparse_cloud->height) {
+        if(!isnan(sparse_cloud->points[off].z)) {
+            (*sparse_points)[n_search_points] = off;
+            search_cloud->points[n_search_points++] = sparse_cloud->points[off];
+        }
+    }
+    assert(n_search_points == n_sparse_points);
+    search_cloud->width = n_search_points;
+    search_cloud->height = 1;
+    search_cloud->is_dense = true;
 
     // The search method used depends a fair bit on the density of the cloud
     // being searched and the number of searches being performed. A KdTree is
@@ -1474,31 +1501,29 @@ gm_context_track_skeleton(struct gm_context *ctx)
 #endif
 
     tree->setSortedResults(false);
-    tree->setInputCloud(cloud);
+    tree->setInputCloud(search_cloud);
 
-    // Note that these values don't really correspond to human size like you
-    // might think. This is what PCL does, and it's as good a measure as any,
-    // but take it with a huge pinch of salt.
-    float min_height = 1.3;
-    float max_height = 2.15;
-    float min_width = 0.3;
-    float max_width = 1.5;
-
-    int min_points = (int)(min_height * min_width / detect_res / detect_res);
-    int max_points = (int)(max_height * max_width / detect_res / detect_res);
+    // Because we aren't in a voxel grid, we just have to make rough estimates
+    // for limits here.
+    // Given we've filtered the floor out (TODO: and hopefully aren't around
+    // too many obscuring features or walls - we should filter out more), most
+    // of the points ought to be a person.
+    int min_points = (int)(search_cloud->width * 0.3f);
+    int max_points = (int)(search_cloud->width * 0.9f);
 
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(std::max(0.03f, detect_res * 2));
+    ec.setClusterTolerance(tolerance);
     ec.setMinClusterSize(min_points);
     ec.setMaxClusterSize(max_points);
     ec.setSearchMethod(tree);
-    ec.setInputCloud(cloud);
+    ec.setInputCloud(search_cloud);
     ec.extract(cluster_indices);
 
     end = get_time();
     duration = end - start;
-    LOGI("Euclidean clustering took (%.3f%s)\n",
+    LOGI("Euclidean clustering took, with %d clusters (%.3f%s)\n",
+         cluster_indices.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -1506,42 +1531,37 @@ gm_context_track_skeleton(struct gm_context *ctx)
     bool person_found = false;
     pcl::PointIndices person_indices;
 
-    // Create a search tree so we can reconstruct the dense person cloud
-    // We use an octree here as the time it takes to build a KdTree vastly
-    // outweighs the speed benefit searching it.
-    pcl::search::Octree<pcl::PointXYZ>::Ptr
-      dense_tree(new pcl::search::Octree<pcl::PointXYZ>(detect_res));
-    dense_tree->setSortedResults(false);
-    dense_tree->setInputCloud(dense_cloud);
-
     // Assume the largest cluster that contains its centroid may be a person
     std::sort(cluster_indices.begin(), cluster_indices.end(), sort_indices);
 
     for (std::vector<pcl::PointIndices>::const_iterator point_it =
-            cluster_indices.begin();
+         cluster_indices.begin();
          point_it != cluster_indices.end(); ++point_it) {
-        const pcl::PointIndices cluster = *point_it;
-
         // Work out the centroid of the cloud and see if there's a point
         // near there. A human, unless they're falling, ought to contain
         // their center of gravity. If they're jumping or falling, we can
         // probably interpolate joint positions (TODO: Interpolation...)
-        Eigen::VectorXf centroid;
-        pcl::computeNDCentroid(*cloud, *point_it, centroid);
+        /*Eigen::VectorXf centroid;
+        pcl::computeNDCentroid(*search_cloud, *point_it, centroid);
 
-        // Make sure the centroid is in the mass
-        std::vector<int>centroid_indices;
-        std::vector<float>centroid_distances;
-        pcl::PointXYZ centroid_pt;
-        centroid_pt.x = centroid[0];
-        centroid_pt.y = centroid[1];
-        centroid_pt.z = centroid[2];
-        dense_tree->radiusSearch(centroid_pt, detect_res * 2,
-                                centroid_indices, centroid_distances);
-
-        if (centroid_indices.size() <= 0) {
+        // Reproject this point into the depth buffer space to get an offset
+        // and check if the point exists in the dense cloud.
+        int x = (int)
+            (centroid[0] * ctx->depth_camera_intrinsics.fx / centroid[2]);
+        if (x < 0 || x >= (int)ctx->depth_camera_intrinsics.width) {
             continue;
         }
+
+        int y = (int)
+            (centroid[1] * ctx->depth_camera_intrinsics.fy / centroid[2]);
+        if (y < 0 || y >= (int)ctx->depth_camera_intrinsics.height) {
+            continue;
+        }
+
+        int off = y * ctx->depth_camera_intrinsics.width + x;
+        if (isnan(dense_cloud->points[off].z)) {
+            continue;
+        }*/
 
         person_indices = *point_it;
         person_found = true;
@@ -1560,46 +1580,34 @@ gm_context_track_skeleton(struct gm_context *ctx)
         return;
     }
 
+    // Reconstruct the person cloud by picking all the points around
     // Do a box search on each point from the sparse tree to rebuild the
     // dense cloud cluster.
     start = get_time();
 
-    std::list<int> indices;
-    for (std::vector<int>::const_iterator it = person_indices.indices.begin();
-         it != person_indices.indices.end (); ++it) {
-        std::vector<int> pt_indices;
-
-        Eigen::Vector3f pt_min, pt_max;
-        pcl::PointXYZ point = cloud->points[*it];
-        pt_min[0] = point.x - half_detect_res;
-        pt_min[1] = point.y - half_detect_res;
-        pt_min[2] = point.z - half_detect_res;
-        pt_max[0] = point.x + half_detect_res;
-        pt_max[1] = point.y + half_detect_res;
-        pt_max[2] = point.z + half_detect_res;
-
-        dense_tree->tree_->boxSearch(pt_min, pt_max, pt_indices);
-        std::copy(pt_indices.begin(), pt_indices.end(),
-                  std::back_inserter(indices));
-    }
-
-    // Duplicate indices seem to cause memory corruption, and I guess the box
-    // search above is inclusive on each boundary (or maybe we shouldn't be
-    // centering around the point?)
-    indices.sort();
-    indices.unique();
-
     pcl::PointCloud<pcl::PointXYZ>::Ptr person_cluster(
         new pcl::PointCloud<pcl::PointXYZ>);
-    for (std::list<int>::const_iterator it = indices.begin();
-         it != indices.end (); ++it) {
-        person_cluster->points.push_back(dense_cloud->points[*it]);
+    for (std::vector<int>::const_iterator it = person_indices.indices.begin();
+         it != person_indices.indices.end (); ++it) {
+        int off = (*sparse_points)[*it];
+        int sparse_x = (off) % sparse_cloud->width;
+        int sparse_y = (off) / sparse_cloud->width;
+
+        for (int y = (int)(sparse_y * detect_res), ey = 0;
+             y < (int)dense_cloud->height && ey < detect_res;
+             ++y, ++ey) {
+            for (int x = (int)(sparse_x * detect_res), ex = 0;
+                 x < (int)dense_cloud->width && ex < detect_res;
+                 ++x, ++ex) {
+                int off = y * dense_cloud->width + x;
+                person_cluster->points.push_back(dense_cloud->points[off]);
+            }
+        }
     }
-    person_cluster->width = indices.size();
+
+    person_cluster->width = person_cluster->points.size();
     person_cluster->height = 1;
     person_cluster->is_dense = true;
-
-    cloud.swap(person_cluster);
 
     end = get_time();
     duration = end - start;
@@ -1624,7 +1632,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
     int height = ctx->training_camera_intrinsics.height;
     half *depth_img = (half *)xmalloc(width * height * sizeof(half));
 
-    reproject_cloud(cloud, (void *)depth_img, &ctx->training_camera_intrinsics,
+    reproject_cloud(person_cluster, (void *)depth_img,
+                    &ctx->training_camera_intrinsics,
                     NULL, DEPTH_INTO_BUFFER);
 
     if (width == 0 || height == 0) {
@@ -2098,13 +2107,19 @@ detector_thread_cb(void *data)
         pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 #endif
 
+        start = get_time();
         LOGI("Starting tracking iteration (%ld)\n",
              ctx->tracking_back->depth_capture_timestamp);
 
         //gm_context_detect_faces(ctx);
 
         gm_context_track_skeleton(ctx);
-        LOGI("Finished skeletal tracking");
+
+        end = get_time();
+        duration = end - start;
+        LOGI("Finished skeletal tracking (%.3f%s)",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
 
         // Buffer the last tracking frame
         for (int i = 0; i < TRACK_FRAMES - 1; i++) {
