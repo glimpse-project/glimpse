@@ -178,7 +178,6 @@ static GLuint gl_rgb_tex;
 static GLuint gl_vid_tex;
 
 static GLuint gl_db_program;
-static GLuint gl_db_attr_coords;
 static GLuint gl_db_attr_depth;
 static GLuint gl_db_uni_mvp;
 static GLuint gl_db_uni_pt_size;
@@ -187,7 +186,6 @@ static GLuint gl_db_uni_depth_intrinsics;
 static GLuint gl_db_uni_video_intrinsics;
 static GLuint gl_db_uni_video_size;
 static GLuint gl_db_vid_tex;
-static GLuint gl_db_coords_bo;
 static GLuint gl_db_depth_bo;
 
 static GLuint gl_cloud_program;
@@ -438,17 +436,13 @@ draw_ui(Data *data)
     glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
     glUniform1f(gl_db_uni_pt_size, 2.f);
 
-    glEnableVertexAttribArray(gl_db_attr_coords);
     glEnableVertexAttribArray(gl_db_attr_depth);
-    glBindBuffer(GL_ARRAY_BUFFER, gl_db_coords_bo);
-    glVertexAttribIPointer(gl_db_attr_coords, 2, GL_INT, 0, nullptr);
     glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
     glVertexAttribPointer(gl_db_attr_depth, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
 
     glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
     glDrawArrays(GL_POINTS, 0, data->video_width * data->video_height);
 
-    glDisableVertexAttribArray(gl_db_attr_coords);
     glDisableVertexAttribArray(gl_db_attr_depth);
 
     // Redraw joints/bones to texture
@@ -1067,7 +1061,6 @@ init_opengl(Data *data)
         "uniform vec4 video_intrinsics;\n"
         "uniform vec2 video_size;\n\n"
 
-        "in ivec2 coords;\n"
         "in float depth;\n"
         "out vec2 v_tex_coord;\n\n"
 
@@ -1078,14 +1071,8 @@ init_opengl(Data *data)
         "  float cx = depth_intrinsics.z;\n"
         "  float cy = depth_intrinsics.w;\n\n"
 
-        // It'd be great to do something like this, but unfortunately it
-        // doesn't seem to work. gl_VertexID doesn't appear to be a straight
-        // incremental count from zero.
-        //"  int x = int(gl_VertexID) % depth_size.x;\n"
-        //"  int y = int(gl_VertexID) / depth_size.y;\n"
-
-        "  int x = coords.x;\n"
-        "  int y = coords.y;\n"
+        "  int x = int(gl_VertexID) % depth_size.x;\n"
+        "  int y = int(gl_VertexID) / depth_size.x;\n"
         "  float dx = ((float(x) - cx) * depth) / fx;\n"
         "  float dy = (-(float(y) - cy) * depth) / fy;\n\n"
 
@@ -1130,7 +1117,6 @@ init_opengl(Data *data)
 
     glUseProgram(gl_db_program);
 
-    gl_db_attr_coords = glGetAttribLocation(gl_db_program, "coords");
     gl_db_attr_depth = glGetAttribLocation(gl_db_program, "depth");
     gl_db_uni_mvp = glGetUniformLocation(gl_db_program, "mvp");
     gl_db_uni_pt_size = glGetUniformLocation(gl_db_program, "pt_size");
@@ -1140,7 +1126,6 @@ init_opengl(Data *data)
     gl_db_uni_video_intrinsics = glGetUniformLocation(gl_db_program,
                                                       "video_intrinsics");
     gl_db_uni_video_size = glGetUniformLocation(gl_db_program, "video_size");
-    glGenBuffers(1, &gl_db_coords_bo);
     glGenBuffers(1, &gl_db_depth_bo);
 
     GLuint uniform_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
@@ -1169,22 +1154,6 @@ init_opengl(Data *data)
                 (GLfloat)video_intrinsics->cx,
                 (GLfloat)video_intrinsics->cy);
 
-    // Update pixel coordinate buffer
-    int *coords = (int*)malloc(
-        depth_intrinsics->width * depth_intrinsics->height * 2 * sizeof(int));
-    for (int y = 0, off = 0; y < (int)depth_intrinsics->height; y++) {
-        for (int x = 0; x < (int)depth_intrinsics->width; x++) {
-            coords[off++] = x;
-            coords[off++] = y;
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, gl_db_coords_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 2 * sizeof(int) * depth_intrinsics->width *
-                 depth_intrinsics->height, coords, GL_DYNAMIC_DRAW);
-    free(coords);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
 
     // Create point-cloud shader
