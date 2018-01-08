@@ -84,7 +84,7 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
               // TODO: Provide a configurable threshold here?
               if (depth_value >= HUGE_DEPTH)
                 {
-                  out_pr_table[tree->header.bg_label] += 1.0f;
+                  out_pr_table[tree->header.bg_label] += 1.0f / (float)n_trees;
                   continue;
                 }
 
@@ -115,20 +115,8 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
                 &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
               for (int i = 0; i < n_labels; i++)
                 {
-                  out_pr_table[i] += pr_table[i];
+                  out_pr_table[i] += pr_table[i] / (float)n_trees;
                 }
-            }
-        }
-    }
-
-  // Correct the probabilities
-  for (uint32_t y = 0, idx = 0; y < height; y++)
-    {
-      for (uint32_t x = 0; x < width; x++)
-        {
-          for (uint8_t l = 0; l < n_labels; l++, idx++)
-            {
-              output_pr[idx] /= (float)n_trees;
             }
         }
     }
