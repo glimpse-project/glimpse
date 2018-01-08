@@ -33,6 +33,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include <cmath>
+#include <forward_list>
 
 #include <pthread.h>
 
@@ -1078,8 +1079,8 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 }
 
 static bool
-sort_indices(pcl::PointIndices a, pcl::PointIndices b) {
-    return (a.indices.size() > b.indices.size());
+sort_indices(std::vector<int> a, std::vector<int> b) {
+    return (a.size() > b.size());
 }
 
 static void
@@ -1294,7 +1295,151 @@ copy_tracking(struct gm_tracking *src, struct gm_tracking *dst)
            src->face_detect_buf_width * src->face_detect_buf_height);
 }
 
+// Clustering based on infer.cc:infer_joints_fast()
 static void
+cluster2d(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
+          float tolerance, int min_points, int max_points,
+          std::vector<std::vector<int>> &cluster_indices)
+{
+    typedef struct {
+      int32_t y;
+      int32_t left;
+      int32_t right;
+    } ScanlineSegment;
+
+    std::vector<std::forward_list<ScanlineSegment>> scanlines(cloud->height);
+
+    // Collect scanline segments
+    for (int32_t y = 0; y < (int)cloud->height; y++) {
+        for (int32_t x = 0; x < (int)cloud->width; x++) {
+            int off = y * cloud->width + x;
+            float depth = cloud->points[off].z;
+
+            if (isnan(depth)) {
+                continue;
+            }
+
+            // Check to see if this point can be added to an existing segment
+            if (!scanlines[y].empty()) {
+                ScanlineSegment &segment = scanlines[y].front();
+                if (segment.right == x - 1 &&
+                    fabsf(depth - cloud->points[off-1].z) <= tolerance) {
+                    segment.right = x;
+                    continue;
+                }
+            }
+
+            scanlines[y].push_front({y, x, x});
+        }
+    }
+
+    // Add each separate scanline segment to a list of clusters
+    typedef std::forward_list<ScanlineSegment> Cluster;
+    typedef std::move_iterator<Cluster::iterator> ClusterMoveIterator;
+
+    std::list<Cluster> clusters;
+    for (int y = 0; y < (int)cloud->height; y++) {
+        for (Cluster::iterator it = scanlines[y].begin();
+             it != scanlines[y].end(); ++it) {
+            clusters.push_front(Cluster());
+            clusters.front().emplace_front(std::move(*it));
+        }
+    }
+
+    // Now iteratively connect the scanline segments to form clusters
+    bool changed;
+    std::list<Cluster> complete_clusters;
+    do {
+        changed = false;
+        for (std::list<Cluster>::iterator it = clusters.begin();
+             it != clusters.end();) {
+            Cluster &parent = *it;
+            for (std::list<Cluster>::iterator it2 = clusters.begin();
+                 it2 != clusters.end();) {
+                Cluster &candidate = *it2;
+                if (it == it2) {
+                    ++it2;
+                    continue;
+                }
+
+                // If this scanline segment connects to the cluster being
+                // checked, remove it from the cluster list, add it to the
+                // checked cluster and break out.
+                bool local_change = false;
+                for (Cluster::iterator p_it = parent.begin();
+                     p_it != parent.end() && !local_change; ++p_it) {
+                    ScanlineSegment &p_segment = *p_it;
+
+                    for (Cluster::iterator c_it = candidate.begin();
+                         c_it != candidate.end() && !local_change; ++c_it) {
+                        ScanlineSegment &c_segment = *c_it;
+
+                        // Check if these two scanline segments touch
+                        if (abs(c_segment.y - p_segment.y) == 1 &&
+                            c_segment.left <= p_segment.right &&
+                            c_segment.right >= p_segment.left) {
+                            // Check if any connections are within tolerance
+                            for (int x = std::max(c_segment.left,
+                                                  p_segment.left);
+                                 x <= std::min(c_segment.right,
+                                               p_segment.right); ++x) {
+                                int off1 = p_segment.y * cloud->width+x;
+                                int off2 = c_segment.y * cloud->width+x;
+                                if (fabsf(cloud->points[off1].z -
+                                          cloud->points[off2].z) <= tolerance) {
+                                    // Move all the scanlines from the candidate
+                                    // into the parent.
+                                    parent.insert_after(
+                                        parent.before_begin(),
+                                        ClusterMoveIterator(candidate.begin()),
+                                        ClusterMoveIterator(candidate.end()));
+                                    it2 = clusters.erase(it2);
+                                    local_change = true;
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (!local_change) {
+                    ++it2;
+                }
+            }
+
+            if (!changed) {
+                // This cluster is complete, add it to the list
+                complete_clusters.emplace_front(std::move(*it));
+                it = clusters.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } while (changed);
+
+    // We now have a list of clusters, build an index list that we can use
+    // more easily with PCL
+    for (std::list<Cluster>::iterator it = complete_clusters.begin();
+         it != complete_clusters.end(); ++it) {
+        Cluster &cluster = *it;
+        std::vector<int> indices;
+        for (Cluster::iterator s_it = cluster.begin();
+             s_it != cluster.end(); ++s_it) {
+            ScanlineSegment &segment = *s_it;
+            for (int x = segment.left; x <= segment.right; x++) {
+                indices.push_back(segment.y * cloud->width + x);
+            }
+        }
+
+        int size = (int)indices.size();
+        if (size >= min_points && size <= max_points) {
+            cluster_indices.emplace_back(std::move(indices));
+        }
+    }
+}
+
+static bool
 gm_context_track_skeleton(struct gm_context *ctx)
 {
     struct gm_tracking *tracking = ctx->tracking_back;
@@ -1466,104 +1611,70 @@ gm_context_track_skeleton(struct gm_context *ctx)
         n_sparse_points -= n_inliers;
     }
 
-    // Use Euclidean clustering to split the cloud into possible human clusters.
+    // Use clustering to split the cloud into possible human clusters.
     start = get_time();
-
-    // KdTree can't handle sparse clouds and ignores the indices param, so
-    // we need to build a dense cloud and a mapping to get back to it.
-    boost::shared_ptr<std::vector<int>> sparse_points(
-        new std::vector<int>(n_sparse_points));
-    pcl::PointCloud<pcl::PointXYZ>::Ptr search_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    search_cloud->points.resize(n_sparse_points);
-    int n_search_points = 0;
-    foreach_xy_off(sparse_cloud->width, sparse_cloud->height) {
-        if(!isnan(sparse_cloud->points[off].z)) {
-            (*sparse_points)[n_search_points] = off;
-            search_cloud->points[n_search_points++] = sparse_cloud->points[off];
-        }
-    }
-    assert(n_search_points == n_sparse_points);
-    search_cloud->width = n_search_points;
-    search_cloud->height = 1;
-    search_cloud->is_dense = true;
-
-    // The search method used depends a fair bit on the density of the cloud
-    // being searched and the number of searches being performed. A KdTree is
-    // usually faster for this particular use-case than an Octree, but this can
-    // vary depending on situation and compile options.
-#if 1
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr
-      tree(new pcl::search::KdTree<pcl::PointXYZ>);
-#else
-    pcl::search::Octree<pcl::PointXYZ>::Ptr
-      tree(new pcl::search::Octree<pcl::PointXYZ>(0.1));
-#endif
-
-    tree->setSortedResults(false);
-    tree->setInputCloud(search_cloud);
 
     // Because we aren't in a voxel grid, we just have to make rough estimates
     // for limits here.
     // Given we've filtered the floor out (TODO: and hopefully aren't around
     // too many obscuring features or walls - we should filter out more), most
     // of the points ought to be a person.
-    int min_points = (int)(search_cloud->width * 0.3f);
-    int max_points = (int)(search_cloud->width * 0.9f);
+    int min_points = (int)(n_sparse_points * 0.3f);
+    int max_points = (int)(n_sparse_points * 0.9f);
 
-    std::vector<pcl::PointIndices> cluster_indices;
-    pcl::EuclideanClusterExtraction<pcl::PointXYZ> ec;
-    ec.setClusterTolerance(tolerance);
-    ec.setMinClusterSize(min_points);
-    ec.setMaxClusterSize(max_points);
-    ec.setSearchMethod(tree);
-    ec.setInputCloud(search_cloud);
-    ec.extract(cluster_indices);
+    std::vector<std::vector<int>> cluster_indices;
+    cluster2d(sparse_cloud, tolerance, min_points, max_points, cluster_indices);
 
     end = get_time();
     duration = end - start;
-    LOGI("Euclidean clustering took, with %d clusters (%.3f%s)\n",
-         cluster_indices.size(),
+    LOGI("Clustering took %.3f%s\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    start = get_time();
-    bool person_found = false;
-    pcl::PointIndices person_indices;
 
     // Assume the largest cluster that contains its centroid may be a person
+    start = get_time();
     std::sort(cluster_indices.begin(), cluster_indices.end(), sort_indices);
 
-    for (std::vector<pcl::PointIndices>::const_iterator point_it =
+    bool person_found = false;
+    const std::vector<int> *person_indices;
+    const float centroid_tolerance = 0.1f;
+    for (std::vector<std::vector<int>>::const_iterator point_it =
          cluster_indices.begin();
          point_it != cluster_indices.end(); ++point_it) {
         // Work out the centroid of the cloud and see if there's a point
         // near there. A human, unless they're falling, ought to contain
         // their center of gravity. If they're jumping or falling, we can
-        // probably interpolate joint positions (TODO: Interpolation...)
-        /*Eigen::VectorXf centroid;
-        pcl::computeNDCentroid(*search_cloud, *point_it, centroid);
+        // probably interpolate joint positions.
+        // Note that I guess humans are actually quite frequently in a state
+        // of semi-falling, so we have a pretty generous tolerance.
+        Eigen::VectorXf centroid;
+        pcl::computeNDCentroid(*sparse_cloud, *point_it, centroid);
 
         // Reproject this point into the depth buffer space to get an offset
         // and check if the point exists in the dense cloud.
         int x = (int)
-            (centroid[0] * ctx->depth_camera_intrinsics.fx / centroid[2]);
+            ((centroid[0] * ctx->depth_camera_intrinsics.fx / centroid[2]) +
+             ctx->depth_camera_intrinsics.cx);
         if (x < 0 || x >= (int)ctx->depth_camera_intrinsics.width) {
             continue;
         }
 
         int y = (int)
-            (centroid[1] * ctx->depth_camera_intrinsics.fy / centroid[2]);
+            ((centroid[0] * ctx->depth_camera_intrinsics.fy / centroid[2]) +
+             ctx->depth_camera_intrinsics.cy);
         if (y < 0 || y >= (int)ctx->depth_camera_intrinsics.height) {
             continue;
         }
 
         int off = y * ctx->depth_camera_intrinsics.width + x;
-        if (isnan(dense_cloud->points[off].z)) {
+        if (isnan(dense_cloud->points[off].z) ||
+            fabsf(centroid[2] - dense_cloud->points[off].z) >
+            centroid_tolerance) {
             continue;
-        }*/
+        }
 
-        person_indices = *point_it;
+        person_indices = &(*point_it);
         person_found = true;
         break;
     }
@@ -1577,7 +1688,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     if (!person_found) {
         // TODO: We should do an interpolation step here.
         LOGE("Skipping detection: Could not find a person cluster\n");
-        return;
+        return false;
     }
 
     // Reconstruct the person cloud by picking all the points around
@@ -1587,11 +1698,10 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr person_cluster(
         new pcl::PointCloud<pcl::PointXYZ>);
-    for (std::vector<int>::const_iterator it = person_indices.indices.begin();
-         it != person_indices.indices.end (); ++it) {
-        int off = (*sparse_points)[*it];
-        int sparse_x = (off) % sparse_cloud->width;
-        int sparse_y = (off) / sparse_cloud->width;
+    for (std::vector<int>::const_iterator it = person_indices->begin();
+         it != person_indices->end (); ++it) {
+        int sparse_x = (*it) % sparse_cloud->width;
+        int sparse_y = (*it) / sparse_cloud->width;
 
         for (int y = (int)(sparse_y * detect_res), ey = 0;
              y < (int)dense_cloud->height && ey < detect_res;
@@ -1620,7 +1730,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         ctx->depth_camera_intrinsics.height == 0)
     {
         LOGE("Skipping detection: depth camera intrinsics not initialized\n");
-        return;
+        return false;
     } else {
         LOGI("depth intrinsics: w=%d, h=%d\n",
              ctx->depth_camera_intrinsics.width,
@@ -1639,7 +1749,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     if (width == 0 || height == 0) {
         LOGE("Skipping detection: bad re-projected depth image size: %dx%d\n",
              width, height);
-        return;
+        return false;
     }
 
     end = get_time();
@@ -1653,7 +1763,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     if (!ctx->decision_trees) {
         LOGE("People detector: exiting: No decision trees loaded\n");
-        return;
+        return false;
     }
     LOGI("People Detector: starting label inference: n_trees=%d, w=%d, h=%d, data=%p",
          ctx->n_decision_trees, width, height, depth_img);
@@ -1795,6 +1905,8 @@ gm_context_track_skeleton(struct gm_context *ctx)
     LOGI("Created RGB label map in %.3f%s\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
+
+    return true;
 }
 
 static struct gm_event *
@@ -2026,7 +2138,6 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
     tracking->depth_capture_timestamp = timestamp;
 }
 
-
 static void *
 detector_thread_cb(void *data)
 {
@@ -2113,7 +2224,7 @@ detector_thread_cb(void *data)
 
         //gm_context_detect_faces(ctx);
 
-        gm_context_track_skeleton(ctx);
+        bool tracked = gm_context_track_skeleton(ctx);
 
         end = get_time();
         duration = end - start;
@@ -2121,18 +2232,21 @@ detector_thread_cb(void *data)
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
-        // Buffer the last tracking frame
-        for (int i = 0; i < TRACK_FRAMES - 1; i++) {
-            std::swap(ctx->tracking_buffer[i], ctx->tracking_buffer[i + 1]);
+        if (tracked) {
+            // Buffer the last tracking frame
+            for (int i = 0; i < TRACK_FRAMES - 1; i++) {
+                std::swap(ctx->tracking_buffer[i], ctx->tracking_buffer[i + 1]);
+            }
+            copy_tracking(ctx->tracking_back,
+                          ctx->tracking_buffer[TRACK_FRAMES - 1]);
+
+            pthread_mutex_lock(&ctx->tracking_swap_mutex);
+            std::swap(ctx->tracking_back, ctx->tracking_mid);
+            ctx->have_tracking = true;
+            pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+
+            notify_tracking(ctx);
         }
-        copy_tracking(ctx->tracking_back, ctx->tracking_buffer[TRACK_FRAMES - 1]);
-
-        pthread_mutex_lock(&ctx->tracking_swap_mutex);
-        std::swap(ctx->tracking_back, ctx->tracking_mid);
-        ctx->have_tracking = true;
-        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
-
-        notify_tracking(ctx);
 
         LOGI("Requesting new frame for skeletal tracking");
         /* We throttle frame aquisition according to our tracking rate... */
