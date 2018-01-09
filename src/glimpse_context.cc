@@ -1883,10 +1883,10 @@ gm_context_track_skeleton(struct gm_context *ctx)
                 }
             } while (changed);
         }
+
         free_joints(result);
 
         process_raw_joint_predictions(ctx);
-
         end = get_time();
         duration = end - start;
         LOGI("People Detector: inferred joints in %.3f%s\n",
@@ -2398,7 +2398,7 @@ gm_context_new(struct gm_logger *logger,
         char *name = NULL;
 
         xsnprintf(rdt_name, sizeof(rdt_name), "tree%u.rdt", i);
-        xsnprintf(json_name, sizeof(json_name), "tree%u.rdt", i);
+        xsnprintf(json_name, sizeof(json_name), "tree%u.json", i);
 
         char *catch_err = NULL;
         struct gm_asset *tree_asset = gm_asset_open(rdt_name,
