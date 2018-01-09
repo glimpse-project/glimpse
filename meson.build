@@ -93,6 +93,7 @@ client_api_src = [
     'src/glimpse_context.cc',
     'src/glimpse_device.cc',
     'src/glimpse_assets.c',
+    'src/glimpse_mem_pool.cc',
     'src/glimpse_log.c',
 
     'src/infer.cc',

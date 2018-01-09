@@ -287,6 +287,30 @@ gm_frame_unref(struct gm_frame *frame)
         frame->api->free(frame);
 }
 
+struct gm_tracking_vtable
+{
+    void (*free)(struct gm_tracking *self);
+};
+
+struct gm_tracking
+{
+    int ref;
+    struct gm_tracking_vtable *api;
+};
+
+inline struct gm_tracking *
+gm_tracking_ref(struct gm_tracking *tracking)
+{
+    tracking->ref++;
+    return tracking;
+}
+
+inline void
+gm_tracking_unref(struct gm_tracking *tracking)
+{
+    if (__builtin_expect(--(tracking->ref) < 1, 0))
+        tracking->api->free(tracking);
+}
 
 struct gm_intrinsics {
   uint32_t width;
@@ -365,8 +389,6 @@ gm_context_event_free(struct gm_event *event);
 void
 gm_context_render_thread_hook(struct gm_context *ctx);
 
-
-struct gm_tracking;
 
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);

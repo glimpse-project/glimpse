@@ -87,8 +87,9 @@
 #include "loader.h"
 
 #include "glimpse_log.h"
-#include "glimpse_context.h"
+#include "glimpse_mem_pool.h"
 #include "glimpse_assets.h"
+#include "glimpse_context.h"
 
 #undef GM_LOG_CONTEXT
 #define GM_LOG_CONTEXT "ctx"
@@ -177,8 +178,14 @@ struct joint_info
     struct joint_dist *dist;
 };
 
-struct gm_tracking
+struct gm_tracking_impl
 {
+    struct gm_tracking base;
+
+    struct gm_tracking_vtable vtable;
+
+    struct gm_mem_pool *pool;
+
     struct gm_context *ctx;
 
     uint64_t depth_capture_timestamp;
@@ -320,12 +327,16 @@ struct gm_context
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
 
+    /* We maintain tracking_history[] as an ordered array of tracking
+     * state from [0] = newest to oldest. Initially with no tracking
+     * history then n_tracking == 0 and all array entries are NULL.
+     * n_tracking only increases up to TRACK_FRAMES at which point
+     * tracking_history[] is a FIFO
+     */
+    struct gm_mem_pool *tracking_pool;
     pthread_mutex_t tracking_swap_mutex;
-    bool have_tracking;
-    struct gm_tracking *tracking_front;
-    struct gm_tracking *tracking_mid;
-    struct gm_tracking *tracking_back;
-    struct gm_tracking *tracking_buffer[TRACK_FRAMES];
+    struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
+    int n_tracking;
 
     int n_labels;
 
@@ -633,10 +644,8 @@ create_program(const char *vertex_source, const char *fragment_source, char **er
 }
 
 void
-gm_context_detect_faces(struct gm_context *ctx)
+gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
 {
-    struct gm_tracking *tracking = ctx->tracking_back;
-
     if (!tracking->face_detect_buf) {
         LOGI("NULL tracking->face_detect_buf");
         return;
@@ -1085,7 +1094,7 @@ sort_indices(std::vector<int> a, std::vector<int> b) {
 
 static void
 tracking_create_rgb_label_map(struct gm_context *ctx,
-                              struct gm_tracking *tracking,
+                              struct gm_tracking_impl *tracking,
                               int debug_label)
 {
     int width = ctx->training_camera_intrinsics.width;
@@ -1142,39 +1151,21 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
     // TODO: We assume that joint positions come at regular intervals,
     // which may not be true... Figure out something else for this.
 
-    // Find the four nearest points in time. We assume the tracking buffers
-    // are ordered.
-    int start, end;
-    start = end = 0;
-    for (end = 0; end < TRACK_FRAMES; end++) {
-        struct gm_tracking *tracking = ctx->tracking_buffer[end];
-        uint64_t current = tracking->depth_capture_timestamp;
-        if (current > timestamp) {
-            break;
-        }
-    }
-    end = std::min(TRACK_FRAMES-1, end + 1);
-    start = std::max(0, end - 3);
-    end = start + 3;
-    if (end >= TRACK_FRAMES) {
+    if (ctx->n_tracking < 4)
         return false;
-    }
 
     glm::vec3 p[4];
     for (int i = 0; i < 4; i++) {
-        struct gm_tracking *tracking = ctx->tracking_buffer[i + start];
-        if (tracking->depth_capture_timestamp <= 0) {
-            return false;
-        }
+        struct gm_tracking_impl *tracking = ctx->tracking_history[i];
+
         p[i].x = tracking->joints_processed[joint*3];
         p[i].y = tracking->joints_processed[joint*3+1];
         p[i].z = tracking->joints_processed[joint*3+2];
     }
 
-    float t = (timestamp -
-               ctx->tracking_buffer[start]->depth_capture_timestamp) /
-      (ctx->tracking_buffer[end]->depth_capture_timestamp -
-       ctx->tracking_buffer[start]->depth_capture_timestamp);
+    float t = (timestamp - ctx->tracking_history[0]->depth_capture_timestamp) /
+        (ctx->tracking_history[0]->depth_capture_timestamp -
+         ctx->tracking_history[3]->depth_capture_timestamp);
     glm::vec3 q = 0.5f *
         ((2.f * p[1]) +
          (-p[0] + p[2]) * t +
@@ -1189,12 +1180,12 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
 }
 
 static void
-process_raw_joint_predictions(struct gm_context *ctx)
+process_raw_joint_predictions(struct gm_context *ctx,
+                              struct gm_tracking_impl *tracking)
 {
-    struct gm_tracking *tracking = ctx->tracking_back;
-
     float distance_threshold = 0.05f;
     float scale_threshold = 4.0f;
+
     for (int j = 0; j < ctx->n_joints; j++) {
         int idx = j * 3;
         tracking->joints_processed[idx] = tracking->joints[idx];
@@ -1203,20 +1194,24 @@ process_raw_joint_predictions(struct gm_context *ctx)
         tracking->joints_predicted[j] = false;
 
         int n_predictions = 0;
-        for (int i = 0; i < TRACK_FRAMES; i++) {
-            if (ctx->tracking_buffer[i]->joints_predicted[j]) {
-                ++n_predictions;
-            }
+        for (int i = 0; i < ctx->n_tracking; i++) {
+            if (ctx->tracking_history[i]->joints_predicted[j])
+                n_predictions++;
         }
 
-        // Don't predict more than half a buffer's worth of frames
+        // Don't keep predicting for longer than half of our tracking
+        // history otherwise we'll certainly be compounding lots of
+        // error
         if (n_predictions >= TRACK_FRAMES / 2) {
             continue;
         }
 
-        struct gm_tracking *p_tracking[2] = {
-            ctx->tracking_buffer[TRACK_FRAMES-1],
-            ctx->tracking_buffer[TRACK_FRAMES-2]
+        if (ctx->n_tracking < 2)
+            continue;
+
+        struct gm_tracking_impl *p_tracking[2] = {
+            ctx->tracking_history[0],
+            ctx->tracking_history[1]
         };
 
         float dist1 = sqrtf(
@@ -1260,39 +1255,6 @@ process_raw_joint_predictions(struct gm_context *ctx)
             }
         }
     }
-}
-
-static void
-copy_tracking(struct gm_tracking *src, struct gm_tracking *dst)
-{
-    int labels_width = src->ctx->training_camera_intrinsics.width;
-    int labels_height = src->ctx->training_camera_intrinsics.height;
-    int depth_width = src->ctx->depth_camera_intrinsics.width;
-    int depth_height = src->ctx->depth_camera_intrinsics.height;
-    int video_width = src->ctx->video_camera_intrinsics.width;
-    int video_height = src->ctx->video_camera_intrinsics.height;
-
-    dst->ctx = src->ctx;
-    dst->depth_capture_timestamp = src->depth_capture_timestamp;
-    dst->video_capture_timestamp = src->video_capture_timestamp;
-    dst->face_detect_buf_width = src->face_detect_buf_width;
-    dst->face_detect_buf_height = src->face_detect_buf_height;
-
-    memcpy(dst->label_map_rgb, src->label_map_rgb,
-           labels_width * labels_height * 3);
-    memcpy(dst->label_probs, src->label_probs, labels_width *
-           labels_height * dst->ctx->n_labels * sizeof(float));
-    memcpy(dst->joints, src->joints, dst->ctx->n_joints * 3 * sizeof(float));
-    memcpy(dst->joints_processed, src->joints_processed,
-           dst->ctx->n_joints * 3 * sizeof(float));
-    memcpy(dst->joints_predicted, src->joints_predicted,
-           dst->ctx->n_joints * sizeof(bool));
-    memcpy(dst->depth, src->depth, depth_width * depth_height * sizeof(float));
-    memcpy(dst->depth_rgb, src->depth_rgb, depth_width * depth_height * 3);
-    memcpy(dst->video, src->video, video_width * video_height *
-           sizeof(uint32_t));
-    memcpy(dst->face_detect_buf, src->face_detect_buf,
-           src->face_detect_buf_width * src->face_detect_buf_height);
 }
 
 // Clustering based on infer.cc:infer_joints_fast()
@@ -1440,10 +1402,9 @@ cluster2d(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
 }
 
 static bool
-gm_context_track_skeleton(struct gm_context *ctx)
+gm_context_track_skeleton(struct gm_context *ctx,
+                          struct gm_tracking_impl *tracking)
 {
-    struct gm_tracking *tracking = ctx->tracking_back;
-
     uint64_t start, end, duration;
 
     // X increases to the right
@@ -1884,7 +1845,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
         }
         free_joints(result);
 
-        process_raw_joint_predictions(ctx);
+        process_raw_joint_predictions(ctx, tracking);
 
         end = get_time();
         duration = end - start;
@@ -1947,7 +1908,7 @@ notify_tracking(struct gm_context *ctx)
 
 void
 update_tracking_video(struct gm_context *ctx,
-                      struct gm_tracking *tracking,
+                      struct gm_tracking_impl *tracking,
                       enum gm_format format,
                       uint8_t *video,
                       uint64_t timestamp)
@@ -2081,7 +2042,7 @@ update_tracking_video(struct gm_context *ctx,
 
 static void
 update_tracking_depth_from_buffer(struct gm_context *ctx,
-                                  struct gm_tracking *tracking,
+                                  struct gm_tracking_impl *tracking,
                                   enum gm_format format,
                                   void *depth,
                                   uint64_t timestamp)
@@ -2136,6 +2097,15 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
 #undef COPY_AND_MAP_DEPTH_TO_RGB
 
     tracking->depth_capture_timestamp = timestamp;
+}
+
+static struct gm_tracking_impl *
+mem_pool_acquire_tracking(struct gm_mem_pool *pool)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)
+        mem_pool_acquire_resource(pool);
+    tracking->base.ref = 1;
+    return tracking;
 }
 
 static void *
@@ -2193,15 +2163,18 @@ detector_thread_cb(void *data)
         ctx->frame_ready = NULL;
         pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
+        struct gm_tracking_impl *tracking =
+            mem_pool_acquire_tracking(ctx->tracking_pool);
+
         struct gm_frame *frame = ctx->frame_front;
         update_tracking_depth_from_buffer(ctx,
-                                          ctx->tracking_back,
+                                          tracking,
                                           frame->depth_format,
                                           frame->depth->data,
                                           frame->timestamp);
 
         update_tracking_video(ctx,
-                              ctx->tracking_back,
+                              tracking,
                               frame->video_format,
                               (uint8_t *)frame->video->data,
                               frame->timestamp);
@@ -2220,11 +2193,11 @@ detector_thread_cb(void *data)
 
         start = get_time();
         LOGI("Starting tracking iteration (%ld)\n",
-             ctx->tracking_back->depth_capture_timestamp);
+             tracking->depth_capture_timestamp);
 
-        //gm_context_detect_faces(ctx);
+        //gm_context_detect_faces(ctx, tracking);
 
-        bool tracked = gm_context_track_skeleton(ctx);
+        bool tracked = gm_context_track_skeleton(ctx, tracking);
 
         end = get_time();
         duration = end - start;
@@ -2233,20 +2206,22 @@ detector_thread_cb(void *data)
              get_duration_ns_print_scale_suffix(duration));
 
         if (tracked) {
-            // Buffer the last tracking frame
-            for (int i = 0; i < TRACK_FRAMES - 1; i++) {
-                std::swap(ctx->tracking_buffer[i], ctx->tracking_buffer[i + 1]);
-            }
-            copy_tracking(ctx->tracking_back,
-                          ctx->tracking_buffer[TRACK_FRAMES - 1]);
-
             pthread_mutex_lock(&ctx->tracking_swap_mutex);
-            std::swap(ctx->tracking_back, ctx->tracking_mid);
-            ctx->have_tracking = true;
+
+            for (int i = TRACK_FRAMES - 1; i > 0; i--)
+                std::swap(ctx->tracking_history[i], ctx->tracking_history[i - 1]);
+            if (ctx->tracking_history[0])
+                gm_tracking_unref(&ctx->tracking_history[0]->base);
+            ctx->tracking_history[0] = tracking;
+
+            if (ctx->n_tracking < TRACK_FRAMES)
+                ctx->n_tracking++;
+
             pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
             notify_tracking(ctx);
-        }
+        } else
+            gm_tracking_unref(&tracking->base);
 
         LOGI("Requesting new frame for skeletal tracking");
         /* We throttle frame aquisition according to our tracking rate... */
@@ -2259,8 +2234,12 @@ detector_thread_cb(void *data)
 }
 
 static void
-free_tracking(struct gm_tracking *tracking)
+tracking_state_free(struct gm_mem_pool *pool,
+                    void *self,
+                    void *user_data)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+
     free(tracking->label_map_rgb);
     free(tracking->label_probs);
     free(tracking->joints);
@@ -2276,15 +2255,37 @@ free_tracking(struct gm_tracking *tracking)
     delete tracking;
 }
 
-static struct gm_tracking *
-alloc_tracking(struct gm_context *ctx)
+static void
+tracking_state_recycle(struct gm_tracking *self)
 {
-    struct gm_tracking *tracking = new gm_tracking();
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+    struct gm_mem_pool *pool = tracking->pool;
 
+    gm_assert(tracking->ctx->log, tracking->base.ref == 0,
+              "Unbalanced tracking unref");
+
+    mem_pool_recycle_resource(pool, tracking);
+}
+
+static void *
+tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
+{
+    struct gm_context *ctx = (struct gm_context *)user_data;
+    struct gm_tracking_impl *tracking = new gm_tracking_impl();
+
+    tracking->base.ref = 1;
+    tracking->base.api = &tracking->vtable;
+
+    tracking->vtable.free = tracking_state_recycle;
+
+    tracking->pool = pool;
     tracking->ctx = ctx;
 
     int labels_width = ctx->training_camera_intrinsics.width;
     int labels_height = ctx->training_camera_intrinsics.height;
+
+    assert(labels_width);
+    assert(labels_height);
 
     tracking->label_map_rgb = (uint8_t *)xcalloc(labels_width * labels_height, 3);
     tracking->label_probs = (float *)xcalloc(labels_width *
@@ -2337,12 +2338,9 @@ alloc_tracking(struct gm_context *ctx)
 void
 gm_context_destroy(struct gm_context *ctx)
 {
-    free_tracking(ctx->tracking_front);
-    free_tracking(ctx->tracking_mid);
-    free_tracking(ctx->tracking_back);
-    for (int i = 0; i < TRACK_FRAMES; i++) {
-        free_tracking(ctx->tracking_buffer[i]);
-    }
+    for (int i = 0; i < ctx->n_tracking; i++)
+        gm_tracking_unref(&ctx->tracking_history[i]->base);
+    mem_pool_free(ctx->tracking_pool);
 
     free(ctx->depth_color_stops);
 
@@ -2366,8 +2364,7 @@ gm_context_destroy(struct gm_context *ctx)
 }
 
 struct gm_context *
-gm_context_new(struct gm_logger *logger,
-               char **err)
+gm_context_new(struct gm_logger *logger, char **err)
 {
     /* NB: we can't just calloc this struct since it contains C++ class members
      * that need to be constructed appropriately
@@ -2379,6 +2376,12 @@ gm_context_new(struct gm_logger *logger,
     pthread_cond_init(&ctx->skel_track_cond, NULL);
     pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
 
+    ctx->tracking_pool = mem_pool_alloc(logger,
+                                        "tracking",
+                                        INT_MAX, // max size
+                                        tracking_state_alloc,
+                                        tracking_state_free,
+                                        ctx); // user data
 
 #ifdef ANDROID
 #error "TODO: call gm_assets_android_set_manager()"
@@ -2728,38 +2731,46 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
 }
 
 const uint8_t *
-gm_tracking_get_rgb_depth(struct gm_tracking *tracking)
+gm_tracking_get_rgb_depth(struct gm_tracking *_tracking)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     //struct gm_context *ctx = tracking->ctx;
 
     return tracking->depth_rgb;
 }
 
 const float *
-gm_tracking_get_depth(struct gm_tracking *tracking)
+gm_tracking_get_depth(struct gm_tracking *_tracking)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
     return tracking->depth;
 }
 
 const uint32_t *
-gm_tracking_get_video(struct gm_tracking *tracking)
+gm_tracking_get_video(struct gm_tracking *_tracking)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
     return tracking->video;
 }
 
 const float *
-gm_tracking_get_joint_positions(struct gm_tracking *tracking,
+gm_tracking_get_joint_positions(struct gm_tracking *_tracking,
                                 int *n_joints)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
     if (n_joints) *n_joints = tracking->ctx->n_joints;
     return tracking->joints_processed;
 }
 
 const uint8_t *
-gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
+gm_tracking_get_rgb_label_map(struct gm_tracking *_tracking,
                               int *width,
                               int *height)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     struct gm_context *ctx = tracking->ctx;
 
     *width = ctx->training_camera_intrinsics.width;
@@ -2769,10 +2780,11 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
 }
 
 const float *
-gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
+gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
                                     int *width,
                                     int *height)
 {
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     struct gm_context *ctx = tracking->ctx;
 
     *width = ctx->training_camera_intrinsics.width;
@@ -2804,11 +2816,14 @@ gm_context_notify_frame(struct gm_context *ctx,
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx)
 {
+    struct gm_tracking *tracking = NULL;
+
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
-    std::swap(ctx->tracking_mid, ctx->tracking_front);
+    if (ctx->tracking_history[0])
+        tracking = gm_tracking_ref(&ctx->tracking_history[0]->base);
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
-    return ctx->tracking_front;
+    return tracking;
 }
 
 void
@@ -2843,7 +2858,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
      * of glGenerateMipmap is optimal and downsampling by another 50%.
      */
 #ifdef DOWNSAMPLE_ON_GPU
-    struct gm_tracking *tracking = ctx->tracking_front;
+    struct gm_tracking_impl *tracking = ctx->tracking_front;
 
     struct {
         float x, y, s, t;
@@ -3289,16 +3304,6 @@ gm_context_set_event_callback(struct gm_context *ctx,
 void
 gm_context_enable(struct gm_context *ctx)
 {
-    /* Note: we can't allocate these up front in gm_cotext_new because we need
-     * to wait until we've been told depth + video camera intrinsics
-     */
-    ctx->tracking_front = alloc_tracking(ctx);
-    ctx->tracking_mid = alloc_tracking(ctx);
-    ctx->tracking_back = alloc_tracking(ctx);
-    for (int i = 0; i < TRACK_FRAMES; i++) {
-        ctx->tracking_buffer[i] = alloc_tracking(ctx);
-    }
-
     request_frame(ctx);
 }
 

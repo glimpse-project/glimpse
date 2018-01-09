@@ -780,6 +780,10 @@ handle_context_tracking_updates(Data *data)
         return;
 
     data->tracking_ready = false;
+
+    if (data->latest_tracking)
+        gm_tracking_unref(data->latest_tracking);
+
     data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
     assert(data->latest_tracking);
 

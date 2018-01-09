@@ -30,6 +30,9 @@
 
 #pragma once
 
+#include <stdlib.h>
+#include <stdarg.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
