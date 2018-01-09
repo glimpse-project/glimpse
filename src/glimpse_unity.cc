@@ -86,10 +86,6 @@ struct glimpse_data
 
     /* Once we've been notified that there's a device frame ready for us then
      * we store the latest frame from gm_device_get_latest_frame() here...
-     *
-     * NB: this frame is only valid to access up until the next call to
-     * gm_device_get_latest_frame() because the gm_device api is free to
-     * recycle the back buffers that are part of a frame.
      */
     struct gm_frame *device_frame;
 
