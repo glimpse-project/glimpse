@@ -7,4 +7,4 @@ source_hash = 98507b55fbe5cd43c51981f2924e4671fd81fe35d52dc53357e20f2c77fa5dfd
 
 patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
 patch_filename = libpng-wrap-1.6.17.tar
-patch_hash = 653102b43a69d120806d39137b075e4891bd8f5106ee125ea11dbf7cb5e903ba
+patch_hash = bfeabb03284dd9f7813522d62913ba76724804a950a6ef3b1e9a83f8d69a67cc
