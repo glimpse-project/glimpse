@@ -336,6 +336,8 @@ struct gm_context
 
     float min_depth;
     float max_depth;
+    int seg_res;
+    int n_sac_iter;
 
     int n_depth_color_stops;
     float depth_color_stops_range;
@@ -1464,12 +1466,11 @@ gm_context_track_skeleton(struct gm_context *ctx)
     // version of the depth buffer. This is significantly cheaper than using a
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
-    int detect_res = 2.f;
     float tolerance = 0.03f;
     pcl::PointCloud<pcl::PointXYZ>::Ptr sparse_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    sparse_cloud->width = dense_cloud->width / detect_res;
-    sparse_cloud->height = dense_cloud->height / detect_res;
+    sparse_cloud->width = dense_cloud->width / ctx->seg_res;
+    sparse_cloud->height = dense_cloud->height / ctx->seg_res;
     sparse_cloud->points.resize(sparse_cloud->width * sparse_cloud->height);
     sparse_cloud->is_dense = false;
 
@@ -1512,7 +1513,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
 
     foreach_xy_off(sparse_cloud->width, sparse_cloud->height) {
         int dense_off = (int)
-            ((y * detect_res * dense_cloud->width) + (x * detect_res));
+            ((y * ctx->seg_res * dense_cloud->width) + (x * ctx->seg_res));
         sparse_cloud->points[off] = dense_cloud->points[dense_off];
 
         if (!isnan(sparse_cloud->points[off].z)) {
@@ -1569,7 +1570,7 @@ gm_context_track_skeleton(struct gm_context *ctx)
     seg.setInputCloud(cloud_floor);
     seg.setIndices(floor_points);
 
-    seg.setMaxIterations(250);
+    seg.setMaxIterations(ctx->n_sac_iter);
     seg.setDistanceThreshold(tolerance);
 
     // XXX: We're assuming that the camera here is perpendicular to the floor
@@ -1703,11 +1704,11 @@ gm_context_track_skeleton(struct gm_context *ctx)
         int sparse_x = (*it) % sparse_cloud->width;
         int sparse_y = (*it) / sparse_cloud->width;
 
-        for (int y = (int)(sparse_y * detect_res), ey = 0;
-             y < (int)dense_cloud->height && ey < detect_res;
+        for (int y = (int)(sparse_y * ctx->seg_res), ey = 0;
+             y < (int)dense_cloud->height && ey < ctx->seg_res;
              ++y, ++ey) {
-            for (int x = (int)(sparse_x * detect_res), ex = 0;
-                 x < (int)dense_cloud->width && ex < detect_res;
+            for (int x = (int)(sparse_x * ctx->seg_res), ex = 0;
+                 x < (int)dense_cloud->width && ex < ctx->seg_res;
                  ++x, ++ex) {
                 int off = y * dense_cloud->width + x;
                 person_cluster->points.push_back(dense_cloud->points[off]);
@@ -2661,6 +2662,28 @@ gm_context_new(struct gm_logger *logger,
     prop.float_state.ptr = &ctx->max_depth;
     prop.float_state.min = 0.5;
     prop.float_state.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_res = 3;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_res";
+    prop.desc = "Resolution divider for running human segmentation";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seg_res;
+    prop.int_state.min = 1;
+    prop.int_state.max = 4;
+    ctx->properties.push_back(prop);
+
+    ctx->n_sac_iter = 100;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "n_sac_iter";
+    prop.desc = "Max number of iterations for RANSAC plane detection";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_sac_iter;
+    prop.int_state.min = 10;
+    prop.int_state.max = 1000;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
