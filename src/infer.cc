@@ -64,32 +64,33 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
 {
   uint8_t n_labels = forest[0]->header.n_labels;
 
-  size_t output_size = width * height * forest[0]->header.n_labels * sizeof(float);
+  size_t output_size = width * height *
+                       forest[0]->header.n_labels * sizeof(float);
   float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
   memset(output_pr, 0, output_size);
 
-  for (uint8_t i = 0; i < n_trees; i++)
+  // Accumulate probability map
+  for (uint32_t y = 0; y < height; y++)
     {
-      RDTree* tree = forest[i];
-
-      // Accumulate probability map
-      for (uint32_t y = 0; y < height; y++)
+      for (uint32_t x = 0; x < width; x++)
         {
-          for (uint32_t x = 0; x < width; x++)
+          float* out_pr_table = &output_pr[(y * width * n_labels) +
+                                           (x * n_labels)];
+          float depth_value = depth_image[y * width + x];
+
+          // TODO: Provide a configurable threshold here?
+          if (depth_value >= HUGE_DEPTH)
             {
-              float* out_pr_table = &output_pr[(y * width * n_labels) +
-                                               (x * n_labels)];
-              float depth_value = depth_image[y * width + x];
+              out_pr_table[forest[0]->header.bg_label] += 1.0f;
+              continue;
+            }
 
-              // TODO: Provide a configurable threshold here?
-              if (depth_value >= HUGE_DEPTH)
-                {
-                  out_pr_table[tree->header.bg_label] += 1.0f / (float)n_trees;
-                  continue;
-                }
-
-              Int2D pixel = { (int32_t)x, (int32_t)y };
+          Int2D pixel = { (int32_t)x, (int32_t)y };
+          for (uint8_t i = 0; i < n_trees; ++i)
+            {
+              RDTree* tree = forest[i];
               Node* node = tree->nodes;
+
               uint32_t id = 0;
               while (node->label_pr_idx == 0)
                 {
@@ -113,10 +114,15 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
                */
               float* pr_table =
                 &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
-              for (int i = 0; i < n_labels; i++)
+              for (int n = 0; n < n_labels; ++n)
                 {
-                  out_pr_table[i] += pr_table[i] / (float)n_trees;
+                  out_pr_table[n] += pr_table[n];
                 }
+            }
+
+          for (int n = 0; n < n_labels; ++n)
+            {
+              out_pr_table[n] /= (float)n_trees;
             }
         }
     }
