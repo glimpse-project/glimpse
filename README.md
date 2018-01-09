@@ -138,7 +138,7 @@ Then to compile Glimpse:
 ```
 mkdir build-android-debug
 cd build-android-debug
-meson.py --cross-file ../android-arm64-cross-file.txt ..
+meson.py --cross-file ../android-arm64-cross-file.txt --buildtype=debug -Ddlib:support_gui=no ..
 ninja
 ```
 
@@ -146,6 +146,6 @@ or release:
 ```
 mkdir build-android-release
 cd build-android-release
-meson.py --cross-file ../android-arm64-cross-file.txt --buildtype=release ..
+meson.py --cross-file ../android-arm64-cross-file.txt --buildtype=release -Ddlib:support_gui=no ..
 ninja
 ```

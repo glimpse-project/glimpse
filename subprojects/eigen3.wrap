@@ -1,10 +1,10 @@
 [wrap-file]
-directory = eigen-eigen-5a0156e40feb
+directory = eigen-git-mirror-3.3.4
 
-source_url = http://bitbucket.org/eigen/eigen/get/3.3.4.tar.bz2
-source_filename = eigen-eigen-5a0156e40feb.tar.bz2
-source_hash = dd254beb0bafc695d0f62ae1a222ff85b52dbaa3a16f76e781dce22d0d20a4a6
+source_url = https://github.com/eigenteam/eigen-git-mirror/archive/3.3.4.zip
+source_filename = eigen-git-mirror-3.3.4.zip
+source_hash = f5580adc34ea45a4c30200e4100f8a55c55af22b77d4ed05985118fd0b15b77e
 
 patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
 patch_filename = eigen-wrap-3.3.4.tar
-patch_hash = 1ca6061ed285afab557e977d2269e8df5cba8d35225632702dda455ee9f60c3f
+patch_hash = 34470889daf9223af30fd72f80f7660c6aab3aeeb32053a5ebddfadd7f7b864d
