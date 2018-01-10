@@ -347,6 +347,7 @@ struct gm_context
 
     float min_depth;
     float max_depth;
+    int n_planes_to_remove;
     int seg_res;
     int n_sac_iter;
 
@@ -1416,33 +1417,30 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Project depth buffer into cloud and filter out points that are too
     // near/far.
     start = get_time();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr dense_cloud(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr hires_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    dense_cloud->width = ctx->depth_camera_intrinsics.width;
-    dense_cloud->height = ctx->depth_camera_intrinsics.height;
-    dense_cloud->points.resize(dense_cloud->width * dense_cloud->height);
-    dense_cloud->is_dense = false;
+    hires_cloud->width = ctx->depth_camera_intrinsics.width;
+    hires_cloud->height = ctx->depth_camera_intrinsics.height;
+    hires_cloud->points.resize(hires_cloud->width * hires_cloud->height);
+    hires_cloud->is_dense = false;
 
     // Person detection will happen in a sparser cloud made from a downscaled
     // version of the depth buffer. This is significantly cheaper than using a
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
     float tolerance = 0.03f;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr sparse_cloud(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    sparse_cloud->width = dense_cloud->width / ctx->seg_res;
-    sparse_cloud->height = dense_cloud->height / ctx->seg_res;
-    sparse_cloud->points.resize(sparse_cloud->width * sparse_cloud->height);
-    sparse_cloud->is_dense = false;
+    lores_cloud->height = 1;
+    lores_cloud->is_dense = true;
 
-    // While generating the dense/sparse clouds, we'll also run a pass-through
-    // filter to generate a candidate floor points cloud
-    pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_floor(
+    pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud_sparse(
         new pcl::PointCloud<pcl::PointXYZ>);
-    cloud_floor->width = sparse_cloud->width;
-    cloud_floor->height = sparse_cloud->height;
-    cloud_floor->points.resize(cloud_floor->width * cloud_floor->height);
-    cloud_floor->is_dense = false;
+    lores_cloud_sparse->width = hires_cloud->width / ctx->seg_res;
+    lores_cloud_sparse->height = hires_cloud->height / ctx->seg_res;
+    lores_cloud_sparse->points.resize(lores_cloud_sparse->width *
+                                      lores_cloud_sparse->height);
+    lores_cloud_sparse->is_dense = false;
 
     int n_points = 0;
 
@@ -1451,55 +1449,46 @@ gm_context_track_skeleton(struct gm_context *ctx,
     float cx = ctx->depth_camera_intrinsics.cx;
     float cy = ctx->depth_camera_intrinsics.cy;
 
-    foreach_xy_off(dense_cloud->width, dense_cloud->height) {
+    foreach_xy_off(hires_cloud->width, hires_cloud->height) {
         float depth = tracking->depth[off];
         if (std::isnormal(depth) &&
             depth >= ctx->min_depth &&
             depth < ctx->max_depth) {
             float dx = (x - cx) * depth * inv_fx;
             float dy = -(y - cy) * depth * inv_fy;
-            dense_cloud->points[off].x = dx;
-            dense_cloud->points[off].y = dy;
-            dense_cloud->points[off].z = depth;
+            hires_cloud->points[off].x = dx;
+            hires_cloud->points[off].y = dy;
+            hires_cloud->points[off].z = depth;
             ++n_points;
         } else {
-            dense_cloud->points[off].x = NAN;
-            dense_cloud->points[off].y = NAN;
-            dense_cloud->points[off].z = NAN;
+            hires_cloud->points[off].x = NAN;
+            hires_cloud->points[off].y = NAN;
+            hires_cloud->points[off].z = NAN;
         }
     }
 
-    int n_sparse_points = 0;
-    boost::shared_ptr<std::vector<int>> floor_points(new std::vector<int>());
+    int n_lores_points = 0;
+    std::vector<int> lores_points;
 
-    foreach_xy_off(sparse_cloud->width, sparse_cloud->height) {
-        int dense_off = (int)
-            ((y * ctx->seg_res * dense_cloud->width) + (x * ctx->seg_res));
-        sparse_cloud->points[off] = dense_cloud->points[dense_off];
+    foreach_xy_off(lores_cloud_sparse->width, lores_cloud_sparse->height) {
+        int hires_off = (int)
+            ((y * ctx->seg_res * hires_cloud->width) + (x * ctx->seg_res));
+        lores_cloud_sparse->points[off] = hires_cloud->points[hires_off];
 
-        if (!std::isnan(sparse_cloud->points[off].z)) {
-            ++n_sparse_points;
-
-            // Only consider points below the camera to be the floor.
-            // TODO: Rotate point cloud based on device sensors so that the
-            //       floor is level. Currently if the camera is pointing
-            //       downwards, we may end up filtering out floor points here.
-            if (sparse_cloud->points[off].y >= 0.f) {
-                cloud_floor->points[off] = sparse_cloud->points[off];
-                floor_points->push_back(off);
-                continue;
-            }
+        if (std::isnan(hires_cloud->points[hires_off].z)) {
+            continue;
         }
 
-        cloud_floor->points[off].x = NAN;
-        cloud_floor->points[off].y = NAN;
-        cloud_floor->points[off].z = NAN;
+        ++n_lores_points;
+        lores_cloud->points.push_back(hires_cloud->points[hires_off]);
+        lores_points.push_back(off);
     }
+    lores_cloud->width = n_lores_points;
 
     end = get_time();
     duration = end - start;
-    LOGI("Projection (%d points, %d sparse, %d floor) took (%.3f%s)\n",
-         n_points, n_sparse_points, (int)floor_points->size(),
+    LOGI("Projection (%d points, %d low-res) took (%.3f%s)\n",
+         n_points, n_lores_points,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -1519,59 +1508,56 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 #endif
 
-    // Detect ground plane.
-    // Create the segmentation object
+    // Remove dense planes above a certain size
     start = get_time();
+    float min_fraction = 0.3f;
+
     pcl::SACSegmentation<pcl::PointXYZ> seg;
-    // Optional
-    seg.setOptimizeCoefficients(true);
-    // Mandatory
-    seg.setModelType(pcl::SACMODEL_PERPENDICULAR_PLANE);
+    seg.setOptimizeCoefficients(false);
+    seg.setModelType(pcl::SACMODEL_PLANE);
     seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setInputCloud(cloud_floor);
-    seg.setIndices(floor_points);
+    seg.setInputCloud(lores_cloud);
 
     seg.setMaxIterations(ctx->n_sac_iter);
     seg.setDistanceThreshold(tolerance);
 
-    // XXX: We're assuming that the camera here is perpendicular to the floor
-    //      and give a generous threshold, but ideally we'd use device sensors
-    //      to detect orientation and use a slightly less broad angle here.
-    seg.setAxis(Eigen::Vector3f(0.f, -1.f, 0.f));
-    seg.setEpsAngle(M_PI/180.0 * 15.0);
+    std::list<int> indices_to_remove;
+    for (int i = 0; i < ctx->n_planes_to_remove; i++) {
+        pcl::ModelCoefficients::Ptr plane_coeffs(new pcl::ModelCoefficients);
+        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
 
-    pcl::ModelCoefficients::Ptr ground_coeffs(new pcl::ModelCoefficients);
-    pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+        seg.segment(*inliers, *plane_coeffs);
 
-    seg.segment(*inliers, *ground_coeffs);
+        int n_inliers = (int)inliers->indices.size();
+        if (n_inliers >= (int)(n_lores_points * min_fraction)) {
+            indices_to_remove.insert(
+                indices_to_remove.end(),
+                inliers->indices.begin(),
+                inliers->indices.end());
+        }
+    }
 
-    int n_inliers = (int)inliers->indices.size();
+    if (ctx->n_planes_to_remove > 1) {
+        indices_to_remove.sort();
+        indices_to_remove.unique();
+    }
+    n_lores_points -= indices_to_remove.size();
+
+    for (std::list<int>::iterator it = indices_to_remove.begin();
+         it != indices_to_remove.end(); ++it) {
+        lores_cloud_sparse->points[lores_points[*it]].x = NAN;
+        lores_cloud_sparse->points[lores_points[*it]].y = NAN;
+        lores_cloud_sparse->points[lores_points[*it]].z = NAN;
+    }
+
+    std::swap(lores_cloud, lores_cloud_sparse);
 
     end = get_time();
     duration = end - start;
-    LOGI("Looking for ground plane took (%.3f%s)\n",
+    LOGI("Plane removal took (%d points removed) (%.3f%s)\n",
+         (int)indices_to_remove.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-
-    if (n_inliers >= (int)(floor_points->size() * 0.25f)) {
-        // Remove ground plane
-        start = get_time();
-        pcl::ExtractIndices<pcl::PointXYZ> extract;
-        extract.setInputCloud(sparse_cloud);
-        extract.setIndices(inliers);
-        extract.setNegative(true);
-        extract.setUserFilterValue(NAN);
-        extract.setKeepOrganized(true);
-        extract.filter(*sparse_cloud);
-
-        end = get_time();
-        duration = end - start;
-        LOGI("Ground plane has %d points (%.3f%s)\n",
-             n_inliers,
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
-        n_sparse_points -= n_inliers;
-    }
 
     // Use clustering to split the cloud into possible human clusters.
     start = get_time();
@@ -1581,11 +1567,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Given we've filtered the floor out (TODO: and hopefully aren't around
     // too many obscuring features or walls - we should filter out more), most
     // of the points ought to be a person.
-    int min_points = (int)(n_sparse_points * 0.3f);
-    int max_points = (int)(n_sparse_points * 0.9f);
+    int min_points = (int)(n_lores_points * 0.3f);
+    int max_points = (int)(n_lores_points * 0.9f);
 
     std::vector<std::vector<int>> cluster_indices;
-    cluster2d(sparse_cloud, tolerance, min_points, max_points, cluster_indices);
+    cluster2d(lores_cloud, tolerance, min_points, max_points, cluster_indices);
 
     end = get_time();
     duration = end - start;
@@ -1611,7 +1597,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // Note that I guess humans are actually quite frequently in a state
         // of semi-falling, so we have a pretty generous tolerance.
         Eigen::VectorXf centroid;
-        pcl::computeNDCentroid(*sparse_cloud, *point_it, centroid);
+        pcl::computeNDCentroid(*lores_cloud, *point_it, centroid);
 
         // Reproject this point into the depth buffer space to get an offset
         // and check if the point exists in the dense cloud.
@@ -1630,8 +1616,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
 
         int off = y * ctx->depth_camera_intrinsics.width + x;
-        if (std::isnan(dense_cloud->points[off].z) ||
-            fabsf(centroid[2] - dense_cloud->points[off].z) >
+        if (std::isnan(hires_cloud->points[off].z) ||
+            fabsf(centroid[2] - hires_cloud->points[off].z) >
             centroid_tolerance) {
             continue;
         }
@@ -1662,17 +1648,17 @@ gm_context_track_skeleton(struct gm_context *ctx,
         new pcl::PointCloud<pcl::PointXYZ>);
     for (std::vector<int>::const_iterator it = person_indices->begin();
          it != person_indices->end (); ++it) {
-        int sparse_x = (*it) % sparse_cloud->width;
-        int sparse_y = (*it) / sparse_cloud->width;
+        int sparse_x = (*it) % lores_cloud->width;
+        int sparse_y = (*it) / lores_cloud->width;
 
         for (int y = (int)(sparse_y * ctx->seg_res), ey = 0;
-             y < (int)dense_cloud->height && ey < ctx->seg_res;
+             y < (int)hires_cloud->height && ey < ctx->seg_res;
              ++y, ++ey) {
             for (int x = (int)(sparse_x * ctx->seg_res), ex = 0;
-                 x < (int)dense_cloud->width && ex < ctx->seg_res;
+                 x < (int)hires_cloud->width && ex < ctx->seg_res;
                  ++x, ++ex) {
-                int off = y * dense_cloud->width + x;
-                person_cluster->points.push_back(dense_cloud->points[off]);
+                int off = y * hires_cloud->width + x;
+                person_cluster->points.push_back(hires_cloud->points[off]);
             }
         }
     }
@@ -2677,6 +2663,17 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.ptr = &ctx->seg_res;
     prop.int_state.min = 1;
     prop.int_state.max = 4;
+    ctx->properties.push_back(prop);
+
+    ctx->n_planes_to_remove = 1;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "n_planes_to_remove";
+    prop.desc = "Number of planes to remove with RANSAC";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_planes_to_remove;
+    prop.int_state.min = 0;
+    prop.int_state.max = 10;
     ctx->properties.push_back(prop);
 
     ctx->n_sac_iter = 100;
