@@ -56,7 +56,7 @@ latest instructions but it's expected you will need to also run:
 cd glimpse-training-data
 ./unpack.sh
 cd blender
-./install-addons.py
+./install-addons.sh
 ```
 *(to decompress the CMU motion capture data that we use in our rendering pipeline
 and to configure Blender with all the required addons for rendering via
