@@ -1004,9 +1004,9 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
         glm::vec3 point_t(point->x, point->y, point->z);
         glm::vec2 point_2d;
 
-        if (isnan(point->x) || isinf(point->x) ||
-            isnan(point->y) || isinf(point->y) ||
-            !isnormal(point->z) || point->z >= HUGE_DEPTH)
+        if (std::isnan(point->x) || std::isinf(point->x) ||
+            std::isnan(point->y) || std::isinf(point->y) ||
+            !std::isnormal(point->z) || point->z >= HUGE_DEPTH)
             continue;
 
         if (extrinsics) {
@@ -1279,7 +1279,7 @@ cluster2d(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
             int off = y * cloud->width + x;
             float depth = cloud->points[off].z;
 
-            if (isnan(depth)) {
+            if (std::isnan(depth)) {
                 continue;
             }
 
@@ -1453,7 +1453,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     foreach_xy_off(dense_cloud->width, dense_cloud->height) {
         float depth = tracking->depth[off];
-        if (isnormal(depth) &&
+        if (std::isnormal(depth) &&
             depth >= ctx->min_depth &&
             depth < ctx->max_depth) {
             float dx = (x - cx) * depth * inv_fx;
@@ -1477,7 +1477,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             ((y * ctx->seg_res * dense_cloud->width) + (x * ctx->seg_res));
         sparse_cloud->points[off] = dense_cloud->points[dense_off];
 
-        if (!isnan(sparse_cloud->points[off].z)) {
+        if (!std::isnan(sparse_cloud->points[off].z)) {
             ++n_sparse_points;
 
             // Only consider points below the camera to be the floor.
@@ -1630,7 +1630,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
 
         int off = y * ctx->depth_camera_intrinsics.width + x;
-        if (isnan(dense_cloud->points[off].z) ||
+        if (std::isnan(dense_cloud->points[off].z) ||
             fabsf(centroid[2] - dense_cloud->points[off].z) >
             centroid_tolerance) {
             continue;
