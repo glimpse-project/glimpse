@@ -37,7 +37,7 @@ static void
 usage(void)
 {
     printf(
-"Usage rdt-to-json [options] <in.json> <out.rdt>\n"
+"Usage json-to-rdt [options] <in.json> <out.rdt>\n"
 "\n"
 "    -h,--help                  Display this help\n\n"
 "\n"
