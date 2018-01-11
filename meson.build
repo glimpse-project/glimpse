@@ -119,11 +119,29 @@ client_api_deps = [
     freenect_dep,
 ]
 
+
+if host_machine.cpu_family() != 'arm64'
+    support_unity = true
+else
+    support_unity = false
+    warning('')
+    warning('')
+    warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+    warning('☠                                                                              ☠')
+    warning('☠ Unity doesn\'t support arm64 currently, so not building Glimpse Unity Plugin  ☠')
+    warning('☠                                                                              ☠')
+    warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+    warning('')
+    warning('')
+endif
+
+if support_unity
 shared_library('glimpse-unity-plugin',
                [ 'src/glimpse_unity.cc' ] + client_api_src,
                include_directories: inc,
                dependencies: client_api_deps,
                cpp_args: client_api_defines)
+endif
 
 if not meson.is_cross_build()
 
@@ -241,3 +259,17 @@ if glfw_dep.found() and epoxy_dep.found()
 endif
 
 endif # is_cross_build
+
+if support_unity
+if compiler.get_define('__ANDROID__') != ''
+    meson.add_install_script(
+        'install_unity_libs.py',
+        '--subdir', 'Android/libs/armeabi-v7a',
+        '--strip', meson.get_cross_property('_strip_binary'))
+else
+    meson.add_install_script(
+        'install_unity_libs.py',
+        '--subdir', host_machine.cpu_family(),
+        '--strip', 'strip')
+endif
+endif
