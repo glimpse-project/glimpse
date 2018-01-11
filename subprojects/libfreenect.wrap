@@ -1,0 +1,10 @@
+[wrap-file]
+directory = libfreenect-glimpse
+
+source_url = https://github.com/glimpse-project/libfreenect/archive/glimpse.zip
+source_filename = libfreenect-glimpse.zip
+source_hash = be08cfbb4b914a3a6d0c540a43077c073adbcf08ad93b854ceca1ecb0c7ae974
+
+patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
+patch_filename = freenect-wrap.tar
+patch_hash = 9f4c67fe80436c5dd3fabfa5b8780bb548959f3427b3f2f6d710fd03167b001d

@@ -71,10 +71,14 @@ else
     pcl_deps += pcl_sp.get_variable('segmentation_dep')
 endif
 
+# For now we even use freenect (fakenect) on Android so it's
+# not currently optional...
 freenect_dep = dependency('libfreenect', required: false)
-if freenect_dep.found()
-    client_api_defines += [ '-DUSE_FREENECT' ]
+if not freenect_dep.found()
+    freenect_sp = subproject('libfreenect')
+    freenect_dep = freenect_sp.get_variable('fakenect_dep')
 endif
+client_api_defines += [ '-DUSE_FREENECT' ]
     
 glfw_dep = dependency('glfw3', required: false)
 epoxy_dep = dependency('epoxy', required: false)
