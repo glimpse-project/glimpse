@@ -1,0 +1,26 @@
+[binaries]
+name = 'android-arm64'
+c = 'arm-linux-androideabi-clang'
+cpp = 'arm-linux-androideabi-clang++'
+ar = 'arm-linux-androideabi-ar'
+ld = 'arm-linux-androideabi-ld'
+strip = 'arm-linux-androideabi-strip'
+
+[host_machine]
+system = 'android'
+cpu_family = 'arm'
+cpu = 'armv7'
+endian = 'little'
+
+[properties]
+
+# Note: The fix-coretex-a8 flag is recommended by upstream docs:
+# https://developer.android.com/ndk/guides/standalone_toolchain.html
+c_args = [ '-mfpu=neon' ]
+c_link_args = [ '-march=armv7-a', '-Wl,--fix-cortex-a8' ]
+cpp_args = [ '-mfpu=neon' ]
+cpp_link_args = [ '-march=armv7-a', '-Wl,--fix-cortex-a8' ]
+
+# As a hacky workaround for not being able to query the binaries
+# we need to specify the strip tool again for our install script
+_strip_binary = 'arm-linux-androideabi-strip'
