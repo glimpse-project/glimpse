@@ -62,6 +62,7 @@
 
 #include <pcl/segmentation/sac_segmentation.h>
 #include <pcl/segmentation/extract_clusters.h>
+#include <pcl/segmentation/organized_multi_plane_segmentation.h>
 
 #include <pcl/filters/crop_box.h>
 #include <pcl/filters/extract_indices.h>
@@ -80,6 +81,7 @@
 #include <setjmp.h>
 
 #include "half.hpp"
+#include "random.hpp"
 
 #include "xalloc.h"
 #include "wrapper_image.h"
@@ -117,6 +119,7 @@
 
 using half_float::half;
 using namespace pcl::common;
+using Random = effolkronium::random_thread_local;
 
 
 #define DOWNSAMPLE_1_2
@@ -350,6 +353,8 @@ struct gm_context
     int n_planes_to_remove;
     int seg_res;
     int n_sac_iter;
+    float min_plane_size;
+    float max_plane_size;
 
     int n_depth_color_stops;
     float depth_color_stops_range;
@@ -1431,16 +1436,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
     float tolerance = 0.03f;
     pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    lores_cloud->height = 1;
-    lores_cloud->is_dense = true;
-
-    pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud_sparse(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    lores_cloud_sparse->width = hires_cloud->width / ctx->seg_res;
-    lores_cloud_sparse->height = hires_cloud->height / ctx->seg_res;
-    lores_cloud_sparse->points.resize(lores_cloud_sparse->width *
-                                      lores_cloud_sparse->height);
-    lores_cloud_sparse->is_dense = false;
+    lores_cloud->width = hires_cloud->width / ctx->seg_res;
+    lores_cloud->height = hires_cloud->height / ctx->seg_res;
+    lores_cloud->points.resize(lores_cloud->width * lores_cloud->height);
+    lores_cloud->is_dense = false;
 
     int n_points = 0;
 
@@ -1470,20 +1469,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
     int n_lores_points = 0;
     std::vector<int> lores_points;
 
-    foreach_xy_off(lores_cloud_sparse->width, lores_cloud_sparse->height) {
+    foreach_xy_off(lores_cloud->width, lores_cloud->height) {
         int hires_off = (int)
             ((y * ctx->seg_res * hires_cloud->width) + (x * ctx->seg_res));
-        lores_cloud_sparse->points[off] = hires_cloud->points[hires_off];
-
-        if (std::isnan(hires_cloud->points[hires_off].z)) {
-            continue;
+        lores_cloud->points[off] = hires_cloud->points[hires_off];
+        if (!std::isnan(hires_cloud->points[hires_off].z)) {
+            ++n_lores_points;
         }
-
-        ++n_lores_points;
-        lores_cloud->points.push_back(hires_cloud->points[hires_off]);
-        lores_points.push_back(off);
     }
-    lores_cloud->width = n_lores_points;
 
     end = get_time();
     duration = end - start;
@@ -1510,52 +1503,111 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     // Remove dense planes above a certain size
     start = get_time();
-    float min_fraction = 0.3f;
 
-    pcl::SACSegmentation<pcl::PointXYZ> seg;
-    seg.setOptimizeCoefficients(false);
-    seg.setModelType(pcl::SACMODEL_PLANE);
-    seg.setMethodType(pcl::SAC_RANSAC);
-    seg.setInputCloud(lores_cloud);
+    // Following based on pcl::SampleConsensusModelPlane code
+    for (int i = 0, n_planes_found = 0, skips = 0;
+         i - skips < ctx->n_sac_iter &&
+         n_planes_found < ctx->n_planes_to_remove &&
+         skips < ctx->n_sac_iter * 10 &&
+         n_lores_points >= 3; ++i) {
+        // Pick a random point, then 2 other points relatively nearby and
+        // calculate the corresponding plane.
+        int samples[3];
+        do {
+            samples[0] = Random::get(0, (int)lores_cloud->points.size() - 1);
+        } while (std::isnan(lores_cloud->points[samples[0]].z));
 
-    seg.setMaxIterations(ctx->n_sac_iter);
-    seg.setDistanceThreshold(tolerance);
+        int x = samples[0] % lores_cloud->width;
+        int y = samples[0] / lores_cloud->width;
+        int sample_dist = lores_cloud->width / 20;
 
-    std::list<int> indices_to_remove;
-    for (int i = 0; i < ctx->n_planes_to_remove; i++) {
-        pcl::ModelCoefficients::Ptr plane_coeffs(new pcl::ModelCoefficients);
-        pcl::PointIndices::Ptr inliers(new pcl::PointIndices);
+        int tries = 10;
+        for (int s = 1; s < 3 && tries; ++s) {
+            do {
+                int sx = std::max(0,
+                    std::min((int)lores_cloud->width - 1,
+                             x + Random::get(-sample_dist, sample_dist)));
+                int sy = std::max(0,
+                    std::min((int)lores_cloud->height - 1,
+                             y + Random::get(-sample_dist, sample_dist)));
+                samples[s] = sy * lores_cloud->width + sx;
+                --tries;
+            } while ((std::isnan(lores_cloud->points[samples[s]].z) ||
+                      samples[s] == samples[s - 1] ||
+                      samples[s] == samples[0]) && tries);
+        }
+        if (!tries) {
+            ++skips;
+            continue;
+        }
 
-        seg.segment(*inliers, *plane_coeffs);
+        pcl::Array4fMap p0 = lores_cloud->points[samples[0]].getArray4fMap();
+        pcl::Array4fMap p1 = lores_cloud->points[samples[1]].getArray4fMap();
+        pcl::Array4fMap p2 = lores_cloud->points[samples[2]].getArray4fMap();
 
-        int n_inliers = (int)inliers->indices.size();
-        if (n_inliers >= (int)(n_lores_points * min_fraction)) {
-            indices_to_remove.insert(
-                indices_to_remove.end(),
-                inliers->indices.begin(),
-                inliers->indices.end());
+        // Check for collinearity
+        Eigen::Array4f p1p0 = p1 - p0;
+        Eigen::Array4f p2p0 = p2 - p0;
+
+        Eigen::Array4f dy1dy2 = p1p0 / p2p0;
+        if ((dy1dy2[0] == dy1dy2[1]) && (dy1dy2[2] == dy1dy2[1])) {
+            ++skips;
+            continue;
+        }
+
+        // Calculate plane coefficients
+        Eigen::Vector4f coefficients;
+
+        // Calculate the plane normal
+        coefficients[0] = p1p0[1] * p2p0[2] - p1p0[2] * p2p0[1];
+        coefficients[1] = p1p0[2] * p2p0[0] - p1p0[0] * p2p0[2];
+        coefficients[2] = p1p0[0] * p2p0[1] - p1p0[1] * p2p0[0];
+        coefficients[3] = 0;
+
+        // Normalise
+        coefficients.normalize();
+
+        // ... + d = 0
+        coefficients[3] = -(coefficients.template head<4>().dot(p0.matrix()));
+
+        // See which points fall near enough to the plane to remove
+        n_lores_points = 0;
+        std::vector<int> intersecting_points;
+        for (unsigned p = 0; p < lores_cloud->points.size(); ++p) {
+            pcl::PointXYZ &point = lores_cloud->points[p];
+            if (std::isnan(point.z)) {
+                continue;
+            }
+            ++n_lores_points;
+
+            Eigen::Vector4f pt(point.x, point.y, point.z, 1);
+            if (fabs (coefficients.dot (pt)) < tolerance) {
+                intersecting_points.push_back(p);
+            }
+        }
+
+        // Check if there are enough points to remove
+        if (intersecting_points.size() >=
+            (unsigned)(n_lores_points * ctx->min_plane_size) &&
+            intersecting_points.size() <=
+            (unsigned)(n_lores_points * ctx->max_plane_size)) {
+            for (std::vector<int>::iterator it = intersecting_points.begin();
+                 it != intersecting_points.end(); ++it) {
+                pcl::PointXYZ &point = lores_cloud->points[*it];
+                point.x = NAN;
+                point.y = NAN;
+                point.z = NAN;
+            }
+            n_lores_points -= intersecting_points.size();
+            ++n_planes_found;
+            LOGI("Found plane with %d points\n", (int)intersecting_points.size());
         }
     }
 
-    if (ctx->n_planes_to_remove > 1) {
-        indices_to_remove.sort();
-        indices_to_remove.unique();
-    }
-    n_lores_points -= indices_to_remove.size();
-
-    for (std::list<int>::iterator it = indices_to_remove.begin();
-         it != indices_to_remove.end(); ++it) {
-        lores_cloud_sparse->points[lores_points[*it]].x = NAN;
-        lores_cloud_sparse->points[lores_points[*it]].y = NAN;
-        lores_cloud_sparse->points[lores_points[*it]].z = NAN;
-    }
-
-    std::swap(lores_cloud, lores_cloud_sparse);
-
     end = get_time();
     duration = end - start;
-    LOGI("Plane removal took (%d points removed) (%.3f%s)\n",
-         (int)indices_to_remove.size(),
+    LOGI("Plane removal took (%d points remain) (%.3f%s)\n",
+         n_lores_points,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -1564,9 +1616,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     // Because we aren't in a voxel grid, we just have to make rough estimates
     // for limits here.
-    // Given we've filtered the floor out (TODO: and hopefully aren't around
-    // too many obscuring features or walls - we should filter out more), most
-    // of the points ought to be a person.
+    // Given we've filtered the floor/walls out (hopefully), most of the
+    // remaining points ought to be a person.
     int min_points = (int)(n_lores_points * 0.3f);
     int max_points = (int)(n_lores_points * 0.9f);
 
@@ -1743,9 +1794,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
 #if 1
     if (ctx->joint_params) {
         start = get_time();
-        float vfov =  (2.0f * atanf(0.5 * height /
-                                    ctx->training_camera_intrinsics.fy)) *
-          180 / M_PI;
+        float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
+                                   ctx->training_camera_intrinsics.fy));
         InferredJoints *result =
             infer_joints_fast(depth_img,
                               tracking->label_probs,
@@ -2665,26 +2715,48 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.max = 4;
     ctx->properties.push_back(prop);
 
-    ctx->n_planes_to_remove = 1;
+    ctx->n_planes_to_remove = 3;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "n_planes_to_remove";
-    prop.desc = "Number of planes to remove with RANSAC";
+    prop.desc = "Number of planes to remove";
     prop.type = GM_PROPERTY_INT;
     prop.int_state.ptr = &ctx->n_planes_to_remove;
     prop.int_state.min = 0;
     prop.int_state.max = 10;
     ctx->properties.push_back(prop);
 
-    ctx->n_sac_iter = 100;
+    ctx->n_sac_iter = 75;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "n_sac_iter";
-    prop.desc = "Max number of iterations for RANSAC plane detection";
+    prop.desc = "Max number of iterations for plane detection";
     prop.type = GM_PROPERTY_INT;
     prop.int_state.ptr = &ctx->n_sac_iter;
     prop.int_state.min = 10;
     prop.int_state.max = 1000;
+    ctx->properties.push_back(prop);
+
+    ctx->min_plane_size = 0.3f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "min_plane_size";
+    prop.desc = "Minimum plane size as a fraction of total cloud points";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->min_plane_size;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1.f;
+    ctx->properties.push_back(prop);
+
+    ctx->max_plane_size = 0.8f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "max_plane_size";
+    prop.desc = "Maximum plane size as a fraction of total cloud points";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->max_plane_size;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1.f;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
