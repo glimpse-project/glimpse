@@ -419,6 +419,17 @@ gm_unity_init(void)
 
     gm_debug(data->log, "GLIMPSE: Init\n");
 
+#ifdef __ANDROID__
+    // During development on Android we are manually uploading recording and
+    // training models to /sdcard on test devices so that build+upload cycles
+    // of packages built via Unity can be as quick as possible by reducing
+    // the size of .apk we have to repeatedly upload.
+    //
+#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
+    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
+    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
+#endif
+
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
