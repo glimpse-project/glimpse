@@ -148,6 +148,11 @@ gm_log(struct gm_logger *logger,
     } \
 } while(0)
 
+#define gm_throw(logger, err, args...) do { \
+    gm_assert(logger, err != NULL, args); \
+    xasprintf(err, args); \
+} while(0)
+
 #ifdef __cplusplus
 }
 #endif

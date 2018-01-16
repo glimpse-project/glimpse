@@ -398,7 +398,7 @@ static bool
 kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
 {
     if (freenect_init(&dev->kinect.fctx, NULL) < 0) {
-        xasprintf(err, "Failed to init libfreenect\n");
+        gm_throw(dev->log, err, "Failed to init libfreenect\n");
         return false;
     }
 
@@ -411,13 +411,13 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
                                                        FREENECT_DEVICE_CAMERA));
 
     if (!freenect_num_devices(dev->kinect.fctx)) {
-        xasprintf(err, "Failed to find a Kinect device\n");
+        gm_throw(dev->log, err, "Failed to find a Kinect device\n");
         freenect_shutdown(dev->kinect.fctx);
         return false;
     }
 
     if (freenect_open_device(dev->kinect.fctx, &dev->kinect.fdev, 0) < 0) {
-        xasprintf(err, "Could not open Kinect device\n");
+        gm_throw(dev->log, err, "Could not open Kinect device\n");
         freenect_shutdown(dev->kinect.fctx);
         return false;
     }
@@ -656,7 +656,8 @@ kinect_start(struct gm_device *dev)
 #endif // USE_FREENECT
 
 static bool
-directory_recurse(const char *path, const char *ext,
+directory_recurse(struct gm_device *dev,
+                  const char *path, const char *ext,
                   std::vector<char *> &files,
                   char **err)
 {
@@ -668,7 +669,7 @@ directory_recurse(const char *path, const char *ext,
     bool ret = true;
 
     if (!(dir = opendir(path))) {
-        xasprintf(err, "Failed to open directory %s\n", path);
+        gm_throw(dev->log, err, "Failed to open directory %s\n", path);
         return false;
     }
 
@@ -685,7 +686,7 @@ directory_recurse(const char *path, const char *ext,
 
         stat(next_path, &st);
         if (S_ISDIR(st.st_mode)) {
-            if (!directory_recurse(next_path, ext, files, err)) {
+            if (!directory_recurse(dev, next_path, ext, files, err)) {
                 ret = false;
                 break;
             }
@@ -708,17 +709,17 @@ recording_open(struct gm_device *dev,
     std::vector<char *> exr_files;
     std::vector<char *> png_files;
 
-    if (!directory_recurse(config->recording.path, ".exr", exr_files, err))
+    if (!directory_recurse(dev, config->recording.path, ".exr", exr_files, err))
         return false;
-    if (!directory_recurse(config->recording.path, ".png", png_files, err))
+    if (!directory_recurse(dev, config->recording.path, ".png", png_files, err))
         return false;
 
     if (exr_files.size() == 0 || png_files.size() == 0) {
-        xasprintf(err, "No exr or png files found\n");
+        gm_throw(dev->log, err, "No exr or png files found\n");
         return false;
     }
     if (exr_files.size() != png_files.size()) {
-        xasprintf(err, "exr/png quantity mismatch\n");
+        gm_throw(dev->log, err, "exr/png quantity mismatch\n");
         return false;
     }
 
@@ -736,7 +737,7 @@ recording_open(struct gm_device *dev,
         if (iu_read_exr_from_file(exr_files[i], &spec, (void**)
                                   &dev->dummy.depth_images[i]) != SUCCESS)
         {
-            xasprintf(err, "Failed to open %s\n", exr_files[i]);
+            gm_throw(dev->log, err, "Failed to open %s\n", exr_files[i]);
             return false;
         }
         free(exr_files[i]);
@@ -764,7 +765,7 @@ recording_open(struct gm_device *dev,
         if (iu_read_png_from_file(png_files[i], &spec, &dev->dummy.lum_images[i],
                                   NULL, NULL) != SUCCESS)
         {
-            xasprintf(err, "Failed to open %s\n", png_files[i]);
+            gm_throw(dev->log, err, "Failed to open %s\n", png_files[i]);
             return false;
         }
         free(png_files[i]);

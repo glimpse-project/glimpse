@@ -573,7 +573,10 @@ alloc_rgb_color_stops(struct color_stop **color_stops,
 }
 
 static GLuint __attribute__((unused))
-load_shader(GLenum type, const char *source, char **err)
+load_shader(struct gm_context *ctx,
+            GLenum type,
+            const char *source,
+            char **err)
 {
     GLuint shader = glCreateShader(type);
     if (!shader)
@@ -591,7 +594,8 @@ load_shader(GLenum type, const char *source, char **err)
             char *buf = (char *)malloc(info_len);
             if (buf) {
                 glGetShaderInfoLog(shader, info_len, NULL, buf);
-                xasprintf(err, "Could not compile shader %d:\n%s\n", type, buf);
+                gm_throw(ctx->log, err, "Could not compile shader %d:\n%s\n",
+                         type, buf);
                 free(buf);
             }
             glDeleteShader(shader);
@@ -603,13 +607,16 @@ load_shader(GLenum type, const char *source, char **err)
 }
 
 static GLuint __attribute__((unused))
-create_program(const char *vertex_source, const char *fragment_source, char **err)
+create_program(struct gm_context *ctx,
+               const char *vertex_source,
+               const char *fragment_source,
+               char **err)
 {
-    GLuint vertex_shader = load_shader(GL_VERTEX_SHADER, vertex_source, err);
+    GLuint vertex_shader = load_shader(ctx, GL_VERTEX_SHADER, vertex_source, err);
     if (!vertex_shader)
         return 0;
 
-    GLuint fragment_shader = load_shader(GL_FRAGMENT_SHADER, fragment_source, err);
+    GLuint fragment_shader = load_shader(ctx, GL_FRAGMENT_SHADER, fragment_source, err);
     if (!fragment_shader) {
         glDeleteShader(vertex_shader);
         return 0;
@@ -634,7 +641,7 @@ create_program(const char *vertex_source, const char *fragment_source, char **er
             char *buf = (char *)malloc(buf_length);
             if (buf) {
                 glGetProgramInfoLog(program, buf_length, NULL, buf);
-                xasprintf(err, "Could not link program:\n%s\n", buf);
+                gm_throw(ctx->log, err, "Could not link program:\n%s\n", buf);
                 free(buf);
             }
         }
@@ -2425,8 +2432,10 @@ gm_context_new(struct gm_logger *logger, char **err)
                                        GM_ASSET_MODE_BUFFER,
                                        &open_err);
             if (!tree_asset) {
-                xasprintf(err, "Failed to open tree%u.rdt and tree%u.json: %s",
-                          i, i, open_err);
+                gm_warn(logger,
+                         "Failed to open tree%u.rdt and tree%u.json: %s",
+                         i, i, open_err);
+                free(open_err);
                 break;
             }
 
@@ -2445,7 +2454,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_asset_close(tree_asset);
 
         if (!ctx->decision_trees[i]) {
-            LOGI("Failed to load %s", name);
+            gm_warn(logger, "Failed to load %s", name);
             break;
         }
 
@@ -2453,7 +2462,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     if (!ctx->n_decision_trees) {
-        xasprintf(err, "Failed to open any decision tree assets");
+        gm_throw(logger, err, "Failed to open any decision tree assets");
         gm_context_destroy(ctx);
         return NULL;
     }
@@ -2467,7 +2476,8 @@ gm_context_new(struct gm_logger *logger, char **err)
                              detector_thread_cb,
                              ctx);
     if (ret != 0) {
-        xasprintf(err, "Failed to start face detector thread: %s", strerror(ret));
+        gm_throw(logger, err,
+                 "Failed to start face detector thread: %s", strerror(ret));
         gm_context_destroy(ctx);
         return NULL;
     }
@@ -2505,7 +2515,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_asset_close(joint_map_asset);
 
         if (!ctx->joint_map) {
-            xasprintf(err, "Failed to open joint map\n");
+            gm_throw(logger, err, "Failed to open joint map\n");
             gm_context_destroy(ctx);
             return NULL;
         }
@@ -2513,7 +2523,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         ctx->n_joints = json_array_get_count(json_array(ctx->joint_map));
 
     } else {
-        xasprintf(err, "Failed to open joint-map.json: %s", open_err);
+        gm_throw(logger, err, "Failed to open joint-map.json: %s", open_err);
         free(open_err);
         gm_context_destroy(ctx);
         return NULL;
@@ -2548,12 +2558,12 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_asset_close(joint_params_asset);
 
         if (!ctx->joint_params) {
-            xasprintf(err, "Failed to laod joint params from json");
+            gm_throw(logger, err, "Failed to laod joint params from json");
             gm_context_destroy(ctx);
             return NULL;
         }
     } else {
-        xasprintf(err, "Failed to open joint-params.json: %s", open_err);
+        gm_throw(logger, err, "Failed to open joint-params.json: %s", open_err);
         free(open_err);
         gm_context_destroy(ctx);
         return NULL;
@@ -2627,7 +2637,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_asset_close(joint_stats_asset);
         json_value_free(json);
     } else {
-        xasprintf(err, "Failed to open joint-dist.json: %s", open_err);
+        gm_throw(logger, err, "Failed to open joint-dist.json: %s", open_err);
         free(open_err);
 
         // We can continue without the joint stats asset, just results may be
@@ -3048,7 +3058,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
             "  frag_color = vec4(texture(yuv_tex_sampler, tex_coords).r, 0.0, 0.0, 1.0);\n"
             "}\n";
 
-        yuv_frame_scale_program_ = create_program(vert_shader, frag_shader, NULL);
+        yuv_frame_scale_program_ = create_program(ctx, vert_shader, frag_shader, NULL);
 
         ctx->attrib_quad_rot_scale_pos = glGetAttribLocation(yuv_frame_scale_program_, "pos");
         ctx->attrib_quad_rot_scale_tex_coords = glGetAttribLocation(yuv_frame_scale_program_, "tex_coords_in");
@@ -3090,7 +3100,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
             "  gl_FragColor = texture2D(texture, tex_coords);\n"
             "}\n";
 
-        scale_program_ = create_program(vert_shader, frag_shader, NULL);
+        scale_program_ = create_program(ctx, vert_shader, frag_shader, NULL);
 
         ctx->attrib_quad_rot_scale_pos =
             glGetAttribLocation(scale_program_, "pos");

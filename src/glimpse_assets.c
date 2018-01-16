@@ -72,7 +72,7 @@ struct gm_asset *
 gm_asset_open(struct gm_logger *log,
               const char *path, int mode, char **err)
 {
-    assert(asset_manager);
+    gm_assert(log, asset_manager, "gm_android_set_asset_manager not called");
 
     AAsset *native = AAssetManager_open(asset_manager, mode);
     if (native) {
@@ -80,7 +80,7 @@ gm_asset_open(struct gm_logger *log,
         ret->native = native;
         return ret;
     } else {
-        xasprintf(err, "Failed to open %s\n", path);
+        gm_throw(log, err, "Failed to open %s\n", path);
         return NULL;
     }
 }
@@ -131,14 +131,14 @@ gm_asset_open(struct gm_logger *log,
 
     fd = open(full_path, O_RDWR|O_CLOEXEC);
     if (fd < 0) {
-        xasprintf(err, "Failed to open %s: %s",
-                  full_path, strerror(errno));
+        gm_throw(log, err, "Failed to open %s: %s",
+                 full_path, strerror(errno));
         return NULL;
     }
 
     if (fstat(fd, &sb) < 0) {
-        xasprintf(err, "Failed to stat %s file descriptor: %s",
-                  full_path, strerror(errno));
+        gm_throw(log, err, "Failed to stat %s file descriptor: %s",
+                 full_path, strerror(errno));
         return NULL;
     }
 
@@ -146,7 +146,8 @@ gm_asset_open(struct gm_logger *log,
     case GM_ASSET_MODE_BUFFER:
         buf = (uint8_t *)mmap(NULL, sb.st_size,
                               PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-        xasprintf(err, "Failed to mmap %s: %s", full_path, strerror(errno));
+        gm_throw(log, err, "Failed to mmap %s: %s",
+                 full_path, strerror(errno));
         break;
     }
 
