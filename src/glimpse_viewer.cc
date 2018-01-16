@@ -1219,7 +1219,7 @@ static void
 logger_cb(struct gm_logger *logger,
           enum gm_log_level level,
           const char *context,
-          const char *backtrace,
+          struct gm_backtrace *backtrace,
           const char *format,
           va_list ap,
           void *user_data)
@@ -1239,6 +1239,17 @@ logger_cb(struct gm_logger *logger,
 
     vfprintf(stderr, format, ap);
     fprintf(stderr, "\n");
+    if (backtrace) {
+        int line_len = 100;
+        char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+        gm_logger_get_backtrace_strings(logger, backtrace,
+                                        line_len, (char *)formatted);
+        for (int i = 0; i < backtrace->n_frames; i++) {
+            char *line = formatted + line_len * i;
+            fprintf(stderr, "> %s\n", line);
+        }
+    }
 }
 
 int

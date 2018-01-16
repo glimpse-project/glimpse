@@ -47,15 +47,60 @@ enum gm_log_level {
     GM_LOG_ASSERT,
 };
 
+/* A given backtrace include instruction pointers for each frame and can
+ * be resolved to symbols with code like this:
+ *  FIXME
+ */
+struct gm_backtrace {
+    int n_frames;
+    const void **frame_pointers;
+};
+
 struct gm_logger *
 gm_logger_new(void (*log_cb)(struct gm_logger *logger,
                              enum gm_log_level level,
                              const char *context,
-                             const char *backtrace,
+                             struct gm_backtrace *backtrace,
                              const char *message,
                              va_list ap,
                              void *user_data),
               void *user_data);
+
+/* XXX: This api is not thread-safe so it's assumed that the backtrace level
+ * and size are set before the logger is used
+ */
+void
+gm_logger_set_backtrace_level(struct gm_logger *logger,
+                              int level);
+
+/* XXX: This api is not thread-safe so it's assumed that the backtrace level
+ * and size are set before the logger is used
+ */
+void
+gm_logger_set_backtrace_size(struct gm_logger *logger,
+                             int size);
+
+/* At the point of logging then if we need to capture a backtrace then we only
+ * save the instruction pointers for each frame. Later if the backtrace needs
+ * to be displayed then those instruction pointers can be converted to human
+ * readable strings...
+ *
+ * With libunwind we will query the function name and a byte offset formatted
+ * like:
+ *
+ *   "gm_context_new()+0x80"
+ *
+ * It's then necessary to use a dissaembler to see what line the offset
+ * really corresponds too.
+ *
+ * @frame_strings is allocated by the caller to be
+ * (backtrace->n_frames * @string_lengths) bytes
+ */
+void
+gm_logger_get_backtrace_strings(struct gm_logger *logger,
+                                struct gm_backtrace *backtrace,
+                                int string_lengths,
+                                char *frame_strings);
 
 void
 gm_logger_destroy(struct gm_logger *logger);

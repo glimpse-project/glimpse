@@ -71,6 +71,8 @@ else
     pcl_deps += pcl_sp.get_variable('segmentation_dep')
 endif
 
+uw_dep = dependency('libunwind', required: false)
+
 # For now we even use freenect (fakenect) on Android so it's
 # not currently optional...
 freenect_dep = dependency('libfreenect', required: false)
@@ -119,6 +121,11 @@ client_api_deps = [
     freenect_dep,
 ]
 
+if uw_dep.found()
+    client_api_deps += uw_dep
+    client_api_defines += '-DUSE_LIBUNWIND=1'
+endif
+
 
 if host_machine.cpu_family() != 'arm64'
     support_unity = true
@@ -140,6 +147,7 @@ shared_library('glimpse-unity-plugin',
                [ 'src/glimpse_unity.cc' ] + client_api_src,
                include_directories: inc,
                dependencies: client_api_deps,
+               c_args: client_api_defines,
                cpp_args: client_api_defines)
 endif
 
@@ -255,6 +263,7 @@ if glfw_dep.found() and epoxy_dep.found()
                [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
                include_directories: inc,
                dependencies: client_api_deps + [ glfw_dep ],
+               c_args: client_api_defines,
                cpp_args: client_api_defines)
 endif
 

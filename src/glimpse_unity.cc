@@ -139,7 +139,7 @@ static void
 logger_cb(struct gm_logger *logger,
           enum gm_log_level level,
           const char *context,
-          const char *backtrace,
+          struct gm_backtrace *backtrace,
           const char *format,
           va_list ap,
           void *user_data)
