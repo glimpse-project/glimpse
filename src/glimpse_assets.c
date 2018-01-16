@@ -37,11 +37,17 @@
 #include <unistd.h>
 
 #include "xalloc.h"
+#include "glimpse_log.h"
 #include "glimpse_assets.h"
+
 
 struct gm_asset
 {
-#ifdef ANDROID
+    /* Note: It's not assumed that we will be using the Asset Manager API on
+     * Android because it's sometimes more convenient during development to
+     * load assets from external storage.
+     */
+#ifdef USE_ANDROID_ASSET_MANAGER_API
     AAsset *native;
 #else
     char *path;
@@ -53,7 +59,7 @@ struct gm_asset
 #endif
 };
 
-#ifdef ANDROID
+#ifdef USE_ANDROID_ASSET_MANAGER_API
 static AAssetManager *asset_manager;
 
 void
@@ -63,7 +69,8 @@ gm_android_set_asset_manager(AAssetManager *manager)
 }
 
 struct gm_asset *
-gm_asset_open(const char *path, int mode, char **err)
+gm_asset_open(struct gm_logger *log,
+              const char *path, int mode, char **err)
 {
     assert(asset_manager);
 
@@ -104,7 +111,8 @@ gm_asset_close(struct gm_asset *asset)
     } while(0)
 
 struct gm_asset *
-gm_asset_open(const char *path, int mode, char **err)
+gm_asset_open(struct gm_logger *log,
+              const char *path, int mode, char **err)
 {
     int fd;
     struct stat sb;

@@ -30,6 +30,8 @@
 
 #pragma once
 
+#include <glimpse_log.h>
+
 /* Note: currently compatible with Android's Asset mode enum which is
  * relied on internally
  */
@@ -53,7 +55,8 @@ gm_android_set_asset_manager(AAssetManager *manager);
 #endif
 
 struct gm_asset *
-gm_asset_open(const char *path, int mode, char **err);
+gm_asset_open(struct gm_logger *log,
+              const char *path, int mode, char **err);
 
 const void *
 gm_asset_get_buffer(struct gm_asset *asset);

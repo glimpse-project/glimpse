@@ -2133,7 +2133,8 @@ detector_thread_cb(void *data)
 
     char *err = NULL;
     struct gm_asset *predictor_asset =
-        gm_asset_open("shape_predictor_68_face_landmarks.dat",
+        gm_asset_open(ctx->log,
+                      "shape_predictor_68_face_landmarks.dat",
                       GM_ASSET_MODE_BUFFER,
                       &err);
     if (predictor_asset) {
@@ -2385,7 +2386,7 @@ gm_context_new(struct gm_logger *logger, char **err)
                                         tracking_state_free,
                                         ctx); // user data
 
-#ifdef ANDROID
+#ifdef USE_ANDROID_ASSET_MANAGER_API
 #error "TODO: call gm_assets_android_set_manager()"
 #endif
 
@@ -2405,7 +2406,8 @@ gm_context_new(struct gm_logger *logger, char **err)
         xsnprintf(json_name, sizeof(json_name), "tree%u.json", i);
 
         char *catch_err = NULL;
-        struct gm_asset *tree_asset = gm_asset_open(rdt_name,
+        struct gm_asset *tree_asset = gm_asset_open(logger,
+                                                    rdt_name,
                                                     GM_ASSET_MODE_BUFFER,
                                                     &catch_err);
         if (tree_asset) {
@@ -2418,7 +2420,8 @@ gm_context_new(struct gm_logger *logger, char **err)
             char *open_err = NULL;
 
             name = json_name;
-            tree_asset = gm_asset_open(json_name,
+            tree_asset = gm_asset_open(logger,
+                                       json_name,
                                        GM_ASSET_MODE_BUFFER,
                                        &open_err);
             if (!tree_asset) {
@@ -2480,7 +2483,8 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     ctx->joint_map = NULL;
     char *open_err = NULL;
-    struct gm_asset *joint_map_asset = gm_asset_open("joint-map.json",
+    struct gm_asset *joint_map_asset = gm_asset_open(logger,
+                                                     "joint-map.json",
                                                      GM_ASSET_MODE_BUFFER,
                                                      &open_err);
     if (joint_map_asset) {
@@ -2518,7 +2522,8 @@ gm_context_new(struct gm_logger *logger, char **err)
     ctx->joint_params = NULL;
 
     struct gm_asset *joint_params_asset =
-        gm_asset_open("joint-params.json",
+        gm_asset_open(logger,
+                      "joint-params.json",
                       GM_ASSET_MODE_BUFFER,
                       &open_err);
     if (joint_params_asset) {
@@ -2559,7 +2564,8 @@ gm_context_new(struct gm_logger *logger, char **err)
     ctx->joint_stats = NULL;
 
     struct gm_asset *joint_stats_asset =
-        gm_asset_open("joint-dist.json", GM_ASSET_MODE_BUFFER, &open_err);
+        gm_asset_open(logger,
+                      "joint-dist.json", GM_ASSET_MODE_BUFFER, &open_err);
     if (joint_stats_asset) {
         ctx->joint_stats = (struct joint_info *)
             xcalloc(ctx->n_joints, sizeof(struct joint_info));
