@@ -96,7 +96,7 @@ jobs:
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e ANDROID_BUILD=1
             -e BUILD_ONLY=1
-            -e CONFIG_OPTS="--cross-file=../android-arm64-cross-file.txt --buildtype=debug -Ddlib:support_gui=no"
+            -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=debug"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
           env: _="Android Release Build"
@@ -104,7 +104,7 @@ jobs:
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e ANDROID_BUILD=1
             -e BUILD_ONLY=1
-            -e CONFIG_OPTS="--cross-file=../android-arm64-cross-file.txt --buildtype=release -Ddlib:support_gui=no"
+            -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=release"
             final-travis-ci-image ./travis/travis-ci-build.sh
 
 cache:

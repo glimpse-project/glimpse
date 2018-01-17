@@ -20,10 +20,10 @@ if test "$ANDROID_BUILD" = "1"; then
     if ! test -d $ANDROID_NDK_HOME/bin; then
         wget https://dl.google.com/android/repository/android-ndk-r16b-linux-x86_64.zip
         unzip -q android-ndk-r16b-linux-x86_64.zip
-        $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py --force --install-dir ./android-arm64-toolchain-21 --arch arm64 --api 21 --stl libc++;
+        $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py --force --install-dir ./android-arm-toolchain-24 --arch arm --api 24 --stl libc++;
     fi
 
-    export PATH=$PWD/android-arm64-toolchain-21/bin:$PATH
+    export PATH=$PWD/android-arm-toolchain-24/bin:$PATH
 fi
 
 export CC=clang-5.0 CXX=clang++-5.0
