@@ -13,7 +13,7 @@ virtualenv glimpse-py3-env
 source glimpse-py3-env/bin/activate
 
 python --version
-pip install meson
+pip install git+https://github.com/glimpse-project/meson
 
 if test "$ANDROID_BUILD" = "1"; then
     export ANDROID_NDK_HOME=$PWD/android-ndk-r16b
