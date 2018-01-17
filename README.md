@@ -93,7 +93,19 @@ running:
 pip3 install --user --upgrade meson
 ```
 
-*Make sure you have Meson >= 0.44.0 if you want to try cross-compiling Glimpse:*
+For cross-compiling to Android you currently need to use [this branch of
+meson](https://github.com/glimpse-project/meson) which knows not to use shared
+library versioning on Android:
+
+```
+pip3 install --user --upgrade git+https://github.com/glimpse-project/meson
+```
+The version should have `glimpse` in the suffix like:
+```
+$ meson --version
+0.45.0.glimpse-dev1
+```
+
 
 ## Debug
 
@@ -130,16 +142,28 @@ export PATH=~/local/android-arm-toolchain-24:$PATH
 *Note: we can't build for arm64 when building the libglimpse-unity-plugin.so since Unity doesn't natively support arm64 on Android*
 *Note: while building for 32bit arm we have to use api level >= 24 otherwise we hit build issues with -D_FILE_OFFSET_BITS=64 usage*
 
-Make sure you have Meson >= 0.44.0, since earlier versions had a bug when
-building subprojects whose directory didn't exactly match the subproject name.
 
-`meson --version`
+Make sure you have cloned the `glimpse` branch of Meson from
+[here](https://github.com/glimpse-project/meson), since upstream Meson isn't
+yet aware that Android lacks support for shared library versioning.
+
+The version should have `glimpse` in the suffix like:
+```
+$ meson --version
+0.45.0.glimpse-dev1
+```
+
+If not, then it can be installed like:
+```
+pip3 install --user --upgrade git+https://github.com/glimpse-project/meson
+```
+
 
 Then to compile Glimpse:
 ```
 mkdir build-android-debug
 cd build-android-debug
-meson.py --cross-file ../android-arm64-cross-file.txt --buildtype=debug -Ddlib:support_gui=no ..
+meson --cross-file ../android-armeabi-v7a-cross-file.txt --buildtype=debug ..
 ninja
 ```
 
@@ -147,6 +171,6 @@ or release:
 ```
 mkdir build-android-release
 cd build-android-release
-meson.py --cross-file ../android-arm64-cross-file.txt --buildtype=release -Ddlib:support_gui=no ..
+meson --cross-file ../android-armeabi-v7a-cross-file.txt --buildtype=release ..
 ninja
 ```
