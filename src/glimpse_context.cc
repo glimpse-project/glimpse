@@ -68,12 +68,7 @@
 #include <pcl/filters/passthrough.h>
 #include <pcl/filters/voxel_grid.h>
 
-#ifdef __ANDROID__
-#include <GLES3/gl3.h>
-#include <GLES2/gl2ext.h>
-#else
 #include <epoxy/gl.h>
-#endif
 
 #define PNG_DEBUG 1
 #include <png.h>

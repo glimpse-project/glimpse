@@ -83,7 +83,7 @@ endif
 client_api_defines += [ '-DUSE_FREENECT' ]
     
 glfw_dep = dependency('glfw3', required: false)
-epoxy_dep = dependency('epoxy', required: false)
+epoxy_dep = dependency('epoxy', fallback: [ 'libepoxy', 'libepoxy_dep' ])
 snappy_dep = dependency('snappy', required: false)
 
 imgui_src = [
