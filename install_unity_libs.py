@@ -59,6 +59,12 @@ for target in targets:
         print(" ".join(install_cmd))
         subprocess.check_call(install_cmd)
 
+        if len(parts) > 2:
+            os.chdir(dst)
+            ln_cmd = [ 'ln', '-s', parts[0] + '.so', parts[0] + '.so.' + parts[2] ]
+            print(" ".join(ln_cmd))
+            subprocess.check_call(ln_cmd)
+
 if args.android_ndk_arch:
     install_cmd = [ 'install', '-s' , '--strip-program', args.strip,
                     libcxx_shared_path, dst]
