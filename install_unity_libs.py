@@ -71,3 +71,8 @@ if args.android_ndk_arch:
     print(" ".join(install_cmd))
     subprocess.check_call(install_cmd)
 
+
+os.chdir(dst)
+chrpath_cmd = [ 'chrpath', '-r', '$ORIGIN', 'libglimpse-unity-plugin.so' ]
+print(" ".join(chrpath_cmd))
+subprocess.check_call(chrpath_cmd)
