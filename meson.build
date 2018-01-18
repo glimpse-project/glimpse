@@ -273,12 +273,13 @@ if support_unity
 if compiler.get_define('__ANDROID__') != ''
     meson.add_install_script(
         'install_unity_libs.py',
-        '--subdir', 'Android/libs/armeabi-v7a',
-        '--strip', meson.get_cross_property('_strip_binary'))
+        '--plugins-subdir', 'Android/libs/armeabi-v7a',
+        '--strip', meson.get_cross_property('_strip_binary'),
+        '--android-ndk-arch', meson.get_cross_property('_ndk_arch'))
 else
     meson.add_install_script(
         'install_unity_libs.py',
-        '--subdir', host_machine.cpu_family(),
+        '--plugins-subdir', host_machine.cpu_family(),
         '--strip', 'strip')
 endif
 endif
