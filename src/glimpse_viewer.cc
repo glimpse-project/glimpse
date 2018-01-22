@@ -153,6 +153,10 @@ typedef struct _Data
     pthread_mutex_t event_queue_lock;
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
+
+    JSON_Value *joints_recording_val;
+    JSON_Array *joints_recording;
+    int requested_recording_len;
 } Data;
 
 static uint32_t joint_palette[] = {
@@ -787,6 +791,37 @@ handle_context_tracking_updates(Data *data)
     data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
     assert(data->latest_tracking);
 
+    if (data->joints_recording) {
+        int n_joints;
+        const float *joints =
+            gm_tracking_get_joint_positions(data->latest_tracking,
+                                            &n_joints);
+        JSON_Value *joints_array_val = json_value_init_array();
+        JSON_Array *joints_array = json_array(joints_array_val);
+        for (int i = 0; i < n_joints; i++) {
+            const float *joint = joints + 3 * i;
+            JSON_Value *coord_val = json_value_init_array();
+            JSON_Array *coord = json_array(coord_val);
+
+            json_array_append_number(coord, joint[0]);
+            json_array_append_number(coord, joint[1]);
+            json_array_append_number(coord, joint[2]);
+
+            json_array_append_value(joints_array, coord_val);
+        }
+
+        json_array_append_value(data->joints_recording, joints_array_val);
+
+        int n_frames = json_array_get_count(data->joints_recording);
+        if (n_frames >= data->requested_recording_len) {
+            json_serialize_to_file_pretty(data->joints_recording_val,
+                                          "glimpse-joints-recording.json");
+            json_value_free(data->joints_recording_val);
+            data->joints_recording_val = NULL;
+            data->joints_recording = NULL;
+        }
+    }
+
     upload_tracking_textures(data);
 }
 
@@ -1363,6 +1398,13 @@ main(int argc, char **argv)
     }
 
     io.Fonts->AddFontFromFileTTF(font_path, 16.0f);
+
+    const char *n_frames_env = getenv("GLIMPSE_RECORD_N_JOINT_FRAMES");
+    if (n_frames_env) {
+        data.joints_recording_val = json_value_init_array();
+        data.joints_recording = json_array(data.joints_recording_val);
+        data.requested_recording_len = strtoull(n_frames_env, NULL, 10);
+    }
 
     // TODO: Might be nice to be able to retrieve this information via the API
     //       rather than reading it separately here.
