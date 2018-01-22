@@ -33,6 +33,10 @@
 
 #include <vector>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+#include <glm/gtc/type_ptr.hpp>
+
 #include "half.hpp"
 
 #include "glimpse_log.h"
@@ -403,7 +407,7 @@ on_device_event_cb(struct gm_device *dev,
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_init(void)
 {
     struct glimpse_data *data = new glimpse_data();
@@ -452,6 +456,72 @@ gm_unity_init(void)
      */
     gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
     gm_device_set_event_callback(data->device, on_device_event_cb, plugin_data);
+
+    return (intptr_t )data;
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    gm_debug(data->log, "GLIMPSE: Get Latest Tracking");
+    return (intptr_t)gm_context_get_latest_tracking(data->ctx);
+}
+
+extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_get_joint_positions(intptr_t plugin_handle,
+                                      intptr_t tracking_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+    int n_joints;
+
+    gm_debug(data->log, "GLIMPSE: Tracking: Get Label Probabilities");
+
+    const float *joints =
+        gm_tracking_get_joint_positions(tracking, &n_joints);
+
+    return joints;
+}
+
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    gm_debug(data->log, "GLIMPSE: Tracking Unref");
+    gm_tracking_unref((struct gm_tracking *)tracking_handle);
+}
+
+static glm::mat4
+intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
+                             float near, float far)
+{
+  float width = intrinsics->width;
+  float height = intrinsics->height;
+
+  float scalex = near / intrinsics->fx;
+  float scaley = near / intrinsics->fy;
+
+  float offsetx = (intrinsics->cx - width / 2.0) * scalex;
+  float offsety = (intrinsics->cy - height / 2.0) * scaley;
+
+  return glm::frustum(scalex * -width / 2.0f - offsetx,
+                      scalex * width / 2.0f - offsetx,
+                      scaley * height / 2.0f - offsety,
+                      scaley * -height / 2.0f - offsety, near, far);
+}
+
+extern "C" const void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_intrinsics *intrinsics =
+      gm_device_get_video_intrinsics(data->device);
+
+    memcpy(out_mat4,
+           glm::value_ptr(intrinsics_to_project_matrix(intrinsics, 0.5, 5)),
+           sizeof(float) * 16);
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
