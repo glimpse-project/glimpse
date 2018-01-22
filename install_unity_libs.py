@@ -61,7 +61,7 @@ for target in targets:
 
         if len(parts) > 2:
             os.chdir(dst)
-            ln_cmd = [ 'ln', '-s', parts[0] + '.so', parts[0] + '.so.' + parts[2] ]
+            ln_cmd = [ 'ln', '-sf', parts[0] + '.so', parts[0] + '.so.' + parts[2] ]
             print(" ".join(ln_cmd))
             subprocess.check_call(ln_cmd)
 
