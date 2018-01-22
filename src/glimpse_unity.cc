@@ -44,8 +44,10 @@
 #include "glimpse_context.h"
 
 #undef GM_LOG_CONTEXT
+
 #ifdef __ANDROID__
 #define GM_LOG_CONTEXT "Glimpse Plugin"
+#include <jni.h>
 #else
 #define GM_LOG_CONTEXT "unity_plugin"
 #endif
@@ -679,3 +681,23 @@ UnityPluginUnload(void)
 {
     unity_graphics->UnregisterDeviceEventCallback(on_graphics_device_event_cb);
 }
+
+#ifdef __ANDROID__
+static jobject
+instantiate_glimpse_test_class(JNIEnv* jni_env)
+{
+    jclass cls_JavaClass = jni_env->FindClass("com/impossible/glimpse/GlimpseTest");
+    jmethodID mid_JavaClass = jni_env->GetMethodID(cls_JavaClass, "<init>", "()V");
+    jobject obj_JavaClass = jni_env->NewObject(cls_JavaClass, mid_JavaClass);
+    return jni_env->NewGlobalRef(obj_JavaClass);
+}
+
+extern "C" jint UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+JNI_OnLoad(JavaVM *vm, void *reserved) {
+    JNIEnv *jni_env = 0;
+    vm->AttachCurrentThread(&jni_env, 0);
+
+    instantiate_glimpse_test_class(jni_env);
+    return JNI_VERSION_1_6;
+}
+#endif

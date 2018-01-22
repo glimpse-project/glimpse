@@ -1,2 +1,4 @@
 option('use_system_libs', type : 'boolean', value : true,
        description: 'Whether to generally link with system libraries')
+option('tango_sdk', type : 'string',
+       description: 'Absolute path to unpacked Tango SDK')

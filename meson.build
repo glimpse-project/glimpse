@@ -1,10 +1,23 @@
-project('glimpse', ['c', 'cpp'],
+project('glimpse', ['c', 'cpp', 'java'],
         license: 'MIT',
         default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
 use_system_libs = get_option('use_system_libs')
 
 compiler = meson.get_compiler('c')
+python3 = import('python3').find_python()
+
+# Kinda silly how awkward it is to query environment variables...
+if compiler.get_define('__ANDROID__') != ''
+    android_sdk_home = run_command(python3, '-c',
+        'import os; print(os.getenv("ANDROID_HOME", ""))').stdout().strip()
+    if android_sdk_home == ''
+        error('Failed to find Android SDK via $ANDROID_HOME environment variable')
+    endif
+endif
+
+introspect_cmd = run_command(python3, '-c',
+    'import os; print(os.getenv("MESONINTROSPECT", ""))').stdout().strip()
 
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
@@ -127,7 +140,6 @@ if uw_dep.found()
     client_api_defines += '-DUSE_LIBUNWIND=1'
 endif
 
-
 if host_machine.cpu_family() != 'arm64'
     support_unity = true
 else
@@ -146,15 +158,51 @@ endif
 if compiler.get_define('__ANDROID__') != ''
     android_log_dep = declare_dependency(link_args: [ '-llog' ])
     client_api_deps += android_log_dep
+
+    tango_enabled = false
+
+    if get_option('tango_sdk') != ''
+        ndk_arch = meson.get_cross_property('_ndk_arch')
+        tango_sdk_inc = join_paths(meson.build_root(), get_option('tango_sdk'), 'include')
+        tango_sdk_libdir = join_paths(meson.build_root(), get_option('tango_sdk'), 'lib', ndk_arch)
+        tango_deps = declare_dependency(link_args: [ '-L' + tango_sdk_libdir,
+                                                     '-ltango_support_api' ],
+                                        compile_args: '-I' + tango_sdk_inc)
+        tango_enabled = compiler.has_header('tango_client_api.h',
+                                            args: '-I' + tango_sdk_inc)
+    endif
+
+    if tango_enabled
+        client_api_deps += tango_deps
+        client_api_defines += '-DUSE_TANGO=1'
+    else
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+        warning('☠                                                                           ☠')
+        warning('☠ Tango support not currently enabled. Use -Dtango_sdk=<path> to locate SDK ☠')
+        warning('☠                                                                           ☠')
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+    endif
 endif
 
 if support_unity
-shared_library('glimpse-unity-plugin',
-               [ 'src/glimpse_unity.cc' ] + client_api_src,
-               include_directories: inc,
-               dependencies: client_api_deps,
-               c_args: client_api_defines,
-               cpp_args: client_api_defines)
+    plugin_lib = shared_library('glimpse-unity-plugin',
+                                [ 'src/glimpse_unity.cc' ] + client_api_src,
+                                include_directories: inc,
+                                dependencies: client_api_deps,
+                                c_args: client_api_defines,
+                                cpp_args: client_api_defines)
+
+    plugin_install_deps = [ plugin_lib ]
+    if compiler.get_define('__ANDROID__') != ''
+        unity_java_src = [
+            'com/impossible/glimpse/GlimpseTest.java'
+        ]
+        android_sdk_jar = join_paths(android_sdk_home, 'platforms/android-23/android.jar')
+        unity_java_jar = jar('GlimpseTest',
+                             unity_java_src,
+                             java_args: [ '-classpath',  android_sdk_jar ])
+        plugin_install_deps += unity_java_jar
+    endif
 endif
 
 if not meson.is_cross_build()
@@ -276,16 +324,30 @@ endif
 endif # is_cross_build
 
 if support_unity
-if compiler.get_define('__ANDROID__') != ''
-    meson.add_install_script(
-        'install_unity_libs.py',
-        '--plugins-subdir', 'Android/libs/armeabi-v7a',
-        '--strip', meson.get_cross_property('_strip_binary'),
-        '--android-ndk-arch', meson.get_cross_property('_ndk_arch'))
-else
-    meson.add_install_script(
-        'install_unity_libs.py',
-        '--plugins-subdir', host_machine.cpu_family(),
-        '--strip', 'strip')
-endif
+    install_args = [
+        # XXX: MESONINTROSPECT env not available during run_target() commands
+        '--meson-introspect', introspect_cmd,
+        '--buildtype', get_option('buildtype'),
+        '--unity-project', join_paths(get_option('prefix'))
+    ]
+
+    if compiler.get_define('__ANDROID__') != ''
+        install_args += [
+            '--plugin-libdir', join_paths('Assets/Plugins/Android', 'libs',
+                                          meson.get_cross_property('_ndk_arch')),
+            '--plugin-jardir', join_paths('Assets/Plugins/Android'),
+            '--strip', meson.get_cross_property('_strip_binary'),
+            '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
+            '--tango-libs', get_option('android_3rdparty')
+        ]
+    else
+        install_args += [
+            '--plugins-subdir', host_machine.cpu_family(),
+            '--strip', 'strip'
+        ]
+    endif
+
+    run_target('install_plugin',
+               command: [ 'install_glimpse.py'] +  install_args,
+               depends: plugin_install_deps)
 endif
