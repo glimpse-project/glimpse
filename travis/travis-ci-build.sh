@@ -45,6 +45,6 @@ do
 done
 set -e
 
-ninja -v
+ninja
 
 deactivate
