@@ -146,8 +146,12 @@ gm_asset_open(struct gm_logger *log,
     case GM_ASSET_MODE_BUFFER:
         buf = (uint8_t *)mmap(NULL, sb.st_size,
                               PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
-        gm_throw(log, err, "Failed to mmap %s: %s",
-                 full_path, strerror(errno));
+        if (!buf) {
+            close(fd);
+            gm_throw(log, err, "Failed to mmap %s: %s",
+                     full_path, strerror(errno));
+            return NULL;
+        }
         break;
     }
 
