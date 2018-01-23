@@ -127,10 +127,6 @@ typedef struct _Data
 
     /* Once we've been notified that there's a device frame ready for us then
      * we store the latest frame from gm_device_get_latest_frame() here...
-     *
-     * NB: this frame is only valid to access up until the next call to
-     * gm_device_get_latest_frame() because the gm_device api is free to
-     * recycle the back buffers that are part of a frame.
      */
     struct gm_frame *device_frame;
 
@@ -977,9 +973,8 @@ on_khr_debug_message_cb(GLenum source,
     }
 }
 
-/* NB: it's undefined what thread this is called on and we are currently
- * assuming it's safe to call gm_device_request_frame() from any thread
- * considering that it just sets a bitmask and signals a condition variable.
+/* NB: it's undefined what thread this is called on so we queue events to
+ * be processed as part of the mainloop processing.
  */
 static void
 on_event_cb(struct gm_context *ctx,
