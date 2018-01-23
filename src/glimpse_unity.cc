@@ -62,6 +62,8 @@ struct event
 
 struct glimpse_data
 {
+    FILE *log_fp;
+
     struct gm_logger *log;
     struct gm_context *ctx;
     struct gm_device *device;
@@ -143,12 +145,56 @@ logger_cb(struct gm_logger *logger,
           va_list ap,
           void *user_data)
 {
+    struct glimpse_data *data = (struct glimpse_data *)user_data;
     char *msg = NULL;
 
     if (vasprintf(&msg, format, ap) > 0) {
         unity_log_function(level, context, msg);
+
+        if (data->log_fp) {
+            switch (level) {
+            case GM_LOG_ERROR:
+                fprintf(data->log_fp, "%s: ERROR: ", context);
+                break;
+            case GM_LOG_WARN:
+                fprintf(data->log_fp, "%s: WARN: ", context);
+                break;
+            default:
+                fprintf(data->log_fp, "%s: ", context);
+            }
+
+            fprintf(data->log_fp, "%s\n", msg);
+
+            if (backtrace) {
+                int line_len = 100;
+                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+                gm_logger_get_backtrace_strings(logger, backtrace,
+                                                line_len, (char *)formatted);
+                for (int i = 0; i < backtrace->n_frames; i++) {
+                    char *line = formatted + line_len * i;
+                    fprintf(data->log_fp, "> %s\n", line);
+                }
+            }
+        }
+
         free(msg);
     }
+}
+
+static void
+logger_abort_cb(struct gm_logger *logger,
+                void *user_data)
+{
+    struct glimpse_data *data = (struct glimpse_data *)user_data;
+
+    if (data->log_fp) {
+        fprintf(data->log_fp, "ABORT\n");
+        fflush(data->log_fp);
+        fclose(data->log_fp);
+    }
+
+    abort();
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -415,6 +461,7 @@ gm_unity_init(void)
     plugin_data = data;
 
     data->log = gm_logger_new(logger_cb, data);
+    gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
     gm_debug(data->log, "GLIMPSE: Init\n");
 
@@ -427,6 +474,9 @@ gm_unity_init(void)
 #define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
     setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
+    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
+#else
+    data->log_fp = fopen("glimpse.log", "w");
 #endif
 
     data->events_front = new std::vector<struct event>();
