@@ -289,7 +289,8 @@ device_buffer_free(struct gm_mem_pool *pool,
                    void *user_data)
 {
     //struct gm_device *dev = user_data
-    struct gm_buffer *buf = (struct gm_buffer *)resource;
+    struct gm_device_buffer *buf = (struct gm_device_buffer *)resource;
+    xfree(buf->base.data);
     xfree(buf);
 }
 
