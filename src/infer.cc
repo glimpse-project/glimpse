@@ -215,8 +215,8 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
 
   // Plan: For each scan-line, scan along and record clusters on 1 dimension.
   //       For each scanline segment, check to see if it intersects with any
-  //       segment on the previous scanline and if so, join the lists together.
-  //       Eventually we should have a list of lists of clusters, which we
+  //       segment on neighbouring scanlines, then join the lists together.
+  //       Finally, we should have a list of lists of clusters, which we
   //       can then calculate confidence for, then when we have the highest
   //       confidence for each label, we can project the points and calculate
   //       the center-point.
@@ -231,133 +231,106 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
     int32_t right;
   } ScanlineSegment;
 
-  // segments is a height x joints array of lists of ScanlineSegment
-  typedef std::forward_list<ScanlineSegment> SegmentList;
-  std::vector<std::vector<SegmentList>>
-    segments(n_joints, std::vector<SegmentList>(height));
-
-  // Collect clusters across scanlines
-  for (int32_t y = 0; y < height; y++)
-    {
-      for (int32_t x = 0; x < width; x++)
-        {
-          for (int32_t j = 0; j < n_joints; j++)
-            {
-              SegmentList &y_segments = segments[j][y];
-              float threshold = params[j].threshold;
-              for (int n = 0; n < map[j].n_labels; n++)
-                {
-                  uint8_t label = map[j].labels[n];
-                  float label_pr = pr_table[(y * width + x) * n_labels + label];
-                  if (label_pr >= threshold)
-                    {
-                      // Check to see if this pixel can be added to an existing
-                      // cluster.
-                      if (!y_segments.empty() &&
-                          y_segments.front().right == x - 1)
-                        {
-                          y_segments.front().right = x;
-                        }
-                      else
-                        {
-                          y_segments.push_front({ y, x, x });
-                        }
-                      break;
-                    }
-                }
-            }
-        }
-    }
-
-  // Add each separate scanline cluster to a list of clusters
   typedef std::forward_list<ScanlineSegment> Cluster;
   typedef std::move_iterator<Cluster::iterator> ClusterMoveIterator;
 
-  // clusters is a joints sized array of lists of Cluster
   std::list<Cluster> clusters[n_joints];
 
-  for (int j = 0; j < n_joints; j++)
+  // Collect clusters across scanlines
+  ScanlineSegment* last_segment[n_joints];
+  for (int32_t y = 0; y < height; ++y)
     {
-      for (std::vector<SegmentList>::iterator it = segments[j].begin();
-           it != segments[j].end(); ++it)
+      memset(last_segment, 0, sizeof(ScanlineSegment*) * n_joints);
+      for (int32_t x = 0; x < width; ++x)
         {
-          for (SegmentList::iterator s_it = (*it).begin();
-               s_it != (*it).end(); ++s_it)
+          for (int32_t j = 0; j < n_joints; ++j)
             {
-              clusters[j].emplace_front(Cluster());
-              clusters[j].front().emplace_front(std::move(*s_it));
+              bool threshold_passed = false;
+              for (int n = 0; n < map[j].n_labels; ++n)
+                {
+                  uint8_t label = map[j].labels[n];
+                  float label_pr = pr_table[(y * width + x) * n_labels + label];
+                  if (label_pr >= params[j].threshold)
+                    {
+                      threshold_passed = true;
+                      break;
+                    }
+                }
+
+              if (threshold_passed)
+                {
+                  // Check to see if this pixel can be added to an existing
+                  // cluster.
+                  if (last_segment[j] && last_segment[j]->right == x - 1)
+                    {
+                      last_segment[j]->right = x;
+                    }
+                  else
+                    {
+                      clusters[j].emplace_front();
+                      clusters[j].front().push_front({ y, x, x });
+                      last_segment[j] = &clusters[j].front().front();
+                    }
+                }
+              else
+                {
+                  last_segment[j] = nullptr;
+                }
             }
         }
     }
 
   // Now iteratively connect the scanline clusters
-  std::list<Cluster> complete_clusters[n_joints];
   for (int j = 0; j < n_joints; j++)
     {
-      bool changed = false;
-      do
+      for (std::list<Cluster>::iterator it = clusters[j].begin();
+           it != clusters[j].end(); ++it)
         {
-          changed = false;
-          for (std::list<Cluster>::iterator it = clusters[j].begin();
-               it != clusters[j].end();)
+          Cluster& parent = *it;
+          for (std::list<Cluster>::iterator it2 = clusters[j].begin();
+               it2 != clusters[j].end();)
             {
-              Cluster& parent = *it;
-              for (std::list<Cluster>::iterator it2 = clusters[j].begin();
-                   it2 != clusters[j].end();)
+              Cluster& candidate = *it2;
+              if (it == it2)
                 {
-                  Cluster& candidate = *it2;
-                  if (it == it2)
-                    {
-                      ++it2;
-                      continue;
-                    }
+                  ++it2;
+                  continue;
+                }
 
-                  // If this scanline segment connects to the cluster being
-                  // checked, remove it from the cluster list, add it to the
-                  // checked cluster and break out.
-                  bool local_change = false;
-                  for (Cluster::iterator p_it = parent.begin();
-                       p_it != parent.end() && !local_change; ++p_it)
+              // If this scanline segment connects to the cluster being
+              // checked, remove it from the cluster list, add it to the
+              // checked cluster and break out.
+              bool local_change = false;
+              for (Cluster::iterator p_it = parent.begin();
+                   p_it != parent.end() && !local_change; ++p_it)
+                {
+                  ScanlineSegment& p_segment = *p_it;
+                  for (Cluster::iterator c_it = candidate.begin();
+                       c_it != candidate.end(); ++c_it)
                     {
-                      ScanlineSegment& p_segment = *p_it;
-                      for (Cluster::iterator c_it = candidate.begin();
-                           c_it != candidate.end(); ++c_it)
+                      ScanlineSegment& c_segment = *c_it;
+                      // Check if these two scanline cluster segments touch
+                      if ((abs(c_segment.y - p_segment.y) == 1) &&
+                          (c_segment.left <= p_segment.right) &&
+                          (c_segment.right >= p_segment.left))
                         {
-                          ScanlineSegment& c_segment = *c_it;
-                          // Check if these two scanline cluster segments touch
-                          if ((abs(c_segment.y - p_segment.y) == 1) &&
-                              (c_segment.left <= p_segment.right) &&
-                              (c_segment.right >= p_segment.left))
-                            {
-                              parent.insert_after(
-                                  parent.before_begin(),
-                                  ClusterMoveIterator(candidate.begin()),
-                                  ClusterMoveIterator(candidate.end()));
-                              it2 = clusters[j].erase(it2);
-                              local_change = true;
-                              changed = true;
-                              break;
-                            }
+                          parent.insert_after(
+                              parent.before_begin(),
+                              ClusterMoveIterator(candidate.begin()),
+                              ClusterMoveIterator(candidate.end()));
+                          it2 = clusters[j].erase(it2);
+                          local_change = true;
+                          break;
                         }
                     }
-
-                  if (!local_change)
-                    {
-                      ++it2;
-                    }
                 }
 
-              if (changed)
+              if (!local_change)
                 {
-                  ++it;
-                }
-              else
-                {
-                  complete_clusters[j].emplace_front(std::move(*it));
-                  it = clusters[j].erase(it);
+                  ++it2;
                 }
             }
-        } while (changed);
+        }
     }
 
   // clusters now contains the boundaries per scanline segment of each cluster
@@ -383,8 +356,8 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
 
   for (int j = 0; j < n_joints; j++)
     {
-      for (std::list<Cluster>::iterator it = complete_clusters[j].begin();
-           it != complete_clusters[j].end(); ++it)
+      for (std::list<Cluster>::iterator it = clusters[j].begin();
+           it != clusters[j].end(); ++it)
         {
           Cluster& cluster = *it;
           Joint* joint = (Joint*)xmalloc(sizeof(Joint));
