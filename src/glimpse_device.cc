@@ -84,6 +84,8 @@ struct gm_device
 
     struct gm_logger *log;
 
+    bool running;
+
     union {
         struct {
             int frame;
@@ -587,15 +589,10 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
 static void
 kinect_close(struct gm_device *dev)
 {
-    freenect_stop_depth(dev->kinect.fdev);
-    freenect_stop_video(dev->kinect.fdev);
+    /* XXX: can assume the device has been stopped */
 
     freenect_close_device(dev->kinect.fdev);
     freenect_shutdown(dev->kinect.fctx);
-
-    mem_pool_free(dev->depth_buf_pool);
-    mem_pool_free(dev->video_buf_pool);
-    mem_pool_free(dev->frame_pool);
 }
 
 static void *
@@ -610,7 +607,9 @@ kinect_io_thread_cb(void *data)
     freenect_start_depth(dev->kinect.fdev);
     freenect_start_video(dev->kinect.fdev);
 
-    while (freenect_process_events(dev->kinect.fctx) >= 0) {
+    while (dev->running &&
+           freenect_process_events(dev->kinect.fctx) >= 0)
+    {
         if (state_check_throttle++ >= 2000) {
             freenect_raw_tilt_state* state;
             freenect_update_tilt_state(dev->kinect.fdev);
@@ -642,16 +641,44 @@ kinect_io_thread_cb(void *data)
         }
     }
 
+    freenect_stop_depth(dev->kinect.fdev);
+    freenect_stop_video(dev->kinect.fdev);
+
     return NULL;
 }
 
 static void
 kinect_start(struct gm_device *dev)
 {
+    /* Set running before starting thread, otherwise it would exit immediately */
+    dev->running = true;
     pthread_create(&dev->kinect.io_thread,
                    NULL, //attributes
                    kinect_io_thread_cb,
                    dev); //data
+    pthread_setname_np(dev->kinect.io_thread, "Kinect IO");
+}
+
+static void
+kinect_stop(struct gm_device *dev)
+{
+    void *retval = NULL;
+
+    /* After setting running = false we expect the thread to exit within a
+     * finite amount of time */
+    dev->running = false;
+
+    int ret = pthread_join(dev->kinect.io_thread, &retval);
+    if (ret < 0) {
+        gm_error(dev->log, "Failed to wait for Kinect IO thread to exit: %s",
+                 strerror(ret));
+        return;
+    }
+
+    if (retval != NULL) {
+        gm_error(dev->log, "Kinect IO thread exited with error: %d",
+                 (int)(intptr_t)retval);
+    }
 }
 #endif // USE_FREENECT
 
@@ -874,10 +901,36 @@ recording_start(struct gm_device *dev)
 {
     dev->dummy.frame = 0;
     dev->dummy.time = get_time();
+
+    /* Set running before starting thread, otherwise it would exit immediately */
+    dev->running = true;
     pthread_create(&dev->dummy.io_thread,
                    NULL,
                    dummy_io_thread_cb,
                    dev);
+    pthread_setname_np(dev->dummy.io_thread, "Recording IO");
+}
+
+static void
+recording_stop(struct gm_device *dev)
+{
+    void *retval = NULL;
+
+    /* After setting running = false we expect the thread to exit within a
+     * finite amount of time */
+    dev->running = false;
+
+    int ret = pthread_join(dev->dummy.io_thread, &retval);
+    if (ret < 0) {
+        gm_error(dev->log, "Failed to wait for recording IO thread to exit: %s",
+                 strerror(ret));
+        return;
+    }
+
+    if (retval != NULL) {
+        gm_error(dev->log, "Recording IO thread exited with error: %d",
+                 (int)(intptr_t)retval);
+    }
 }
 
 struct gm_device *
@@ -936,6 +989,9 @@ gm_device_open(struct gm_logger *log,
 void
 gm_device_close(struct gm_device *dev)
 {
+    if (dev->running)
+        gm_device_stop(dev);
+
     switch (dev->type) {
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
@@ -948,6 +1004,37 @@ gm_device_close(struct gm_device *dev)
         recording_close(dev);
         break;
     }
+
+    /* Make sure to release current back/ready buffers to their
+     * pools to avoid assertions when destroying the pools...
+     */
+
+    if (dev->last_frame) {
+        gm_frame_unref(dev->last_frame);
+        dev->last_frame = NULL;
+    }
+
+    if (dev->depth_buf_back) {
+        gm_buffer_unref(&dev->depth_buf_back->base);
+        dev->depth_buf_back = NULL;
+    }
+    if (dev->depth_buf_ready) {
+        gm_buffer_unref(&dev->depth_buf_ready->base);
+        dev->depth_buf_ready = NULL;
+    }
+
+    if (dev->video_buf_back) {
+        gm_buffer_unref(&dev->video_buf_back->base);
+        dev->video_buf_back = NULL;
+    }
+    if (dev->video_buf_ready) {
+        gm_buffer_unref(&dev->video_buf_ready->base);
+        dev->video_buf_ready = NULL;
+    }
+
+    mem_pool_free(dev->depth_buf_pool);
+    mem_pool_free(dev->video_buf_pool);
+    mem_pool_free(dev->frame_pool);
 
     delete dev;
 }
@@ -976,6 +1063,23 @@ gm_device_start(struct gm_device *dev)
         break;
     case GM_DEVICE_RECORDING:
         recording_start(dev);
+        break;
+    }
+}
+
+void
+gm_device_stop(struct gm_device *dev)
+{
+    switch (dev->type) {
+    case GM_DEVICE_KINECT:
+#ifdef USE_FREENECT
+        kinect_stop(dev);
+#else
+        gm_assert(dev->log, 0, "Kinect support not enabled");
+#endif
+        break;
+    case GM_DEVICE_RECORDING:
+        recording_stop(dev);
         break;
     }
 }

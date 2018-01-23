@@ -99,7 +99,7 @@ gm_device_set_event_callback(struct gm_device *dev,
 void gm_device_event_free(struct gm_device_event *event);
 
 void gm_device_start(struct gm_device *dev);
-// TODO add _stop() api also
+void gm_device_stop(struct gm_device *dev);
 
 void gm_device_close(struct gm_device *dev);
 
