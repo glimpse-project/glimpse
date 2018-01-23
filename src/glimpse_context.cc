@@ -230,6 +230,10 @@ struct gm_context
 {
     struct gm_logger *log;
 
+    /* E.g taken during the render hook to block the context from being destroyed */
+    pthread_mutex_t liveness_lock;
+    bool destroying;
+
     //struct gm_intrinsics color_camera_intrinsics;
     //struct gm_intrinsics rgbir_camera_intrinsics;
     struct gm_intrinsics depth_camera_intrinsics;
@@ -2239,6 +2243,10 @@ static void *
 detector_thread_cb(void *data)
 {
     struct gm_context *ctx = (struct gm_context *)data;
+    struct timespec five_ms_ts;
+
+    five_ms_ts.tv_sec = 0;
+    five_ms_ts.tv_nsec = 5000000;
 
     LOGE("DetectorRun");
 
@@ -2279,17 +2287,24 @@ detector_thread_cb(void *data)
         free(err);
     }
 
-    while(1) {
+    while (!ctx->destroying) {
         LOGI("Waiting for new frame to start tracking\n");
         pthread_mutex_lock(&ctx->frame_ready_mutex);
-        while (!ctx->frame_ready) {
-            pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
+        while (!ctx->frame_ready && !ctx->destroying) {
+            pthread_cond_timedwait(&ctx->frame_ready_cond,
+                                   &ctx->frame_ready_mutex,
+                                   &five_ms_ts);
         }
         if (ctx->frame_front)
             gm_frame_unref(ctx->frame_front);
         ctx->frame_front = ctx->frame_ready;
         ctx->frame_ready = NULL;
         pthread_mutex_unlock(&ctx->frame_ready_mutex);
+
+        if (ctx->destroying) {
+            gm_debug(ctx->log, "Stopping tracking after frame acquire (context being destroyed)");
+            break;
+        }
 
         struct gm_tracking_impl *tracking =
             mem_pool_acquire_tracking(ctx->tracking_pool);
@@ -2315,9 +2330,18 @@ detector_thread_cb(void *data)
         LOGI("Waiting for new scaled frame for face detection");
         pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
         ctx->need_new_scaled_frame = true;
-        while (ctx->need_new_scaled_frame)
-            pthread_cond_wait(&ctx->scaled_frame_available_cond, &ctx->scaled_frame_cond_mutex);
+        while (ctx->need_new_scaled_frame && !ctx->destroying) {
+            pthread_cond_timed_wait(&ctx->scaled_frame_available_cond,
+                                    &ctx->scaled_frame_cond_mutex,
+                                    &five_ms_ts);
+        }
         pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
+
+        if (ctx->destroying) {
+            gm_debug(ctx->log, "Stopping tracking after frame downsample (context being destroyed)");
+            gm_tracking_unref(tracking);
+            break;
+        }
 #endif
 
         start = get_time();
@@ -2339,25 +2363,43 @@ detector_thread_cb(void *data)
 
             for (int i = TRACK_FRAMES - 1; i > 0; i--)
                 std::swap(ctx->tracking_history[i], ctx->tracking_history[i - 1]);
-            if (ctx->tracking_history[0])
+            if (ctx->tracking_history[0]) {
+                gm_debug(ctx->log, "pushing %p out of tracking history fifo (ref = %d)\n",
+                         ctx->tracking_history[0],
+                         ctx->tracking_history[0]->base.ref);
                 gm_tracking_unref(&ctx->tracking_history[0]->base);
+            }
             ctx->tracking_history[0] = tracking;
+
+            gm_debug(ctx->log, "adding %p to tracking history fifo (ref = %d)\n",
+                     ctx->tracking_history[0],
+                     ctx->tracking_history[0]->base.ref);
 
             if (ctx->n_tracking < TRACK_FRAMES)
                 ctx->n_tracking++;
 
+            gm_debug(ctx->log, "tracking history len = %d:", ctx->n_tracking);
+            for (int i = 0; i < ctx->n_tracking; i++) {
+                gm_debug(ctx->log, "%d) %p (ref = %d)", i,
+                         ctx->tracking_history[i],
+                         ctx->tracking_history[i]->base.ref);
+            }
+
             pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
             notify_tracking(ctx);
-        } else
+        } else {
             gm_tracking_unref(&tracking->base);
+
+            gm_debug(ctx->log, "discarding tracking %p after nothing found (ref = %d)\n",
+                     tracking,
+                     tracking->base.ref);
+        }
 
         LOGI("Requesting new frame for skeletal tracking");
         /* We throttle frame acquisition according to our tracking rate... */
         request_frame(ctx);
     }
-
-    pthread_exit((void *)1);
 
     return NULL;
 }
@@ -2467,11 +2509,85 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 void
 gm_context_destroy(struct gm_context *ctx)
 {
+    /* XXX: The context may be accessed asynchronously in the following ways:
+     *
+     *  1) The tracking thread
+     *  2) The render thread hook
+     *  3) Various thread safe getter or notify entry-points
+     *
+     * We created/own the tracking thread and so we have to stop this thread
+     * anyway after which we don't have to worry about it accessing ctx state.
+     *
+     * The render thread hook will take the liveness_lock and assert
+     * ctx->destroying == false before accessing the ctx state, so assuming the
+     * render hook always completes in a finite time we can simply wait until
+     * we've acquired this lock before starting to destroy the context. Note:
+     * the hook can use an assertion to check ctx->destroying because it's the
+     * callers responsibility to ensure that the render hook doesn't continue
+     * to be called with a context pointer that's about to become invalid. I.e.
+     * We're only concerned about render hooks that are already running when
+     * gm_context_destroy() is called.
+     *
+     * Any other thread-safe entry-points should take the liveness_lock and
+     * assert ctx->destroying == false. We should expect that the caller has
+     * ensured that these functions will no longer be called because the caller
+     * knows that the context pointer is about to become invalid, but should
+     * also scatter some assertions to try and catch spurious notifications
+     * during destruction.
+     */
+
+    pthread_mutex_lock(&ctx->liveness_lock);
+
+    /* The tracking thread checks for this, such that we can now expect it to
+     * exit within a finite amount of time.
+     */
+    ctx->destroying = true;
+
+    /* Note: we intentionally don't keep this lock for the duration of
+     * destruction because the assumption is that we only need to wait for
+     * the render hook or other entrypoints that were already running to
+     * finish the caller should otherwise ensure no further calls are made.
+     * Dropping the lock asap increases the chance of our debug assertions
+     * recognising any mistake made.
+     */
+    pthread_mutex_unlock(&ctx->liveness_lock);
+
+    void *tracking_retval = NULL;
+    int ret = pthread_join(ctx->detect_thread, &tracking_retval);
+    if (ret < 0) {
+        gm_error(ctx->log, "Failed waiting for tracking thread to complete: %s",
+                 strerror(ret));
+    }
+
+    if (tracking_retval != 0) {
+        gm_error(ctx->log, "Tracking thread exited with value = %d",
+                 (int)(intptr_t)tracking_retval);
+    }
+
+    /* Make sure all resourced are returned to their pools before destroying
+     * the pools which will in-turn destroy the resources...
+     */
     for (int i = 0; i < ctx->n_tracking; i++)
         gm_tracking_unref(&ctx->tracking_history[i]->base);
     mem_pool_free(ctx->tracking_pool);
 
+    /* Only taking the mutex for the sake of a debug assertion within
+     * gm_context_notify_frame() (to double check that we don't see any
+     * notifications during destruction)...
+     */
+    pthread_mutex_lock(&ctx->frame_ready_mutex);
+    if (ctx->frame_ready) {
+        gm_frame_unref(ctx->frame_ready);
+        ctx->frame_ready = NULL;
+    }
+    if (ctx->frame_front) {
+        gm_frame_unref(ctx->frame_front);
+        ctx->frame_front = NULL;
+    }
+    pthread_mutex_unlock(&ctx->frame_ready_mutex);
+
     free(ctx->depth_color_stops);
+    free(ctx->heat_color_stops);
 
     for (int i = 0; i < ctx->n_decision_trees; i++)
         free_tree(ctx->decision_trees[i]);
@@ -2600,6 +2716,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_context_destroy(ctx);
         return NULL;
     }
+    pthread_setname_np(ctx->detect_thread, "Glimpse Track");
 
     int labels_width = 172;
     int labels_height = 224;
@@ -3043,12 +3160,20 @@ gm_context_notify_frame(struct gm_context *ctx,
     if (frame->depth == NULL || frame->video == NULL)
         return false;
 
+    pthread_mutex_lock(&ctx->liveness_lock);
+
+    gm_assert(ctx->log, !ctx->destroying,
+              "Spurious notification during tracking context destruction");
+
     pthread_mutex_lock(&ctx->frame_ready_mutex);
+    gm_assert(ctx->log, !ctx->destroying, "Spurious frame notification during destruction");
     if (ctx->frame_ready)
         gm_frame_unref(ctx->frame_ready);
     ctx->frame_ready = gm_frame_ref(frame);
     pthread_cond_signal(&ctx->frame_ready_cond);
     pthread_mutex_unlock(&ctx->frame_ready_mutex);
+
+    pthread_mutex_unlock(&ctx->liveness_lock);
 
     return true;
 }
@@ -3059,8 +3184,13 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     struct gm_tracking *tracking = NULL;
 
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
-    if (ctx->tracking_history[0])
+    if (ctx->tracking_history[0]) {
         tracking = gm_tracking_ref(&ctx->tracking_history[0]->base);
+
+        gm_debug(ctx->log, "get_latest_tracking = %p (ref = %d)\n",
+                 ctx->tracking_history[0],
+                 ctx->tracking_history[0]->base.ref);
+    }
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
     return tracking;
@@ -3069,12 +3199,19 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
 void
 gm_context_render_thread_hook(struct gm_context *ctx)
 {
+    pthread_mutex_lock(&ctx->liveness_lock);
+
+    gm_assert(ctx->log, !ctx->destroying,
+              "Spurious render thread hook during tracking context destruction");
+
     /*
      * FIXME: clean all this stuff up...
      */
 
-    if (!ctx->need_new_scaled_frame)
+    if (!ctx->need_new_scaled_frame) {
+        pthread_mutex_unlock(&ctx->liveness_lock);
         return;
+    }
 
     /* FIXME: how can we query the info (namely the downsampling rate) at
      * runtime from the ctx->detector.scanner.pyramid_type, instead of hard
@@ -3522,6 +3659,8 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
     ctx->need_new_scaled_frame = false;
     pthread_cond_signal(&ctx->scaled_frame_available_cond);
+
+    pthread_mutex_unlock(&ctx->liveness_lock);
 }
 
 struct gm_ui_properties *

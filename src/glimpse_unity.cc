@@ -319,7 +319,12 @@ handle_context_tracking_updates(struct glimpse_data *data)
         return;
 
     data->tracking_ready = false;
-    data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
+
+    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
+    if (data->latest_tracking)
+        gm_tracking_unref(data->latest_tracking);
+    data->latest_tracking = tracking;
+
     assert(data->latest_tracking);
 
     //upload_tracking_textures(data);
@@ -414,9 +419,9 @@ gm_unity_get_render_event_callback(void)
     return on_render_event_cb;
 }
 
-/* NB: it's undefined what thread this is called on and we are currently
- * assuming it's safe to call gm_device_request_frame() from any thread
- * considering that it just sets a bitmask and signals a condition variable.
+/* NB: it's undefined what thread this is called on so we queue events to
+ * be processed by gm_unity_process_events() during the GlimpseRuntime
+ * script's Update().
  */
 static void
 on_event_cb(struct gm_context *ctx,
@@ -539,8 +544,12 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    gm_debug(data->log, "GLIMPSE: Tracking Unref");
-    gm_tracking_unref((struct gm_tracking *)tracking_handle);
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+
+    gm_debug(data->log, "GLIMPSE: Tracking Unref %p (ref = %d)",
+             tracking,
+             tracking->ref);
+    gm_tracking_unref(tracking);
 }
 
 static glm::mat4
@@ -600,8 +609,52 @@ gm_unity_terminate(void)
     struct glimpse_data *data = plugin_data;
 
     gm_debug(data->log, "GLIMPSE: Terminate\n");
+
+    /* Destroying the context' tracking pool will assert that all tracking
+     * resources have been released first...
+     */
+    if (data->latest_tracking)
+        gm_tracking_unref(data->latest_tracking);
+
+    /* NB: It's our responsibility to be sure that there can be no asynchonous
+     * calls into the gm_context api before we start to destroy it!
+     *
+     * We stop the device first because device callbacks result in calls
+     * through to the gm_context api.
+     *
+     * We don't destroy the device first because destroying the context will
+     * release device resources (which need to be release before the device
+     * can be cleanly closed).
+     */
+    gm_device_stop(data->device);
+
+    for (unsigned i = 0; i < data->events_back->size(); i++) {
+        struct event event = (*data->events_back)[i];
+
+        switch (event.type) {
+        case EVENT_DEVICE:
+            gm_device_event_free(event.device_event);
+            break;
+        case EVENT_CONTEXT:
+            gm_context_event_free(event.context_event);
+            break;
+        }
+    }
+
     gm_context_destroy(data->ctx);
+
+    if (data->device_frame)
+        gm_frame_unref(data->device_frame);
+
     gm_device_close(data->device);
+
+    gm_debug(data->log, "Destroying logger");
+    gm_logger_destroy(data->log);
+    fclose(data->log_fp);
+    unity_log_function = NULL;
+
+    delete plugin_data;
+    plugin_data = NULL;
 }
 
 extern "C" void	UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API

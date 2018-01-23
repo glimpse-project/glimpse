@@ -1437,14 +1437,52 @@ main(int argc, char **argv)
 
     event_loop(&data);
 
+    /* Destroying the context' tracking pool will assert that all tracking
+     * resources have been released first...
+     */
+    if (data.latest_tracking)
+        gm_tracking_unref(data.latest_tracking);
+
+    /* NB: It's our responsibility to be sure that there can be no asynchonous
+     * calls into the gm_context api before we start to destroy it!
+     *
+     * We stop the device first because device callbacks result in calls
+     * through to the gm_context api.
+     *
+     * We don't destroy the device first because destroying the context will
+     * release device resources (which need to be release before the device
+     * can be cleanly closed).
+     */
+    gm_device_stop(data.device);
+
+    for (unsigned i = 0; i < data.events_back->size(); i++) {
+        struct event event = (*data.events_back)[i];
+
+        switch (event.type) {
+        case EVENT_DEVICE:
+            gm_device_event_free(event.device_event);
+            break;
+        case EVENT_CONTEXT:
+            gm_context_event_free(event.context_event);
+            break;
+        }
+    }
+
     gm_context_destroy(data.ctx);
+
+    if (data.device_frame)
+        gm_frame_unref(data.device_frame);
+
+    gm_device_close(data.device);
 
     ProfileShutdown();
     ImGui_ImplGlfwGLES3_Shutdown();
     glfwDestroyWindow(data.window);
     glfwTerminate();
 
-    gm_device_close(data.device);
+    json_value_free(data.joint_map);
+
+    gm_logger_destroy(data.log);
 
     delete data.events_front;
     delete data.events_back;
