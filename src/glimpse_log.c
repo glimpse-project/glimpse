@@ -48,6 +48,10 @@ struct gm_logger {
                      void *user_data);
     void *callback_data;
 
+    void (*abort_cb)(struct gm_logger *logger,
+                     void *user_data);
+    void *abort_cb_data;
+
     int backtrace_level;
     int backtrace_size;
 };
@@ -87,6 +91,25 @@ gm_logger_set_backtrace_size(struct gm_logger *logger,
                              int size)
 {
     logger->backtrace_size = size;
+}
+
+void
+gm_logger_set_abort_callback(struct gm_logger *logger,
+                             void (*log_abort_cb)(struct gm_logger *logger,
+                                                  void *user_data),
+                             void *user_data)
+{
+    logger->abort_cb = log_abort_cb;
+    logger->abort_cb_data = user_data;
+}
+
+void __attribute((noreturn))
+gm_logger_abort(struct gm_logger *logger)
+{
+    if (logger->abort_cb)
+        logger->abort_cb(logger, logger->abort_cb_data);
+
+    abort();
 }
 
 void

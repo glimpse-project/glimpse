@@ -103,6 +103,15 @@ gm_logger_get_backtrace_strings(struct gm_logger *logger,
                                 char *frame_strings);
 
 void
+gm_logger_set_abort_callback(struct gm_logger *logger,
+                             void (*log_abort_cb)(struct gm_logger *logger,
+                                                  void *user_data),
+                             void *user_data);
+
+void __attribute((noreturn))
+gm_logger_abort(struct gm_logger *logger);
+
+void
 gm_logger_destroy(struct gm_logger *logger);
 
 void
@@ -144,7 +153,7 @@ gm_log(struct gm_logger *logger,
 #define gm_assert(logger, condition, args...) do { \
     if (!__builtin_expect((condition), 1)) { \
         gm_log(logger, GM_LOG_ASSERT, GM_LOG_CONTEXT, args); \
-        abort(); \
+        gm_logger_abort(logger); \
     } \
 } while(0)
 
