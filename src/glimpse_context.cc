@@ -2308,7 +2308,7 @@ detector_thread_cb(void *data)
                               (uint8_t *)frame->video->data,
                               frame->timestamp);
 
-        /* While downsampling on the CPU we currently do that synchronosuly
+        /* While downsampling on the CPU we currently do that synchronously
          * when we are notified of a new frame.
          */
 #ifdef DOWNSAMPLE_ON_GPU
@@ -2353,7 +2353,7 @@ detector_thread_cb(void *data)
             gm_tracking_unref(&tracking->base);
 
         LOGI("Requesting new frame for skeletal tracking");
-        /* We throttle frame aquisition according to our tracking rate... */
+        /* We throttle frame acquisition according to our tracking rate... */
         request_frame(ctx);
     }
 
