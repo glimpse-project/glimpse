@@ -77,7 +77,7 @@ mem_pool_free(struct gm_mem_pool *pool)
 {
     mem_pool_free_resources(pool);
     free(pool->name);
-    free(pool);
+    delete pool;
 }
 
 void *
