@@ -176,7 +176,8 @@ main(int argc, char **argv)
     {
       return 1;
     }
-  float* output_pr = infer_labels(forest, n_trees, depth_image, width, height);
+  float* output_pr = infer_labels<half>(forest, n_trees, depth_image,
+                                        width, height);
   uint8_t n_labels = forest[0]->header.n_labels;
   free_forest(forest, n_trees);
 

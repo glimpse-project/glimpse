@@ -44,8 +44,9 @@ typedef struct {
   uint32_t i;
 } Int3D;
 
+template<typename FloatT>
 inline float
-sample_uv(half_float::half* depth_image, uint32_t width, uint32_t height,
+sample_uv(FloatT* depth_image, uint32_t width, uint32_t height,
           Int2D pixel, float depth, UVPair uv)
 {
 #if 0

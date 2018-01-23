@@ -58,8 +58,9 @@ typedef struct {
 } JointMapEntry;
 
 
+template<typename FloatT>
 float*
-infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
+infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
              uint32_t width, uint32_t height, float* out_labels)
 {
   uint8_t n_labels = forest[0]->header.n_labels;
@@ -76,7 +77,7 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
         {
           float* out_pr_table = &output_pr[(y * width * n_labels) +
                                            (x * n_labels)];
-          float depth_value = depth_image[y * width + x];
+          float depth_value = (float)depth_image[y * width + x];
 
           // TODO: Provide a configurable threshold here?
           if (depth_value >= HUGE_DEPTH)
@@ -94,8 +95,8 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
               uint32_t id = 0;
               while (node->label_pr_idx == 0)
                 {
-                  float value = sample_uv(depth_image, width, height, pixel,
-                                          depth_value, node->uv);
+                  float value = sample_uv<FloatT>(depth_image, width, height,
+                                                  pixel, depth_value, node->uv);
 
                   /* NB: The nodes are arranged in breadth-first, left then
                    * right child order with the root node at index zero.
@@ -130,12 +131,17 @@ infer_labels(RDTree** forest, uint8_t n_trees, half* depth_image,
   return output_pr;
 }
 
+template float*
+infer_labels<half>(RDTree**, uint8_t, half*, uint32_t, uint32_t, float*);
+template float*
+infer_labels<float>(RDTree**, uint8_t, float*, uint32_t, uint32_t, float*);
+
 /* We don't want to be making lots of function calls or dereferencing
  * lots of pointers while accessing the joint map within inner loops
  * so this lets us temporarily unpack the label mappings into a
  * tight array of JointMapEntries.
  */
-static void
+static inline void
 unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
 {
   for (int i = 0; i < n_joints; i++)
@@ -158,8 +164,9 @@ unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
     }
 }
 
+template<typename FloatT>
 float*
-calc_pixel_weights(half* depth_image, float* pr_table,
+calc_pixel_weights(FloatT* depth_image, float* pr_table,
                    int32_t width, int32_t height, uint8_t n_labels,
                    JSON_Value* joint_map, float* weights)
 {
@@ -177,7 +184,7 @@ calc_pixel_weights(half* depth_image, float* pr_table,
     {
       for (int32_t x = 0; x < width; x++, pixel_idx++)
         {
-          float depth = depth_image[pixel_idx];
+          float depth = (float)depth_image[pixel_idx];
           float depth_2 = depth * depth;
 
           for (uint8_t j = 0; j < n_joints; j++, weight_idx++)
@@ -196,6 +203,13 @@ calc_pixel_weights(half* depth_image, float* pr_table,
   return weights;
 }
 
+template float*
+calc_pixel_weights<half>(half*, float*, int32_t, int32_t, uint8_t,
+                         JSON_Value*, float*);
+template float*
+calc_pixel_weights<float>(float*, float*, int32_t, int32_t, uint8_t,
+                          JSON_Value*, float*);
+
 static int
 compare_joints(LList* a, LList* b, void* userdata)
 {
@@ -204,8 +218,9 @@ compare_joints(LList* a, LList* b, void* userdata)
   return ja->confidence - jb->confidence;
 }
 
+template<typename FloatT>
 InferredJoints*
-infer_joints_fast(half* depth_image, float* pr_table, float* weights,
+infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
                   int32_t width, int32_t height, uint8_t n_labels,
                   JSON_Value* joint_map, float vfov, JIParam* params)
 {
@@ -232,9 +247,9 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
   } ScanlineSegment;
 
   typedef std::forward_list<ScanlineSegment> Cluster;
-  typedef std::move_iterator<Cluster::iterator> ClusterMoveIterator;
+  typedef std::move_iterator<typename Cluster::iterator> ClusterMoveIterator;
 
-  std::list<Cluster> clusters[n_joints];
+  typename std::list<Cluster> clusters[n_joints];
 
   // Collect clusters across scanlines
   ScanlineSegment* last_segment[n_joints];
@@ -283,11 +298,11 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
   // Now iteratively connect the scanline clusters
   for (int j = 0; j < n_joints; j++)
     {
-      for (std::list<Cluster>::iterator it = clusters[j].begin();
+      for (typename std::list<Cluster>::iterator it = clusters[j].begin();
            it != clusters[j].end(); ++it)
         {
           Cluster& parent = *it;
-          for (std::list<Cluster>::iterator it2 = clusters[j].begin();
+          for (typename std::list<Cluster>::iterator it2 = clusters[j].begin();
                it2 != clusters[j].end();)
             {
               Cluster& candidate = *it2;
@@ -301,11 +316,11 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
               // checked, remove it from the cluster list, add it to the
               // checked cluster and break out.
               bool local_change = false;
-              for (Cluster::iterator p_it = parent.begin();
+              for (typename Cluster::iterator p_it = parent.begin();
                    p_it != parent.end() && !local_change; ++p_it)
                 {
                   ScanlineSegment& p_segment = *p_it;
-                  for (Cluster::iterator c_it = candidate.begin();
+                  for (typename Cluster::iterator c_it = candidate.begin();
                        c_it != candidate.end(); ++c_it)
                     {
                       ScanlineSegment& c_segment = *c_it;
@@ -356,8 +371,8 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
 
   for (int j = 0; j < n_joints; j++)
     {
-      for (std::list<Cluster>::iterator it = clusters[j].begin();
-           it != clusters[j].end(); ++it)
+      for (typename std::list<Cluster>::iterator it =
+           clusters[j].begin(); it != clusters[j].end(); ++it)
         {
           Cluster& cluster = *it;
           Joint* joint = (Joint*)xmalloc(sizeof(Joint));
@@ -366,7 +381,7 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
           int n_points = 0;
           int x = 0;
           int y = 0;
-          for (Cluster::iterator s_it = cluster.begin();
+          for (typename Cluster::iterator s_it = cluster.begin();
                s_it != cluster.end(); ++s_it)
             {
               ScanlineSegment& segment = *s_it;
@@ -390,7 +405,7 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
 
           // Calculate the confidence of the cluster
           joint->confidence = 0.f;
-          for (Cluster::iterator s_it = cluster.begin();
+          for (typename Cluster::iterator s_it = cluster.begin();
                s_it != cluster.end(); ++s_it)
             {
               ScanlineSegment& segment = *s_it;
@@ -412,8 +427,17 @@ infer_joints_fast(half* depth_image, float* pr_table, float* weights,
   return result;
 }
 
+template InferredJoints*
+infer_joints_fast<half>(half*, float*, float*, int32_t, int32_t, uint8_t,
+                        JSON_Value*, float, JIParam*);
+
+template InferredJoints*
+infer_joints_fast<float>(float*, float*, float*, int32_t, int32_t, uint8_t,
+                         JSON_Value*, float, JIParam*);
+
+template<typename FloatT>
 InferredJoints*
-infer_joints(half* depth_image, float* pr_table, float* weights,
+infer_joints(FloatT* depth_image, float* pr_table, float* weights,
              int32_t width, int32_t height,
              uint8_t n_labels, JSON_Value* joint_map,
              float vfov, JIParam* params)
@@ -596,6 +620,14 @@ infer_joints(half* depth_image, float* pr_table, float* weights,
   return result;
 }
 
+template InferredJoints*
+infer_joints<half>(half*, float*, float*, int32_t, int32_t, uint8_t,
+                   JSON_Value*, float, JIParam*);
+
+template InferredJoints*
+infer_joints<float>(float*, float*, float*, int32_t, int32_t, uint8_t,
+                    JSON_Value*, float, JIParam*);
+
 void
 free_joints(InferredJoints* joints)
 {
@@ -607,8 +639,9 @@ free_joints(InferredJoints* joints)
   xfree(joints);
 }
 
+template<typename FloatT>
 float*
-reproject(half* depth_image, int32_t width, int32_t height,
+reproject(FloatT* depth_image, int32_t width, int32_t height,
           float vfov, float threshold, uint32_t* n_points, float* out_cloud)
 {
   float half_width = width / 2.f;
@@ -660,9 +693,16 @@ reproject(half* depth_image, int32_t width, int32_t height,
   return point_cloud;
 }
 
-half*
+template float*
+reproject<half>(half*, int32_t, int32_t, float, float, uint32_t*, float*);
+
+template float*
+reproject<float>(float*, int32_t, int32_t, float, float, uint32_t*, float*);
+
+template<typename FloatT>
+FloatT*
 project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
-        float vfov, float background, half* out_depth)
+        float vfov, float background, FloatT* out_depth)
 {
   float half_width = width / 2.f;
   float half_height = height / 2.f;
@@ -672,9 +712,9 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
   float tan_half_vfov = tanf(vfov_rad / 2.f);
   float tan_half_hfov = tan_half_vfov * aspect;
 
-  half* depth_image = out_depth ? out_depth :
-    (half*)xmalloc(width * height * sizeof(half));
-  half bg_half = (half)background;
+  FloatT* depth_image = out_depth ? out_depth :
+    (FloatT*)xmalloc(width * height * sizeof(FloatT));
+  FloatT bg_half = (FloatT)background;
   for (int32_t i = 0; i < width * height; i++)
     {
       depth_image[i] = bg_half;
@@ -702,8 +742,14 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
       int32_t col = x;
       int32_t row = y;
 
-      depth_image[row * width + col] = (half)point[2];
+      depth_image[row * width + col] = (FloatT)point[2];
     }
 
   return depth_image;
 }
+
+template half*
+project<half>(float*, uint32_t, int32_t, int32_t, float, float, half*);
+
+template float*
+project<float>(float*, uint32_t, int32_t, int32_t, float, float, float*);

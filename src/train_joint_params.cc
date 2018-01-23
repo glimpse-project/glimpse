@@ -161,16 +161,16 @@ thread_body(void* userdata)
   for (uint32_t i = i_start, idx = ctx->width * ctx->height * i_start;
        i < i_end; i++, idx += ctx->width * ctx->height)
     {
-      ctx->inferred[i] = infer_labels(ctx->forest, ctx->n_trees,
-                               &ctx->depth_images[idx],
-                               ctx->width, ctx->height);
+      ctx->inferred[i] = infer_labels<half>(ctx->forest, ctx->n_trees,
+                                            &ctx->depth_images[idx],
+                                            ctx->width, ctx->height);
 
       // Calculate pixel weight
       uint32_t weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
-      calc_pixel_weights(&ctx->depth_images[idx], ctx->inferred[i],
-                         ctx->width, ctx->height, n_labels,
-                         ctx->joint_map,
-                         &ctx->weights[weight_idx]);
+      calc_pixel_weights<half>(&ctx->depth_images[idx], ctx->inferred[i],
+                               ctx->width, ctx->height, n_labels,
+                               ctx->joint_map,
+                               &ctx->weights[weight_idx]);
 
       // Calculate inference accuracy if label images were specified
       if (ctx->check_accuracy)
@@ -291,11 +291,11 @@ thread_body(void* userdata)
 
           // Get joint positions
           InferredJoints* result =
-            infer_joints(depth_image, pr_table, weights,
-                         ctx->width, ctx->height, n_labels,
-                         ctx->joint_map,
-                         ctx->forest[0]->header.fov,
-                         params);
+            infer_joints<half>(depth_image, pr_table, weights,
+                               ctx->width, ctx->height, n_labels,
+                               ctx->joint_map,
+                               ctx->forest[0]->header.fov,
+                               params);
 
           // Calculate distance from expected joint position and accumulate
           for (uint8_t j = 0; j < ctx->n_joints; j++)

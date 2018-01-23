@@ -988,7 +988,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
     }
     if (op == DEPTH_INTO_BUFFER) {
         foreach_xy_off(width, height) {
-            ((half*)buffer)[off] = HUGE_DEPTH;
+            ((float*)buffer)[off] = HUGE_DEPTH;
         }
     }
 
@@ -1054,7 +1054,7 @@ reproject_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
         }
 
         case DEPTH_INTO_BUFFER:
-            ((half*)buffer)[off] = (half)point_t.z;
+            ((float*)buffer)[off] = (float)point_t.z;
             break;
 
         case RGB_MIXIN_COPY:
@@ -1761,10 +1761,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
         return false;
     }
 
-    std::vector<half*> depth_images;
+    std::vector<float*> depth_images;
     for (std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>::iterator it =
          person_clouds.begin(); it != person_clouds.end(); ++it) {
-        half *depth_img = (half *)xmalloc(width * height * sizeof(half));
+        float *depth_img = (float *)xmalloc(width * height * sizeof(float));
         reproject_cloud(*it, (void *)depth_img,
                         &ctx->training_camera_intrinsics,
                         NULL, DEPTH_INTO_BUFFER);
@@ -1786,16 +1786,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
     float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
                                          sizeof(float));
     InferredJoints *result = nullptr;
-    for (std::vector<half*>::iterator it = depth_images.begin();
+    for (std::vector<float*>::iterator it = depth_images.begin();
          it != depth_images.end(); ++it) {
         start = get_time();
-        half *depth_img = *it;
-        infer_labels(ctx->decision_trees,
-                     ctx->n_decision_trees,
-                     depth_img,
-                     width,
-                     height,
-                     label_probs);
+        float *depth_img = *it;
+        infer_labels<float>(ctx->decision_trees, ctx->n_decision_trees,
+                            depth_img, width, height, label_probs);
         end = get_time();
         duration = end - start;
         LOGI("Label probability (%d trees, %dx%d) inference took %.3f%s\n",
@@ -1804,12 +1800,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration));
 
         start = get_time();
-        calc_pixel_weights(depth_img,
-                           label_probs,
-                           width, height,
-                           ctx->n_labels,
-                           ctx->joint_map,
-                           weights);
+        calc_pixel_weights<float>(depth_img, label_probs, width, height,
+                                  ctx->n_labels, ctx->joint_map, weights);
         end = get_time();
         duration = end - start;
         LOGI("Calculating pixel weights took %.3f%s\n",
@@ -1818,14 +1810,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         start = get_time();
         InferredJoints *candidate =
-            infer_joints_fast(depth_img,
-                              label_probs,
-                              weights,
-                              width, height,
-                              ctx->n_labels,
-                              ctx->joint_map,
-                              vfov,
-                              ctx->joint_params->joint_params);
+            infer_joints_fast<float>(depth_img, label_probs, weights,
+                                     width, height, ctx->n_labels,
+                                     ctx->joint_map,
+                                     vfov, ctx->joint_params->joint_params);
         xfree(depth_img);
 
         end = get_time();

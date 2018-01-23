@@ -26,7 +26,6 @@
 
 #include <stdint.h>
 
-#include "half.hpp"
 #include "loader.h"
 #include "llist.h"
 #include "parson.h"
@@ -45,14 +44,16 @@ typedef struct {
   LList** joints;
 } InferredJoints;
 
+template<typename FloatT>
 float* infer_labels(RDTree** forest,
                     uint8_t n_trees,
-                    half_float::half* depth_image,
+                    FloatT* depth_image,
                     uint32_t width,
                     uint32_t height,
                     float* out_labels = NULL);
 
-float* calc_pixel_weights(half_float::half* depth_image,
+template<typename FloatT>
+float* calc_pixel_weights(FloatT* depth_image,
                           float* pr_table,
                           int32_t width,
                           int32_t height,
@@ -60,7 +61,8 @@ float* calc_pixel_weights(half_float::half* depth_image,
                           JSON_Value* joint_map,
                           float* out_weights = NULL);
 
-InferredJoints* infer_joints_fast(half_float::half* depth_image,
+template<typename FloatT>
+InferredJoints* infer_joints_fast(FloatT* depth_image,
                                   float* pr_table,
                                   float* weights,
                                   int32_t width,
@@ -70,7 +72,8 @@ InferredJoints* infer_joints_fast(half_float::half* depth_image,
                                   float vfov,
                                   JIParam* params);
 
-InferredJoints* infer_joints(half_float::half* depth_image,
+template<typename FloatT>
+InferredJoints* infer_joints(FloatT* depth_image,
                              float* pr_table,
                              float* weights,
                              int32_t width,
@@ -82,7 +85,8 @@ InferredJoints* infer_joints(half_float::half* depth_image,
 
 void free_joints(InferredJoints* joints);
 
-float* reproject(half_float::half* depth_image,
+template<typename FloatT>
+float* reproject(FloatT* depth_image,
                  int32_t width,
                  int32_t height,
                  float vfov,
@@ -90,10 +94,12 @@ float* reproject(half_float::half* depth_image,
                  uint32_t* n_points,
                  float* out_points = NULL);
 
-half_float::half* project(float* point_cloud,
-                          uint32_t n_points,
-                          int32_t width,
-                          int32_t height,
-                          float vfov,
-                          float background = 0.f,
-                          half_float::half* out_depth = NULL);
+template<typename FloatT>
+FloatT* project(float* point_cloud,
+                uint32_t n_points,
+                int32_t width,
+                int32_t height,
+                float vfov,
+                float background = 0.f,
+                FloatT* out_depth = NULL);
+
