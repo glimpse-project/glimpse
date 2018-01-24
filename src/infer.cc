@@ -377,18 +377,21 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
           Cluster& cluster = *it;
           Joint* joint = (Joint*)xmalloc(sizeof(Joint));
 
-          // Calculate the center-point of the cluster
+          // Calculate the center-point and confidence of the cluster
           int n_points = 0;
           int x = 0;
           int y = 0;
+          joint->confidence = 0.f;
           for (typename Cluster::iterator s_it = cluster.begin();
                s_it != cluster.end(); ++s_it)
             {
               ScanlineSegment& segment = *s_it;
+              int idx = segment.y * width;
               for (int i = segment.left; i <= segment.right; i++, n_points++)
                 {
                   x += i;
                   y += segment.y;
+                  joint->confidence += weights[(idx + i) * n_joints + j];
                 }
             }
 
@@ -402,19 +405,6 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
           joint->x = (tan_half_hfov * depth) * s;
           joint->y = (tan_half_vfov * depth) * t;
           joint->z = depth + params[j].offset;
-
-          // Calculate the confidence of the cluster
-          joint->confidence = 0.f;
-          for (typename Cluster::iterator s_it = cluster.begin();
-               s_it != cluster.end(); ++s_it)
-            {
-              ScanlineSegment& segment = *s_it;
-              int idx = segment.y * width;
-              for (int i = segment.left; i <= segment.right; i++)
-                {
-                  joint->confidence += weights[(idx + i) * n_joints + j];
-                }
-            }
 
           // Add the joint to the list
           result->joints[j] = llist_insert_before(result->joints[j],
