@@ -270,6 +270,15 @@ draw_properties(struct gm_ui_properties *props)
                 }
             }
             break;
+        case GM_PROPERTY_BOOL:
+            {
+                bool current_val = gm_prop_get_bool(prop),
+                     save_val = current_val;
+                ImGui::Checkbox(prop->name, &current_val);
+                if (current_val != save_val)
+                    gm_prop_set_bool(prop, current_val);
+            }
+            break;
         case GM_PROPERTY_FLOAT:
             {
                 float current_val = gm_prop_get_float(prop), save_val = current_val;

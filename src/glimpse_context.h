@@ -67,6 +67,7 @@ gm_format_bytes_per_pixel(enum gm_format format)
 enum gm_property_type {
     GM_PROPERTY_INT,
     GM_PROPERTY_ENUM,
+    GM_PROPERTY_BOOL,
     GM_PROPERTY_FLOAT,
     GM_PROPERTY_FLOAT_VEC3,
 };
@@ -98,6 +99,11 @@ struct gm_ui_property {
             void (*set)(void *object, int val);
         } enum_state;
         struct {
+            bool *ptr;
+            bool (*get)(void *object);
+            void (*set)(void *object, bool val);
+        } bool_state;
+        struct {
             float *ptr;
             float min;
             float max;
@@ -125,6 +131,7 @@ inline CTYPE gm_prop_get_##NAME(struct gm_ui_property *prop) \
         return *prop->NAME##_state.ptr; \
 }
 GM_DECLARE_SCALAR_GETTER(int, int)
+GM_DECLARE_SCALAR_GETTER(bool, bool)
 GM_DECLARE_SCALAR_GETTER(enum, int)
 GM_DECLARE_SCALAR_GETTER(float, float)
 
@@ -137,6 +144,7 @@ inline void gm_prop_set_##NAME(struct gm_ui_property *prop, CTYPE val) \
         *(prop->NAME##_state.ptr) = val; \
 }
 GM_DECLARE_SCALAR_SETTER(int, int)
+GM_DECLARE_SCALAR_SETTER(bool, bool)
 GM_DECLARE_SCALAR_SETTER(enum, int)
 GM_DECLARE_SCALAR_SETTER(float, float)
 
