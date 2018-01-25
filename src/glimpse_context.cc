@@ -93,6 +93,10 @@
             exit(1); \
     } while(0)
 
+#define joint_name(x) \
+    json_object_get_string( \
+        json_array_get_object(json_array(ctx->joint_map), x), "joint")
+
 /* With this foreach macro the following block of code will have access to
  * x, y, z and off variables. (off = y * width + x)
  */
@@ -121,7 +125,7 @@ using namespace pcl::common;
 
 #endif
 
-#define TRACK_FRAMES 4
+#define TRACK_FRAMES 12
 
 enum image_format {
     IMAGE_FORMAT_X8,
@@ -351,6 +355,13 @@ struct gm_context
     float max_curvature;
     int refinement_steps;
     float cluster_tolerance;
+
+    bool joint_refinement;
+    int joint_max_predictions;
+    float min_confidence;
+    float joint_move_threshold;
+    float joint_max_travel;
+    float joint_scale_threshold;
 
     int n_depth_color_stops;
     float depth_color_stops_range;
@@ -1187,80 +1198,205 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
     return true;
 }
 
+static inline float
+distance_between(float *point1, float *point2)
+{
+    return sqrtf(powf(point1[0] - point2[0], 2.f) +
+                 powf(point1[1] - point2[1], 2.f) +
+                 powf(point1[2] - point2[2], 2.f));
+}
+
 static void
 process_raw_joint_predictions(struct gm_context *ctx,
-                              struct gm_tracking_impl *tracking)
+                              struct gm_tracking_impl *tracking,
+                              InferredJoints *result)
 {
-    float distance_threshold = 0.05f;
-    float scale_threshold = 4.0f;
+    assert(result->n_joints == ctx->n_joints);
+
+    float confidence[ctx->n_joints];
+    LList *joint_ptrs[ctx->n_joints];
+    for (int j = 0; j < ctx->n_joints; j++) {
+        if (result->joints[j]) {
+            Joint *joint = (Joint *)result->joints[j]->data;
+            tracking->joints[j*3] = joint->x;
+            tracking->joints[j*3+1] = joint->y;
+            tracking->joints[j*3+2] = joint->z;
+            tracking->joints_predicted[j] = false;
+            confidence[j] = joint->confidence;
+            joint_ptrs[j] = result->joints[j];
+        }
+    }
+
+    // Try to see if there are better joint predictions based on statistics
+    // of distances between joints.
+    if (ctx->joint_stats && ctx->joint_refinement) {
+        // XXX: Maybe put a limit on the number of passes this does(?)
+        //      It's pretty inexpensive though.
+        bool changed;
+        do {
+            changed = false;
+            for (int j = 0; j < ctx->n_joints; j++) {
+                // If we have < 2 joint candidates, skip over this joint.
+                if (!result->joints[j] || !result->joints[j]->next) {
+                    continue;
+                }
+
+                // Find out the last joint position and pick the nearest
+                // position to that.
+                /*float *old_joint = nullptr;
+                if (ctx->n_tracking) {
+                    old_joint = &ctx->tracking_history[0]->
+                        joints_processed[j*3];
+                }*/
+
+                LList *best_joint = NULL;
+                float best_dist = FLT_MAX;
+                int best_error = INT_MAX;
+                /*float best_dist_from_prev = old_joint ?
+                    distance_between(old_joint, &tracking->joints[j*3]) : 0.f;*/
+
+                for (LList *l = result->joints[j]; l; l = l->next) {
+                    Joint *joint = (Joint *)l->data;
+                    float dist_acc = 0;
+                    int error = 0;
+                    for (int k = 0; k < ctx->joint_stats[j].n_connections;
+                         k++) {
+                        int c = ctx->joint_stats[j].connections[k];
+                        struct joint_dist *joint_dist =
+                            &ctx->joint_stats[j].dist[c];
+                        float dist = distance_between(&tracking->joints[c*3],
+                                                      &joint->x);
+                        dist = fabsf(dist - joint_dist->mean);
+                        dist_acc += dist;
+                        if (dist < joint_dist->min ||
+                            dist > joint_dist->max) {
+                            ++error;
+                        }
+                    }
+                    /*float dist_from_prev = old_joint ? distance_between(
+                        old_joint, &((Joint *)l->data)->x) : 0.f;*/
+                    if (error < best_error && dist_acc <= best_dist/* &&
+                        dist_from_prev <= best_dist_from_prev*/) {
+                        best_dist = dist_acc;
+                        /*best_dist_from_prev = dist_from_prev;*/
+                        best_error = error;
+                        best_joint = l;
+                    }
+                }
+
+                if (best_joint && joint_ptrs[j] != best_joint) {
+                    // Null out the original data so we don't end up with
+                    // situations where we oscillate between two choices
+                    Joint *joint = (Joint *)joint_ptrs[j]->data;
+                    joint->x = 0.f;
+                    joint->y = 0.f;
+                    joint->z = HUGE_DEPTH * 2;
+
+                    joint_ptrs[j] = best_joint;
+                    joint = (Joint *)best_joint->data;
+                    tracking->joints[j*3] = joint->x;
+                    tracking->joints[j*3+1] = joint->y;
+                    tracking->joints[j*3+2] = joint->z;
+                    confidence[j] = joint->confidence;
+                    changed = true;
+                }
+            }
+        } while (changed);
+    }
 
     for (int j = 0; j < ctx->n_joints; j++) {
         int idx = j * 3;
+
         tracking->joints_processed[idx] = tracking->joints[idx];
         tracking->joints_processed[idx+1] = tracking->joints[idx+1];
         tracking->joints_processed[idx+2] = tracking->joints[idx+2];
         tracking->joints_predicted[j] = false;
 
-        int n_predictions = 0;
-        for (int i = 0; i < ctx->n_tracking; i++) {
-            if (ctx->tracking_history[i]->joints_predicted[j])
-                n_predictions++;
+        int np = 0;
+        for (int i = 0; i < ctx->n_tracking; ++i, ++np) {
+            if (!ctx->tracking_history[i]->joints_predicted[j]) {
+                break;
+            }
         }
 
         // Don't keep predicting for longer than half of our tracking
         // history otherwise we'll certainly be compounding lots of
-        // error
-        if (n_predictions >= TRACK_FRAMES / 2) {
+        // error. If this happens, just reset to the raw values.
+        if (np >= ctx->joint_max_predictions) {
+            for (int i = 0; i < np; ++i) {
+                ctx->tracking_history[i]->joints_processed[idx] =
+                    ctx->tracking_history[i]->joints[idx];
+                ctx->tracking_history[i]->joints_processed[idx+1] =
+                    ctx->tracking_history[i]->joints[idx+1];
+                ctx->tracking_history[i]->joints_processed[idx+2] =
+                    ctx->tracking_history[i]->joints[idx+2];
+                ctx->tracking_history[i]->joints_predicted[j] = false;
+            }
+            np = 0;
+        }
+
+        // We need at least 2 unpredicted frames to do reliable prediction
+        if (ctx->n_tracking - np < 2) {
+            LOGI("Joint %s position: %.2f, %.2f, %.2f",
+                 joint_name(j),
+                 tracking->joints[idx],
+                 tracking->joints[idx+1],
+                 tracking->joints[idx+2]);
             continue;
         }
 
-        if (ctx->n_tracking < 2)
-            continue;
+        float distance = distance_between(
+            &tracking->joints[idx],
+            &ctx->tracking_history[np]->joints_processed[idx]);
 
-        struct gm_tracking_impl *p_tracking[2] = {
-            ctx->tracking_history[0],
-            ctx->tracking_history[1]
-        };
+        float prev_dist = distance_between(
+            &ctx->tracking_history[np]->joints_processed[idx],
+            &ctx->tracking_history[np+1]->joints_processed[idx]);
 
-        float dist1 = sqrtf(
-            powf(tracking->joints[idx] -
-                 p_tracking[0]->joints_processed[idx], 2.f) +
-            powf(tracking->joints[idx+1] -
-                 p_tracking[0]->joints_processed[idx+1], 2.f) +
-            powf(tracking->joints[idx+2] -
-                 p_tracking[0]->joints_processed[idx+2], 2.f));
-
-        if (dist1 > distance_threshold) {
-            float dist2 = sqrtf(
-                powf(p_tracking[0]->joints_processed[idx] -
-                     p_tracking[1]->joints_processed[idx], 2.f) +
-                powf(p_tracking[0]->joints_processed[idx+1] -
-                     p_tracking[1]->joints_processed[idx+1], 2.f) +
-                powf(p_tracking[0]->joints_processed[idx+2] -
-                     p_tracking[1]->joints_processed[idx+2], 2.f));
-            if (dist1 > dist2 * scale_threshold) {
-                float prediction[3];
-                if (!predict_from_previous_frames(
-                        ctx, j, tracking->depth_capture_timestamp,
-                        prediction)) {
-                    continue;
-                }
-
-                // Try not to replace a result with a worse prediction
-                float new_dist1 = sqrtf(
-                    powf(prediction[0] -
-                         p_tracking[0]->joints_processed[idx], 2.f) +
-                    powf(prediction[1] -
-                         p_tracking[0]->joints_processed[idx+1], 2.f) +
-                    powf(prediction[2] -
-                         p_tracking[0]->joints_processed[idx+2], 2.f));
-                if (new_dist1 < dist1) {
-                    tracking->joints_processed[idx] = prediction[0];
-                    tracking->joints_processed[idx+1] = prediction[1];
-                    tracking->joints_processed[idx+2] = prediction[2];
-                    tracking->joints_predicted[j] = true;
-                }
+        if (confidence[j] < ctx->min_confidence &&
+            distance > ctx->joint_move_threshold &&
+            (distance > ctx->joint_max_travel ||
+             distance > prev_dist * ctx->joint_scale_threshold)) {
+            float prediction[3];
+            if (!predict_from_previous_frames(
+                    ctx, j, tracking->depth_capture_timestamp,
+                    prediction)) {
+                tracking->joints_predicted[j] = false;
+                LOGI("Prediction for joint %s failed", joint_name(j));
+                continue;
             }
+
+            // Try not to replace a result with a worse prediction
+            float new_distance = distance_between(prediction,
+                &ctx->tracking_history[np]->joints_processed[idx]);
+
+            if (new_distance < distance) {
+                LOGI("Joint %s replaced (%.2f, %.2f, %.2f)->(%.2f, %.2f, %.2f)",
+                     joint_name(j),
+                     tracking->joints[idx],
+                     tracking->joints[idx+1],
+                     tracking->joints[idx+2],
+                     prediction[0], prediction[1], prediction[2]);
+                tracking->joints_processed[idx] = prediction[0];
+                tracking->joints_processed[idx+1] = prediction[1];
+                tracking->joints_processed[idx+2] = prediction[2];
+                tracking->joints_predicted[j] = true;
+            } else {
+                LOGI("Joint %s remains (%.2f, %.2f, %.2f)<-(%.2f, %.2f, %.2f)",
+                     joint_name(j),
+                     tracking->joints[idx],
+                     tracking->joints[idx+1],
+                     tracking->joints[idx+2],
+                     prediction[0], prediction[1], prediction[2]);
+            }
+        } else {
+            LOGI("Joint %s position: %.2f, %.2f, %.2f (%.2f, %.2fx, c: %.2f)",
+                 joint_name(j),
+                 tracking->joints[idx],
+                 tracking->joints[idx+1],
+                 tracking->joints[idx+2],
+                 distance, distance / prev_dist,
+                 confidence[j]);
         }
     }
 }
@@ -1846,84 +1982,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     if (result) {
         start = get_time();
-        assert(result->n_joints = ctx->n_joints);
-        LList *joint_ptrs[ctx->n_joints];
-        for (int j = 0; j < ctx->n_joints; j++) {
-            if (result->joints[j]) {
-                Joint *joint = (Joint *)result->joints[j]->data;
-                tracking->joints[j*3] = joint->x;
-                tracking->joints[j*3+1] = joint->y;
-                tracking->joints[j*3+2] = joint->z;
-                joint_ptrs[j] = result->joints[j];
-            }
-        }
-        // Try to see if there are better joint predictions based on statistics
-        // of distances between joints.
-        if (ctx->joint_stats) {
-            // XXX: Maybe put a limit on the number of passes this does(?)
-            //      It's pretty inexpensive though.
-            bool changed;
-            do {
-                changed = false;
-                for (int j = 0; j < ctx->n_joints; j++) {
-                    // If we have < 2 joint candidates, skip over this joint.
-                    if (!result->joints[j] || !result->joints[j]->next) {
-                        continue;
-                    }
 
-                    LList *best_joint = NULL;
-                    float best_dist = FLT_MAX;
-                    int best_error = INT_MAX;
-
-                    for (LList *l = result->joints[j]; l; l = l->next) {
-                        Joint *joint = (Joint *)l->data;
-                        float dist_acc = 0;
-                        int error = 0;
-                        for (int k = 0; k < ctx->joint_stats[j].n_connections;
-                             k++) {
-                            int c = ctx->joint_stats[j].connections[k];
-                            struct joint_dist *joint_dist =
-                                &ctx->joint_stats[j].dist[c];
-                            float dist = sqrtf(
-                                powf(tracking->joints[c*3] - joint->x, 2.f) +
-                                powf(tracking->joints[c*3+1] - joint->y, 2.f) +
-                                powf(tracking->joints[c*3+2] - joint->z, 2.f));
-                            dist = fabsf(dist - joint_dist->mean);
-                            dist_acc += dist;
-                            if (dist < joint_dist->min ||
-                                dist > joint_dist->max) {
-                                ++error;
-                            }
-                        }
-                        if (error < best_error && dist_acc <= best_dist) {
-                            best_dist = dist_acc;
-                            best_error = error;
-                            best_joint = l;
-                        }
-                    }
-
-                    if (best_joint && joint_ptrs[j] != best_joint) {
-                        // Null out the original data so we don't end up with
-                        // situations where we oscillate between two choices
-                        Joint *joint = (Joint *)joint_ptrs[j]->data;
-                        joint->x = 0.f;
-                        joint->y = 0.f;
-                        joint->z = HUGE_DEPTH * 2;
-
-                        joint_ptrs[j] = best_joint;
-                        joint = (Joint *)best_joint->data;
-                        tracking->joints[j*3] = joint->x;
-                        tracking->joints[j*3+1] = joint->y;
-                        tracking->joints[j*3+2] = joint->z;
-                        changed = true;
-                    }
-                }
-            } while (changed);
-        }
-
+        process_raw_joint_predictions(ctx, tracking, result);
         free_joints(result);
-
-        process_raw_joint_predictions(ctx, tracking);
 
         end = get_time();
         duration = end - start;
@@ -3005,6 +3066,71 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->cluster_tolerance;
     prop.float_state.min = 0.01f;
     prop.float_state.max = 0.1f;
+    ctx->properties.push_back(prop);
+
+    ctx->joint_refinement = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "joint_refinement";
+    prop.desc = "Favour less confident joint predictions that conform "
+                "to a statistical joint position model better";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->joint_refinement;
+    ctx->properties.push_back(prop);
+
+    ctx->joint_max_predictions = 4;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "joint_max_predictions";
+    prop.desc = "Maximum number of consecutive joint predictions to make";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->joint_max_predictions;
+    prop.int_state.min = 0;
+    prop.int_state.max = TRACK_FRAMES - 1;
+    ctx->properties.push_back(prop);
+
+    ctx->min_confidence = 300.f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "min_confidence";
+    prop.desc = "Minimum joint confidence value to trust before predicting";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->min_confidence;
+    prop.float_state.min = 10.f;
+    prop.float_state.max = 500.f;
+    ctx->properties.push_back(prop);
+
+    ctx->joint_move_threshold = 0.05f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "joint_move_threshold";
+    prop.desc = "Minimum travel distance before considering joint prediction";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->joint_move_threshold;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.1f;
+    ctx->properties.push_back(prop);
+
+    ctx->joint_max_travel = 0.3f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "joint_max_travel";
+    prop.desc = "Maximum travel distance before considering joint prediction";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->joint_max_travel;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.5f;
+    ctx->properties.push_back(prop);
+
+    ctx->joint_scale_threshold = 8.0f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "joint_scale_threshold";
+    prop.desc = "Maximum growth difference before considering joint prediction";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->joint_scale_threshold;
+    prop.float_state.min = 1.f;
+    prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
