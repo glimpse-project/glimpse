@@ -1571,24 +1571,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     int n_lores_points = 0;
-    std::vector<int> lores_points;
-
     foreach_xy_off(lores_cloud->width, lores_cloud->height) {
-        // Create a greedy downsample, where we take the nearest of the
-        // point for every group of sampled points
-        lores_cloud->points[off] = invalid_pt;
-
-        for (int hy = y * ctx->seg_res; hy < (y + 1) * ctx->seg_res; ++hy) {
-            for (int hx = x * ctx->seg_res; hx < (x + 1) * ctx->seg_res; ++hx) {
-                int hires_off = hy * hires_cloud->width + hx;
-                pcl::PointXYZ &hpt = hires_cloud->points[hires_off];
-                if (std::isnan(lores_cloud->points[off].z) ||
-                    hpt.z < lores_cloud->points[off].z) {
-                    lores_cloud->points[off] = hpt;
-                }
-            }
-        }
-
+        int hoff = (y * ctx->seg_res) * hires_cloud->width + (x * ctx->seg_res);
+        lores_cloud->points[off] = hires_cloud->points[hoff];
         if (!std::isnan(lores_cloud->points[off].z)) {
             ++n_lores_points;
         }
