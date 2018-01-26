@@ -337,6 +337,7 @@ struct gm_context
     struct joint_info *joint_stats;
     int n_joints;
 
+    int cloud_res;
     float min_depth;
     float max_depth;
     int seg_res;
@@ -1388,8 +1389,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
     pcl::PointCloud<pcl::PointXYZ>::Ptr hires_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    hires_cloud->width = ctx->depth_camera_intrinsics.width;
-    hires_cloud->height = ctx->depth_camera_intrinsics.height;
+    hires_cloud->width = ctx->depth_camera_intrinsics.width / ctx->cloud_res;
+    hires_cloud->height = ctx->depth_camera_intrinsics.height / ctx->cloud_res;
     hires_cloud->points.resize(hires_cloud->width * hires_cloud->height);
     hires_cloud->is_dense = false;
 
@@ -1401,12 +1402,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
     float cy = ctx->depth_camera_intrinsics.cy;
 
     foreach_xy_off(hires_cloud->width, hires_cloud->height) {
-        float depth = tracking->depth[off];
+        int doff = (y * ctx->cloud_res) * ctx->depth_camera_intrinsics.width +
+                   (x * ctx->cloud_res);
+        float depth = tracking->depth[doff];
         if (std::isnormal(depth) &&
             depth >= ctx->min_depth &&
             depth < ctx->max_depth) {
-            float dx = (x - cx) * depth * inv_fx;
-            float dy = -(y - cy) * depth * inv_fy;
+            float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
+            float dy = -((y * ctx->cloud_res) - cy) * depth * inv_fy;
             hires_cloud->points[off].x = dx;
             hires_cloud->points[off].y = dy;
             hires_cloud->points[off].z = depth;
@@ -2794,6 +2797,17 @@ gm_context_new(struct gm_logger *logger, char **err)
                           1.f / ARRAY_LEN(heat_map_rainbow)); // step
 
     struct gm_ui_property prop;
+
+    ctx->cloud_res = 1;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cloud_res";
+    prop.desc = "Resolution divider for depth camera cloud";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->cloud_res;
+    prop.int_state.min = 1;
+    prop.int_state.max = 4;
+    ctx->properties.push_back(prop);
 
     ctx->min_depth = 0.5;
     prop = gm_ui_property();
