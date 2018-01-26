@@ -133,13 +133,6 @@ enum image_format {
     IMAGE_FORMAT_XFLOAT,
 };
 
-enum reproject_op {
-    RGBA_INTO_CLOUD,
-    RGB_INTO_CLOUD,
-    RGB_MIXIN_COPY,
-    DEPTH_INTO_BUFFER
-};
-
 /* XXX: fix namespace */
 struct pt {
     float x, y;
@@ -973,142 +966,6 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
 #endif
 }
 
-void
-reproject_cloud(const pcl::PointCloud<pcl::PointXYZ>::Ptr cloud,
-                void *buffer,
-                const struct gm_intrinsics *intrinsics,
-                const struct gm_extrinsics *extrinsics,
-                enum reproject_op op,
-                GlimpsePointXYZRGBA *cloud_copy = NULL,
-                int *cloud_size = NULL,
-                bool copy_is_dense = true)
-{
-    glm::mat3 rotate;
-    glm::vec3 translate;
-
-    int width = intrinsics->width;
-    int height = intrinsics->height;
-
-    if (cloud_copy && !copy_is_dense) {
-        foreach_xy_off(width, height) {
-            cloud_copy[off].x = HUGE_DEPTH;
-            cloud_copy[off].y = HUGE_DEPTH;
-            cloud_copy[off].z = HUGE_DEPTH;
-            cloud_copy[off].rgba = 0;
-        }
-    }
-    if (op == DEPTH_INTO_BUFFER) {
-        foreach_xy_off(width, height) {
-            ((float*)buffer)[off] = HUGE_DEPTH;
-        }
-    }
-
-    if (extrinsics) {
-        const float *r = extrinsics->rotation;
-        rotate = glm::mat3(r[0], r[1], r[2],
-                           r[3], r[4], r[5],
-                           r[6], r[7], r[8]);
-        const float *t = extrinsics->translation;
-        translate = glm::vec3(t[0], t[1], t[2]);
-    }
-
-    /* XXX: we don't assume that cloud->width/height are the same as
-     * width/height. The pcl point cloud might not be 2d and if it is
-     * we might be projecting a high resolution point cloud into a
-     * low resolution depth buffer according to our training camera
-     * intrinsics
-     */
-    int n_points = 0;
-    for (uint32_t p = 0; p < cloud->points.size(); p++) {
-        pcl::PointXYZ *point = &cloud->points[p];
-        glm::vec3 point_t(point->x, point->y, point->z);
-        glm::vec2 point_2d;
-
-        if (std::isnan(point->x) || std::isinf(point->x) ||
-            std::isnan(point->y) || std::isinf(point->y) ||
-            !std::isnormal(point->z) || point->z >= HUGE_DEPTH)
-            continue;
-
-        if (extrinsics) {
-            point_t = (rotate * point_t) + translate;
-        }
-
-        int x = (int)
-          ((point_t.x * intrinsics->fx / point_t.z) + intrinsics->cx);
-
-        if (x < 0 || x >= width) {
-            continue;
-        }
-
-        int y = (int)
-          ((point_t.y * intrinsics->fy / point_t.z) + intrinsics->cy);
-
-        if (y < 0 || y >= height) {
-            continue;
-        }
-
-        int off = width * y + x;
-
-        uint32_t rgba = 0;
-        switch(op) {
-        case RGBA_INTO_CLOUD:
-            rgba = ((uint32_t*)buffer)[off];
-            break;
-
-        case RGB_INTO_CLOUD: {
-            uint8_t r = ((uint8_t*)buffer)[off * 3];
-            uint8_t g = ((uint8_t*)buffer)[off * 3 + 1];
-            uint8_t b = ((uint8_t*)buffer)[off * 3 + 2];
-            uint32_t col = r << 24 | g << 16 | b << 8 | 0xFF;
-            rgba = col;
-            break;
-        }
-
-        case DEPTH_INTO_BUFFER:
-            ((float*)buffer)[off] = (float)point_t.z;
-            break;
-
-        case RGB_MIXIN_COPY:
-            break;
-        }
-
-        if (cloud_copy) {
-            int cloud_off = copy_is_dense ? n_points : off;
-            cloud_copy[cloud_off].x = point->x;
-            cloud_copy[cloud_off].y = -point->y;
-            cloud_copy[cloud_off].z = point->z;
-
-            if (op == RGB_MIXIN_COPY) {
-                uint32_t r = (uint32_t)((uint8_t*)buffer)[off * 3];
-                uint32_t g = (uint32_t)((uint8_t*)buffer)[off * 3 + 1];
-                uint32_t b = (uint32_t)((uint8_t*)buffer)[off * 3 + 2];
-
-                uint32_t r2 = (rgba >> 24) & 0xFF;
-                uint32_t g2 = (rgba >> 16) & 0xFF;
-                uint32_t b2 = (rgba >> 8) & 0xFF;
-
-                uint32_t col = ((r + r2)/2) << 24 |
-                               ((g + g2)/2) << 16 |
-                               ((b + b2)/2) << 8 | (rgba & 0xFF);
-
-                cloud_copy[cloud_off].rgba = col;
-
-                // To aid visualisation, bump these points a little closer to
-                // the camera so they draw over neighbouring points
-                cloud_copy[cloud_off].z -= 0.005f;
-            } else {
-                cloud_copy[cloud_off].rgba = rgba;
-            }
-        }
-
-        ++n_points;
-    }
-
-    if (cloud_size) {
-        *cloud_size = copy_is_dense ? n_points : (width * height);
-    }
-}
-
 static void
 tracking_create_rgb_label_map(struct gm_context *ctx,
                               struct gm_tracking_impl *tracking,
@@ -1536,17 +1393,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
     hires_cloud->points.resize(hires_cloud->width * hires_cloud->height);
     hires_cloud->is_dense = false;
 
-    // Person detection will happen in a sparser cloud made from a downscaled
-    // version of the depth buffer. This is significantly cheaper than using a
-    // voxel grid, which would produce better results but take a lot longer
-    // doing so and give us less useful data structures.
-    pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    lores_cloud->width = hires_cloud->width / ctx->seg_res;
-    lores_cloud->height = hires_cloud->height / ctx->seg_res;
-    lores_cloud->points.resize(lores_cloud->width * lores_cloud->height);
-    lores_cloud->is_dense = false;
-
     int n_points = 0;
 
     float inv_fx = 1.0f / ctx->depth_camera_intrinsics.fx;
@@ -1570,13 +1416,31 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    int n_lores_points = 0;
-    foreach_xy_off(lores_cloud->width, lores_cloud->height) {
-        int hoff = (y * ctx->seg_res) * hires_cloud->width + (x * ctx->seg_res);
-        lores_cloud->points[off] = hires_cloud->points[hoff];
-        if (!std::isnan(lores_cloud->points[off].z)) {
-            ++n_lores_points;
+    // Person detection can happen in a sparser cloud made from a downscaled
+    // version of the depth buffer. This is significantly cheaper than using a
+    // voxel grid, which would produce better results but take a lot longer
+    // doing so and give us less useful data structures.
+    int n_lores_points;
+    pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud;
+    if (ctx->seg_res > 1) {
+        lores_cloud = boost::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>(
+              new pcl::PointCloud<pcl::PointXYZ>);
+        lores_cloud->width = hires_cloud->width / ctx->seg_res;
+        lores_cloud->height = hires_cloud->height / ctx->seg_res;
+        lores_cloud->points.resize(lores_cloud->width * lores_cloud->height);
+        lores_cloud->is_dense = false;
+
+        n_lores_points = 0;
+        foreach_xy_off(lores_cloud->width, lores_cloud->height) {
+            int hoff = (y * ctx->seg_res) * hires_cloud->width + (x * ctx->seg_res);
+            lores_cloud->points[off] = hires_cloud->points[hoff];
+            if (!std::isnan(lores_cloud->points[off].z)) {
+                ++n_lores_points;
+            }
         }
+    } else {
+        lores_cloud = hires_cloud;
+        n_lores_points = n_points;
     }
 
     end = get_time();
@@ -1585,22 +1449,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
          n_points, n_lores_points,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-
-#if 0
-    // Reproject colour information into cloud
-    start = get_time();
-    reproject_cloud(cloud, (void *)tracking->video,
-                    &ctx->video_camera_intrinsics,
-                    ctx->extrinsics_set ?
-                        &ctx->depth_to_video_extrinsics : NULL,
-                    RGBA_INTO_CLOUD,
-                    tracking->cloud, &tracking->cloud_size, false);
-    end = get_time();
-    duration = end - start;
-    LOGI("Reprojection of colour information took (%.3f%s)\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-#endif
 
     // Remove dense planes above a certain size
     start = get_time();
@@ -1822,54 +1670,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
         return false;
     }
 
-    // Reconstruct the person cloud by picking all the points around
-    // Do a box search on each point from the sparse tree to rebuild the
-    // dense cloud cluster.
-    start = get_time();
-
-    std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr> person_clouds;
-    for (std::vector<pcl::PointIndices>::iterator p_it = persons.begin();
-         p_it != persons.end(); ++p_it) {
-        pcl::PointCloud<pcl::PointXYZ>::Ptr person_cloud(
-            new pcl::PointCloud<pcl::PointXYZ>);
-        for (std::vector<int>::const_iterator it = (*p_it).indices.begin();
-             it != (*p_it).indices.end (); ++it) {
-            int sparse_x = (*it) % lores_cloud->width;
-            int sparse_y = (*it) / lores_cloud->width;
-
-            for (int y = (int)(sparse_y * ctx->seg_res), ey = 0;
-                 y < (int)hires_cloud->height && ey < ctx->seg_res;
-                 ++y, ++ey) {
-                for (int x = (int)(sparse_x * ctx->seg_res), ex = 0;
-                     x < (int)hires_cloud->width && ex < ctx->seg_res;
-                     ++x, ++ex) {
-                    int off = y * hires_cloud->width + x;
-                    person_cloud->points.push_back(hires_cloud->points[off]);
-                }
-            }
-        }
-        person_cloud->width = person_cloud->points.size();
-        person_cloud->height = 1;
-        person_cloud->is_dense = true;
-        person_clouds.push_back(person_cloud);
-    }
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Person reconstruction (%d clouds) took (%.3f%s)\n",
-         (int)person_clouds.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
     if (ctx->depth_camera_intrinsics.width == 0 ||
         ctx->depth_camera_intrinsics.height == 0)
     {
-        LOGE("Skipping detection: depth camera intrinsics not initialized\n");
+        LOGE("Skipping detection: depth camera intrinsics uninitialized\n");
         return false;
-    } else {
-        LOGI("depth intrinsics: w=%d, h=%d\n",
-             ctx->depth_camera_intrinsics.width,
-             ctx->depth_camera_intrinsics.height);
     }
 
     start = get_time();
@@ -1877,25 +1682,83 @@ gm_context_track_skeleton(struct gm_context *ctx,
     int height = ctx->training_camera_intrinsics.height;
 
     if (width == 0 || height == 0) {
-        LOGE("Skipping detection: bad re-projected depth image size: %dx%d\n",
-             width, height);
+        LOGE("Skipping detection: training camera intrinsics uninitialized\n");
         return false;
     }
 
+    // Using the lores point cloud as a mask, reproject the hires point cloud
+    // into training camera space.
+    glm::mat3 rotate;
+    glm::vec3 translate;
+    if (ctx->extrinsics_set) {
+        const float *r = ctx->depth_to_video_extrinsics.rotation;
+        rotate = glm::mat3(r[0], r[1], r[2],
+                           r[3], r[4], r[5],
+                           r[6], r[7], r[8]);
+        const float *t = ctx->depth_to_video_extrinsics.translation;
+        translate = glm::vec3(t[0], t[1], t[2]);
+    }
+
     std::vector<float*> depth_images;
-    for (std::vector<pcl::PointCloud<pcl::PointXYZ>::Ptr>::iterator it =
-         person_clouds.begin(); it != person_clouds.end(); ++it) {
+    for (std::vector<pcl::PointIndices>::iterator p_it = persons.begin();
+         p_it != persons.end(); ++p_it) {
+
         float *depth_img = (float *)xmalloc(width * height * sizeof(float));
-        reproject_cloud(*it, (void *)depth_img,
-                        &ctx->training_camera_intrinsics,
-                        NULL, DEPTH_INTO_BUFFER);
+        for (int i = 0; i < width * height; ++i) {
+            depth_img[i] = HUGE_DEPTH;
+        }
+
+        for (std::vector<int>::const_iterator it = (*p_it).indices.begin();
+             it != (*p_it).indices.end (); ++it) {
+            int lx = (*it) % lores_cloud->width;
+            int ly = (*it) / lores_cloud->width;
+            for (int hy = (int)(ly * ctx->seg_res), ey = 0;
+                 hy < (int)hires_cloud->height && ey < ctx->seg_res;
+                 ++hy, ++ey) {
+                for (int hx = (int)(lx * ctx->seg_res), ex = 0;
+                     hx < (int)hires_cloud->width && ex < ctx->seg_res;
+                     ++hx, ++ex) {
+                    int off = hy * hires_cloud->width + hx;
+
+                    // Reproject this point into training camera space
+                    glm::vec3 point_t(hires_cloud->points[off].x,
+                                      hires_cloud->points[off].y,
+                                      hires_cloud->points[off].z);
+
+                    if (ctx->extrinsics_set) {
+                        point_t = (rotate * point_t) + translate;
+                    }
+
+                    int x = (int)
+                        ((point_t.x * ctx->training_camera_intrinsics.fx /
+                          point_t.z) + ctx->training_camera_intrinsics.cx);
+
+                    if (x < 0 || x >= width) {
+                        continue;
+                    }
+
+                    int y = (int)
+                        ((point_t.y * ctx->training_camera_intrinsics.fy /
+                          point_t.z) + ctx->training_camera_intrinsics.cy);
+
+                    if (y < 0 || y >= height) {
+                        continue;
+                    }
+
+                    int doff = width * y + x;
+                    depth_img[doff] = point_t.z;
+                }
+            }
+        }
+
         depth_images.push_back(depth_img);
     }
+
 
     end = get_time();
     duration = end - start;
     LOGI("Re-projecting %d %dx%d point clouds took %.3f%s\n",
-         (int)person_clouds.size(), (int)width, (int)height,
+         (int)persons.size(), (int)width, (int)height,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
