@@ -18,9 +18,9 @@ support_64bit_file_offsets = False
 
 # Note: The fix-coretex-a8 flag is recommended by upstream docs:
 # https://developer.android.com/ndk/guides/standalone_toolchain.html
-c_args = [ '-mfpu=neon' ]
-c_link_args = [ '-march=armv7-a', '-Wl,--fix-cortex-a8' ]
-cpp_args = [ '-mfpu=neon' ]
+c_args = [ '-mfpu=neon', '-fno-omit-frame-pointer', '-funwind-tables' ]
+c_link_args = [ '-march=armv7-a', '-Wl,--fix-cortex-a8'  ]
+cpp_args = [ '-mfpu=neon', '-fno-omit-frame-pointer', '-funwind-tables' ]
 cpp_link_args = [ '-march=armv7-a', '-Wl,--fix-cortex-a8' ]
 
 # As a hacky workaround for not being able to query the binaries
