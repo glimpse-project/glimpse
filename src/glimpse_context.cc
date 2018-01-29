@@ -2147,10 +2147,6 @@ static void *
 detector_thread_cb(void *data)
 {
     struct gm_context *ctx = (struct gm_context *)data;
-    struct timespec five_ms_ts;
-
-    five_ms_ts.tv_sec = 0;
-    five_ms_ts.tv_nsec = 5000000;
 
     LOGE("DetectorRun");
 
@@ -2195,9 +2191,7 @@ detector_thread_cb(void *data)
         LOGI("Waiting for new frame to start tracking\n");
         pthread_mutex_lock(&ctx->frame_ready_mutex);
         while (!ctx->frame_ready && !ctx->destroying) {
-            pthread_cond_timedwait(&ctx->frame_ready_cond,
-                                   &ctx->frame_ready_mutex,
-                                   &five_ms_ts);
+            pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
         }
         if (ctx->frame_front)
             gm_frame_unref(ctx->frame_front);
@@ -2235,9 +2229,8 @@ detector_thread_cb(void *data)
         pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
         ctx->need_new_scaled_frame = true;
         while (ctx->need_new_scaled_frame && !ctx->destroying) {
-            pthread_cond_timed_wait(&ctx->scaled_frame_available_cond,
-                                    &ctx->scaled_frame_cond_mutex,
-                                    &five_ms_ts);
+            pthread_cond_wait(&ctx->scaled_frame_available_cond,
+                              &ctx->scaled_frame_cond_mutex);
         }
         pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 
@@ -2455,6 +2448,20 @@ gm_context_destroy(struct gm_context *ctx)
      * recognising any mistake made.
      */
     pthread_mutex_unlock(&ctx->liveness_lock);
+
+    /* It's possible the tracker thread is waiting for a new frame in
+     * pthread_cond_wait, and we don't want it to wait indefinitely...
+     */
+    pthread_mutex_lock(&ctx->frame_ready_mutex);
+    pthread_cond_signal(&ctx->frame_ready_cond);
+    pthread_mutex_unlock(&ctx->frame_ready_mutex);
+
+    /* It's also possible the tracker thread is waiting for a downsampled
+     * frame in pthread_cond_wait...
+     */
+    pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
+    pthread_cond_signal(&ctx->scaled_frame_available_cond);
+    pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 
     void *tracking_retval = NULL;
     int ret = pthread_join(ctx->detect_thread, &tracking_retval);
