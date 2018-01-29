@@ -82,7 +82,11 @@
 #include "glimpse_context.h"
 
 #undef GM_LOG_CONTEXT
+#ifdef __ANDROID__
+#define GM_LOG_CONTEXT "Glimpse Tracking"
+#else
 #define GM_LOG_CONTEXT "ctx"
+#endif
 #define LOGI(...) gm_info(ctx->log, __VA_ARGS__)
 #define LOGE(...) gm_error(ctx->log, __VA_ARGS__)
 

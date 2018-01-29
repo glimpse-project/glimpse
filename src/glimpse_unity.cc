@@ -43,6 +43,13 @@
 #include "glimpse_device.h"
 #include "glimpse_context.h"
 
+#undef GM_LOG_CONTEXT
+#ifdef __ANDROID__
+#define GM_LOG_CONTEXT "Glimpse Plugin"
+#else
+#define GM_LOG_CONTEXT "unity_plugin"
+#endif
+
 using half_float::half;
 
 enum event_type
