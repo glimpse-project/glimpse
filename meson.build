@@ -142,6 +142,11 @@ else
     warning('')
 endif
 
+if compiler.get_define('__ANDROID__') != ''
+    android_log_dep = declare_dependency(link_args: [ '-llog' ])
+    client_api_deps += android_log_dep
+endif
+
 if support_unity
 shared_library('glimpse-unity-plugin',
                [ 'src/glimpse_unity.cc' ] + client_api_src,
