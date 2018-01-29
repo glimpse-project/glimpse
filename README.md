@@ -137,7 +137,7 @@ For ease of integration with Meson we create a standalone toolchain like so:
 
 ```
 $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py --install-dir ~/local/android-arm-toolchain-24 --arch arm --api 24 --stl libc++
-export PATH=~/local/android-arm-toolchain-24:$PATH
+export PATH=~/local/android-arm-toolchain-24/bin:$PATH
 ```
 *Note: we can't build for arm64 when building the libglimpse-unity-plugin.so since Unity doesn't natively support arm64 on Android*
 *Note: while building for 32bit arm we have to use api level >= 24 otherwise we hit build issues with -D_FILE_OFFSET_BITS=64 usage*
