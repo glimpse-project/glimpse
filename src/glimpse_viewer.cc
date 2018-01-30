@@ -1105,8 +1105,9 @@ init_opengl(Data *data)
 
     // Create depth-buffer point shader
     gl_db_program = gm_gl_create_program(data->log,
+                                         vertShaderDepth,
                                          fragShaderDepth,
-                                         vertShaderDepth, NULL);
+                                         NULL);
 
     glUseProgram(gl_db_program);
 
@@ -1151,8 +1152,8 @@ init_opengl(Data *data)
 
     // Create point-cloud shader
     gl_cloud_program = gm_gl_create_program(data->log,
-                                            fragShaderCloud,
                                             vertShaderCloud,
+                                            fragShaderCloud,
                                             NULL);
 
     glUseProgram(gl_cloud_program);
