@@ -61,6 +61,7 @@
 #include "glimpse_log.h"
 #include "glimpse_context.h"
 #include "glimpse_device.h"
+#include "glimpse_gl.h"
 
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
@@ -1016,55 +1017,6 @@ on_device_event_cb(struct gm_device *dev,
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
-static GLuint
-compile_shader(GLenum shaderType, const char *shaderText)
-{
-    GLint stat;
-    GLuint shader = glCreateShader(shaderType);
-    glShaderSource(shader, 1, (const char **) &shaderText, NULL);
-    glCompileShader(shader);
-    glGetShaderiv(shader, GL_COMPILE_STATUS, &stat);
-    if (!stat) {
-        char log[1000];
-        GLsizei len;
-        glGetShaderInfoLog (shader, 1000, &len, log);
-        fprintf(stderr, "Error: Shader did not compile: %s\n", log);
-        exit(1);
-    }
-
-    return shader;
-}
-
-static GLuint
-link_program(GLuint firstShader, ...)
-{
-    GLint stat;
-    GLuint program = glCreateProgram();
-
-    glAttachShader(program, firstShader);
-
-    va_list args;
-    va_start(args, firstShader);
-
-    GLuint shader;
-    while ((shader = va_arg(args, GLuint))) {
-        glAttachShader(program, shader);
-    }
-    va_end(args);
-
-    glLinkProgram(program);
-    glGetProgramiv(program, GL_LINK_STATUS, &stat);
-    if (!stat) {
-        char log[1000];
-        GLsizei len;
-        glGetProgramInfoLog(program, 1000, &len, log);
-        fprintf (stderr, "Error linking:\n%s\n", log);
-        exit (1);
-    }
-
-    return program;
-}
-
 static void
 init_opengl(Data *data)
 {
@@ -1148,15 +1100,13 @@ init_opengl(Data *data)
         "  color = texture2D(texture, v_tex_coord.st).abgr;\n"
         "}\n";
 
-    GLuint cloudFragShader, cloudVertShader, depthFragShader, depthVertShader;
-
     glClearColor(0.0, 0.0, 0.0, 0.0);
     glClearStencil(0);
 
     // Create depth-buffer point shader
-    depthFragShader = compile_shader(GL_FRAGMENT_SHADER, fragShaderDepth);
-    depthVertShader = compile_shader(GL_VERTEX_SHADER, vertShaderDepth);
-    gl_db_program = link_program(depthFragShader, depthVertShader, 0);
+    gl_db_program = gm_gl_create_program(data->log,
+                                         fragShaderDepth,
+                                         vertShaderDepth, NULL);
 
     glUseProgram(gl_db_program);
 
@@ -1200,9 +1150,10 @@ init_opengl(Data *data)
     glUseProgram(0);
 
     // Create point-cloud shader
-    cloudFragShader = compile_shader(GL_FRAGMENT_SHADER, fragShaderCloud);
-    cloudVertShader = compile_shader(GL_VERTEX_SHADER, vertShaderCloud);
-    gl_cloud_program = link_program(cloudFragShader, cloudVertShader, 0);
+    gl_cloud_program = gm_gl_create_program(data->log,
+                                            fragShaderCloud,
+                                            vertShaderCloud,
+                                            NULL);
 
     glUseProgram(gl_cloud_program);
 
