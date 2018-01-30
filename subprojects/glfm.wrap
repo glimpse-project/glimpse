@@ -1,0 +1,4 @@
+[wrap-git]
+directory = glfm
+url = https://github.com/glimpse-project/glfm
+revision = 17a689c54e559fd29ad5c1d100b2a25d793d29af

@@ -12,6 +12,8 @@ os.chdir(os.environ['MESON_BUILD_ROOT'])
 parser = argparse.ArgumentParser()
 parser.add_argument('--buildtype',
                     help="The Meson configured buildtype")
+parser.add_argument('--viewer',
+                    help='Absolute path in which to install Glimpse Viewer and dependent libraries')
 parser.add_argument('--unity-project',
                     help='Absolute path to a Unity project where we will install the Glimpse plugin')
 parser.add_argument('--plugin-libdir',
@@ -93,7 +95,8 @@ def install_jar_targets(dst):
 def install_unity_plugin(unity_project):
     unity_plugin_libs_dir = os.path.join(unity_project, args.plugin_libdir)
     os.makedirs(unity_plugin_libs_dir, exist_ok=True)
-    install_shared_lib_targets(unity_plugin_libs_dir, libs_blacklist)
+    install_shared_lib_targets(unity_plugin_libs_dir,
+                               libs_blacklist.union({'glimpse_viewer_android'}))
 
     if args.android_ndk_arch:
         unity_plugin_jar_dir = os.path.join(unity_project, args.plugin_jardir)
@@ -116,9 +119,22 @@ def install_unity_plugin(unity_project):
     print(" ".join(chrpath_cmd))
     subprocess.check_call(chrpath_cmd)
 
+def install_viewer(dst):
+    os.makedirs(dst, exist_ok=True)
+    install_shared_lib_targets(dst,
+                               libs_blacklist.union({'glimpse-unity-plugin'}))
+
+    if args.android_ndk_arch:
+        do_install(libcxx_shared_path, dst);
+
+        if args.tango_libs:
+            tango_libs = [ 'libtango_support_api.so' ]
+            for lib in tango_libs:
+                do_install(os.path.join(args.tango_libs, 'lib',
+                           args.android_ndk_arch, lib), dst)
 
 if args.unity_project:
     install_unity_plugin(args.unity_project)
 
-
-
+if args.viewer:
+    install_viewer(args.viewer)

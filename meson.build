@@ -91,7 +91,7 @@ if not freenect_dep.found()
     freenect_dep = freenect_sp.get_variable('fakenect_dep')
 endif
 client_api_defines += [ '-DUSE_FREENECT' ]
-    
+
 glfw_dep = dependency('glfw3', required: false)
 epoxy_dep = dependency('epoxy', fallback: [ 'libepoxy', 'libepoxy_dep' ])
 snappy_dep = dependency('snappy', required: false)
@@ -102,7 +102,6 @@ imgui_src = [
     'src/imgui/imgui_draw.cpp',
     'src/imgui/profiler.cpp',
     'src/imgui/timer.cpp',
-    'src/imgui/imgui_impl_glfw_gles3.cpp',
 ]
 
 client_api_src = [
@@ -200,6 +199,21 @@ if support_unity
                              java_args: [ '-classpath',  android_sdk_jar ])
         plugin_install_deps += unity_java_jar
     endif
+endif
+
+if compiler.get_define('__ANDROID__') != ''
+    glfm_sp = subproject('glfm')
+    glfm_dep = glfm_sp.get_variable('glfm_dep')
+    glfm_defines = [ '-DGLFM_INCLUDE_ES3' ]
+
+    imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
+
+    shared_library('glimpse_viewer_android',
+                   [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
+                   include_directories: inc,
+                   dependencies: client_api_deps + [ glfm_dep ],
+                   c_args: client_api_defines + glfm_defines,
+                   cpp_args: client_api_defines + glfm_defines)
 endif
 
 if not meson.is_cross_build()
@@ -310,6 +324,7 @@ if snappy_dep.found()
 endif
 
 if glfw_dep.found() and epoxy_dep.found()
+    imgui_src += 'src/imgui/imgui_impl_glfw_gles3.cpp'
     executable('glimpse_viewer',
                [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
                include_directories: inc,
@@ -343,6 +358,20 @@ if support_unity
     endif
 
     run_target('install_plugin',
+               command: [ 'install_glimpse.py'] +  install_args,
+               depends: plugin_install_deps)
+endif
+
+if compiler.get_define('__ANDROID__') != ''
+    install_args = [
+        '--buildtype', get_option('buildtype'),
+        '--viewer', join_paths('lib', meson.get_cross_property('_ndk_arch')),
+        '--strip', meson.get_cross_property('_strip_binary'),
+        '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
+        '--tango-libs', get_option('tango_sdk')
+    ]
+
+    run_target('install_viewer',
                command: [ 'install_glimpse.py'] +  install_args,
                depends: plugin_install_deps)
 endif
