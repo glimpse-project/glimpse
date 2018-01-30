@@ -2242,7 +2242,7 @@ detector_thread_cb(void *data)
 #endif
 
         start = get_time();
-        LOGI("Starting tracking iteration (%ld)\n",
+        LOGI("Starting tracking iteration (%llu)\n",
              tracking->depth_capture_timestamp);
 
         //gm_context_detect_faces(ctx, tracking);
@@ -3204,7 +3204,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
      * runtime from the ctx->detector.scanner.pyramid_type, instead of hard
      * coding...
      */
-    dlib::pyramid_down<6> pyr;
+    //dlib::pyramid_down<6> pyr;
 
     /* The most practical way to get face detection running at any half
      * decent rate on a relatively underpowered device is to massively

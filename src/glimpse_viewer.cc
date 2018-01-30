@@ -55,7 +55,6 @@
 #include <imgui_impl_glfw_gles3.h>
 #include <profiler.h>
 
-#include "half.hpp"
 #include "parson.h"
 
 #include "glimpse_log.h"
@@ -73,8 +72,6 @@
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
             exit(1); \
     } while(0)
-
-using half_float::half;
 
 enum event_type
 {
