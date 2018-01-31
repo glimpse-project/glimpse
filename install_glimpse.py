@@ -12,8 +12,6 @@ os.chdir(os.environ['MESON_BUILD_ROOT'])
 parser = argparse.ArgumentParser()
 parser.add_argument('--buildtype',
                     help="The Meson configured buildtype")
-parser.add_argument('--meson-introspect',
-                    help='Command for running meson introspect (using same version of meson used to configure build)')
 parser.add_argument('--unity-project',
                     help='Absolute path to a Unity project where we will install the Glimpse plugin')
 parser.add_argument('--plugin-libdir',
@@ -29,7 +27,7 @@ parser.add_argument('--strip',
                     default='strip')
 args = parser.parse_args()
 
-introspect_cmd = args.meson_introspect.split()
+introspect_cmd = os.environ['MESONINTROSPECT'].split()
 targets_json = subprocess.check_output(introspect_cmd + [ '--targets' ])
 
 targets = json.loads(targets_json)

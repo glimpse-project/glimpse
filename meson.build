@@ -16,9 +16,6 @@ if compiler.get_define('__ANDROID__') != ''
     endif
 endif
 
-introspect_cmd = run_command(python3, '-c',
-    'import os; print(os.getenv("MESONINTROSPECT", ""))').stdout().strip()
-
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
 
@@ -325,8 +322,6 @@ endif # is_cross_build
 
 if support_unity
     install_args = [
-        # XXX: MESONINTROSPECT env not available during run_target() commands
-        '--meson-introspect', introspect_cmd,
         '--buildtype', get_option('buildtype'),
         '--unity-project', join_paths(get_option('prefix'))
     ]
