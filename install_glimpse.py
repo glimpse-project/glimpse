@@ -88,8 +88,9 @@ def install_jar_targets(dst):
     for target in targets:
 
         if target['filename'][-4:] == '.jar':
+            basename = os.path.basename(target['filename'])
             do_install(os.path.join(os.environ['MESON_BUILD_ROOT'], target['filename']),
-                       os.path.join(dst, target['filename']))
+                       os.path.join(dst, basename))
 
 
 def install_unity_plugin(unity_project):

@@ -191,13 +191,7 @@ if support_unity
 
     plugin_install_deps = [ plugin_lib ]
     if compiler.get_define('__ANDROID__') != ''
-        unity_java_src = [
-            'com/impossible/glimpse/GlimpseTest.java'
-        ]
-        android_sdk_jar = join_paths(android_sdk_home, 'platforms/android-23/android.jar')
-        unity_java_jar = jar('GlimpseTest',
-                             unity_java_src,
-                             java_args: [ '-classpath',  android_sdk_jar ])
+        subdir('src/java')
         plugin_install_deps += unity_java_jar
     endif
 endif
