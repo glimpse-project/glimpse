@@ -43,15 +43,18 @@
 #include "glimpse_log.h"
 #include "glimpse_device.h"
 #include "glimpse_context.h"
+#include "glimpse_gl.h"
 
 #undef GM_LOG_CONTEXT
 
 #ifdef __ANDROID__
 #define GM_LOG_CONTEXT "Glimpse Plugin"
+#define GLSL_SHADER_VERSION "#version 300 es\n"
 #include <android/log.h>
 #include <jni.h>
 #else
 #define GM_LOG_CONTEXT "unity_plugin"
+#define GLSL_SHADER_VERSION "#version 150\n"
 #endif
 
 using half_float::half;
@@ -101,6 +104,12 @@ struct glimpse_data
      */
     struct gm_frame *device_frame;
 
+    /* When we come to render the background we take a reference on the latest
+     * device_frame before uploading to a texture for display.
+     */
+    struct gm_frame *visible_frame;
+    GLuint gl_vid_tex;
+
     /* Set when gm_context sends a _REQUEST_FRAME event */
     bool context_needs_frame;
     /* Set when gm_context sends a _TRACKING_READY event */
@@ -122,6 +131,16 @@ struct glimpse_data
     std::vector<struct event> *events_front;
 
     bool registered_gl_debug_callback;
+
+    GLuint yuv_frame_video_program;
+    GLuint video_program;
+
+    GLuint attrib_quad_bo;
+
+    GLuint attrib_quad_pos;
+    GLuint attrib_quad_tex_coords;
+
+    GLuint uniform_tex_sampler;
 };
 
 static void (*unity_log_function)(int level,
@@ -139,7 +158,6 @@ static IUnityGraphics *unity_graphics;
 static UnityGfxRenderer unity_renderer_type = kUnityGfxRendererNull;
 
 static struct glimpse_data *plugin_data;
-
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_notify_log_function(void (*log_func)(int level,
@@ -447,6 +465,184 @@ gm_unity_process_events(void)
 }
 
 static void
+draw_video_quad(struct glimpse_data *data,
+                float s0, float t0,
+                float s1, float t1)
+{
+    struct {
+        float x, y, s, t;
+    } quad_strip[4] = {
+        { -1,  1, s0, t0, }, //  0  2
+        { -1, -1, s0, t1, }, //  | /|
+        {  1,  1, s1, t0, }, //  |/ |
+        {  1, -1, s1, t1  }  //  1  3
+    };
+
+    /* Try our best to save and restore and GL state we use, to avoid confusing
+     * any caching of state that Unity does.
+     */
+    GLint saved_program;
+    glGetIntegerv(GL_CURRENT_PROGRAM, &saved_program);
+
+    GLint saved_array_buffer;
+    glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_array_buffer);
+
+    if (!data->attrib_quad_bo) {
+        glGenBuffers(1, &data->attrib_quad_bo);
+        glBindBuffer(GL_ARRAY_BUFFER, data->attrib_quad_bo);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(quad_strip), quad_strip, GL_STATIC_DRAW);
+    }
+
+    if (!data->video_program) {
+        const char *vert_shader =
+            GLSL_SHADER_VERSION
+            "precision mediump float;\n"
+            "precision mediump int;\n"
+            "in vec2 pos;\n"
+            "in vec2 tex_coords_in;\n"
+            "out vec2 tex_coords;\n"
+            "void main() {\n"
+            "  gl_Position = vec4(pos.x, pos.y, 0.0, 1.0);\n"
+            "  tex_coords = tex_coords_in;\n"
+            "}\n";
+        const char *frag_shader =
+            GLSL_SHADER_VERSION
+            "precision highp float;\n"
+            "precision highp int;\n"
+            "uniform sampler2D tex_sampler;\n"
+            "in vec2 tex_coords;\n"
+            "out lowp vec4 frag_color;\n"
+            "void main() {\n"
+            "  frag_color = texture(tex_sampler, tex_coords);\n"
+            "}\n";
+
+        data->video_program = gm_gl_create_program(data->log,
+                                                   vert_shader,
+                                                   frag_shader,
+                                                   NULL);
+
+        data->attrib_quad_pos =
+            glGetAttribLocation(data->video_program, "pos");
+        data->attrib_quad_tex_coords =
+            glGetAttribLocation(data->video_program, "tex_coords_in");
+
+        data->uniform_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
+        glUseProgram(data->video_program);
+        glUniform1i(data->uniform_tex_sampler, 0);
+    }
+
+    glUseProgram(data->video_program);
+    glBindBuffer(GL_ARRAY_BUFFER, data->attrib_quad_bo);
+
+    glEnableVertexAttribArray(data->attrib_quad_pos);
+    glVertexAttribPointer(data->attrib_quad_pos,
+                          2, GL_FLOAT, GL_FALSE, sizeof(quad_strip[0]), (void *)0);
+
+    if (data->attrib_quad_tex_coords != -1) {
+        glEnableVertexAttribArray(data->attrib_quad_tex_coords);
+        glVertexAttribPointer(data->attrib_quad_tex_coords,
+                              2, GL_FLOAT, GL_FALSE, sizeof(quad_strip[0]), (void *)8);
+    }
+
+    glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+
+    /* Don't touch the depth buffer, otherwise everything rendered by later
+     * cameras will likely be discarded...
+     */
+    glDepthMask(GL_FALSE);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDepthMask(GL_TRUE);
+
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    glDisableVertexAttribArray(data->attrib_quad_pos);
+    if (data->attrib_quad_tex_coords != -1)
+        glDisableVertexAttribArray(data->attrib_quad_tex_coords);
+
+    glBindBuffer(GL_ARRAY_BUFFER, saved_array_buffer);
+    glUseProgram(saved_program);
+}
+
+static void
+render_ar_video_background(struct glimpse_data *data)
+{
+    gm_assert(data->log, !!data->ctx, "render_ar_video_background, NULL ctx");
+
+    /* Upload latest video frame it it's changed...
+     */
+    if (data->device_frame != data->visible_frame) {
+        struct gm_frame *new_frame = gm_frame_ref(data->device_frame);
+
+        if (data->visible_frame)
+            gm_frame_unref(data->visible_frame);
+        data->visible_frame = new_frame;
+
+        /*
+         * Update video from camera
+         */
+        glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        /* NB: gles2 only allows npot textures with clamp to edge
+         * coordinate wrapping
+         */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        void *video_front = new_frame->video->data;
+        enum gm_format video_format = data->device_frame->video_format;
+
+        switch (video_format) {
+        case GM_FORMAT_LUMINANCE_U8:
+            gm_debug(data->log, "uploading U8 %dx%x",
+                     data->video_width, data->video_height);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                         data->video_width, data->video_height,
+                         0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_RGB:
+            gm_debug(data->log, "uploading RGB8 %dx%x",
+                     data->video_width, data->video_height);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                         data->video_width, data->video_height,
+                         0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_RGBX:
+        case GM_FORMAT_RGBA:
+            gm_debug(data->log, "uploading RGBA8 %dx%x",
+                     data->video_width, data->video_height);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                         data->video_width, data->video_height,
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_UNKNOWN:
+        case GM_FORMAT_Z_U16_MM:
+        case GM_FORMAT_Z_F32_M:
+        case GM_FORMAT_Z_F16_M:
+            gm_assert(data->log, 0, "Unexpected format for video buffer");
+            break;
+        }
+
+        glBindTexture(GL_TEXTURE_2D, 0);
+        gm_debug(data->log, "render_ar_video_background DEBUG 6");
+    }
+
+    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
+    if (tracking) {
+        gm_tracking_unref(tracking);
+    }
+
+    draw_video_quad(data, 0, 0, 1, 1);
+}
+
+static void
 on_khr_debug_message_cb(GLenum source,
                         GLenum type,
                         GLuint id,
@@ -507,7 +703,14 @@ on_render_event_cb(int event)
         plugin_data->registered_gl_debug_callback = true;
     }
 
-    gm_context_render_thread_hook(plugin_data->ctx);
+    switch (event) {
+    case 0:
+        gm_context_render_thread_hook(plugin_data->ctx);
+        break;
+    case 1:
+        render_ar_video_background(plugin_data);
+        break;
+    }
 }
 
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -692,7 +895,7 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
       gm_device_get_video_intrinsics(data->device);
 
     memcpy(out_mat4,
-           glm::value_ptr(intrinsics_to_project_matrix(intrinsics, 0.5, 5)),
+           glm::value_ptr(intrinsics_to_project_matrix(intrinsics, 0.1, 10)),
            sizeof(float) * 16);
 }
 
