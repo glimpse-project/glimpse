@@ -230,6 +230,13 @@ logger_abort_cb(struct gm_logger *logger,
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_log(int level, const char *msg)
+{
+    if (plugin_data)
+        gm_log(plugin_data->log, (enum gm_log_level)level, "GlimpseUnity", "%s", msg);
+}
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_set_time(float time)
 {
     unity_current_time = time;
