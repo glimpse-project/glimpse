@@ -38,7 +38,7 @@ cd build
 set +e
 for i in 1 2 3
 do
-    meson .. --errorlogs --warnlevel 3 $CONFIG_OPTS || sleep 5
+    meson .. --errorlogs $CONFIG_OPTS || sleep 5
     if test -f build.ninja; then
         break
     fi
