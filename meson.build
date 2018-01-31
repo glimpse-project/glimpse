@@ -333,7 +333,7 @@ if support_unity
             '--plugin-jardir', join_paths('Assets/Plugins/Android'),
             '--strip', meson.get_cross_property('_strip_binary'),
             '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
-            '--tango-libs', get_option('android_3rdparty')
+            '--tango-libs', get_option('tango_sdk')
         ]
     else
         install_args += [
