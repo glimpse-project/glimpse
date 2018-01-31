@@ -509,6 +509,22 @@ gm_unity_init(void)
 
     gm_debug(data->log, "GLIMPSE: Init\n");
 
+    switch (unity_renderer_type) {
+    case kUnityGfxRendererOpenGLES20:
+        gm_debug(data->log, "OpenGL ES 2.0 Renderer");
+        break;
+    case kUnityGfxRendererOpenGLES30:
+        gm_debug(data->log, "OpenGL ES 3.0 Renderer");
+        break;
+    case kUnityGfxRendererOpenGLCore:
+        gm_debug(data->log, "OpenGL Core Renderer");
+        break;
+    default:
+        gm_debug(data->log, "Unexpected Unity Renderer %d",
+                 (int)unity_renderer_type);
+        break;
+    }
+
 #ifdef __ANDROID__
     // During development on Android we are manually uploading recording and
     // training models to /sdcard on test devices so that build+upload cycles
