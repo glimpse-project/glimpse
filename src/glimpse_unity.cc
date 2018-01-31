@@ -39,6 +39,7 @@
 
 #include "half.hpp"
 
+#include "xalloc.h"
 #include "glimpse_log.h"
 #include "glimpse_device.h"
 #include "glimpse_context.h"
@@ -47,6 +48,7 @@
 
 #ifdef __ANDROID__
 #define GM_LOG_CONTEXT "Glimpse Plugin"
+#include <android/log.h>
 #include <jni.h>
 #else
 #define GM_LOG_CONTEXT "unity_plugin"
@@ -158,7 +160,28 @@ logger_cb(struct gm_logger *logger,
     char *msg = NULL;
 
     if (vasprintf(&msg, format, ap) > 0) {
-        unity_log_function(level, context, msg);
+#ifdef __ANDROID__
+        switch (level) {
+        case GM_LOG_ASSERT:
+            __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
+            break;
+        case GM_LOG_ERROR:
+            __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
+            break;
+        case GM_LOG_WARN:
+            __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
+            break;
+        case GM_LOG_INFO:
+            __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
+            break;
+        case GM_LOG_DEBUG:
+            __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
+            break;
+        }
+#else
+        if (unity_log_function)
+            unity_log_function(level, context, msg);
+#endif
 
         if (data->log_fp) {
             switch (level) {
