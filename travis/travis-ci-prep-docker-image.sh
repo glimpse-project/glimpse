@@ -25,6 +25,9 @@ FROM $1
 USER root
 ENV LANG C.UTF-8
 ENV LC_ALL C.UTF-8
+RUN apt-get install -y --no-install-recommends --no-install-suggests \
+    openjdk-8-jdk-headless \
+    && apt-get clean
 RUN groupadd -g $_GID $_GROUP && useradd -u $_UID -g $_GID -G sudo -m $_USER
 RUN echo "%sudo ALL=NOPASSWD: ALL">>/etc/sudoers
 
