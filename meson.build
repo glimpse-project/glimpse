@@ -7,13 +7,33 @@ use_system_libs = get_option('use_system_libs')
 compiler = meson.get_compiler('c')
 python3 = import('python3').find_python()
 
-# Kinda silly how awkward it is to query environment variables...
 if compiler.get_define('__ANDROID__') != ''
-    android_sdk_home = run_command(python3, '-c',
-        'import os; print(os.getenv("ANDROID_HOME", ""))').stdout().strip()
+    android_sdk_home = get_option('android_sdk')
     if android_sdk_home == ''
-        error('Failed to find Android SDK via $ANDROID_HOME environment variable')
+        android_sdk_home = run_command(python3, '-c',
+            'import os; print(os.getenv("ANDROID_HOME", ""))').stdout().strip()
     endif
+    if android_sdk_home == ''
+        error('Failed to find Android SDK via -Dandroid_sdk option or $ANDROID_HOME environment variable')
+    endif
+
+    android_api = '23'
+    android_sdk_jar = join_paths(android_sdk_home, 'platforms', 'android-' + android_api, 'android.jar')
+
+    android_build_tools = get_option('android_sdk_build_tools')
+
+    android_ndk_home = get_option('android_ndk')
+    if android_ndk_home == ''
+        android_ndk_home = run_command(python3, '-c',
+            'import os; print(os.getenv("ANDROID_NDK_HOME", ""))').stdout().strip()
+    endif
+    if android_ndk_home == ''
+        error('Failed to find Android NDK via -Dandroid_ndk option or $ANDROID_NDK_HOME environment variable')
+    endif
+
+    platform_android = true
+else
+    platform_android = false
 endif
 
 threads_dep = dependency('threads')
@@ -137,75 +157,101 @@ if uw_dep.found()
     client_api_defines += '-DUSE_LIBUNWIND=1'
 endif
 
-if host_machine.cpu_family() != 'arm64'
-    support_unity = true
-else
-    support_unity = false
-    warning('')
-    warning('')
-    warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-    warning('☠                                                                              ☠')
-    warning('☠ Unity doesn\'t support arm64 currently, so not building Glimpse Unity Plugin  ☠')
-    warning('☠                                                                              ☠')
-    warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-    warning('')
-    warning('')
+unity_enabled = false
+if get_option('unity_project') != ''
+    unity_enabled = true
+
+    if compiler.get_define('__ANDROID__') != '' and get_option('unity_editor') == ''
+        unity_enabled = false
+        warning('')
+        warning('')
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+        warning('☠                                                                                     ☠')
+        warning('☠ -Dunity_editor=<prefix> must be used for build to find .jar class package for Unity ☠')
+        warning('☠                                                                                     ☠')
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+        warning('')
+        warning('')
+    endif
+
+    if host_machine.cpu_family() == 'arm64'
+        unity_enabled = false
+        warning('')
+        warning('')
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+        warning('☠                                                                              ☠')
+        warning('☠ Unity doesn\'t support arm64 currently, so not building Glimpse Unity Plugin  ☠')
+        warning('☠                                                                              ☠')
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+        warning('')
+        warning('')
+    endif
 endif
 
+tango_enabled = false
 if compiler.get_define('__ANDROID__') != ''
     android_log_dep = declare_dependency(link_args: [ '-llog' ])
     client_api_deps += android_log_dep
 
-    tango_enabled = false
-
-    if get_option('tango_sdk') != ''
+    if get_option('android_tango_sdk') != ''
         ndk_arch = meson.get_cross_property('_ndk_arch')
-        tango_sdk_inc = join_paths(meson.build_root(), get_option('tango_sdk'), 'include')
-        tango_sdk_libdir = join_paths(meson.build_root(), get_option('tango_sdk'), 'lib', ndk_arch)
+        tango_sdk_inc = join_paths(meson.build_root(), get_option('android_tango_sdk'), 'include')
+        tango_sdk_libdir = join_paths(meson.build_root(), get_option('android_tango_sdk'), 'lib', ndk_arch)
         tango_deps = declare_dependency(link_args: [ '-L' + tango_sdk_libdir,
+                                                     '-ltango_client_api',
                                                      '-ltango_support_api' ],
                                         compile_args: '-I' + tango_sdk_inc)
         tango_enabled = compiler.has_header('tango_client_api.h',
                                             args: '-I' + tango_sdk_inc)
     endif
 
-    if tango_enabled
-        client_api_deps += tango_deps
-        client_api_defines += '-DUSE_TANGO=1'
-    else
-        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-        warning('☠                                                                           ☠')
-        warning('☠ Tango support not currently enabled. Use -Dtango_sdk=<path> to locate SDK ☠')
-        warning('☠                                                                           ☠')
-        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+    if tango_enabled == false
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+        warning('☠                                                                                   ☠')
+        warning('☠ Tango support not currently enabled. Use -Dandroid_tango_sdk=<path> to locate SDK ☠')
+        warning('☠                                                                                   ☠')
+        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
     endif
 endif
 
-if support_unity
+need_unity_jar = false
+if unity_enabled
+    if platform_android
+        need_unity_jar = true
+    endif
+    if tango_enabled
+        plugin_deps = client_api_deps + [ tango_deps ]
+        plugin_defines = client_api_defines + [ '-DUSE_TANGO=1' ]
+    else
+        plugin_deps = client_api_deps
+        plugin_defines = client_api_defines
+    endif
     plugin_lib = shared_library('glimpse-unity-plugin',
                                 [ 'src/glimpse_unity.cc' ] + client_api_src,
                                 include_directories: inc,
-                                dependencies: client_api_deps,
-                                c_args: client_api_defines,
-                                cpp_args: client_api_defines)
-
-    plugin_install_deps = [ plugin_lib ]
-    if compiler.get_define('__ANDROID__') != ''
-        subdir('src/java')
-        plugin_install_deps += unity_java_jar
-    endif
+                                dependencies: plugin_deps,
+                                c_args: plugin_defines,
+                                cpp_args: plugin_defines)
 endif
 
+need_glimpse_native_jar = false
 if compiler.get_define('__ANDROID__') != ''
     glfm_sp = subproject('glfm')
     glfm_dep = glfm_sp.get_variable('glfm_dep')
     glfm_defines = [ '-DGLFM_INCLUDE_ES3' ]
+    client_api_defines += '-DUSE_GLFM'
+
+    if tango_enabled
+        viewer_deps = client_api_deps + [ tango_deps, glfm_dep ]
+        viewer_defines = client_api_defines + glfm_defines + [ '-DUSE_TANGO=1' ]
+    else
+        viewer_deps = client_api_deps + [ glfm_dep ]
+        viewer_defines = client_api_defines + glfm_defines
+    endif
 
     use_asset_manager = get_option('use_asset_manager')
     if use_asset_manager
-        asset_manager_defines = [ '-DUSE_ANDROID_ASSET_MANAGER_API' ]
-    else
-        asset_manager_defines = []
+        viewer_defines += [ '-DUSE_ANDROID_ASSET_MANAGER_API' ]
     endif
 
     imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
@@ -213,10 +259,14 @@ if compiler.get_define('__ANDROID__') != ''
     android_viewer = shared_library('glimpse_viewer_android',
         [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
         include_directories: inc,
-        dependencies: client_api_deps + [ glfm_dep ],
-        c_args: client_api_defines + glfm_defines + asset_manager_defines,
-        cpp_args: client_api_defines + glfm_defines + asset_manager_defines)
+        dependencies: viewer_deps,
+        c_args: viewer_defines,
+        cpp_args: viewer_defines)
+
+    need_glimpse_native_jar = true
 endif
+
+subdir('src/java')
 
 if not meson.is_cross_build()
 
@@ -326,6 +376,7 @@ if snappy_dep.found()
 endif
 
 if glfw_dep.found() and epoxy_dep.found()
+    client_api_defines += '-DUSE_GLFW'
     imgui_src += 'src/imgui/imgui_impl_glfw_gles3.cpp'
     executable('glimpse_viewer',
                [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
@@ -337,43 +388,57 @@ endif
 
 endif # is_cross_build
 
-if support_unity
+if unity_enabled
     install_args = [
         '--buildtype', get_option('buildtype'),
-        '--unity-project', join_paths(get_option('prefix'))
     ]
+    install_deps = [ plugin_lib ]
 
     if compiler.get_define('__ANDROID__') != ''
+        plugin_lib_dir = join_paths('Assets', 'Plugins', 'Android', 'libs',
+                                    meson.get_cross_property('_ndk_arch'))
         install_args += [
-            '--plugin-libdir', join_paths('Assets/Plugins/Android', 'libs',
-                                          meson.get_cross_property('_ndk_arch')),
-            '--plugin-jardir', join_paths('Assets/Plugins/Android'),
-            '--strip', meson.get_cross_property('_strip_binary'),
+            '--android-ndk', android_ndk_home,
             '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
-            '--tango-libs', get_option('tango_sdk')
+            '--plugin-jardir', join_paths('Assets', 'Plugins', 'Android'),
+            '--strip', meson.get_cross_property('_strip_binary'),
         ]
+        if tango_enabled
+            install_args += [ '--tango-libs', get_option('android_tango_sdk') ]
+            install_deps += [ unity_java_jar ]
+        endif
+        install_deps += [ unity_java_jar ]
     else
-        install_args += [
-            '--plugins-subdir', host_machine.cpu_family(),
-            '--strip', 'strip'
-        ]
+        plugin_lib_dir = join_paths('Assets', 'Plugins', host_machine.cpu_family())
     endif
 
+    install_args += [
+        join_paths(get_option('unity_project')),
+        plugin_lib_dir,
+    ]
     run_target('install_plugin',
-               command: [ 'install_glimpse.py'] +  install_args,
-               depends: plugin_install_deps)
+               command: [ 'install_glimpse.py' ] +  install_args,
+               depends: install_deps)
 endif
 
 if compiler.get_define('__ANDROID__') != ''
-    install_args = [
+    build_apk_args = [
         '--buildtype', get_option('buildtype'),
-        '--viewer', join_paths('lib', meson.get_cross_property('_ndk_arch')),
-        '--strip', meson.get_cross_property('_strip_binary'),
+        '--android-sdk', android_sdk_home,
+        '--android-build-tools', android_build_tools,
+        '--android-api', android_api,
+        '--android-ndk', android_ndk_home,
         '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
-        '--tango-libs', get_option('tango_sdk')
+        '--strip', meson.get_cross_property('_strip_binary'),
+        'src/glimpse_viewer_android/AndroidManifest.xml',
+        'src/glimpse_viewer_android/res',
+        'glimpse_viewer',
     ]
+    if tango_enabled
+        build_apk_args += [ '--tango-libs', get_option('android_tango_sdk') ]
+    endif
 
-    run_target('install_viewer',
-               command: [ 'install_glimpse.py'] +  install_args,
-               depends: [ android_viewer ])
+    run_target('viewer_apk',
+               command: [ 'build_apk.py' ] +  build_apk_args,
+               depends: [ android_viewer, glimpse_native_jar ])
 endif

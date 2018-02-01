@@ -1,6 +1,18 @@
-option('use_system_libs', type : 'boolean', value : true,
+option('use_system_libs', type: 'boolean', value : true,
        description: 'Whether to generally link with system libraries')
-option('use_asset_manager', type : 'boolean', value : false,
+
+option('android_ndk', type: 'string',
+       description: 'Absolute path to the Android NDK')
+option('android_sdk', type: 'string',
+       description: 'Absolute path to the Android SDK')
+option('android_sdk_build_tools', type: 'string', value: '26.0.2',
+       description: 'The version of Android SDK build tools to use')
+option('android_tango_sdk', type: 'string',
+       description: 'Absolute path to unpacked Tango SDK for Android')
+option('use_asset_manager', type: 'boolean', value: false,
        description: 'Whether to use the Android asset manager')
-option('tango_sdk', type : 'string',
-       description: 'Absolute path to unpacked Tango SDK')
+
+option('unity_project', type: 'string',
+       description: 'Path to top of a Unity project where Glimpse plugin can be installed')
+option('unity_editor', type: 'string',
+       description: 'Path to Unity Editor installation prefix (required for Android builds)')

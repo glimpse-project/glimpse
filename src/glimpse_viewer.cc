@@ -51,6 +51,7 @@
 #include <imgui.h>
 #ifdef __ANDROID__
 #    include <android/log.h>
+#    include <jni.h>
 #    include <glfm.h>
 #    include <imgui_impl_glfm_gles3.h>
 #else
@@ -92,16 +93,26 @@ struct event
     union {
         struct gm_event *context_event;
         struct gm_device_event *device_event;
+        int android_event;
     };
 };
 
 typedef struct _Data
 {
     struct gm_logger *log;
+    FILE *log_fp;
+
+    /* On Android we don't actually initialize a lot of state including
+     * ImGui until we've negotiated permissions, since we might not be
+     * able to load the font we need. viewer_init() will be called if
+     * the check passes.
+     */
+    bool initialized;
+
     struct gm_context *ctx;
     struct gm_device *device;
 
-#ifndef __ANDROID__
+#ifdef USE_GLFW
     GLFWwindow *window;
 #else
     bool surface_created;
@@ -168,6 +179,10 @@ typedef struct _Data
     int requested_recording_len;
 } Data;
 
+#ifdef __ANDROID__
+static JavaVM *android_jvm_singleton;
+#endif
+
 static uint32_t joint_palette[] = {
     0xFFFFFFFF, // head.tail
     0xCCCCCCCC, // neck_01.head
@@ -216,7 +231,15 @@ static bool cloud_tex_valid = false;
 
 static bool pause_profile;
 
-static void init_opengl(Data *data);
+#ifdef USE_GLFM
+static bool permissions_check_failed;
+static bool permissions_check_passed;
+#endif
+
+static void viewer_init(Data *data);
+static void init_viewer_opengl(Data *data);
+static void init_basic_opengl(Data *data);
+
 
 static void
 on_profiler_pause_cb(bool pause)
@@ -752,14 +775,14 @@ handle_device_frame_updates(Data *data)
                          0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
             break;
 
-        case GM_FORMAT_RGB:
+        case GM_FORMAT_RGB_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                          data->video_width, data->video_height,
                          0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
             break;
 
-        case GM_FORMAT_RGBX:
-        case GM_FORMAT_RGBA:
+        case GM_FORMAT_RGBX_U8:
+        case GM_FORMAT_RGBA_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                          data->video_width, data->video_height,
                          0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
@@ -769,6 +792,7 @@ handle_device_frame_updates(Data *data)
         case GM_FORMAT_Z_U16_MM:
         case GM_FORMAT_Z_F32_M:
         case GM_FORMAT_Z_F16_M:
+        case GM_FORMAT_POINTS_XYZC_F32_M:
             gm_assert(data->log, 0, "Unexpected format for video buffer");
             break;
         }
@@ -792,7 +816,7 @@ upload_tracking_textures(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    const uint8_t *depth_rgb = gm_tracking_get_rgb_depth(data->latest_tracking);
+    uint8_t *depth_rgb = (uint8_t *)gm_tracking_get_rgb_depth(data->latest_tracking);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                  data->depth_width, data->depth_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
@@ -950,9 +974,36 @@ handle_context_tracking_updates(Data *data)
 }
 
 static void
+handle_device_ready(Data *data)
+{
+    struct gm_intrinsics *depth_intrinsics =
+        gm_device_get_depth_intrinsics(data->device);
+    data->depth_width = depth_intrinsics->width;
+    data->depth_height = depth_intrinsics->height;
+
+    struct gm_intrinsics *video_intrinsics =
+        gm_device_get_video_intrinsics(data->device);
+    data->video_width = video_intrinsics->width;
+    data->video_height = video_intrinsics->height;
+
+    init_viewer_opengl(data);
+
+    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
+    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
+    /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
+      gm_device_get_depth_to_video_extrinsics(data->device));*/
+
+    gm_device_start(data->device);
+    gm_context_enable(data->ctx);
+}
+
+static void
 handle_device_event(Data *data, struct gm_device_event *event)
 {
     switch (event->type) {
+    case GM_DEV_EVENT_READY:
+        handle_device_ready(data);
+        break;
     case GM_DEV_EVENT_FRAME_READY:
 
         /* It's always possible that we will see an event for a frame
@@ -1024,47 +1075,7 @@ event_loop_iteration(Data *data)
 
 }
 
-#ifdef __ANDROID__
-/*
- * Copied from
- * https://codelab.wordpress.com/2014/11/03/ \
- * how-to-use-standard-output-streams-for-logging-in-android-apps/
- */
-static int pfd[2];
-static pthread_t log_thread;
-
-static void *
-log_thread_cb(void*)
-{
-    ssize_t rdsz;
-    char buf[1024];
-    while((rdsz = read(pfd[0], buf, sizeof buf - 1)) > 0) {
-        if (buf[rdsz - 1] == '\n') buf[rdsz - 1] = '\0';
-        else buf[rdsz] = '\0';
-        __android_log_write(ANDROID_LOG_DEBUG, "GlimpseViewer", buf);
-    }
-    return 0;
-}
-
-int
-start_output_redirect()
-{
-    /* make stdout line-buffered and stderr unbuffered */
-    setvbuf(stdout, 0, _IOLBF, 0);
-    setvbuf(stderr, 0, _IOLBF, 0);
-
-    /* create the pipe and redirect stdout and stderr */
-    pipe(pfd);
-    dup2(pfd[1], 1);
-    dup2(pfd[1], 2);
-
-    /* spawn the logging thread */
-    if (pthread_create(&log_thread, 0, log_thread_cb, 0) == -1)
-        return -1;
-    pthread_detach(log_thread);
-    return 0;
-}
-
+#ifdef USE_GLFM
 static void
 surface_created_cb(GLFMDisplay *display, int width, int height)
 {
@@ -1073,7 +1084,7 @@ surface_created_cb(GLFMDisplay *display, int width, int height)
     gm_debug(data->log, "Surface created (%dx%d)", width, height);
 
     if (!data->surface_created) {
-        init_opengl(data);
+        init_basic_opengl(data);
         data->surface_created = true;
     }
 
@@ -1109,21 +1120,36 @@ frame_cb(GLFMDisplay* display, double frameTime)
 {
     Data *data = (Data*)glfmGetUserData(display);
 
-    ProfileNewFrame();
-    ProfileScopedSection(Frame);
-    event_loop_iteration(data);
+    if (permissions_check_passed) {
+        if (!data->initialized)
+            viewer_init(data);
 
-    {
-        ProfileScopedSection(Redraw);
+        ProfileNewFrame();
+        ProfileScopedSection(Frame);
+        event_loop_iteration(data);
 
-        glViewport(0, 0, data->win_width, data->win_height);
+        {
+            ProfileScopedSection(Redraw);
+
+            glViewport(0, 0, data->win_width, data->win_height);
+            glClear(GL_COLOR_BUFFER_BIT);
+            ImGui_ImplGlfmGLES3_NewFrame(display, frameTime);
+            draw_ui(data);
+        }
+
+    } else if (permissions_check_failed) {
+        /* At least some visual feedback that we failed to
+         * acquire the permissions we need...
+         */
+        glClearColor(1.0, 0.0, 0.0, 1.0);
         glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplGlfmGLES3_NewFrame(display, frameTime);
-        draw_ui(data);
+    } else {
+        glClear(GL_COLOR_BUFFER_BIT);
     }
 }
-#else
+#endif
 
+#ifdef USE_GLFW
 static void
 event_loop(Data *data)
 {
@@ -1249,8 +1275,36 @@ on_device_event_cb(struct gm_device *dev,
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
+/* Initialize enough OpenGL state to handle rendering before being
+ * notified that the Glimpse device is 'ready' (i.e. before it's
+ * possible to query camera intrinsics)
+ */
 static void
-init_opengl(Data *data)
+init_basic_opengl(Data *data)
+{
+    glClearColor(0.0, 0.0, 0.0, 1.0);
+    glClearStencil(0);
+
+    glDebugMessageControl(GL_DONT_CARE, /* source */
+                          GL_DONT_CARE, /* type */
+                          GL_DONT_CARE, /* severity */
+                          0,
+                          NULL,
+                          false);
+
+    glDebugMessageControl(GL_DONT_CARE, /* source */
+                          GL_DEBUG_TYPE_ERROR,
+                          GL_DONT_CARE, /* severity */
+                          0,
+                          NULL,
+                          true);
+
+    glEnable(GL_DEBUG_OUTPUT);
+    glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
+}
+
+static void
+init_viewer_opengl(Data *data)
 {
     static const char *vertShaderCloud =
         "#version 300 es\n"
@@ -1336,8 +1390,6 @@ init_opengl(Data *data)
 #endif
         "}\n";
 
-    glClearColor(0.0, 0.0, 0.0, 0.0);
-    glClearStencil(0);
 
     // Create depth-buffer point shader
     gl_db_program = gm_gl_create_program(data->log,
@@ -1440,23 +1492,6 @@ init_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glGenFramebuffers(1, &gl_cloud_fbo);
     glGenRenderbuffers(1, &gl_cloud_depth_bo);
-
-    glDebugMessageControl(GL_DONT_CARE, /* source */
-                          GL_DONT_CARE, /* type */
-                          GL_DONT_CARE, /* severity */
-                          0,
-                          NULL,
-                          false);
-
-    glDebugMessageControl(GL_DONT_CARE, /* source */
-                          GL_DEBUG_TYPE_ERROR,
-                          GL_DONT_CARE, /* severity */
-                          0,
-                          NULL,
-                          true);
-
-    glEnable(GL_DEBUG_OUTPUT);
-    glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
 }
 
 static void
@@ -1468,103 +1503,80 @@ logger_cb(struct gm_logger *logger,
           va_list ap,
           void *user_data)
 {
-    //Data *data = (Data *)user_data;
-    FILE *output = stderr;
+    Data *data = (Data *)user_data;
+    char *msg = NULL;
 
-    switch (level) {
-    case GM_LOG_ERROR:
-        fprintf(output, "%s: ERROR: ", context);
-        break;
-    case GM_LOG_WARN:
-        fprintf(output, "%s: WARN: ", context);
-        break;
-    default:
-        output = stdout;
-        fprintf(output, "%s: ", context);
-    }
-
-    vfprintf(output, format, ap);
-    fprintf(output, "\n");
-    if (backtrace) {
-        int line_len = 100;
-        char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-        gm_logger_get_backtrace_strings(logger, backtrace,
-                                        line_len, (char *)formatted);
-        for (int i = 0; i < backtrace->n_frames; i++) {
-            char *line = formatted + line_len * i;
-            fprintf(output, "> %s\n", line);
+    if (vasprintf(&msg, format, ap) > 0) {
+#ifdef __ANDROID__
+        switch (level) {
+        case GM_LOG_ASSERT:
+            __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
+            break;
+        case GM_LOG_ERROR:
+            __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
+            break;
+        case GM_LOG_WARN:
+            __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
+            break;
+        case GM_LOG_INFO:
+            __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
+            break;
+        case GM_LOG_DEBUG:
+            __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
+            break;
         }
+#endif
+
+        if (data->log_fp) {
+            switch (level) {
+            case GM_LOG_ERROR:
+                fprintf(data->log_fp, "%s: ERROR: ", context);
+                break;
+            case GM_LOG_WARN:
+                fprintf(data->log_fp, "%s: WARN: ", context);
+                break;
+            default:
+                fprintf(data->log_fp, "%s: ", context);
+            }
+
+            fprintf(data->log_fp, "%s\n", msg);
+
+            if (backtrace) {
+                int line_len = 100;
+                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+                gm_logger_get_backtrace_strings(logger, backtrace,
+                                                line_len, (char *)formatted);
+                for (int i = 0; i < backtrace->n_frames; i++) {
+                    char *line = formatted + line_len * i;
+                    fprintf(data->log_fp, "> %s\n", line);
+                }
+            }
+        }
+
+        free(msg);
     }
 }
 
-#ifdef __ANDROID__
-void
-glfmMain(GLFMDisplay* display)
-#else
-int
-main(int argc, char **argv)
-#endif
+static void
+logger_abort_cb(struct gm_logger *logger,
+                void *user_data)
 {
-#ifdef __ANDROID__
-    Data *data = (Data *)calloc(1, sizeof(Data));
-#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
-#ifndef USE_ANDROID_ASSET_MANAGER_API
-    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
-#endif
-    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
-    start_output_redirect();
-#else
-    Data _data = {};
-    Data *data = &_data;
-#endif
+    Data *data = (Data *)user_data;
 
-    data->log = gm_logger_new(logger_cb, data);
-
-#ifdef USE_ANDROID_ASSET_MANAGER_API
-    ANativeActivity *activity = glfmAndroidGetActivity();
-    if (activity) {
-        gm_android_set_asset_manager(activity->assetManager);
-    } else {
-        gm_error(data->log, "Unable to get ANativeActivity");
-        exit(1);
-    }
-#endif
-
-    data->events_front = new std::vector<struct event>();
-    data->events_back = new std::vector<struct event>();
-    data->focal_point = glm::vec3(0.0, 0.0, 2.5);
-
-#ifndef __ANDROID__
-    if (!glfwInit()) {
-        fprintf(stderr, "Failed to init GLFW, OpenGL windows system library\n");
-        exit(1);
+    if (data->log_fp) {
+        fprintf(data->log_fp, "ABORT\n");
+        fflush(data->log_fp);
+        fclose(data->log_fp);
     }
 
-    if (argc == 2) {
-        struct gm_device_config config = {};
-        config.type = GM_DEVICE_RECORDING;
-        config.recording.path = argv[1];
-        data->device = gm_device_open(data->log, &config, NULL);
-    } else
-#endif
-    {
-        struct gm_device_config config = {};
-        config.type = GM_DEVICE_KINECT;
-        data->device = gm_device_open(data->log, &config, NULL);
-    }
+    abort();
+}
 
-    struct gm_intrinsics *depth_intrinsics =
-        gm_device_get_depth_intrinsics(data->device);
-    data->depth_width = depth_intrinsics->width;
-    data->depth_height = depth_intrinsics->height;
-
-    struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(data->device);
-    data->video_width = video_intrinsics->width;
-    data->video_height = video_intrinsics->height;
-
-#ifdef __ANDROID__
+#ifdef USE_GLFM
+static void
+init_winsys_glfm(Data *data, GLFMDisplay *display)
+{
     glfmSetDisplayConfig(display,
                          GLFMRenderingAPIOpenGLES3,
                          GLFMColorFormatRGBA8888,
@@ -1581,7 +1593,18 @@ main(int argc, char **argv)
     glfmSetMainLoopFunc(display, frame_cb);
 
     ImGui_ImplGlfmGLES3_Init(display, true);
-#else
+}
+#endif
+
+#ifdef USE_GLFW
+static void
+init_winsys_glfw(Data *data)
+{
+    if (!glfwInit()) {
+        fprintf(stderr, "Failed to init GLFW, OpenGL windows system library\n");
+        exit(1);
+    }
+
     data->win_width = 980 + TOOLBAR_LEFT_WIDTH;
     data->win_height = 768;
 
@@ -1614,8 +1637,65 @@ main(int argc, char **argv)
                                ImGui_ImplGlfwGLES3_MouseButtonCallback);
     glfwSetScrollCallback(data->window, ImGui_ImplGlfwGLES3_ScrollCallback);
     glfwSetCharCallback(data->window, ImGui_ImplGlfwGLES3_CharCallback);
-#endif
 
+    init_basic_opengl(data);
+}
+#endif // USE_GLFW
+
+static void __attribute__((unused))
+viewer_destroy(Data *data)
+{
+    /* Destroying the context' tracking pool will assert that all tracking
+     * resources have been released first...
+     */
+    if (data->latest_tracking)
+        gm_tracking_unref(data->latest_tracking);
+
+    /* NB: It's our responsibility to be sure that there can be no asynchonous
+     * calls into the gm_context api before we start to destroy it!
+     *
+     * We stop the device first because device callbacks result in calls
+     * through to the gm_context api.
+     *
+     * We don't destroy the device first because destroying the context will
+     * release device resources (which need to be release before the device
+     * can be cleanly closed).
+     */
+    gm_device_stop(data->device);
+
+    for (unsigned i = 0; i < data->events_back->size(); i++) {
+        struct event event = (*data->events_back)[i];
+
+        switch (event.type) {
+        case EVENT_DEVICE:
+            gm_device_event_free(event.device_event);
+            break;
+        case EVENT_CONTEXT:
+            gm_context_event_free(event.context_event);
+            break;
+        }
+    }
+
+    gm_context_destroy(data->ctx);
+
+    if (data->device_frame)
+        gm_frame_unref(data->device_frame);
+
+    gm_device_close(data->device);
+
+    json_value_free(data->joint_map);
+
+    gm_logger_destroy(data->log);
+
+    delete data->events_front;
+    delete data->events_back;
+
+    ProfileShutdown();
+}
+
+static void
+viewer_init(Data *data)
+{
     ImGuiIO& io = ImGui::GetIO();
 
     char *open_err = NULL;
@@ -1672,10 +1752,6 @@ main(int argc, char **argv)
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
-#ifndef __ANDROID__
-    init_opengl(data);
-#endif
-
     data->ctx = gm_context_new(data->log, NULL);
 
     const struct gm_intrinsics *training_intrinsics =
@@ -1683,16 +1759,7 @@ main(int argc, char **argv)
     data->training_width = training_intrinsics->width;
     data->training_height = training_intrinsics->height;
 
-    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
-    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
-    /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
-        gm_device_get_depth_to_video_extrinsics(data->device));*/
-
-    /* NB: there's no guarantee about what thread these event callbacks
-     * might be invoked from...
-     */
     gm_context_set_event_callback(data->ctx, on_event_cb, data);
-    gm_device_set_event_callback(data->device, on_device_event_cb, data);
 
     struct gm_asset *config_asset =
         gm_asset_open(data->log,
@@ -1706,62 +1773,89 @@ main(int argc, char **argv)
         free(open_err);
     }
 
-    gm_device_start(data->device);
-    gm_context_enable(data->ctx);
 
-#ifndef __ANDROID__
+    struct gm_device_config config = {};
+#ifdef USE_TANGO
+    config.type = GM_DEVICE_TANGO;
+#else
+    config.type = GM_DEVICE_KINECT;
+#endif
+    data->device = gm_device_open(data->log, &config, NULL);
+    gm_device_set_event_callback(data->device, on_device_event_cb, data);
+#ifdef __ANDROID__
+    gm_device_attach_jvm(data->device, android_jvm_singleton);
+#endif
+    gm_device_commit_config(data->device, NULL);
+
+    data->initialized = true;
+}
+
+
+#ifdef USE_GLFM
+void
+glfmMain(GLFMDisplay *display)
+#else
+int
+main(int argc, char **argv)
+#endif
+{
+    Data *data = (Data *)calloc(1, sizeof(Data));
+
+#ifdef __ANDROID__
+#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
+    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
+    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
+    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
+#else
+    data->log_fp = stderr;
+#endif
+
+    data->log = gm_logger_new(logger_cb, data);
+    gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
+
+#ifdef USE_GLFW
+    init_winsys_glfw(data);
+#endif
+#ifdef USE_GLFM
+    init_winsys_glfm(data, display);
+#endif
+
+    data->events_front = new std::vector<struct event>();
+    data->events_back = new std::vector<struct event>();
+    data->focal_point = glm::vec3(0.0, 0.0, 2.5);
+
+#ifdef USE_GLFW
+    viewer_init(data);
+
     event_loop(data);
 
-    /* Destroying the context' tracking pool will assert that all tracking
-     * resources have been released first...
-     */
-    if (data->latest_tracking)
-        gm_tracking_unref(data->latest_tracking);
+    viewer_destroy(data);
 
-    /* NB: It's our responsibility to be sure that there can be no asynchonous
-     * calls into the gm_context api before we start to destroy it!
-     *
-     * We stop the device first because device callbacks result in calls
-     * through to the gm_context api.
-     *
-     * We don't destroy the device first because destroying the context will
-     * release device resources (which need to be release before the device
-     * can be cleanly closed).
-     */
-    gm_device_stop(data->device);
-
-    for (unsigned i = 0; i < data->events_back->size(); i++) {
-        struct event event = (*data->events_back)[i];
-
-        switch (event.type) {
-        case EVENT_DEVICE:
-            gm_device_event_free(event.device_event);
-            break;
-        case EVENT_CONTEXT:
-            gm_context_event_free(event.context_event);
-            break;
-        }
-    }
-
-    gm_context_destroy(data->ctx);
-
-    if (data->device_frame)
-        gm_frame_unref(data->device_frame);
-
-    gm_device_close(data->device);
-
-    ProfileShutdown();
     ImGui_ImplGlfwGLES3_Shutdown();
     glfwDestroyWindow(data->window);
     glfwTerminate();
 
-    json_value_free(data->joint_map);
-
-    gm_logger_destroy(data->log);
-
-    delete data->events_front;
-    delete data->events_back;
-
     return 0;
 #endif
 }
+
+#ifdef __ANDROID__
+extern "C" jint
+JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    android_jvm_singleton = vm;
+
+    return JNI_VERSION_1_6;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_impossible_glimpse_GlimpseNativeActivity_OnPermissionsCheckResult(
+    JNIEnv *env, jclass type, jboolean permission)
+{
+    /* Just wait for the next frame to check these */
+    if (permission) {
+        permissions_check_passed = true;
+    } else
+        permissions_check_failed = true;
+}
+#endif

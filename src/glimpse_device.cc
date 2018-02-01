@@ -34,6 +34,16 @@
 #include <libfreenect.h>
 #endif
 
+#ifdef __ANDROID__
+#include <jni.h>
+#include <android/log.h>
+#endif
+
+#ifdef USE_TANGO
+#include <tango_client_api.h>
+#include <tango_support_api.h>
+#endif
+
 #include "half.hpp"
 #include "xalloc.h"
 
@@ -84,6 +94,20 @@ struct gm_device
 
     struct gm_logger *log;
 
+    /* When a device is first opened it is not considered to be fully
+     * configured until gm_device_commit_config() returns successfully.
+     *
+     * This allows for an extensible configuration API, e.g. for
+     * setting callbacks before using the device.
+     *
+     * NB: Not all of the device API is ready to use while a device is
+     * unconfigured. E.g. you shouldn't try and query camera intrinsics
+     * and start/stop the device, until the device is configured *and*
+     * a _READY event has been delivered.
+     */
+    bool configured;
+
+    /* Between gm_device_start/stop boundaries the device is 'running' */
     bool running;
 
     union {
@@ -110,6 +134,12 @@ struct gm_device
             float mks_accel[3];
             pthread_t io_thread;
         } kinect;
+#endif
+
+#ifdef USE_TANGO
+        struct {
+            TangoConfig tango_config;
+        } tango;
 #endif
     };
 
@@ -163,7 +193,21 @@ struct gm_device
     void *callback_data;
 
     pthread_mutex_t request_requirements_lock;
+
+#ifdef __ANDROID__
+    JavaVM *jvm;
+#endif
 };
+
+#ifdef USE_TANGO
+static pthread_mutex_t jni_lock;
+static jobject early_tango_service_binder;
+
+/* For our JNI callbacks we assume there can only be a single device
+ * corresponding to our Tango camera...
+ */
+static struct gm_device *tango_singleton_dev;
+#endif
 
 static uint64_t
 get_time(void)
@@ -196,7 +240,13 @@ mem_pool_acquire_frame(struct gm_mem_pool *pool)
 {
     struct gm_device_frame *frame = (struct gm_device_frame *)
         mem_pool_acquire_resource(pool);
+
     frame->base.ref = 1;
+    frame->base.depth = NULL;
+    frame->base.depth_format = GM_FORMAT_UNKNOWN;
+    frame->base.video = NULL;
+    frame->base.video_format = GM_FORMAT_UNKNOWN;
+
     return frame;
 }
 
@@ -219,7 +269,8 @@ device_frame_recycle(struct gm_frame *self)
     gm_assert(frame->dev->log, frame->base.ref == 0, "Unbalanced frame unref");
 
     mem_pool_recycle_resource(dev->video_buf_pool, self->video);
-    mem_pool_recycle_resource(dev->depth_buf_pool, self->depth);
+    if (self->depth)
+        mem_pool_recycle_resource(dev->depth_buf_pool, self->depth);
     mem_pool_recycle_resource(pool, frame);
 }
 
@@ -308,11 +359,21 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     buf->base.ref = 1;
     buf->base.api = &buf->vtable;
 
-    /* Allocated large enough got _U16_MM data */
     int depth_width = dev->depth_camera_intrinsics.width;
     int depth_height = dev->depth_camera_intrinsics.height;
-    buf->base.len = depth_width * depth_height * 2;
-    buf->base.data = xmalloc(buf->base.len);
+
+    switch (dev->type) {
+    case GM_DEVICE_TANGO:
+        /* Allocated large enough for _XYZC_F32_M data */
+        buf->base.len = depth_width * depth_height * 16;
+        buf->base.data = xmalloc(buf->base.len);
+        break;
+    default:
+        /* Allocated large enough for _U16_MM data */
+        buf->base.len = depth_width * depth_height * 2;
+        buf->base.data = xmalloc(buf->base.len);
+        break;
+    }
 
     return buf;
 }
@@ -327,6 +388,8 @@ static void
 notify_frame_locked(struct gm_device *dev)
 {
     struct gm_device_event *event = device_event_alloc(GM_DEV_EVENT_FRAME_READY);
+
+    gm_debug(dev->log, "notify_frame_locked (requirements = 0x%llx", dev->frame_request_requirements);
 
     event->frame_ready.met_requirements = dev->frame_request_requirements;
     dev->frame_request_requirements = 0;
@@ -451,7 +514,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     /* We're going to use Freenect's registered depth mode, which transforms
      * depth to video space, so we don't need video intrinsics/extrinsics.
      */
-    dev->video_format = GM_FORMAT_RGB;
+    dev->video_format = GM_FORMAT_RGB_U8;
     dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
     dev->depth_to_video_extrinsics.rotation[0] = 1.f;
     dev->depth_to_video_extrinsics.rotation[1] = 0.f;
@@ -934,6 +997,488 @@ recording_stop(struct gm_device *dev)
     }
 }
 
+static void
+notify_device_ready(struct gm_device *dev)
+{
+    struct gm_device_event *event = device_event_alloc(GM_DEV_EVENT_READY);
+
+    dev->event_callback(dev, event, dev->callback_data);
+}
+
+#ifdef USE_TANGO
+static bool
+tango_open(struct gm_device *dev, struct gm_device_config *config, char **err)
+{
+    gm_debug(dev->log, "Tango Device Open");
+
+    /* We wait until _configure() time before doing much because we want to
+     * allow the device to be configured with an event callback first
+     * so we will be able to notify that the device is ready if the Tango
+     * service has already been bound.
+     */
+
+    return true;
+}
+
+static void
+tango_close(struct gm_device *dev)
+{
+    gm_debug(dev->log, "Tango Device Close");
+}
+
+static void
+tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
+{
+    struct gm_device *dev = (struct gm_device *)context;
+
+    gm_debug(dev->log, "tango_point_cloud_cb");
+
+    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH)) {
+        gm_debug(dev->log, "> tango_point_cloud_cb: depth not needed");
+        return;
+    }
+
+    /* FIXME: explicitly enable/disable callbacks via Tango API somehow */
+    if (!dev->running) {
+        gm_debug(dev->log, "> tango_point_cloud_cb: not running");
+        return;
+    }
+
+    struct gm_device_buffer *depth_buf_back =
+        mem_pool_acquire_buffer(dev->depth_buf_pool);
+
+    gm_assert(dev->log,
+              point_cloud->num_points < (dev->depth_camera_intrinsics.width *
+                                         dev->depth_camera_intrinsics.height),
+              "Spurious Tango Point Cloud larger than sensor resolution");
+
+    memcpy(depth_buf_back->base.data,
+           point_cloud->points,
+           point_cloud->num_points * 4 * sizeof(float));
+    depth_buf_back->base.len = point_cloud->num_points * 4 * sizeof(float);
+
+    pthread_mutex_lock(&dev->swap_buffers_lock);
+
+    struct gm_device_buffer *old = dev->depth_buf_ready;
+    dev->depth_buf_ready = depth_buf_back;
+    dev->frame_time = (uint64_t)(point_cloud->timestamp * 1e9);
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+    gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);
+
+    if (old)
+        gm_buffer_unref(&old->base);
+
+    pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+    pthread_mutex_lock(&dev->request_requirements_lock);
+    if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
+        dev->frame_request_requirements)
+    {
+        notify_frame_locked(dev);
+    }
+    pthread_mutex_unlock(&dev->request_requirements_lock);
+}
+
+// This function does nothing. TangoService_connectOnTextureAvailable
+// requires a callback function pointer, and it cannot be null.
+static void
+tango_texture_available_cb(void *context, TangoCameraId id)
+{
+    //struct gm_device *dev = (struct gm_device *)context;
+}
+
+#if 0
+static int
+tango_format_bits_per_pixel(struct gm_device *dev, TangoImageFormatType format)
+{
+    switch (format) {
+    case TANGO_HAL_PIXEL_FORMAT_RGBA_8888:
+        gm_assert(dev->log, 0, "Unhandled Tango Camera Format (RGBA_8888)");
+        return 32;
+    case TANGO_HAL_PIXEL_FORMAT_YV12:
+        gm_assert(dev->log, 0, "Unhandled Tango Camera Format (YV12)");
+        return 12;
+    case TANGO_HAL_PIXEL_FORMAT_YCrCb_420_SP:
+        return 12;
+    }
+
+    gm_assert(dev->log, 0, "Should not be reached");
+}
+#endif
+
+/* FIXME: we should avoid needing to copy the video buffers here by only
+ * sampling the video as a GL texture.
+ */
+static void
+tango_frame_available_cb(void *context,
+                         TangoCameraId id,
+                         const TangoImageBuffer *buffer)
+{
+    struct gm_device *dev = (struct gm_device *)context;
+
+    gm_debug(dev->log, "tango_frame_available_cb");
+
+    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO)) {
+        gm_debug(dev->log, "> tango_frame_available_cb: VIDEO not required");
+        return;
+    }
+
+    /* FIXME: explicitly enable/disable callbacks via Tango API somehow */
+    if (!dev->running) {
+        gm_debug(dev->log, "> tango_frame_available_cb: not running");
+        return;
+    }
+
+    gm_assert(dev->log, buffer->format == TANGO_HAL_PIXEL_FORMAT_YCrCb_420_SP,
+              "FIXME: Unhandled Tango Camera Format (only supporting NV12 currently)");
+    if (buffer->format != TANGO_HAL_PIXEL_FORMAT_YCrCb_420_SP)
+        return;
+
+    struct gm_device_buffer *video_buf_back =
+        mem_pool_acquire_buffer(dev->video_buf_pool);
+
+    /* XXX: we're just keeping the luminance for now... */
+    memcpy(video_buf_back->base.data,
+           buffer->data,
+           buffer->width * buffer->height);
+
+    pthread_mutex_lock(&dev->swap_buffers_lock);
+
+    struct gm_device_buffer *old = dev->video_buf_ready;
+    dev->video_buf_ready = video_buf_back;
+    dev->frame_time = (uint64_t)(buffer->timestamp * 1e9);
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+
+    gm_debug(dev->log, "tango_frame_available_cb video ready = %p", dev->video_buf_ready);
+
+    if (old)
+        gm_buffer_unref(&old->base);
+
+    pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+    pthread_mutex_lock(&dev->request_requirements_lock);
+    if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
+        dev->frame_request_requirements)
+    {
+        notify_frame_locked(dev);
+    }
+    pthread_mutex_unlock(&dev->request_requirements_lock);
+}
+
+static bool
+tango_set_up_config(struct gm_device *dev, char **err)
+{
+    dev->depth_format = GM_FORMAT_POINTS_XYZC_F32_M;
+    dev->video_format = GM_FORMAT_LUMINANCE_U8;
+
+    /* FIXME */
+    dev->depth_to_video_extrinsics.rotation[0] = 1.f;
+    dev->depth_to_video_extrinsics.rotation[1] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[2] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[3] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[4] = 1.f;
+    dev->depth_to_video_extrinsics.rotation[5] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[6] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[7] = 0.f;
+    dev->depth_to_video_extrinsics.rotation[8] = 1.f;
+
+    dev->depth_to_video_extrinsics.translation[0] = 0.f;
+    dev->depth_to_video_extrinsics.translation[1] = 0.f;
+    dev->depth_to_video_extrinsics.translation[2] = 0.f;
+
+    // The TANGO_CONFIG_DEFAULT config enables basic motion tracking capabilities.
+    // In addition to motion tracking, however, we want to run with depth...
+    dev->tango.tango_config = TangoService_getConfig(TANGO_CONFIG_DEFAULT);
+    if (dev->tango.tango_config == nullptr) {
+        gm_throw(dev->log, err, "Unable to get tango config");
+        return false;
+    }
+
+    TangoErrorType ret =
+        TangoConfig_setBool(dev->tango.tango_config, "config_enable_depth", true);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err, "Failed to enable depth.");
+        return false;
+    }
+
+    ret = TangoConfig_setInt32(dev->tango.tango_config, "config_depth_mode",
+                               TANGO_POINTCLOUD_XYZC);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err, "Failed to configure to XYZC.");
+        return false;
+    }
+
+    ret = TangoConfig_setBool(dev->tango.tango_config, "config_enable_color_camera", true);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err, "Failed to enable color camera.");
+        return false;
+    }
+
+    // Enable low latency IMU integration so that we have pose information
+    // available as quickly as possible. Without setting this flag, you will
+    // often receive invalid poses when calling getPoseAtTime() for an image.
+    ret = TangoConfig_setBool(dev->tango.tango_config,
+                              "config_enable_low_latency_imu_integration", true);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err, "Failed to enable low latency imu integration.");
+        return false;
+    }
+
+    // Drift correction allows motion tracking to recover after it loses tracking.
+    //
+    // The drift corrected pose is is available through the frame pair with
+    // base frame AREA_DESCRIPTION and target frame DEVICE.
+    ret = TangoConfig_setBool(dev->tango.tango_config,
+                              "config_enable_drift_correction", true);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,
+                 "enabling config_enable_drift_correction failed with error code: %d",
+                 ret);
+        return false;
+    }
+
+#if 0
+    if (point_cloud_manager_ == nullptr) {
+        int32_t max_point_cloud_elements;
+        ret = TangoConfig_getInt32(dev->tango.tango_config, "max_point_cloud_elements",
+                                   &max_point_cloud_elements);
+        if (ret != TANGO_SUCCESS) {
+            gm_throw(dev->log, err,
+                     "Failed to query maximum number of point cloud elements.");
+            return false;
+        }
+
+        ret = TangoSupport_createPointCloudManager(max_point_cloud_elements,
+                                                   &point_cloud_manager_);
+        if (ret != TANGO_SUCCESS) {
+            gm_throw(dev->log, err, "Failed to create a point cloud manager.");
+            return false;
+        }
+    }
+#endif
+
+    // Register for depth notification.
+    ret = TangoService_connectOnPointCloudAvailable(tango_point_cloud_cb);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,"Failed to connected to depth callback.");
+        return false;
+    }
+
+#if 0
+    // The Tango service allows you to connect an OpenGL texture directly to its
+    // RGB and fisheye cameras. This is the most efficient way of receiving
+    // images from the service because it avoids copies. You get access to the
+    // graphic buffer directly. As we are interested in rendering the color image
+    // in our render loop, we will be polling for the color image as needed.
+    ret = TangoService_connectOnTextureAvailable(TANGO_CAMERA_COLOR, dev,
+                                                 tango_texture_available_cb);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,
+                 "Failed to connect texture callback with error code: %d",
+                 ret);
+        return false;
+    }
+
+    ret = TangoService_connectOnFrameAvailable(TANGO_CAMERA_COLOR, dev,
+                                               tango_frame_available_cb);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,"Failed to connect to color frame callback");
+        return false;
+    }
+#endif
+    return true;
+}
+
+static bool
+tango_connect(struct gm_device *dev, char **err)
+{
+    TangoCameraIntrinsics color_camera_intrinsics;
+    //TangoCameraIntrinsics rgbir_camera_intrinsics;
+    TangoCameraIntrinsics depth_camera_intrinsics;
+
+    // Here, we will connect to the TangoService and set up to run. Note that
+    // we are passing in a pointer to ourselves as the context which will be
+    // passed back in our callbacks.
+    TangoErrorType ret = TangoService_connect(dev, dev->tango.tango_config);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err, "Failed to connect to the Tango service.");
+        return false;
+    }
+
+    // Get the intrinsics for the color camera and pass them on to the depth
+    // image. We need these to know how to project the point cloud into the color
+    // camera frame.
+    ret = TangoService_getCameraIntrinsics(TANGO_CAMERA_COLOR,
+                                           &color_camera_intrinsics);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,
+                 "Failed to get the intrinsics for the color camera.");
+        return false;
+    }
+
+    ret = TangoService_connectOnFrameAvailable(TANGO_CAMERA_COLOR, dev,
+                                               tango_frame_available_cb);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,"Failed to connect to color frame callback");
+        return false;
+    }
+
+    dev->video_camera_intrinsics.width = color_camera_intrinsics.width;
+    dev->video_camera_intrinsics.height = color_camera_intrinsics.height;
+    dev->video_camera_intrinsics.fx = color_camera_intrinsics.fx;
+    dev->video_camera_intrinsics.fy = color_camera_intrinsics.fy;
+    dev->video_camera_intrinsics.cx = color_camera_intrinsics.cx;
+    dev->video_camera_intrinsics.cy = color_camera_intrinsics.cy;
+
+#define DEGREES(RAD) (RAD * (360.0 / (M_PI * 2.0)))
+
+    float color_hfov = 2.0 * atan(0.5 * color_camera_intrinsics.width /
+                                  color_camera_intrinsics.fx);
+    float color_vfov = 2.0 * atan(0.5 * color_camera_intrinsics.height /
+                                  color_camera_intrinsics.fy);
+    gm_debug(dev->log,
+             "ColorCamera: %dx%d H-FOV: %f, V-FOV: %f",
+             (int)color_camera_intrinsics.width,
+             (int)color_camera_intrinsics.height,
+             DEGREES(color_hfov), DEGREES(color_vfov));
+
+    ret = TangoService_getCameraIntrinsics(TANGO_CAMERA_DEPTH,
+                                           &depth_camera_intrinsics);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err,
+                 "Failed to get the intrinsics for the depth camera.");
+        return false;
+    }
+
+    dev->depth_camera_intrinsics.width = depth_camera_intrinsics.width;
+    dev->depth_camera_intrinsics.height = depth_camera_intrinsics.height;
+    dev->depth_camera_intrinsics.fx = depth_camera_intrinsics.fx;
+    dev->depth_camera_intrinsics.fy = depth_camera_intrinsics.fy;
+    dev->depth_camera_intrinsics.cx = depth_camera_intrinsics.cx;
+    dev->depth_camera_intrinsics.cy = depth_camera_intrinsics.cy;
+
+    float depth_hfov = 2.0 * atan(0.5 * depth_camera_intrinsics.width /
+                                  depth_camera_intrinsics.fx);
+    float depth_vfov = 2.0 * atan(0.5 * depth_camera_intrinsics.height /
+                                  depth_camera_intrinsics.fy);
+    gm_debug(dev->log, "DepthCamera: %dx%d H-FOV: %f, V-FOV: %f",
+             (int)depth_camera_intrinsics.width,
+             (int)depth_camera_intrinsics.height,
+             DEGREES(depth_hfov), DEGREES(depth_vfov));
+
+    TangoCoordinateFramePair pair = { TANGO_COORDINATE_FRAME_CAMERA_COLOR,
+        TANGO_COORDINATE_FRAME_CAMERA_DEPTH };
+    TangoPoseData color_camera_T_depth_camera;
+
+    TangoService_getPoseAtTime(0, //get latest
+                               pair,
+                               &color_camera_T_depth_camera);
+    gm_debug(dev->log,
+             "depth -> color camera: dx=%f,dy=%f,dz=%f, [w=%f (x=%f, y=%f, z=%f)]",
+             color_camera_T_depth_camera.translation[0],
+             color_camera_T_depth_camera.translation[1],
+             color_camera_T_depth_camera.translation[2],
+             color_camera_T_depth_camera.orientation[0],
+             color_camera_T_depth_camera.orientation[1],
+             color_camera_T_depth_camera.orientation[2],
+             color_camera_T_depth_camera.orientation[3]);
+
+#if 0
+    /* Hitting an abort in the Tango SDK if we attempt to query intrinsics
+     * with the TANGO_CAMERA_RGBIR enum
+     */
+    ret = TangoService_getCameraIntrinsics(TANGO_CAMERA_RGBIR,
+                                           &rgbir_camera_intrinsics_);
+    if (ret != TANGO_SUCCESS) {
+        gm_throw(dev->log, err, "Failed to get the intrinsics for the RGB-IR "
+             "camera.");
+        std::exit(EXIT_SUCCESS);
+    }
+
+    dev->rgbir_camera_intrinsics.width = rgbir_camera_intrinsics.width;
+    dev->rgbir_camera_intrinsics.height = rgbir_camera_intrinsics.height;
+    dev->rgbir_camera_intrinsics.fx = rgbir_camera_intrinsics.fx;
+    dev->rgbir_camera_intrinsics.fy = rgbir_camera_intrinsics.fy;
+    dev->rgbir_camera_intrinsics.cx = rgbir_camera_intrinsics.cx;
+    dev->rgbir_camera_intrinsics.cy = rgbir_camera_intrinsics.cy;
+
+    float ir_hfov = 2.0 * atan(0.5 * rgbir_camera_intrinsics_.width /
+                            rgbir_camera_intrinsics_.fx);
+    float ir_vfov = 2.0 * atan(0.5 * rgbir_camera_intrinsics_.height /
+                            rgbir_camera_intrinsics_.fy);
+    LOGI("RGB-IR-Camera: %dx%d H-FOV: %f, V-FOV: %f",
+         (int)rgbir_camera_intrinsics_.width,
+         (int)rgbir_camera_intrinsics_.height,
+         DEGREES(ir_hfov), DEGREES(ir_vfov));
+#endif
+
+    // Initialize TangoSupport context.
+    TangoSupport_initialize(TangoService_getPoseAtTime,
+                            TangoService_getCameraIntrinsics);
+
+    return true;
+}
+
+static void
+tango_set_service_binder(struct gm_device *dev, JNIEnv *jni_env, jobject binder)
+{
+    TangoErrorType ret = TangoService_setBinder(jni_env, binder);
+    if (ret != TANGO_SUCCESS) {
+        gm_debug(dev->log, "TangoService_setBinder failed");
+        return;
+    }
+
+    char *err = NULL;
+    if (tango_set_up_config(dev, &err) && tango_connect(dev, &err))
+    {
+        notify_device_ready(dev);
+    } else {
+        gm_error(dev->log, "Failed to configure Tango: %s", err);
+        free(err);
+    }
+}
+
+static bool
+tango_configure(struct gm_device *dev, char **err)
+{
+    dev->configured = true;
+
+    gm_debug(dev->log, "Tango Device Configure");
+
+    pthread_mutex_lock(&jni_lock);
+
+    /* We wait until now to set the global tango_singleton_dev pointer so that
+     * JNI callbacks won't see the device until it's safe to e.g. deliver
+     * events from the device
+     */
+    gm_assert(dev->log, tango_singleton_dev == NULL, "Attempted to open multiple Tango devices");
+    tango_singleton_dev = dev;
+
+    if (early_tango_service_binder) {
+        JNIEnv *jni_env = 0;
+        dev->jvm->AttachCurrentThread(&jni_env, 0);
+
+        tango_set_service_binder(dev, jni_env, early_tango_service_binder);
+    }
+
+    pthread_mutex_unlock(&jni_lock);
+
+    return true;
+}
+
+static void
+tango_start(struct gm_device *dev)
+{
+    dev->running = true;
+}
+
+static void
+tango_stop(struct gm_device *dev)
+{
+    dev->running = false;
+}
+#endif // USE_TANGO
+
 struct gm_device *
 gm_device_open(struct gm_logger *log,
                struct gm_device_config *config,
@@ -943,6 +1488,7 @@ gm_device_open(struct gm_logger *log,
     bool status;
 
     dev->log = log;
+    dev->type = config->type;
 
     dev->video_buf_pool = mem_pool_alloc(
                      log,
@@ -977,6 +1523,13 @@ gm_device_open(struct gm_logger *log,
     case GM_DEVICE_RECORDING:
         status = recording_open(dev, config, err);
         break;
+    case GM_DEVICE_TANGO:
+#ifdef USE_TANGO
+        status = tango_open(dev, config, err);
+#else
+        gm_assert(log, 0, "Tango support not enabled");
+#endif
+        break;
     }
 
     if (!status) {
@@ -985,6 +1538,32 @@ gm_device_open(struct gm_logger *log,
     }
 
     return dev;
+}
+
+bool
+gm_device_commit_config(struct gm_device *dev, char **err)
+{
+    bool status = true;
+
+    switch (dev->type) {
+    case GM_DEVICE_TANGO:
+#ifdef USE_TANGO
+        status = tango_configure(dev, err);
+#endif
+        break;
+    default:
+        dev->configured = true;
+        notify_device_ready(dev);
+        status = true;
+        break;
+    }
+
+    if (!status) {
+        gm_device_close(dev);
+        return false;
+    }
+
+    return true;
 }
 
 void
@@ -997,12 +1576,15 @@ gm_device_close(struct gm_device *dev)
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
         kinect_close(dev);
-#else
-        gm_assert(dev->log, 0, "Kinect support not enabled");
 #endif
         break;
     case GM_DEVICE_RECORDING:
         recording_close(dev);
+        break;
+    case GM_DEVICE_TANGO:
+#ifdef USE_TANGO
+        tango_close(dev);
+#endif
         break;
     }
 
@@ -1058,12 +1640,15 @@ gm_device_start(struct gm_device *dev)
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
         kinect_start(dev);
-#else
-        gm_assert(dev->log, 0, "Kinect support not enabled");
 #endif
         break;
     case GM_DEVICE_RECORDING:
         recording_start(dev);
+        break;
+    case GM_DEVICE_TANGO:
+#ifdef USE_TANGO
+        tango_start(dev);
+#endif
         break;
     }
 }
@@ -1075,12 +1660,15 @@ gm_device_stop(struct gm_device *dev)
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
         kinect_stop(dev);
-#else
-        gm_assert(dev->log, 0, "Kinect support not enabled");
 #endif
         break;
     case GM_DEVICE_RECORDING:
         recording_stop(dev);
+        break;
+    case GM_DEVICE_TANGO:
+#ifdef USE_TANGO
+        tango_stop(dev);
+#endif
         break;
     }
 }
@@ -1148,12 +1736,16 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     dev->last_frame = &frame->base;
 
+    gm_debug(dev->log, "latest frame = %p, requirements = %llx",
+             frame, dev->frame_ready_requirements);
+
     if (dev->frame_ready_requirements & GM_REQUEST_FRAME_DEPTH) {
         frame->base.depth = &dev->depth_buf_ready->base;
         dev->depth_buf_ready = NULL;
         frame->base.depth_format = dev->depth_format;
         gm_assert(dev->log, frame->base.depth != NULL,
                   "Depth ready flag set but buffer missing");
+        gm_debug(dev->log, "> depth = %p", frame->base.depth);
     }
     if (dev->frame_ready_requirements & GM_REQUEST_FRAME_VIDEO) {
         frame->base.video = &dev->video_buf_ready->base;
@@ -1161,6 +1753,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
         frame->base.video_format = dev->video_format;
         gm_assert(dev->log, frame->base.video != NULL,
                   "Video ready flag set but buffer missing");
+        gm_debug(dev->log, "> video = %p", frame->base.video);
     } else
         assert(0);
 
@@ -1187,3 +1780,32 @@ gm_device_get_ui_properties(struct gm_device *dev)
 {
     return &dev->properties_state;
 }
+
+#ifdef __ANDROID__
+void
+gm_device_attach_jvm(struct gm_device *dev, JavaVM *jvm)
+{
+    dev->jvm = jvm;
+}
+#endif
+
+#ifdef USE_TANGO
+extern "C" JNIEXPORT void JNICALL
+Java_com_impossible_glimpse_GlimpseJNI_onTangoServiceConnected(JNIEnv *env,
+                                                               jobject /*obj*/,
+                                                               jobject binder)
+{
+    // we might race with gm_device_configure which also wants to know whether
+    // the service is already connected...
+    pthread_mutex_lock(&jni_lock);
+
+    if (tango_singleton_dev) {
+        tango_set_service_binder(tango_singleton_dev, env, binder);
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onTangoServiceConnected JNI");
+        early_tango_service_binder = env->NewWeakGlobalRef(binder);
+    }
+
+    pthread_mutex_unlock(&jni_lock);
+}
+#endif

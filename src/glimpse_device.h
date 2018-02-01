@@ -24,11 +24,19 @@
 
 #pragma once
 
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
+
 #include "glimpse_context.h"
 
 enum gm_device_event_type
 {
-    GM_DEV_EVENT_FRAME_READY
+    /* The device itself is ready to be used */
+    GM_DEV_EVENT_READY,
+
+    /* A new frame has been captured by the device */
+    GM_DEV_EVENT_FRAME_READY,
 };
 
 struct gm_device_event
@@ -46,6 +54,7 @@ struct gm_device_event
 enum gm_device_type {
     GM_DEVICE_KINECT,
     GM_DEVICE_RECORDING,
+    GM_DEVICE_TANGO,
 };
 
 struct gm_device_config {
@@ -69,6 +78,16 @@ gm_device_open(struct gm_logger *log,
                struct gm_device_config *config,
                char **err);
 
+void
+gm_device_set_event_callback(struct gm_device *dev,
+                             void (*event_callback)(struct gm_device *dev,
+                                                    struct gm_device_event *event,
+                                                    void *user_data),
+                             void *user_data);
+
+bool
+gm_device_commit_config(struct gm_device *dev, char **err);
+
 struct gm_ui_properties *
 gm_device_get_ui_properties(struct gm_device *dev);
 
@@ -81,14 +100,8 @@ gm_device_get_video_intrinsics(struct gm_device *dev);
 struct gm_extrinsics *
 gm_device_get_depth_to_video_extrinsics(struct gm_device *dev);
 
-void
-gm_device_set_event_callback(struct gm_device *dev,
-                             void (*event_callback)(struct gm_device *dev,
-                                                    struct gm_device_event *event,
-                                                    void *user_data),
-                             void *user_data);
 
-/* It's expected that events aren't synchronously handed within the above
+/* It's expected that events aren't synchronously handled within the above
  * event callback considering that it's undefined what thread the callback
  * is invoked on and it's undefined what locks might be held during the
  * invocation whereby the device api may not be reentrant at that point.
@@ -108,6 +121,11 @@ gm_device_request_frame(struct gm_device *dev, uint64_t requirements);
 
 struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev);
+
+#ifdef __ANDROID__
+void
+gm_device_attach_jvm(struct gm_device *dev, JavaVM *jvm);
+#endif
 
 #ifdef __cplusplus
 }

@@ -25,6 +25,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <dlfcn.h>
 
 #include <IUnityInterface.h>
 #include <IUnityGraphics.h>
@@ -81,6 +82,8 @@ struct glimpse_data
     struct gm_logger *log;
     struct gm_context *ctx;
     struct gm_device *device;
+
+    bool device_ready;
 
     /* A convenience for accessing the depth_camera_intrinsics.width/height */
     int depth_width;
@@ -142,6 +145,10 @@ struct glimpse_data
 
     GLuint uniform_tex_sampler;
 };
+
+#ifdef __ANDROID__
+static JavaVM *android_jvm_singleton;
+#endif
 
 static void (*unity_log_function)(int level,
                                   const char *context,
@@ -390,9 +397,33 @@ handle_context_tracking_updates(struct glimpse_data *data)
 }
 
 static void
+handle_device_ready(struct glimpse_data *data)
+{
+    struct gm_intrinsics *depth_intrinsics =
+        gm_device_get_depth_intrinsics(data->device);
+    data->depth_width = depth_intrinsics->width;
+    data->depth_height = depth_intrinsics->height;
+
+    struct gm_intrinsics *video_intrinsics =
+        gm_device_get_video_intrinsics(data->device);
+    data->video_width = video_intrinsics->width;
+    data->video_height = video_intrinsics->height;
+
+    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
+    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
+    /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
+      gm_device_get_depth_to_video_extrinsics(data->device));*/
+
+    data->device_ready = true;
+}
+
+static void
 handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
 {
     switch (event->type) {
+    case GM_DEV_EVENT_READY:
+        handle_device_ready(data);
+        break;
     case GM_DEV_EVENT_FRAME_READY:
         gm_debug(data->log, "GM_DEV_EVENT_FRAME_READY\n");
 
@@ -544,7 +575,11 @@ draw_video_quad(struct glimpse_data *data,
                               2, GL_FLOAT, GL_FALSE, sizeof(quad_strip[0]), (void *)8);
     }
 
+#ifdef __ANDROID__
     glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+#else
+    glBindTextureUnit(0, data->gl_vid_tex);
+#endif
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -598,24 +633,24 @@ render_ar_video_background(struct glimpse_data *data)
 
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
-            gm_debug(data->log, "uploading U8 %dx%x",
+            gm_debug(data->log, "uploading U8 %dx%d",
                      data->video_width, data->video_height);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
                          data->video_width, data->video_height,
                          0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
             break;
 
-        case GM_FORMAT_RGB:
-            gm_debug(data->log, "uploading RGB8 %dx%x",
+        case GM_FORMAT_RGB_U8:
+            gm_debug(data->log, "uploading RGB8 %dx%d",
                      data->video_width, data->video_height);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                          data->video_width, data->video_height,
                          0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
             break;
 
-        case GM_FORMAT_RGBX:
-        case GM_FORMAT_RGBA:
-            gm_debug(data->log, "uploading RGBA8 %dx%x",
+        case GM_FORMAT_RGBX_U8:
+        case GM_FORMAT_RGBA_U8:
+            gm_debug(data->log, "uploading RGBA8 %dx%d",
                      data->video_width, data->video_height);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                          data->video_width, data->video_height,
@@ -626,6 +661,7 @@ render_ar_video_background(struct glimpse_data *data)
         case GM_FORMAT_Z_U16_MM:
         case GM_FORMAT_Z_F32_M:
         case GM_FORMAT_Z_F16_M:
+        case GM_FORMAT_POINTS_XYZC_F32_M:
             gm_assert(data->log, 0, "Unexpected format for video buffer");
             break;
         }
@@ -770,6 +806,11 @@ gm_unity_init(void)
 
     gm_debug(data->log, "GLIMPSE: Init\n");
 
+#ifdef __ANDROID__
+    gm_assert(data->log, android_jvm_singleton != NULL,
+              "Expected to have discovered JavaVM before gm_unity_init()");
+#endif
+
     switch (unity_renderer_type) {
     case kUnityGfxRendererOpenGLES20:
         gm_debug(data->log, "OpenGL ES 2.0 Renderer");
@@ -803,30 +844,22 @@ gm_unity_init(void)
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
-    struct gm_device_config config = {};
-    config.type = GM_DEVICE_KINECT;
-    data->device = gm_device_open(data->log, &config, NULL);
-
-    struct gm_intrinsics *depth_intrinsics =
-        gm_device_get_depth_intrinsics(data->device);
-    data->depth_width = depth_intrinsics->width;
-    data->depth_height = depth_intrinsics->height;
-
-    struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(data->device);
-    data->video_width = video_intrinsics->width;
-    data->video_height = video_intrinsics->height;
-
     data->ctx = gm_context_new(data->log, NULL);
-
-    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
-    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
-
-    /* NB: there's no guarantee about what thread these event callbacks
-     * might be invoked from...
-     */
     gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
+
+    struct gm_device_config config = {};
+#ifdef USE_TANGO
+    config.type = GM_DEVICE_TANGO;
+#else
+    config.type = GM_DEVICE_KINECT;
+#endif
+    data->device = gm_device_open(data->log, &config, NULL);
     gm_device_set_event_callback(data->device, on_device_event_cb, plugin_data);
+#ifdef __ANDROID__
+    gm_device_attach_jvm(data->device, android_jvm_singleton);
+#endif
+
+    gm_device_commit_config(data->device, NULL);
 
     return (intptr_t )data;
 }
@@ -899,14 +932,19 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
            sizeof(float) * 16);
 }
 
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_run(void)
 {
     struct glimpse_data *data = plugin_data;
 
+    if (!data->device_ready)
+        return false;
+
     gm_debug(data->log, "GLIMPSE: Run\n");
     gm_device_start(data->device);
     gm_context_enable(data->ctx);
+
+    return true;
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1000,11 +1038,11 @@ instantiate_glimpse_test_class(JNIEnv* jni_env)
 }
 
 extern "C" jint UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-JNI_OnLoad(JavaVM *vm, void *reserved) {
-    JNIEnv *jni_env = 0;
-    vm->AttachCurrentThread(&jni_env, 0);
+JNI_OnLoad(JavaVM *vm, void *reserved)
+{
+    android_jvm_singleton = vm;
 
-    instantiate_glimpse_test_class(jni_env);
+    //instantiate_glimpse_test_class(jni_env);
     return JNI_VERSION_1_6;
 }
 #endif

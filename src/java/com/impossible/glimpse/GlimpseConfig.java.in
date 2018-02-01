@@ -1,0 +1,6 @@
+package com.impossible.glimpse;
+
+public class GlimpseConfig
+{
+    public static final boolean USE_TANGO = @use_tango@;
+}

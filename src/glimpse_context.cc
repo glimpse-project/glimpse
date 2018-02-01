@@ -201,6 +201,8 @@ struct gm_tracking_impl
     // Label probability tables
     float *label_probs;
 
+    bool success;
+
     // Inferred joint positions
     float *joints;
     float *joints_processed;
@@ -328,10 +330,18 @@ struct gm_context
      * history then n_tracking == 0 and all array entries are NULL.
      * n_tracking only increases up to TRACK_FRAMES at which point
      * tracking_history[] is a FIFO
+     *
+     * We only add to the history if we successfully detect a person
+     *
+     * We clear the history when tracking failed to detect a person
+     *
+     * We always store a reference to the last tracking state in
+     * latest_tracking, even if we failed to detect a person.
      */
     struct gm_mem_pool *tracking_pool;
     pthread_mutex_t tracking_swap_mutex;
     struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
+    struct gm_tracking_impl *latest_tracking;
     int n_tracking;
 
     int n_labels;
@@ -1965,7 +1975,7 @@ update_tracking_video(struct gm_context *ctx,
     glimpse::wrapped_image<unsigned char> orig_grey_img;
 
     switch(format) {
-    case GM_FORMAT_RGB:
+    case GM_FORMAT_RGB_U8:
         foreach_xy_off(width, height) {
             uint8_t r = video[off * 3];
             uint8_t g = video[off * 3 + 1];
@@ -1975,7 +1985,7 @@ update_tracking_video(struct gm_context *ctx,
         }
         break;
 
-    case GM_FORMAT_RGBX:
+    case GM_FORMAT_RGBX_U8:
         foreach_xy_off(width, height) {
             uint32_t rgba = ((uint32_t*)video)[off] | 0xFF;
             tracking->video[off] = rgba;
@@ -1987,7 +1997,7 @@ update_tracking_video(struct gm_context *ctx,
         }
         break;
 
-    case GM_FORMAT_RGBA:
+    case GM_FORMAT_RGBA_U8:
         memcpy(tracking->video, video, width * height * 4);
         foreach_xy_off(width, height) {
             uint8_t r = video[off * 3];
@@ -2009,6 +2019,7 @@ update_tracking_video(struct gm_context *ctx,
     case GM_FORMAT_Z_U16_MM:
     case GM_FORMAT_Z_F32_M:
     case GM_FORMAT_Z_F16_M:
+    case GM_FORMAT_POINTS_XYZC_F32_M:
         gm_assert(ctx->log, 0, "Unexpected format for video buffer");
         return;
     }
@@ -2079,11 +2090,12 @@ static void
 update_tracking_depth_from_buffer(struct gm_context *ctx,
                                   struct gm_tracking_impl *tracking,
                                   enum gm_format format,
-                                  void *depth,
+                                  struct gm_buffer *buffer,
                                   uint64_t timestamp)
 {
     int width = ctx->depth_camera_intrinsics.width;
     int height = ctx->depth_camera_intrinsics.height;
+    void *depth = buffer->data;
 
 #define COPY_AND_MAP_DEPTH_TO_RGB(DEPTH_COPY, DEPTH_RGB_BUF, OFF, DEPTH) \
     do { \
@@ -2100,6 +2112,7 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
 
     float *depth_copy = tracking->depth;
     uint8_t *depth_rgb_back = tracking->depth_rgb;
+    int num_points;
 
     switch (format) {
     case GM_FORMAT_Z_U16_MM:
@@ -2120,11 +2133,51 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
             COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
         }
         break;
+    case GM_FORMAT_POINTS_XYZC_F32_M:
+
+        /* FIXME:
+         * Avoid clearing this buffer
+         * Avoid copying this data
+         * Avoid redundantly reprojecting from a point cloud into an image
+         * only to later turn into a pcl point cloud later! :/
+         *
+         * Urgh
+         */
+        memset(depth_copy, 0, width * height * sizeof(float));
+        memset(depth_rgb_back, 0, width * height * 3);
+        num_points = buffer->len / 16;
+        for (int off = 0; off < num_points; off++) {
+            float *xyzc = ((float *)buffer->data) + 4 * off;
+
+            // Reproject this point into training camera space
+            glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
+
+            int x = (int)
+                ((point_t.x * ctx->depth_camera_intrinsics.fx /
+                  point_t.z) + ctx->depth_camera_intrinsics.cx);
+
+            if (x < 0 || x >= width) {
+                continue;
+            }
+
+            int y = (int)
+                ((point_t.y * ctx->depth_camera_intrinsics.fy /
+                  point_t.z) + ctx->depth_camera_intrinsics.cy);
+
+            if (y < 0 || y >= height) {
+                continue;
+            }
+
+            int doff = width * y + x;
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, doff, point_t.z);
+        }
+
+        break;
     case GM_FORMAT_UNKNOWN:
     case GM_FORMAT_LUMINANCE_U8:
-    case GM_FORMAT_RGB:
-    case GM_FORMAT_RGBX:
-    case GM_FORMAT_RGBA:
+    case GM_FORMAT_RGB_U8:
+    case GM_FORMAT_RGBX_U8:
+    case GM_FORMAT_RGBA_U8:
         gm_assert(ctx->log, 0, "Unexpected format for depth buffer");
         break;
     }
@@ -2140,6 +2193,9 @@ mem_pool_acquire_tracking(struct gm_mem_pool *pool)
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)
         mem_pool_acquire_resource(pool);
     tracking->base.ref = 1;
+
+    tracking->success = false;
+
     return tracking;
 }
 
@@ -2212,7 +2268,7 @@ detector_thread_cb(void *data)
         update_tracking_depth_from_buffer(ctx,
                                           tracking,
                                           frame->depth_format,
-                                          frame->depth->data,
+                                          frame->depth,
                                           frame->timestamp);
 
         update_tracking_video(ctx,
@@ -2255,8 +2311,10 @@ detector_thread_cb(void *data)
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
+        pthread_mutex_lock(&ctx->tracking_swap_mutex);
+
         if (tracked) {
-            pthread_mutex_lock(&ctx->tracking_swap_mutex);
+            tracking->success = true;
 
             for (int i = TRACK_FRAMES - 1; i > 0; i--)
                 std::swap(ctx->tracking_history[i], ctx->tracking_history[i - 1]);
@@ -2282,16 +2340,29 @@ detector_thread_cb(void *data)
                          ctx->tracking_history[i]->base.ref);
             }
 
-            pthread_mutex_unlock(&ctx->tracking_swap_mutex);
-
-            notify_tracking(ctx);
+            if (ctx->latest_tracking)
+                gm_tracking_unref(&ctx->latest_tracking->base);
+            ctx->latest_tracking =
+                (struct gm_tracking_impl *)gm_tracking_ref(&tracking->base);
         } else {
-            gm_tracking_unref(&tracking->base);
+            /* Clear the tracking history once we fail to detect a person */
+            for (int i = 0; i < ctx->n_tracking; i++) {
+                gm_debug(ctx->log, "clearing %p out of tracking history fifo (ref = %d)\n",
+                         ctx->tracking_history[i],
+                         ctx->tracking_history[i]->base.ref);
+                gm_tracking_unref(&ctx->tracking_history[i]->base);
+                ctx->tracking_history[i] = NULL;
+            }
+            ctx->n_tracking = 0;
 
-            gm_debug(ctx->log, "discarding tracking %p after nothing found (ref = %d)\n",
-                     tracking,
-                     tracking->base.ref);
+            if (ctx->latest_tracking)
+                gm_tracking_unref(&ctx->latest_tracking->base);
+            ctx->latest_tracking = tracking;
         }
+
+        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+
+        notify_tracking(ctx);
 
         LOGI("Requesting new frame for skeletal tracking");
         /* We throttle frame acquisition according to our tracking rate... */
@@ -2480,6 +2551,7 @@ gm_context_destroy(struct gm_context *ctx)
      */
     for (int i = 0; i < ctx->n_tracking; i++)
         gm_tracking_unref(&ctx->tracking_history[i]->base);
+    gm_tracking_unref(&ctx->latest_tracking->base);
     mem_pool_free(ctx->tracking_pool);
 
     /* Only taking the mutex for the sake of a debug assertion within
@@ -3151,6 +3223,9 @@ gm_context_notify_frame(struct gm_context *ctx,
 
     pthread_mutex_lock(&ctx->liveness_lock);
 
+    gm_debug(ctx->log, "gm_context_notify_frame: frame = %p, depth=%p, video=%p",
+             frame, frame->depth, frame->video);
+
     gm_assert(ctx->log, !ctx->destroying,
               "Spurious notification during tracking context destruction");
 
@@ -3173,12 +3248,12 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     struct gm_tracking *tracking = NULL;
 
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
-    if (ctx->tracking_history[0]) {
-        tracking = gm_tracking_ref(&ctx->tracking_history[0]->base);
+    if (ctx->latest_tracking) {
+        tracking = gm_tracking_ref(&ctx->latest_tracking->base);
 
         gm_debug(ctx->log, "get_latest_tracking = %p (ref = %d)\n",
-                 ctx->tracking_history[0],
-                 ctx->tracking_history[0]->base.ref);
+                 ctx->latest_tracking,
+                 ctx->latest_tracking->base.ref);
     }
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
