@@ -35,34 +35,12 @@ enum gm_format {
     GM_FORMAT_Z_F32_M,
     GM_FORMAT_Z_F16_M,
     GM_FORMAT_LUMINANCE_U8,
-    GM_FORMAT_RGB,
-    GM_FORMAT_RGBX,
-    GM_FORMAT_RGBA
+    GM_FORMAT_RGB_U8,
+    GM_FORMAT_RGBX_U8,
+    GM_FORMAT_RGBA_U8,
+
+    GM_FORMAT_POINTS_XYZC_F32_M, // points; not an image
 };
-
-inline int __attribute__((unused))
-gm_format_bytes_per_pixel(enum gm_format format)
-{
-    switch (format) {
-    case GM_FORMAT_UNKNOWN:
-        assert(0);
-        return 0;
-    case GM_FORMAT_LUMINANCE_U8:
-        return 1;
-    case GM_FORMAT_Z_U16_MM:
-    case GM_FORMAT_Z_F16_M:
-        return 2;
-    case GM_FORMAT_RGB:
-        return 3;
-    case GM_FORMAT_RGBX:
-    case GM_FORMAT_RGBA:
-    case GM_FORMAT_Z_F32_M:
-        return 4;
-    }
-
-    assert(0);
-    return 0;
-}
 
 
 enum gm_event_type
