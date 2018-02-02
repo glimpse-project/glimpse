@@ -16,10 +16,14 @@
 
 #include "glfm.h"
 
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
+
 // Data
 static double       g_Time = 0.0f;
-static bool         g_MouseJustPressed[3] = { false, false, false };
-static float        g_MouseWheel = 0.0f;
+static bool         g_MouseDown = false;
+static ImVec2       g_MousePos(-1, -1);
+static bool         g_TouchJustHeld[5] = {};
+static bool         g_TouchHeld[5] = {};
 static GLuint       g_FontTexture = 0;
 static int          g_ShaderHandle = 0, g_VertHandle = 0, g_FragHandle = 0;
 static int          g_AttribLocationTex = 0, g_AttribLocationProjMtx = 0;
@@ -143,20 +147,63 @@ static void ImGui_ImplGlfmGLES3_SetClipboardText(void* user_data, const char* te
     //glfwSetClipboardString((GLFWwindow*)user_data, text);
 }
 
+bool ImGui_ImplGlfmGLES3_TouchCallback(GLFMDisplay* display, int touch,
+                                       GLFMTouchPhase phase, double x, double y)
+{
+    if (touch > ARRAY_LEN(g_TouchHeld)) {
+        return false;
+    }
+
+    double scale = glfmGetDisplayScale(display);
+    x /= scale;
+    y /= scale;
+
+    switch(phase) {
+    case GLFMTouchPhaseBegan :
+        g_TouchHeld[touch] = g_TouchJustHeld[touch] = true;
+        if (touch == 0) {
+            g_MousePos = ImVec2(x, y);
+        }
+        return true;
+
+    case GLFMTouchPhaseHover :
+        // Only the emscripten backend of GLFM sends hover (move without touch)
+    case GLFMTouchPhaseMoved :
+        if (touch == 0) {
+            g_MousePos = ImVec2(x, y);
+        }
+        return true;
+
+    case GLFMTouchPhaseEnded :
+    case GLFMTouchPhaseCancelled :
+        g_TouchHeld[touch] = false;
+        return true;
+    }
+
+    return false;
+}
+
+bool ImGui_ImplGlfmGLES3_KeyCallback(GLFMDisplay *display, GLFMKey keyCode,
+                                     GLFMKeyAction action, int modifiers)
+{
+    return false;
+}
+
+#if 0
 void ImGui_ImplGlfmGLES3_MouseButtonCallback(GLFMDisplay*, int button, int action, int /*mods*/)
 {
-    /*if (action == GLFW_PRESS && button >= 0 && button < 3)
-        g_MouseJustPressed[button] = true;*/
+    if (action == GLFW_PRESS && button >= 0 && button < 3)
+        g_MouseJustPressed[button] = true;
 }
 
 void ImGui_ImplGlmwGLES3_ScrollCallback(GLFMDisplay*, double /*xoffset*/, double yoffset)
 {
-    //g_MouseWheel += (float)yoffset; // Use fractional mouse wheel.
+    g_MouseWheel += (float)yoffset; // Use fractional mouse wheel.
 }
 
 void ImGui_ImplGlfmGLES3_KeyCallback(GLFMDisplay*, int key, int, int action, int mods)
 {
-    /*ImGuiIO& io = ImGui::GetIO();
+    ImGuiIO& io = ImGui::GetIO();
     if (action == GLFW_PRESS)
         io.KeysDown[key] = true;
     if (action == GLFW_RELEASE)
@@ -166,7 +213,7 @@ void ImGui_ImplGlfmGLES3_KeyCallback(GLFMDisplay*, int key, int, int action, int
     io.KeyCtrl = io.KeysDown[GLFW_KEY_LEFT_CONTROL] || io.KeysDown[GLFW_KEY_RIGHT_CONTROL];
     io.KeyShift = io.KeysDown[GLFW_KEY_LEFT_SHIFT] || io.KeysDown[GLFW_KEY_RIGHT_SHIFT];
     io.KeyAlt = io.KeysDown[GLFW_KEY_LEFT_ALT] || io.KeysDown[GLFW_KEY_RIGHT_ALT];
-    io.KeySuper = io.KeysDown[GLFW_KEY_LEFT_SUPER] || io.KeysDown[GLFW_KEY_RIGHT_SUPER];*/
+    io.KeySuper = io.KeysDown[GLFW_KEY_LEFT_SUPER] || io.KeysDown[GLFW_KEY_RIGHT_SUPER];
 }
 
 void ImGui_ImplGlfmGLES3_CharCallback(GLFMDisplay*, unsigned int c)
@@ -175,6 +222,7 @@ void ImGui_ImplGlfmGLES3_CharCallback(GLFMDisplay*, unsigned int c)
     if (c > 0 && c < 0x10000)
         io.AddInputCharacter((unsigned short)c);
 }
+#endif
 
 bool ImGui_ImplGlfmGLES3_CreateFontsTexture()
 {
@@ -312,20 +360,20 @@ void    ImGui_ImplGlfmGLES3_InvalidateDeviceObjects()
 bool    ImGui_ImplGlfmGLES3_Init(GLFMDisplay* display, bool install_callbacks)
 {
     ImGuiIO& io = ImGui::GetIO();
-    /*io.KeyMap[ImGuiKey_Tab] = GLFW_KEY_TAB;                         // Keyboard mapping. ImGui will use those indices to peek into the io.KeyDown[] array.
-    io.KeyMap[ImGuiKey_LeftArrow] = GLFW_KEY_LEFT;
-    io.KeyMap[ImGuiKey_RightArrow] = GLFW_KEY_RIGHT;
-    io.KeyMap[ImGuiKey_UpArrow] = GLFW_KEY_UP;
-    io.KeyMap[ImGuiKey_DownArrow] = GLFW_KEY_DOWN;
-    io.KeyMap[ImGuiKey_PageUp] = GLFW_KEY_PAGE_UP;
+    io.KeyMap[ImGuiKey_Tab] = GLFMKeyTab;                         // Keyboard mapping. ImGui will use those indices to peek into the io.KeyDown[] array.
+    io.KeyMap[ImGuiKey_LeftArrow] = GLFMKeyLeft;
+    io.KeyMap[ImGuiKey_RightArrow] = GLFMKeyRight;
+    io.KeyMap[ImGuiKey_UpArrow] = GLFMKeyUp;
+    io.KeyMap[ImGuiKey_DownArrow] = GLFMKeyDown;
+    /*io.KeyMap[ImGuiKey_PageUp] = GLFW_KEY_PAGE_UP;
     io.KeyMap[ImGuiKey_PageDown] = GLFW_KEY_PAGE_DOWN;
     io.KeyMap[ImGuiKey_Home] = GLFW_KEY_HOME;
     io.KeyMap[ImGuiKey_End] = GLFW_KEY_END;
-    io.KeyMap[ImGuiKey_Delete] = GLFW_KEY_DELETE;
-    io.KeyMap[ImGuiKey_Backspace] = GLFW_KEY_BACKSPACE;
-    io.KeyMap[ImGuiKey_Enter] = GLFW_KEY_ENTER;
-    io.KeyMap[ImGuiKey_Escape] = GLFW_KEY_ESCAPE;
-    io.KeyMap[ImGuiKey_A] = GLFW_KEY_A;
+    io.KeyMap[ImGuiKey_Delete] = GLFW_KEY_DELETE;*/
+    io.KeyMap[ImGuiKey_Backspace] = GLFMKeyBackspace;
+    io.KeyMap[ImGuiKey_Enter] = GLFMKeyEnter;
+    io.KeyMap[ImGuiKey_Escape] = GLFMKeyEscape;
+    /*io.KeyMap[ImGuiKey_A] = GLFW_KEY_A;
     io.KeyMap[ImGuiKey_C] = GLFW_KEY_C;
     io.KeyMap[ImGuiKey_V] = GLFW_KEY_V;
     io.KeyMap[ImGuiKey_X] = GLFW_KEY_X;
@@ -337,12 +385,9 @@ bool    ImGui_ImplGlfmGLES3_Init(GLFMDisplay* display, bool install_callbacks)
     io.GetClipboardTextFn = ImGui_ImplGlfmGLES3_GetClipboardText;
     io.ClipboardUserData = display;
 
-    if (install_callbacks)
-    {
-        /*glfwSetMouseButtonCallback(window, ImGui_ImplGlfwGLES3_MouseButtonCallback);
-        glfwSetScrollCallback(window, ImGui_ImplGlfwGLES3_ScrollCallback);
-        glfwSetKeyCallback(window, ImGui_ImplGlfwGLES3_KeyCallback);
-        glfwSetCharCallback(window, ImGui_ImplGlfwGLES3_CharCallback);*/
+    if (install_callbacks) {
+        glfmSetTouchFunc(display, ImGui_ImplGlfmGLES3_TouchCallback);
+        glfmSetKeyFunc(display, ImGui_ImplGlfmGLES3_KeyCallback);
     }
 
     return true;
@@ -370,39 +415,39 @@ void ImGui_ImplGlfmGLES3_NewFrame(GLFMDisplay* display, double frametime)
 
     // Setup time step
     io.DeltaTime = (float)(frametime - g_Time);
-    if (io.DeltaTime < 0.f) io.DeltaTime = 1.f/60.f;
+    if (io.DeltaTime < 1.f/60.f) io.DeltaTime = 1.f/60.f;
     g_Time = frametime;
 
-    // Setup inputs
-    // (we already got mouse wheel, keyboard keys & characters from glfw callbacks polled in glfwPollEvents())
-/*    if (glfwGetWindowAttrib(g_Window, GLFW_FOCUSED))
-    {
-        if (io.WantMoveMouse)
-        {
-            glfwSetCursorPos(g_Window, (double)io.MousePos.x, (double)io.MousePos.y);   // Set mouse position if requested by io.WantMoveMouse flag (used when io.NavMovesTrue is enabled by user and using directional navigation)
-        }
-        else
-        {
-            double mouse_x, mouse_y;
-            glfwGetCursorPos(g_Window, &mouse_x, &mouse_y);
-            io.MousePos = ImVec2((float)mouse_x, (float)mouse_y);   // Get mouse position in screen coordinates (set to -1,-1 if no mouse / on another screen, etc.)
+    // Handle fake mouse input
+    bool mousedown = false;
+    for (int i = 0; i < ARRAY_LEN(g_TouchHeld); ++i) {
+        if (g_TouchHeld[i] | g_TouchJustHeld[i]) {
+            mousedown = true;
+            break;
         }
     }
-    else
-    {
-        io.MousePos = ImVec2(-FLT_MAX,-FLT_MAX);
-    }
 
-    for (int i = 0; i < 3; i++)
-    {
-        // If a mouse press event came, always pass it as "mouse held this frame", so we don't miss click-release events that are shorter than 1 frame.
-        io.MouseDown[i] = g_MouseJustPressed[i] || glfwGetMouseButton(g_Window, i) != 0;
-        g_MouseJustPressed[i] = false;
+    if (mousedown && !g_MouseDown) {
+        // Delay mouse-down for a frame so that we get a frame with a hover
+        // before widget interaction begins.
+    } else {
+        for (int i = 0; i < ARRAY_LEN(g_TouchHeld); ++i) {
+            io.MouseDown[i] = g_TouchHeld[i] || g_TouchJustHeld[i];
+            g_TouchJustHeld[i] = false;
+        }
     }
-
-    io.MouseWheel = g_MouseWheel;
-    g_MouseWheel = 0.0f;*/
+    if (io.MousePos.x != g_MousePos.x ||
+        io.MousePos.y != g_MousePos.y) {
+        io.MousePos = g_MousePos;
+    }
 
     // Start the frame. This call will update the io.WantCaptureMouse, io.WantCaptureKeyboard flag that you can use to dispatch inputs (or not) to your application.
     ImGui::NewFrame();
+
+    // If the 'mouse' button was just released, tell ImGUI the cursor has
+    // disappeared on the next frame.
+    if (!mousedown && g_MouseDown) {
+        g_MousePos = io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
+    }
+    g_MouseDown = mousedown;
 }

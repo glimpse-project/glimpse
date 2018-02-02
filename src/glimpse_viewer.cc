@@ -1444,7 +1444,7 @@ main(int argc, char **argv)
     glfmSetSurfaceDestroyedFunc(display, surface_destroyed_cb);
     glfmSetMainLoopFunc(display, frame_cb);
 
-    ImGui_ImplGlfmGLES3_Init(display, false);
+    ImGui_ImplGlfmGLES3_Init(display, true);
 #else
     data->win_width = 800 + TOOLBAR_LEFT_WIDTH;
     data->win_height = 600;
