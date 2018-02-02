@@ -48,7 +48,7 @@ struct gm_asset;
 extern "C" {
 #endif
 
-#ifdef ANDROID
+#ifdef USE_ANDROID_ASSET_MANAGER_API
 #include <android/asset_manager.h>
 void
 gm_android_set_asset_manager(AAssetManager *manager);

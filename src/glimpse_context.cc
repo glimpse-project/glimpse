@@ -2539,10 +2539,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                                         tracking_state_free,
                                         ctx); // user data
 
-#ifdef USE_ANDROID_ASSET_MANAGER_API
-#error "TODO: call gm_assets_android_set_manager()"
-#endif
-
     /* Load the decision trees immediately so we know how many labels we're
      * dealing with asap.
      */

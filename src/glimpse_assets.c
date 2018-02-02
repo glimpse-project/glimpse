@@ -72,9 +72,10 @@ struct gm_asset *
 gm_asset_open(struct gm_logger *log,
               const char *path, int mode, char **err)
 {
-    gm_assert(log, asset_manager, "gm_android_set_asset_manager not called");
+    gm_assert(log, asset_manager != NULL,
+              "gm_android_set_asset_manager not called");
 
-    AAsset *native = AAssetManager_open(asset_manager, mode);
+    AAsset *native = AAssetManager_open(asset_manager, path, mode);
     if (native) {
         struct gm_asset *ret = xmalloc(sizeof(*ret));
         ret->native = native;
@@ -85,7 +86,7 @@ gm_asset_open(struct gm_logger *log,
     }
 }
 
-static const void *
+const void *
 gm_asset_get_buffer(struct gm_asset *asset)
 {
     return AAsset_getBuffer(asset->native);
@@ -129,7 +130,11 @@ gm_asset_open(struct gm_logger *log,
     char *full_path = alloca(max_len);
     xsnprintf(full_path, max_len, "%s/%s", root, path);
 
+#ifndef __ANDROID__
     fd = open(full_path, O_RDWR|O_CLOEXEC);
+#else
+    fd = open(full_path, O_RDONLY|O_CLOEXEC);
+#endif
     if (fd < 0) {
         gm_throw(log, err, "Failed to open %s: %s",
                  full_path, strerror(errno));
@@ -144,6 +149,7 @@ gm_asset_open(struct gm_logger *log,
 
     switch (mode) {
     case GM_ASSET_MODE_BUFFER:
+#ifndef __ANDROID__
         buf = (uint8_t *)mmap(NULL, sb.st_size,
                               PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
         if (!buf) {
@@ -152,6 +158,20 @@ gm_asset_open(struct gm_logger *log,
                      full_path, strerror(errno));
             return NULL;
         }
+#else
+        buf = (uint8_t *)malloc(sb.st_size);
+        if (!buf) {
+            close(fd);
+            gm_throw(log, err, "Failed to allocate memory for %s", full_path);
+            return NULL;
+        }
+        if (read(fd, buf, sb.st_size) != sb.st_size) {
+            free(buf);
+            close(fd);
+            gm_throw(log, err, "Failed to read %s", full_path);
+            return NULL;
+        }
+#endif
         break;
     }
 
@@ -182,8 +202,13 @@ gm_asset_close(struct gm_asset *asset)
 {
     switch (asset->mode) {
     case GM_ASSET_MODE_BUFFER:
+#ifndef __ANDROID__
         if (asset->buf)
             munmap(asset->buf, asset->file_len);
+#else
+        if (asset->buf)
+            free(asset->buf);
+#endif
         break;
     }
     close(asset->fd);

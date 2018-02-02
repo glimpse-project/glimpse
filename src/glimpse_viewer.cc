@@ -50,6 +50,7 @@
 
 #include <imgui.h>
 #ifdef __ANDROID__
+#    include <android/log.h>
 #    include <glfm.h>
 #    include <imgui_impl_glfm_gles3.h>
 #else
@@ -65,6 +66,7 @@
 #include "glimpse_log.h"
 #include "glimpse_context.h"
 #include "glimpse_device.h"
+#include "glimpse_assets.h"
 #include "glimpse_gl.h"
 
 
@@ -96,7 +98,6 @@ struct event
 typedef struct _Data
 {
     struct gm_logger *log;
-    FILE *log_fp;
     struct gm_context *ctx;
     struct gm_device *device;
 
@@ -903,6 +904,46 @@ event_loop_iteration(Data *data)
 }
 
 #ifdef __ANDROID__
+/*
+ * Copied from
+ * https://codelab.wordpress.com/2014/11/03/ \
+ * how-to-use-standard-output-streams-for-logging-in-android-apps/
+ */
+static int pfd[2];
+static pthread_t log_thread;
+
+static void *
+log_thread_cb(void*)
+{
+    ssize_t rdsz;
+    char buf[1024];
+    while((rdsz = read(pfd[0], buf, sizeof buf - 1)) > 0) {
+        if (buf[rdsz - 1] == '\n') buf[rdsz - 1] = '\0';
+        else buf[rdsz] = '\0';
+        __android_log_write(ANDROID_LOG_DEBUG, "GlimpseViewer", buf);
+    }
+    return 0;
+}
+
+int
+start_output_redirect()
+{
+    /* make stdout line-buffered and stderr unbuffered */
+    setvbuf(stdout, 0, _IOLBF, 0);
+    setvbuf(stderr, 0, _IOLBF, 0);
+
+    /* create the pipe and redirect stdout and stderr */
+    pipe(pfd);
+    dup2(pfd[1], 1);
+    dup2(pfd[1], 2);
+
+    /* spawn the logging thread */
+    if (pthread_create(&log_thread, 0, log_thread_cb, 0) == -1)
+        return -1;
+    pthread_detach(log_thread);
+    return 0;
+}
+
 static void
 surface_created_cb(GLFMDisplay *display, int width, int height)
 {
@@ -1289,21 +1330,23 @@ logger_cb(struct gm_logger *logger,
           va_list ap,
           void *user_data)
 {
-    Data *data = (Data *)user_data;
+    //Data *data = (Data *)user_data;
+    FILE *output = stderr;
 
     switch (level) {
     case GM_LOG_ERROR:
-        fprintf(data->log_fp, "%s: ERROR: ", context);
+        fprintf(output, "%s: ERROR: ", context);
         break;
     case GM_LOG_WARN:
-        fprintf(data->log_fp, "%s: WARN: ", context);
+        fprintf(output, "%s: WARN: ", context);
         break;
     default:
-        fprintf(data->log_fp, "%s: ", context);
+        output = stdout;
+        fprintf(output, "%s: ", context);
     }
 
-    vfprintf(data->log_fp, format, ap);
-    fprintf(data->log_fp, "\n");
+    vfprintf(output, format, ap);
+    fprintf(output, "\n");
     if (backtrace) {
         int line_len = 100;
         char *formatted = (char *)alloca(backtrace->n_frames * line_len);
@@ -1312,27 +1355,12 @@ logger_cb(struct gm_logger *logger,
                                         line_len, (char *)formatted);
         for (int i = 0; i < backtrace->n_frames; i++) {
             char *line = formatted + line_len * i;
-            fprintf(data->log_fp, "> %s\n", line);
+            fprintf(output, "> %s\n", line);
         }
     }
 }
 
 #ifdef __ANDROID__
-static void
-logger_abort_cb(struct gm_logger *logger,
-                void *user_data)
-{
-    Data *data = (Data *)user_data;
-
-    if (data->log_fp) {
-        fprintf(data->log_fp, "ABORT\n");
-        fflush(data->log_fp);
-        fclose(data->log_fp);
-    }
-
-    abort();
-}
-
 void
 glfmMain(GLFMDisplay* display)
 #else
@@ -1343,19 +1371,26 @@ main(int argc, char **argv)
 #ifdef __ANDROID__
     Data *data = (Data *)calloc(1, sizeof(Data));
 #define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
+#ifndef USE_ANDROID_ASSET_MANAGER_API
     setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
+#endif
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
-    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
+    start_output_redirect();
 #else
     Data _data = {};
     Data *data = &_data;
-    data->log_fp = stderr;
 #endif
 
     data->log = gm_logger_new(logger_cb, data);
 
-#ifdef __ANDROID__
-    gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
+#ifdef USE_ANDROID_ASSET_MANAGER_API
+    ANativeActivity *activity = glfmAndroidGetActivity();
+    if (activity) {
+        gm_android_set_asset_manager(activity->assetManager);
+    } else {
+        gm_error(data->log, "Unable to get ANativeActivity");
+        exit(1);
+    }
 #endif
 
     data->events_front = new std::vector<struct event>();
@@ -1406,7 +1441,6 @@ main(int argc, char **argv)
 
     ImGui_ImplGlfmGLES3_Init(display, false);
 #else
-    data->log_fp = stderr;
     data->win_width = 800 + TOOLBAR_LEFT_WIDTH;
     data->win_height = 600;
 
@@ -1443,28 +1477,24 @@ main(int argc, char **argv)
 
     ImGuiIO& io = ImGui::GetIO();
 
-    const char *font_ttf = "Roboto-Medium.ttf";
-    char font_asset_path[512];
-    const char *font_path = NULL;
+    char *open_err = NULL;
+    struct gm_asset *font_asset = gm_asset_open(data->log,
+                                                "Roboto-Medium.ttf",
+                                                GM_ASSET_MODE_BUFFER,
+                                                &open_err);
+    if (font_asset) {
+        const void *buf = gm_asset_get_buffer(font_asset);
 
-    const char *joint_map_json = "joint-map.json";
-    char joint_map_asset_path[512];
-    const char *joint_map_path = NULL;
+        unsigned len = gm_asset_get_length(font_asset);
+        void *buf_copy = ImGui::MemAlloc(len);
+        memcpy(buf_copy, buf, len);
 
-    char *assets_root = getenv("GLIMPSE_ASSETS_ROOT");
-    if (assets_root) {
-        xsnprintf(font_asset_path, sizeof(font_asset_path), "%s/%s",
-                  assets_root, font_ttf);
-        font_path = font_asset_path;
-        xsnprintf(joint_map_asset_path, sizeof(joint_map_asset_path), "%s/%s",
-                  assets_root, joint_map_json);
-        joint_map_path = joint_map_asset_path;
+        io.Fonts->AddFontFromMemoryTTF(buf_copy, 16.f, 16.f);
+        gm_asset_close(font_asset);
     } else {
-        font_path = font_ttf;
-        joint_map_path = joint_map_json;
+        gm_error(data->log, "%s", open_err);
+        exit(1);
     }
-
-    io.Fonts->AddFontFromFileTTF(font_path, 16.0f);
 
     const char *n_frames_env = getenv("GLIMPSE_RECORD_N_JOINT_FRAMES");
     if (n_frames_env) {
@@ -1475,7 +1505,18 @@ main(int argc, char **argv)
 
     // TODO: Might be nice to be able to retrieve this information via the API
     //       rather than reading it separately here.
-    data->joint_map = json_parse_file(joint_map_path);
+    struct gm_asset *joint_map_asset = gm_asset_open(data->log,
+                                                     "joint-map.json",
+                                                     GM_ASSET_MODE_BUFFER,
+                                                     &open_err);
+    if (joint_map_asset) {
+        const void *buf = gm_asset_get_buffer(joint_map_asset);
+        data->joint_map = json_parse_string((const char *)buf);
+        gm_asset_close(joint_map_asset);
+    } else {
+        gm_error(data->log, "%s", open_err);
+        exit(1);
+    }
 
     // Count the number of bones defined by connections in the joint map.
     data->n_bones = 0;

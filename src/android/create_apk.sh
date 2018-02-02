@@ -9,7 +9,7 @@ GLIMPSE_ASSETS_ROOT=${GLIMPSE_ASSETS_ROOT:=../}
 mkdir -p gen assets
 rm -f lib
 ln -s $3 lib
-#cp $GLIMPSE_ASSETS_ROOT/tree*.rdt $GLIMPSE_ASSETS_ROOT/joint-map.json $GLIMPSE_ASSETS_ROOT/joint-params.json $GLIMPSE_ASSETS_ROOT/joint-dist.json ./assets/
+#cp ../Roboto-Medium.ttf $GLIMPSE_ASSETS_ROOT/tree*.rdt $GLIMPSE_ASSETS_ROOT/joint-map.json $GLIMPSE_ASSETS_ROOT/joint-params.json $GLIMPSE_ASSETS_ROOT/joint-dist.json ./assets/
 
 BUILD_TOOLS="$ANDROID_HOME/build-tools/$1"
 ANDROID_JAR="$ANDROID_HOME/platforms/android-$2/android.jar"

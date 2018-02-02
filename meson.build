@@ -206,14 +206,21 @@ if compiler.get_define('__ANDROID__') != ''
     glfm_dep = glfm_sp.get_variable('glfm_dep')
     glfm_defines = [ '-DGLFM_INCLUDE_ES3' ]
 
+    use_asset_manager = get_option('use_asset_manager')
+    if use_asset_manager
+        asset_manager_defines = [ '-DUSE_ANDROID_ASSET_MANAGER_API' ]
+    else
+        asset_manager_defines = []
+    endif
+
     imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
 
     android_viewer = shared_library('glimpse_viewer_android',
         [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
         include_directories: inc,
         dependencies: client_api_deps + [ glfm_dep ],
-        c_args: client_api_defines + glfm_defines,
-        cpp_args: client_api_defines + glfm_defines)
+        c_args: client_api_defines + glfm_defines + asset_manager_defines,
+        cpp_args: client_api_defines + glfm_defines + asset_manager_defines)
 endif
 
 if not meson.is_cross_build()
