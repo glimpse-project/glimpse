@@ -90,7 +90,7 @@ mem_pool_acquire_resource(struct gm_mem_pool *pool)
     /* Sanity check with arbitrary upper limit for the number of allocations */
     gm_assert(pool->log,
               (pool->busy.size() + pool->available.size()) < 100,
-              "'%s' memory pool growing out of control (%lu allocations)",
+              "'%s' memory pool growing out of control (%u allocations)",
               pool->name,
               (pool->busy.size() + pool->available.size()));
 
