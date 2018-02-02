@@ -364,8 +364,8 @@ void ImGui_ImplGlfmGLES3_NewFrame(GLFMDisplay* display, double frametime)
     // Setup display size (every frame to accommodate for window resizing)
     int w, h;
     glfmGetDisplaySize(display, &w, &h);
-    io.DisplaySize = ImVec2((float)w, (float)h);
     double scale = glfmGetDisplayScale(display);
+    io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
     io.DisplayFramebufferScale = ImVec2(scale, scale);
 
     // Setup time step
