@@ -322,6 +322,11 @@ draw_ui(Data *data)
     ImVec2 win_size;
     ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
 
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 uiScale = io.DisplayFramebufferScale;
+    float win_width = data->win_width / uiScale.x;
+    float win_height = data->win_height / uiScale.y;
+
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
     if (ImGui::BeginMainMenuBar()) {
@@ -335,7 +340,7 @@ draw_ui(Data *data)
     }
 
     ImGui::SetNextWindowPos(ImVec2(0, main_menu_size.y));
-    ImGui::SetNextWindowSize(ImVec2(left_col, data->win_height));
+    ImGui::SetNextWindowSize(ImVec2(left_col, win_height));
     ImGui::Begin("Controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize);
@@ -358,7 +363,7 @@ draw_ui(Data *data)
 
     ImGui::End();
 
-    ImVec2 main_area_size = ImVec2(data->win_width - left_col, data->win_height - main_menu_size.y);
+    ImVec2 main_area_size = ImVec2(win_width - left_col, win_height - main_menu_size.y);
 
     ImGui::SetNextWindowPos(ImVec2(left_col, main_menu_size.y));
     ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
