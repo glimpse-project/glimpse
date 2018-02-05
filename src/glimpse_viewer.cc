@@ -335,8 +335,15 @@ adjust_aspect(ImVec2 &input, int width, int height)
 }
 
 static void
-draw_controls(Data *data)
+draw_controls(Data *data, int x, int y, int width, int height)
 {
+    ImGui::SetNextWindowPos(ImVec2(x, y));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::Begin("Controls", NULL,
+                 ImGuiWindowFlags_NoTitleBar|
+                 ImGuiWindowFlags_NoResize|
+                 ImGuiWindowFlags_NoMove);
+
     ImGui::TextDisabled("Device properties...");
     ImGui::Separator();
     ImGui::Spacing();
@@ -352,6 +359,28 @@ draw_controls(Data *data)
 
     props = gm_context_get_ui_properties(data->ctx);
     draw_properties(props);
+
+    ImGui::End();
+}
+
+static ImVec2
+draw_visualisation(int x, int y, int width, int height,
+                   int aspect_width, int aspect_height,
+                   const char *name, GLuint tex)
+{
+    ImGui::SetNextWindowPos(ImVec2(x, y));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::Begin(name, NULL,
+                 ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    ImVec2 win_size = ImGui::GetContentRegionMax();
+    adjust_aspect(win_size, aspect_width, aspect_height);
+    if (tex != 0) {
+        ImGui::Image((void *)(intptr_t)tex, win_size);
+        ImGui::End();
+    }
+    return win_size;
 }
 
 static void
@@ -484,84 +513,17 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
 }
 
 static void
-draw_ui(Data *data)
+draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
+                         int x, int y, int width, int height)
 {
-    float left_col = TOOLBAR_LEFT_WIDTH;
-    ImVec2 win_size;
-    ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
-
-    ImGuiIO& io = ImGui::GetIO();
-    ImVec2 uiScale = io.DisplayFramebufferScale;
-    float win_width = data->win_width / uiScale.x;
-    float win_height = data->win_height / uiScale.y;
-
-    // Draw control panel on the left
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
-
-    ImGui::SetNextWindowPos(ImVec2(0, 0));
-    ImGui::SetNextWindowSize(ImVec2(left_col, win_height));
-    ImGui::Begin("Controls", NULL,
-                 ImGuiWindowFlags_NoTitleBar|
-                 ImGuiWindowFlags_NoResize|
-                 ImGuiWindowFlags_NoMove);
-
-    draw_controls(data);
-
-    ImGui::End();
-
-    ImVec2 main_area_size = ImVec2(win_width - left_col, win_height);
-
-    // Draw depth buffer visualisation in top-left
-    ImGui::SetNextWindowPos(ImVec2(left_col, 0));
-    ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
-    ImGui::Begin("Depth Buffer", NULL,
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse);
-    win_size = ImGui::GetContentRegionMax();
-    adjust_aspect(win_size, data->depth_width, data->depth_height);
-    ImGui::Image((void *)(intptr_t)gl_depth_rgb_tex, win_size);
-    ImGui::End();
-
-    // Draw video buffer visualisation in bottom-left
-    ImGui::SetNextWindowPos(ImVec2(left_col, main_area_size.y/2));
-    ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
-    ImGui::Begin("Video Buffer", NULL,
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse);
-    win_size = ImGui::GetContentRegionMax();
-    adjust_aspect(win_size, data->video_width, data->video_height);
-    ImGui::Image((void *)(intptr_t)gl_vid_tex, win_size);
-    ImGui::End();
-
-    // Draw label inference visualisation in top-right
-    ImGui::SetNextWindowPos(ImVec2(left_col + main_area_size.x/2, 0));
-    ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
-    ImGui::Begin("Labels", NULL,
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse);
-    win_size = ImGui::GetContentRegionMax();
-    adjust_aspect(win_size, data->training_width, data->training_height);
-    ImGui::Image((void *)(intptr_t)gl_labels_tex, win_size);
-    ImGui::End();
-
-    // Draw point cloud and joint position/bones visualisation in bottom-left
-    ImGui::SetNextWindowPos(ImVec2(left_col + main_area_size.x/2,
-                                   main_area_size.y/2));
-    ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
-    ImGui::Begin("Cloud", NULL,
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse);
-    win_size = ImGui::GetContentRegionMax();
-    adjust_aspect(win_size, data->depth_width, data->depth_height);
+    ImVec2 win_size = draw_visualisation(
+        x, y, width, height,
+        data->depth_width, data->depth_height,
+        "Cloud", 0);
 
     update_cloud_vis(data, win_size, uiScale);
 
-    ImGui::Image((void *)(intptr_t)gl_cloud_tex, win_size,
-                 ImVec2(0, 0), ImVec2(1, 1));
+    ImGui::Image((void *)(intptr_t)gl_cloud_tex, win_size);
 
     // Handle input for cloud visualisation
     if (ImGui::IsWindowHovered()) {
@@ -574,6 +536,48 @@ draw_ui(Data *data)
     }
 
     ImGui::End();
+}
+
+static void
+draw_ui(Data *data)
+{
+    float left_col = TOOLBAR_LEFT_WIDTH;
+    ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 uiScale = io.DisplayFramebufferScale;
+    float win_width = data->win_width / uiScale.x;
+    float win_height = data->win_height / uiScale.y;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+
+    // Draw control panel on the left
+    draw_controls(data, 0, 0, left_col, win_height);
+
+    ImVec2 main_area_size = ImVec2(win_width - left_col, win_height);
+
+    // Draw depth buffer visualisation in top-left
+    draw_visualisation(left_col, 0,
+                       main_area_size.x/2, main_area_size.y/2,
+                       data->depth_width, data->depth_height,
+                       "Depth Buffer", gl_depth_rgb_tex);
+
+    // Draw video buffer visualisation in bottom-left
+    draw_visualisation(left_col, main_area_size.y/2,
+                       main_area_size.x/2, main_area_size.y/2,
+                       data->video_width, data->video_height,
+                       "Video Buffer", gl_vid_tex);
+
+    // Draw label inference visualisation in top-right
+    draw_visualisation(left_col + main_area_size.x/2, 0,
+                       main_area_size.x/2, main_area_size.y/2,
+                       data->training_width, data->training_height,
+                       "Labels", gl_labels_tex);
+
+    // Draw point cloud and joint position/bones visualisation in bottom-left
+    draw_cloud_visualisation(data, uiScale,
+                             left_col + main_area_size.x/2, main_area_size.y/2,
+                             main_area_size.x/2, main_area_size.y/2);
 
     ImGui::PopStyleVar();
 
