@@ -318,7 +318,6 @@ static void
 draw_ui(Data *data)
 {
     float left_col = TOOLBAR_LEFT_WIDTH;
-    ImVec2 main_menu_size;
     ImVec2 win_size;
     ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
 
@@ -329,17 +328,6 @@ draw_ui(Data *data)
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
-    if (ImGui::BeginMainMenuBar()) {
-        main_menu_size = ImGui::GetWindowSize();
-
-        if (ImGui::BeginMenu("File")) {
-
-            ImGui::EndMenu();
-        }
-        ImGui::EndMainMenuBar();
-    }
-
-    ImGui::SetNextWindowPos(ImVec2(0, main_menu_size.y));
     ImGui::SetNextWindowSize(ImVec2(left_col, win_height));
     ImGui::Begin("Controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
@@ -363,47 +351,51 @@ draw_ui(Data *data)
 
     ImGui::End();
 
-    ImVec2 main_area_size = ImVec2(win_width - left_col, win_height - main_menu_size.y);
+    ImVec2 main_area_size = ImVec2(win_width - left_col, win_height);
 
-    ImGui::SetNextWindowPos(ImVec2(left_col, main_menu_size.y));
+    ImGui::SetNextWindowPos(ImVec2(left_col, 0));
     ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
     ImGui::Begin("Depth Buffer", NULL,
                  ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize);
-    win_size = ImGui::GetWindowSize();
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    win_size = ImGui::GetContentRegionMax();
     ImGui::Image((void *)(intptr_t)gl_depth_rgb_tex, win_size);
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(left_col, main_menu_size.y + main_area_size.y/2));
+    ImGui::SetNextWindowPos(ImVec2(left_col, main_area_size.y/2));
     ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
     ImGui::Begin("Video Buffer", NULL,
                  ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize);
-    win_size = ImGui::GetWindowSize();
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    win_size = ImGui::GetContentRegionMax();
     ImGui::Image((void *)(intptr_t)gl_vid_tex, win_size);
     ImGui::End();
 
-    ImGui::SetNextWindowPos(ImVec2(left_col + main_area_size.x/2, main_menu_size.y));
+    ImGui::SetNextWindowPos(ImVec2(left_col + main_area_size.x/2, 0));
     ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
     ImGui::Begin("Labels", NULL,
                  ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize);
-    win_size = ImGui::GetWindowSize();
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    win_size = ImGui::GetContentRegionMax();
     ImGui::Image((void *)(intptr_t)gl_labels_tex, win_size);
     ImGui::End();
 
     ImGui::SetNextWindowPos(ImVec2(left_col + main_area_size.x/2,
-                                   main_menu_size.y + main_area_size.y/2));
+                                   main_area_size.y/2));
     ImGui::SetNextWindowSize(ImVec2(main_area_size.x/2, main_area_size.y/2));
     ImGui::Begin("Cloud", NULL,
                  ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize);
-    win_size = ImGui::GetWindowSize();
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse);
+    win_size = ImGui::GetContentRegionMax();
 
     // Ensure the framebuffer texture is valid
     if (!cloud_tex_valid) {
-        int width = (main_area_size.x/2) * uiScale.x;
-        int height = (main_area_size.y/2) * uiScale.y;
+        int width = win_size.x * uiScale.x;
+        int height = win_size.y * uiScale.y;
 
         // Generate textures
         glBindTexture(GL_TEXTURE_2D, gl_cloud_tex);
