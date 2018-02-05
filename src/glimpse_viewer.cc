@@ -402,8 +402,8 @@ draw_ui(Data *data)
 
     // Ensure the framebuffer texture is valid
     if (!cloud_tex_valid) {
-        int width = main_area_size.x/2;
-        int height = main_area_size.y/2;
+        int width = (main_area_size.x/2) * uiScale.x;
+        int height = (main_area_size.y/2) * uiScale.y;
 
         // Generate textures
         glBindTexture(GL_TEXTURE_2D, gl_cloud_tex);
@@ -453,7 +453,8 @@ draw_ui(Data *data)
     glDepthFunc(GL_LESS);
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glViewport(0, 0, main_area_size.x/2, main_area_size.y/2);
+    glViewport(0, 0, (main_area_size.x/2) * uiScale.x,
+               (main_area_size.y/2) * uiScale.y);
 
     glUseProgram(gl_db_program);
     glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
@@ -954,6 +955,8 @@ surface_created_cb(GLFMDisplay *display, int width, int height)
 {
     Data *data = (Data *)glfmGetUserData(display);
 
+    gm_debug(data->log, "Surface created (%dx%d)", width, height);
+
     if (!data->surface_created) {
         init_opengl(data);
         data->surface_created = true;
@@ -968,7 +971,22 @@ static void
 surface_destroyed_cb(GLFMDisplay *display)
 {
     Data *data = (Data *)glfmGetUserData(display);
+    gm_debug(data->log, "Surface destroyed");
     data->surface_created = false;
+    cloud_tex_valid = false;
+}
+
+static void
+app_focus_cb(GLFMDisplay *display, bool focused)
+{
+    Data *data = (Data *)glfmGetUserData(display);
+    gm_debug(data->log, focused ? "Focused" : "Unfocused");
+
+    if (focused) {
+        gm_device_start(data->device);
+    } else {
+        gm_device_stop(data->device);
+    }
 }
 
 static void
@@ -1442,6 +1460,7 @@ main(int argc, char **argv)
     glfmSetSurfaceCreatedFunc(display, surface_created_cb);
     glfmSetSurfaceResizedFunc(display, surface_created_cb);
     glfmSetSurfaceDestroyedFunc(display, surface_destroyed_cb);
+    glfmSetAppFocusFunc(display, app_focus_cb);
     glfmSetMainLoopFunc(display, frame_cb);
 
     ImGui_ImplGlfmGLES3_Init(display, true);
@@ -1494,7 +1513,8 @@ main(int argc, char **argv)
         void *buf_copy = ImGui::MemAlloc(len);
         memcpy(buf_copy, buf, len);
 
-        io.Fonts->AddFontFromMemoryTTF(buf_copy, 16.f, 16.f);
+        ImVec2 uiScale = io.DisplayFramebufferScale;
+        io.Fonts->AddFontFromMemoryTTF(buf_copy, 16.f, 16.f * uiScale.x);
         gm_asset_close(font_asset);
     } else {
         gm_error(data->log, "%s", open_err);

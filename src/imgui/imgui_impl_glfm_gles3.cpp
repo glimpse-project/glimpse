@@ -385,6 +385,13 @@ bool    ImGui_ImplGlfmGLES3_Init(GLFMDisplay* display, bool install_callbacks)
     io.GetClipboardTextFn = ImGui_ImplGlfmGLES3_GetClipboardText;
     io.ClipboardUserData = display;
 
+    int w, h;
+    glfmGetDisplaySize(display, &w, &h);
+    double scale = glfmGetDisplayScale(display);
+    io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
+    io.DisplayFramebufferScale = ImVec2(scale, scale);
+    io.FontGlobalScale = 1.f / scale;
+
     if (install_callbacks) {
         glfmSetTouchFunc(display, ImGui_ImplGlfmGLES3_TouchCallback);
         glfmSetKeyFunc(display, ImGui_ImplGlfmGLES3_KeyCallback);
@@ -412,6 +419,7 @@ void ImGui_ImplGlfmGLES3_NewFrame(GLFMDisplay* display, double frametime)
     double scale = glfmGetDisplayScale(display);
     io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
     io.DisplayFramebufferScale = ImVec2(scale, scale);
+    io.FontGlobalScale = 1.f / scale;
 
     // Setup time step
     io.DeltaTime = (float)(frametime - g_Time);
