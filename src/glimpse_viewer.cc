@@ -117,6 +117,10 @@ typedef struct _Data
     int video_width;
     int video_height;
 
+    /* A convenience for accessing training_camera_intrinsics.width/height */
+    int training_width;
+    int training_height;
+
     /* A convenience for accessing number of joints in latest tracking */
     int n_joints;
     int n_bones;
@@ -315,6 +319,22 @@ draw_properties(struct gm_ui_properties *props)
 }
 
 static void
+adjust_aspect(ImVec2 &input, int width, int height)
+{
+    ImVec2 output = input;
+    float aspect = width / (float)height;
+    if (aspect > input.x / input.y) {
+        output.y = input.x / aspect;
+    } else {
+        output.x = input.y * aspect;
+    }
+
+    ImGui::SetCursorPosX((input.x - output.x) / 2.f);
+    ImGui::SetCursorPosY((input.y - output.y) / 2.f);
+    input = output;
+}
+
+static void
 draw_ui(Data *data)
 {
     float left_col = TOOLBAR_LEFT_WIDTH;
@@ -360,6 +380,7 @@ draw_ui(Data *data)
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoScrollWithMouse);
     win_size = ImGui::GetContentRegionMax();
+    adjust_aspect(win_size, data->depth_width, data->depth_height);
     ImGui::Image((void *)(intptr_t)gl_depth_rgb_tex, win_size);
     ImGui::End();
 
@@ -370,6 +391,7 @@ draw_ui(Data *data)
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoScrollWithMouse);
     win_size = ImGui::GetContentRegionMax();
+    adjust_aspect(win_size, data->video_width, data->video_height);
     ImGui::Image((void *)(intptr_t)gl_vid_tex, win_size);
     ImGui::End();
 
@@ -380,6 +402,7 @@ draw_ui(Data *data)
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoScrollWithMouse);
     win_size = ImGui::GetContentRegionMax();
+    adjust_aspect(win_size, data->training_width, data->training_height);
     ImGui::Image((void *)(intptr_t)gl_labels_tex, win_size);
     ImGui::End();
 
@@ -391,6 +414,7 @@ draw_ui(Data *data)
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoScrollWithMouse);
     win_size = ImGui::GetContentRegionMax();
+    adjust_aspect(win_size, data->depth_width, data->depth_height);
 
     // Ensure the framebuffer texture is valid
     if (!cloud_tex_valid) {
@@ -445,8 +469,7 @@ draw_ui(Data *data)
     glDepthFunc(GL_LESS);
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glViewport(0, 0, (main_area_size.x/2) * uiScale.x,
-               (main_area_size.y/2) * uiScale.y);
+    glViewport(0, 0, win_size.x, win_size.y);
 
     glUseProgram(gl_db_program);
     glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
@@ -1552,6 +1575,11 @@ main(int argc, char **argv)
 #endif
 
     data->ctx = gm_context_new(data->log, NULL);
+
+    const struct gm_intrinsics *training_intrinsics =
+        gm_context_get_training_intrinsics(data->ctx);
+    data->training_width = training_intrinsics->width;
+    data->training_height = training_intrinsics->height;
 
     gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);

@@ -3066,6 +3066,12 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
     }
 }
 
+const gm_intrinsics *
+gm_context_get_training_intrinsics(struct gm_context *ctx)
+{
+    return &ctx->training_camera_intrinsics;
+}
+
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *_tracking)
 {

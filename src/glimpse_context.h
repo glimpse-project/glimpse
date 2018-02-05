@@ -369,6 +369,9 @@ void
 gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
                                                 struct gm_extrinsics *extrinsics);
 
+const gm_intrinsics *
+gm_context_get_training_intrinsics(struct gm_context *ctx);
+
 /* Enable skeletal tracking */
 void
 gm_context_enable(struct gm_context *ctx);
