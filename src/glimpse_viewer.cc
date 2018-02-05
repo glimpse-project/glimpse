@@ -342,7 +342,8 @@ draw_controls(Data *data, int x, int y, int width, int height)
     ImGui::Begin("Controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize|
-                 ImGuiWindowFlags_NoMove);
+                 ImGuiWindowFlags_NoMove|
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
 
     ImGui::TextDisabled("Device properties...");
     ImGui::Separator();
@@ -373,7 +374,9 @@ draw_visualisation(int x, int y, int width, int height,
     ImGui::Begin(name, NULL,
                  ImGuiWindowFlags_NoScrollbar |
                  ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse);
+                 ImGuiWindowFlags_NoScrollWithMouse |
+                 ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
     ImVec2 win_size = ImGui::GetContentRegionMax();
     adjust_aspect(win_size, aspect_width, aspect_height);
     if (tex != 0) {
@@ -439,7 +442,7 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
     glDepthFunc(GL_LESS);
 
     glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glViewport(0, 0, win_size.x, win_size.y);
+    glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
 
     glUseProgram(gl_db_program);
     glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
@@ -546,49 +549,98 @@ draw_ui(Data *data)
 
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 uiScale = io.DisplayFramebufferScale;
-    float win_width = data->win_width / uiScale.x;
-    float win_height = data->win_height / uiScale.y;
+    ImVec2 origin = io.DisplayVisibleMin;
+    ImVec2 win_size = ImVec2(io.DisplayVisibleMax.x - io.DisplayVisibleMin.x,
+                             io.DisplayVisibleMax.y - io.DisplayVisibleMin.y);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
-    // Draw control panel on the left
-    draw_controls(data, 0, 0, left_col, win_height);
+    if (win_size.x >= 1024 && win_size.y >= 600) {
+        // Draw control panel on the left
+        draw_controls(data, origin.x, origin.y,
+                      left_col + origin.x, win_size.y - origin.y);
 
-    ImVec2 main_area_size = ImVec2(win_width - left_col, win_height);
+        ImVec2 main_area_size = ImVec2(win_size.x - left_col, win_size.y);
+        int vis_width = main_area_size.x/2;
+        int vis_height = main_area_size.y/2;
 
-    // Draw depth buffer visualisation in top-left
-    draw_visualisation(left_col, 0,
-                       main_area_size.x/2, main_area_size.y/2,
-                       data->depth_width, data->depth_height,
-                       "Depth Buffer", gl_depth_rgb_tex);
+        // Draw depth buffer visualisation in top-left
+        draw_visualisation(origin.x + left_col, origin.y,
+                           vis_width, vis_height,
+                           data->depth_width, data->depth_height,
+                           "Depth Buffer", gl_depth_rgb_tex);
 
-    // Draw video buffer visualisation in bottom-left
-    draw_visualisation(left_col, main_area_size.y/2,
-                       main_area_size.x/2, main_area_size.y/2,
-                       data->video_width, data->video_height,
-                       "Video Buffer", gl_vid_tex);
+        // Draw video buffer visualisation in bottom-left
+        draw_visualisation(origin.x + left_col, origin.y + vis_height,
+                           vis_width, vis_height,
+                           data->video_width, data->video_height,
+                           "Video Buffer", gl_vid_tex);
 
-    // Draw label inference visualisation in top-right
-    draw_visualisation(left_col + main_area_size.x/2, 0,
-                       main_area_size.x/2, main_area_size.y/2,
-                       data->training_width, data->training_height,
-                       "Labels", gl_labels_tex);
+        // Draw label inference visualisation in top-right
+        draw_visualisation(origin.x + left_col + vis_width, origin.y,
+                           vis_width, vis_height,
+                           data->training_width, data->training_height,
+                           "Labels", gl_labels_tex);
 
-    // Draw point cloud and joint position/bones visualisation in bottom-left
-    draw_cloud_visualisation(data, uiScale,
-                             left_col + main_area_size.x/2, main_area_size.y/2,
-                             main_area_size.x/2, main_area_size.y/2);
+        // Draw point cloud and joint visualisation in bottom-left
+        draw_cloud_visualisation(data, uiScale,
+                                 origin.x + left_col + vis_width,
+                                 origin.y + vis_height,
+                                 vis_width, vis_height);
+    } else {
+        // Draw a view-picker at the top
+        const char *views[] = {
+            "Controls", "Depth Buffer", "Video Buffer", "Labels", "Cloud" };
+        static int current_view = ARRAY_LEN(views) - 1;
+
+        ImGui::SetNextWindowPos(origin);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(win_size.x, 0),
+                                            ImVec2(win_size.x, win_size.y));
+        ImGui::Begin("View picker", NULL,
+                     ImGuiWindowFlags_NoTitleBar|
+                     ImGuiWindowFlags_NoResize|
+                     ImGuiWindowFlags_NoMove|
+                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+        ImGui::Combo("View", &current_view, views, ARRAY_LEN(views));
+
+        int x = origin.x;
+        int y = ImGui::GetWindowHeight() + origin.y;
+        ImVec2 main_area_size = ImVec2(win_size.x,
+                                       win_size.y - ImGui::GetWindowHeight());
+
+        ImGui::End();
+
+        switch (current_view) {
+        case 0:
+            draw_controls(data, x, y, main_area_size.x, main_area_size.y);
+            break;
+        case 1:
+            draw_visualisation(x, y, main_area_size.x, main_area_size.y,
+                               data->depth_width, data->depth_height,
+                               "Depth Buffer", gl_depth_rgb_tex);
+            break;
+        case 2:
+            draw_visualisation(x, y, main_area_size.x, main_area_size.y,
+                               data->video_width, data->video_height,
+                               "Video Buffer", gl_vid_tex);
+            break;
+        case 3:
+            draw_visualisation(x, y, main_area_size.x, main_area_size.y,
+                               data->training_width, data->training_height,
+                               "Labels", gl_labels_tex);
+            break;
+        case 4:
+            draw_cloud_visualisation(data, uiScale,
+                                     x, y, main_area_size.x, main_area_size.y);
+            break;
+        }
+    }
 
     ImGui::PopStyleVar();
 
-    /* Handy to look at the various features of imgui... */
-#if 0
-    ImGui::SetNextWindowPos(ImVec2(650, 20), ImGuiCond_FirstUseEver);
-    ImGui::ShowTestWindow(&show_test_window);
-#endif
-
     // Draw profiler window always-on-top
-    ImGui::SetNextWindowFocus();
+    ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
     ProfileDrawUI();
 
     ImGui::Render();
@@ -1496,6 +1548,8 @@ main(int argc, char **argv)
                          GLFMDepthFormatNone,
                          GLFMStencilFormatNone,
                          GLFMMultisampleNone);
+    glfmSetDisplayChrome(display,
+                         GLFMUserInterfaceChromeNavigationAndStatusBar);
     glfmSetUserData(display, data);
     glfmSetSurfaceCreatedFunc(display, surface_created_cb);
     glfmSetSurfaceResizedFunc(display, surface_created_cb);
@@ -1505,8 +1559,8 @@ main(int argc, char **argv)
 
     ImGui_ImplGlfmGLES3_Init(display, true);
 #else
-    data->win_width = 800 + TOOLBAR_LEFT_WIDTH;
-    data->win_height = 600;
+    data->win_width = 980 + TOOLBAR_LEFT_WIDTH;
+    data->win_height = 768;
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  0) ;

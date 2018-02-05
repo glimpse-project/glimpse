@@ -357,6 +357,25 @@ void    ImGui_ImplGlfmGLES3_InvalidateDeviceObjects()
     }
 }
 
+static void
+ImGui_ImplGlfmGLES3_UpdateDisplayMetrics(GLFMDisplay* display)
+{
+    ImGuiIO& io = ImGui::GetIO();
+
+    int w, h;
+    glfmGetDisplaySize(display, &w, &h);
+    double scale = glfmGetDisplayScale(display);
+    io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
+    io.DisplayFramebufferScale = ImVec2(scale, scale);
+    io.FontGlobalScale = 1.f / scale;
+
+    double top, right, bottom, left;
+    glfmGetDisplayChromeInsets(display, &top, &right, &bottom, &left);
+    io.DisplayVisibleMin = ImVec2(left / scale, top / scale);
+    io.DisplayVisibleMax = ImVec2(io.DisplaySize.x - right / scale,
+                                  io.DisplaySize.y - bottom / scale);
+}
+
 bool    ImGui_ImplGlfmGLES3_Init(GLFMDisplay* display, bool install_callbacks)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -385,12 +404,7 @@ bool    ImGui_ImplGlfmGLES3_Init(GLFMDisplay* display, bool install_callbacks)
     io.GetClipboardTextFn = ImGui_ImplGlfmGLES3_GetClipboardText;
     io.ClipboardUserData = display;
 
-    int w, h;
-    glfmGetDisplaySize(display, &w, &h);
-    double scale = glfmGetDisplayScale(display);
-    io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
-    io.DisplayFramebufferScale = ImVec2(scale, scale);
-    io.FontGlobalScale = 1.f / scale;
+    ImGui_ImplGlfmGLES3_UpdateDisplayMetrics(display);
 
     if (install_callbacks) {
         glfmSetTouchFunc(display, ImGui_ImplGlfmGLES3_TouchCallback);
@@ -414,12 +428,7 @@ void ImGui_ImplGlfmGLES3_NewFrame(GLFMDisplay* display, double frametime)
     ImGuiIO& io = ImGui::GetIO();
 
     // Setup display size (every frame to accommodate for window resizing)
-    int w, h;
-    glfmGetDisplaySize(display, &w, &h);
-    double scale = glfmGetDisplayScale(display);
-    io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
-    io.DisplayFramebufferScale = ImVec2(scale, scale);
-    io.FontGlobalScale = 1.f / scale;
+    ImGui_ImplGlfmGLES3_UpdateDisplayMetrics(display);
 
     // Setup time step
     io.DeltaTime = (float)(frametime - g_Time);
@@ -454,8 +463,9 @@ void ImGui_ImplGlfmGLES3_NewFrame(GLFMDisplay* display, double frametime)
 
     // If the 'mouse' button was just released, tell ImGUI the cursor has
     // disappeared on the next frame.
-    if (!mousedown && g_MouseDown) {
+    // XXX: This breaks combo boxes :(
+    /*if (!mousedown && g_MouseDown) {
         g_MousePos = io.MousePos = ImVec2(-FLT_MAX, -FLT_MAX);
-    }
+    }*/
     g_MouseDown = mousedown;
 }

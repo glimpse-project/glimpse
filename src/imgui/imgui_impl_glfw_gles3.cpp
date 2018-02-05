@@ -381,6 +381,8 @@ void ImGui_ImplGlfwGLES3_NewFrame()
     glfwGetWindowSize(g_Window, &w, &h);
     glfwGetFramebufferSize(g_Window, &display_w, &display_h);
     io.DisplaySize = ImVec2((float)w, (float)h);
+    io.DisplayVisibleMin = ImVec2(0, 0);
+    io.DisplayVisibleMax = io.DisplaySize;
     io.DisplayFramebufferScale = ImVec2(w > 0 ? ((float)display_w / w) : 0, h > 0 ? ((float)display_h / h) : 0);
 
     // Setup time step
