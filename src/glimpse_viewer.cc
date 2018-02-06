@@ -1671,6 +1671,18 @@ main(int argc, char **argv)
     gm_context_set_event_callback(data->ctx, on_event_cb, data);
     gm_device_set_event_callback(data->device, on_device_event_cb, data);
 
+    struct gm_asset *config_asset =
+        gm_asset_open(data->log,
+                      "glimpse-config.json", GM_ASSET_MODE_BUFFER, &open_err);
+    if (config_asset) {
+        const char *buf = (const char *)gm_asset_get_buffer(config_asset);
+        gm_config_load(data->log, buf, gm_context_get_ui_properties(data->ctx));
+        gm_asset_close(config_asset);
+    } else {
+        gm_warn(data->log, "Failed to open glimpse-config.json: %s", open_err);
+        free(open_err);
+    }
+
     gm_device_start(data->device);
     gm_context_enable(data->ctx);
 

@@ -2242,7 +2242,7 @@ detector_thread_cb(void *data)
 #endif
 
         start = get_time();
-        LOGI("Starting tracking iteration (%llu)\n",
+        LOGI("Starting tracking iteration (%lu)\n",
              tracking->depth_capture_timestamp);
 
         //gm_context_detect_faces(ctx, tracking);
