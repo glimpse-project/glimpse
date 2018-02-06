@@ -361,6 +361,29 @@ draw_controls(Data *data, int x, int y, int width, int height)
     props = gm_context_get_ui_properties(data->ctx);
     draw_properties(props);
 
+    ImGui::Spacing();
+    ImGui::Separator();
+
+    if (ImGui::Button("Save config")) {
+        char *json = gm_config_save(data->log, props);
+
+        FILE *output = fopen("glimpse-config.json", "w");
+        if (output) {
+            if (fputs(json, output) == EOF) {
+                gm_error(data->log, "Error writing config: %s",
+                         strerror(errno));
+            }
+            if (fclose(output) == EOF) {
+                gm_error(data->log, "Error closing config: %s",
+                         strerror(errno));
+            }
+        } else {
+            gm_error(data->log, "Error saving config: %s", strerror(errno));
+        }
+
+        free(json);
+    }
+
     ImGui::End();
 }
 

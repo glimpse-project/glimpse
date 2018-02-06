@@ -144,8 +144,8 @@ extern "C" {
 void gm_config_load(struct gm_logger *log,
                     const char *json_buf,
                     struct gm_ui_properties *props);
-//char *gm_config_save(struct gm_logger *log,
-//                     struct gm_ui_properties *props);
+char *gm_config_save(struct gm_logger *log,
+                     struct gm_ui_properties *props);
 
 #ifdef __cplusplus
 }
