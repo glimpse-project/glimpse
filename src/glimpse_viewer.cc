@@ -39,6 +39,7 @@
 
 #include <pthread.h>
 
+#include <list>
 #include <vector>
 
 #include <epoxy/gl.h>
@@ -67,6 +68,7 @@
 #include "glimpse_log.h"
 #include "glimpse_context.h"
 #include "glimpse_device.h"
+#include "glimpse_record.h"
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
 
@@ -108,6 +110,7 @@ typedef struct _Data
      * the check passes.
      */
     bool initialized;
+    bool gl_initialized;
 
     struct gm_context *ctx;
     struct gm_device *device;
@@ -165,6 +168,15 @@ typedef struct _Data
      */
     struct gm_tracking *latest_tracking;
 
+    /* When recording we keep the tracking frames in order in a list and
+     * write out the files and metadata when recording finishes.
+     */
+    bool recording;
+    std::list<struct gm_tracking *> records;
+
+    bool playback;
+    struct gm_device *playback_device;
+
     /* Events from the gm_context and gm_device apis may be delivered via any
      * arbitrary thread which we don't want to block, and at a time where
      * the gm_ apis may not be reentrant due to locks held during event
@@ -185,7 +197,7 @@ static JavaVM *android_jvm_singleton;
 
 static uint32_t joint_palette[] = {
     0xFFFFFFFF, // head.tail
-    0xCCCCCCCC, // neck_01.head
+    0xCCCCCCFF, // neck_01.head
     0xFF8888FF, // upperarm_l.head
     0x8888FFFF, // upperarm_r.head
     0xFFFF88FF, // lowerarm_l.head
@@ -237,9 +249,11 @@ static bool permissions_check_passed;
 #endif
 
 static void viewer_init(Data *data);
-static void init_viewer_opengl(Data *data);
+static void refresh_viewer_opengl(Data *data, struct gm_device *dev);
 static void init_basic_opengl(Data *data);
-
+static void handle_device_ready(Data *data, struct gm_device *dev);
+static void on_device_event_cb(struct gm_device_event *device_event,
+                               void *user_data);
 
 static void
 on_profiler_pause_cb(bool pause)
@@ -372,7 +386,9 @@ draw_controls(Data *data, int x, int y, int width, int height)
     ImGui::Separator();
     ImGui::Spacing();
 
-    struct gm_ui_properties *props = gm_device_get_ui_properties(data->device);
+    struct gm_ui_properties *props =
+        gm_device_get_ui_properties(data->playback ?
+                                    data->playback_device : data->device);
     draw_properties(props);
 
     ImGui::Spacing();
@@ -406,6 +422,85 @@ draw_controls(Data *data, int x, int y, int width, int height)
 
         free(json);
     }
+
+    ImGui::End();
+}
+
+static void
+draw_playback_controls(Data *data, const ImVec4 &bounds)
+{
+    ImGui::SetNextWindowSize(ImVec2(0, 0), ImGuiCond_Always);
+    ImGui::Begin("Playback controls", NULL,
+                 ImGuiWindowFlags_NoTitleBar|
+                 ImGuiWindowFlags_NoResize|
+                 ImGuiWindowFlags_ShowBorders|
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    ImGui::Spacing();
+
+#if 0
+    // TODO: Playback controls
+    ImGui::Button("<");
+    ImGui::SameLine();
+    ImGui::Button("||");
+    ImGui::SameLine();
+    ImGui::Button(">");
+    ImGui::SameLine();
+#endif
+    if (ImGui::Button(data->recording ? "Stop" : "Record")) {
+        if (data->recording) {
+            if (data->records.size()) {
+                gm_record_save(data->log, data->device, data->records,
+                               "glimpse_viewer_recording");
+            }
+
+            data->recording = false;
+            for (std::list<struct gm_tracking *>::iterator it =
+                 data->records.begin(); it != data->records.end(); ++it) {
+                gm_tracking_unref(*it);
+            }
+            data->records.clear();
+        } else if (!data->playback) {
+            data->recording = true;
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(data->playback ? "Unload" : "Load") && !data->recording) {
+        if (data->playback) {
+            gm_device_stop(data->playback_device);
+
+            if (data->device_frame) {
+                gm_frame_unref(data->device_frame);
+                data->device_frame = nullptr;
+            }
+            gm_context_flush(data->ctx);
+
+            gm_device_close(data->playback_device);
+            data->playback_device = nullptr;
+
+            data->playback = false;
+            handle_device_ready(data, data->device);
+        } else {
+            gm_device_stop(data->device);
+
+            struct gm_device_config config = {};
+            config.type = GM_DEVICE_RECORDING;
+            config.recording.path = "glimpse_viewer_recording";
+
+            data->playback_device = gm_device_open(data->log, &config, NULL);
+            gm_device_set_event_callback(data->playback_device,
+                                         on_device_event_cb, data);
+            data->playback = true;
+            gm_device_commit_config(data->playback_device, NULL);
+        }
+    }
+
+    ImGui::Spacing();
+
+    ImVec2 size = ImGui::GetWindowSize();
+    ImGui::SetWindowPos(ImVec2(bounds.x + (bounds.z - size.x) / 2,
+                               (bounds.y + bounds.w) - size.y - 16.f),
+                        ImGuiCond_FirstUseEver);
 
     ImGui::End();
 }
@@ -473,7 +568,8 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
 
     // Calculate the projection matrix
     struct gm_intrinsics *intrinsics =
-      gm_device_get_depth_intrinsics(data->device);
+      gm_device_get_depth_intrinsics(data->playback ?
+                                     data->playback_device : data->device);
     glm::mat4 proj = intrinsics_to_project_matrix(intrinsics, 0.01f, 10);
     glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
     mvp = glm::translate(mvp, data->focal_point);
@@ -602,6 +698,9 @@ draw_ui(Data *data)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
     if (win_size.x >= 1024 && win_size.y >= 600) {
+        // Draw playback controls
+        draw_playback_controls(data, ImVec4(0, 0, win_size.x, win_size.y));
+
         // Draw control panel on the left
         draw_controls(data, origin.x, origin.y,
                       left_col + origin.x, win_size.y - origin.y);
@@ -701,7 +800,9 @@ request_device_frame(Data *data, uint64_t requirements)
     uint64_t new_requirements = data->pending_frame_requirements | requirements;
 
     if (data->pending_frame_requirements != new_requirements) {
-        gm_device_request_frame(data->device, new_requirements);
+        gm_device_request_frame(data->playback ?
+                                data->playback_device : data->device,
+                                new_requirements);
         data->pending_frame_requirements = new_requirements;
     }
 }
@@ -723,8 +824,11 @@ handle_device_frame_updates(Data *data)
     {
         ProfileScopedSection(GetLatestFrame);
         /* NB: gm_device_get_latest_frame will give us a _ref() */
-        data->device_frame = gm_device_get_latest_frame(data->device);
-        assert(data->device_frame);
+        data->device_frame = gm_device_get_latest_frame(data->playback ?
+            data->playback_device : data->device);
+        if (!data->device_frame) {
+            return;
+        }
         upload = true;
     }
 
@@ -834,7 +938,7 @@ upload_tracking_textures(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    const uint32_t *color = gm_tracking_get_video(data->latest_tracking);
+    const uint8_t *color = gm_tracking_get_video(data->latest_tracking);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                  data->video_width, data->video_height,
                  0, GL_RGBA, GL_UNSIGNED_BYTE, color);
@@ -939,6 +1043,11 @@ handle_context_tracking_updates(Data *data)
     data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
     assert(data->latest_tracking);
 
+    if (data->recording) {
+        gm_tracking_ref(data->latest_tracking);
+        data->records.push_back(data->latest_tracking);
+    }
+
     if (data->joints_recording) {
         int n_joints;
         const float *joints =
@@ -974,35 +1083,46 @@ handle_context_tracking_updates(Data *data)
 }
 
 static void
-handle_device_ready(Data *data)
+handle_device_ready(Data *data, struct gm_device *dev)
 {
+    fprintf(stderr, "%s device ready\n",
+            data->playback ? "Playback" : "Default");
+
     struct gm_intrinsics *depth_intrinsics =
-        gm_device_get_depth_intrinsics(data->device);
+        gm_device_get_depth_intrinsics(dev);
     data->depth_width = depth_intrinsics->width;
     data->depth_height = depth_intrinsics->height;
 
     struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(data->device);
+        gm_device_get_video_intrinsics(dev);
     data->video_width = video_intrinsics->width;
     data->video_height = video_intrinsics->height;
 
-    init_viewer_opengl(data);
+    refresh_viewer_opengl(data, dev);
 
     gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
-      gm_device_get_depth_to_video_extrinsics(data->device));*/
+      gm_device_get_depth_to_video_extrinsics(dev));*/
 
-    gm_device_start(data->device);
+    data->pending_frame_requirements = 0;
+    gm_device_start(dev);
     gm_context_enable(data->ctx);
 }
 
 static void
 handle_device_event(Data *data, struct gm_device_event *event)
 {
+    // Ignore unexpected device events
+    if ((data->playback && event->device != data->playback_device) ||
+        (!data->playback && event->device != data->device)) {
+        gm_device_event_free(event);
+        return;
+    }
+
     switch (event->type) {
     case GM_DEV_EVENT_READY:
-        handle_device_ready(data);
+        handle_device_ready(data, event->device);
         break;
     case GM_DEV_EVENT_FRAME_READY:
 
@@ -1027,6 +1147,7 @@ handle_context_event(Data *data, struct gm_event *event)
 {
     switch (event->type) {
     case GM_EVENT_REQUEST_FRAME:
+        fprintf(stderr, "Requesting frame\n");
         data->context_needs_frame = true;
         request_device_frame(data,
                              (GM_REQUEST_FRAME_DEPTH |
@@ -1109,9 +1230,17 @@ app_focus_cb(GLFMDisplay *display, bool focused)
     gm_debug(data->log, focused ? "Focused" : "Unfocused");
 
     if (focused) {
-        gm_device_start(data->device);
+        if (data->playback) {
+            gm_device_start(data->playback_device);
+        } else {
+            gm_device_start(data->device);
+        }
     } else {
-        gm_device_stop(data->device);
+        if (data->playback) {
+            gm_device_stop(data->playback_device);
+        } else {
+            gm_device_stop(data->device);
+        }
     }
 }
 
@@ -1260,8 +1389,7 @@ on_event_cb(struct gm_context *ctx,
 }
 
 static void
-on_device_event_cb(struct gm_device *dev,
-                   struct gm_device_event *device_event,
+on_device_event_cb(struct gm_device_event *device_event,
                    void *user_data)
 {
     Data *data = (Data *)user_data;
@@ -1384,9 +1512,9 @@ init_viewer_opengl(Data *data)
 
         "void main() {\n"
 #ifdef __ANDROID__
-        "  color = texture(texture, v_tex_coord.st).abgr;\n"
+        "  color = texture(texture, v_tex_coord.st);\n"
 #else
-        "  color = texture2D(texture, v_tex_coord.st).abgr;\n"
+        "  color = texture2D(texture, v_tex_coord.st);\n"
 #endif
         "}\n";
 
@@ -1412,29 +1540,6 @@ init_viewer_opengl(Data *data)
 
     GLuint uniform_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
     glUniform1i(uniform_tex_sampler, 0);
-
-    // Update camera intrinsics
-    struct gm_intrinsics *depth_intrinsics =
-      gm_device_get_depth_intrinsics(data->device);
-    struct gm_intrinsics *video_intrinsics =
-      gm_device_get_video_intrinsics(data->device);
-
-    glUniform2i(gl_db_uni_depth_size,
-                (GLint)depth_intrinsics->width,
-                (GLint)depth_intrinsics->height);
-    glUniform2f(gl_db_uni_video_size,
-                (GLfloat)video_intrinsics->width,
-                (GLfloat)video_intrinsics->height);
-    glUniform4f(gl_db_uni_depth_intrinsics,
-                (GLfloat)depth_intrinsics->fx,
-                (GLfloat)depth_intrinsics->fy,
-                (GLfloat)depth_intrinsics->cx,
-                (GLfloat)depth_intrinsics->cy);
-    glUniform4f(gl_db_uni_video_intrinsics,
-                (GLfloat)video_intrinsics->fx,
-                (GLfloat)video_intrinsics->fy,
-                (GLfloat)video_intrinsics->cx,
-                (GLfloat)video_intrinsics->cy);
 
     glUseProgram(0);
 
@@ -1492,8 +1597,44 @@ init_viewer_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
     glGenFramebuffers(1, &gl_cloud_fbo);
     glGenRenderbuffers(1, &gl_cloud_depth_bo);
+
+    data->gl_initialized = true;
 }
 
+static void
+refresh_viewer_opengl(Data *data, struct gm_device *dev)
+{
+    if (!data->gl_initialized) {
+        init_viewer_opengl(data);
+    }
+
+    glUseProgram(gl_db_program);
+
+    // Update camera intrinsics
+    struct gm_intrinsics *depth_intrinsics =
+      gm_device_get_depth_intrinsics(dev);
+    struct gm_intrinsics *video_intrinsics =
+      gm_device_get_video_intrinsics(dev);
+
+    glUniform2i(gl_db_uni_depth_size,
+                (GLint)depth_intrinsics->width,
+                (GLint)depth_intrinsics->height);
+    glUniform2f(gl_db_uni_video_size,
+                (GLfloat)video_intrinsics->width,
+                (GLfloat)video_intrinsics->height);
+    glUniform4f(gl_db_uni_depth_intrinsics,
+                (GLfloat)depth_intrinsics->fx,
+                (GLfloat)depth_intrinsics->fy,
+                (GLfloat)depth_intrinsics->cx,
+                (GLfloat)depth_intrinsics->cy);
+    glUniform4f(gl_db_uni_video_intrinsics,
+                (GLfloat)video_intrinsics->fx,
+                (GLfloat)video_intrinsics->fy,
+                (GLfloat)video_intrinsics->cx,
+                (GLfloat)video_intrinsics->cy);
+
+    glUseProgram(0);
+}
 static void
 logger_cb(struct gm_logger *logger,
           enum gm_log_level level,
@@ -1662,6 +1803,9 @@ viewer_destroy(Data *data)
      * can be cleanly closed).
      */
     gm_device_stop(data->device);
+    if (data->playback_device) {
+        gm_device_stop(data->playback_device);
+    }
 
     for (unsigned i = 0; i < data->events_back->size(); i++) {
         struct event event = (*data->events_back)[i];
@@ -1682,6 +1826,9 @@ viewer_destroy(Data *data)
         gm_frame_unref(data->device_frame);
 
     gm_device_close(data->device);
+    if (data->playback_device) {
+        gm_device_close(data->playback_device);
+    }
 
     json_value_free(data->joint_map);
 
@@ -1689,6 +1836,7 @@ viewer_destroy(Data *data)
 
     delete data->events_front;
     delete data->events_back;
+    delete data;
 
     ProfileShutdown();
 }
@@ -1799,7 +1947,7 @@ int
 main(int argc, char **argv)
 #endif
 {
-    Data *data = (Data *)calloc(1, sizeof(Data));
+    Data *data = new Data();
 
 #ifdef __ANDROID__
 #define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"

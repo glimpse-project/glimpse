@@ -184,7 +184,7 @@ IUReturnCode
 iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
                         uint8_t** output, void** pal_output, int* pal_size)
 {
-  int width, height;
+  int width, height, bpp;
   png_byte color_type;
   png_structp png_ptr;
   png_infop info_ptr;
@@ -193,7 +193,7 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
   png_bytep *rows;
 
   IUPngMemReadInfo readinfo = { (int)len, 0, buffer };
-  IUImageSpec default_spec = {0, 0, IU_FORMAT_U8};
+  IUImageSpec default_spec = {0, 0, IU_FORMAT_ANY};
 
   IUReturnCode ret = SUCCESS;
 
@@ -203,6 +203,14 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
   if (!spec)
     {
       spec = &default_spec;
+    }
+
+  if (spec->format != IU_FORMAT_U8 &&
+      spec->format != IU_FORMAT_U32 &&
+      spec->format != IU_FORMAT_ANY)
+    {
+      fprintf(stderr, "Only support 8-bit or 32-bit spec format for PNG\n");
+      return BAD_SPEC;
     }
 
   if (len <= 8)
@@ -253,13 +261,34 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
     }
 
   color_type = png_get_color_type(png_ptr, info_ptr);
-  if (color_type != PNG_COLOR_TYPE_GRAY &&
+  if (spec->format == IU_FORMAT_U8 &&
+      color_type != PNG_COLOR_TYPE_GRAY &&
       color_type != PNG_COLOR_TYPE_PALETTE)
     {
       fprintf(stderr, "Expected an 8-bit color type\n");
       ret = NON_CONFORMANT;
       goto destroy_info_struct;
     }
+  if (spec->format == IU_FORMAT_U32 &&
+      color_type != PNG_COLOR_TYPE_RGBA)
+    {
+      fprintf(stderr, "Expected a 32-bit color type\n");
+      ret = NON_CONFORMANT;
+      goto destroy_info_struct;
+    }
+  if (spec->format == IU_FORMAT_ANY &&
+      color_type != PNG_COLOR_TYPE_GRAY &&
+      color_type != PNG_COLOR_TYPE_PALETTE &&
+      color_type != PNG_COLOR_TYPE_RGBA)
+    {
+      fprintf(stderr, "Expected either 8-bit or 32-bit color type\n");
+      ret = NON_CONFORMANT;
+      goto destroy_info_struct;
+    }
+
+  spec->format = (color_type == PNG_COLOR_TYPE_RGBA) ?
+      IU_FORMAT_U32 : IU_FORMAT_U8;
+  bpp = (spec->format == IU_FORMAT_U32) ? 4 : 1;
 
   if (png_get_bit_depth(png_ptr, info_ptr) != 8)
     {
@@ -269,7 +298,7 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
     }
 
   if (!(*output))
-    *output = (uint8_t *)xmalloc(spec->width * spec->height);
+    *output = (uint8_t *)xmalloc(spec->width * spec->height * bpp);
 
   if (setjmp(png_jmpbuf(png_ptr)))
     {
@@ -279,7 +308,7 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
     }
 
   row_stride = png_get_rowbytes(png_ptr, info_ptr);
-  if (row_stride != width)
+  if (row_stride != width * bpp)
     {
       fprintf(stderr, "Expected PNG row stride to match width\n");
       ret = BAD_FORMAT;
@@ -288,11 +317,12 @@ iu_read_png_from_memory(uint8_t* buffer, size_t len, IUImageSpec* spec,
 
   rows = (png_bytep *)alloca(sizeof(png_bytep) * height);
   for (int y = 0; y < height; y++)
-    rows[y] = (png_byte *)(*output + row_stride * y);
+    rows[y] = (png_bytep)(*output + row_stride * y);
 
   png_read_image(png_ptr, rows);
 
-  if (ret == SUCCESS && pal_output && pal_size)
+  if (ret == SUCCESS && color_type == PNG_COLOR_TYPE_PALETTE &&
+      pal_output && pal_size)
     {
       ret = _iu_read_png_pal(png_ptr, info_ptr, pal_output, pal_size);
     }
@@ -309,6 +339,7 @@ IUReturnCode
 iu_write_png_to_file(const char* filename, IUImageSpec* spec, void* data,
                      void* pal, int pal_size)
 {
+  int bpp;
   png_structp png_ptr;
   png_infop info_ptr;
   png_byte color_type;
@@ -321,9 +352,9 @@ iu_write_png_to_file(const char* filename, IUImageSpec* spec, void* data,
       return BAD_SPEC;
     }
 
-  if (spec->format != IU_FORMAT_U8)
+  if (spec->format != IU_FORMAT_U8 && spec->format != IU_FORMAT_U32)
     {
-      fprintf(stderr, "Only IU_FORMAT_U8 pngs are supported\n");
+      fprintf(stderr, "Only 8bpp and 32bpp pngs are supported\n");
       return BAD_SPEC;
     }
 
@@ -356,23 +387,25 @@ iu_write_png_to_file(const char* filename, IUImageSpec* spec, void* data,
 
   png_init_io(png_ptr, fp);
 
-  color_type = pal ? PNG_COLOR_TYPE_PALETTE : PNG_COLOR_TYPE_GRAY;
+  color_type = (spec->format == IU_FORMAT_U32) ? PNG_COLOR_TYPE_RGB_ALPHA :
+    (pal ? PNG_COLOR_TYPE_PALETTE : PNG_COLOR_TYPE_GRAY);
 
   png_set_IHDR(png_ptr, info_ptr, spec->width, spec->height,
                8, color_type, PNG_INTERLACE_NONE,
                PNG_COMPRESSION_TYPE_BASE, PNG_FILTER_TYPE_BASE);
 
-  if (pal)
+  if (spec->format == IU_FORMAT_U8 && pal)
     {
       png_set_PLTE(png_ptr, info_ptr, (png_color*)pal, pal_size);
     }
 
   png_write_info(png_ptr, info_ptr);
 
-  rows = (png_bytep*)xmalloc(spec->height * sizeof(png_bytep));
+  bpp = (spec->format == IU_FORMAT_U8) ? 1 : 4;
+  rows = (png_bytep*)xmalloc(spec->height * sizeof(png_bytep) * bpp);
   for (int y = 0; y < spec->height; y++)
     {
-      rows[y] = (png_byte*)data + spec->width * y;
+      rows[y] = (png_byte*)data + spec->width * y * bpp;
     }
   png_write_image(png_ptr, rows);
   xfree(rows);

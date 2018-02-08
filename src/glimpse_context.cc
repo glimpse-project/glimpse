@@ -186,7 +186,7 @@ struct gm_tracking_impl
     float *depth;
 
     // Colour data, RGBA
-    uint32_t *video;
+    uint8_t *video;
 
     // Depth data mapped to colour for visualisation
     uint8_t *depth_rgb;
@@ -1871,16 +1871,25 @@ gm_context_track_skeleton(struct gm_context *ctx,
 #if 1
         pcl::Normal &norm = normals->points[doff];
         if (std::isnan(norm.normal_z)) {
-            tracking->video[off] = 0;
+            tracking->video[off * 4] = 0;
+            tracking->video[off * 4 + 1] = 0;
+            tracking->video[off * 4 + 2] = 0;
+            tracking->video[off * 4 + 3] = 0;
         } else {
             uint8_t r = (uint8_t)((norm.normal_x * 127) + 127);
             uint8_t g = (uint8_t)((norm.normal_y * 127) + 127);
             uint8_t b = (uint8_t)(255 - ((norm.normal_z * 127) + 127));
-            tracking->video[off] = (r<<24)|(g<<16)|(b<<8)|0xFF;
+            tracking->video[off * 4] = r;
+            tracking->video[off * 4 + 1] = g;
+            tracking->video[off * 4 + 2] = b;
+            tracking->video[off * 4 + 3] = 0xFF;
         }
 #else
         pcl::Label &label = plane_labels->points[doff];
-        tracking->video[off] = ((label.label * 20)<<8)|0xFF;
+        tracking->video[off*4] = (label.label * 20);
+        tracking->video[off*4 + 1] = (label.label * 20)<<8;
+        tracking->video[off*4 + 2] = (label.label * 20)<<16;
+        tracking->video[off*4 + 3] = 0xFF;
 #endif
     }
 #endif
@@ -1977,22 +1986,26 @@ update_tracking_video(struct gm_context *ctx,
     switch(format) {
     case GM_FORMAT_RGB_U8:
         foreach_xy_off(width, height) {
-            uint8_t r = video[off * 3];
-            uint8_t g = video[off * 3 + 1];
-            uint8_t b = video[off * 3 + 2];
-            tracking->video[off] = (r << 24) | (g << 16) | (b << 8) | 0xFF;
-            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+            tracking->video[off * 4] = video[off * 3];
+            tracking->video[off * 4 + 1] = video[off * 3 + 1];
+            tracking->video[off * 4 + 2] = video[off * 3 + 2];
+            tracking->video[off * 4 + 3] = 0xFF;
+            tracking->face_detect_buf[off] = RGB2Y(video[off * 3],
+                                                   video[off * 3 + 1],
+                                                   video[off * 3 + 2]);
         }
         break;
 
     case GM_FORMAT_RGBX_U8:
         foreach_xy_off(width, height) {
-            uint32_t rgba = ((uint32_t*)video)[off] | 0xFF;
-            tracking->video[off] = rgba;
+            tracking->video[off * 4] = video[off * 4];
+            tracking->video[off * 4 + 1] = video[off * 4 + 1];
+            tracking->video[off * 4 + 2] = video[off * 4 + 2];
+            tracking->video[off * 4 + 3] = 0xFF;
 
-            uint8_t r = video[off * 3];
-            uint8_t g = video[off * 3 + 1];
-            uint8_t b = video[off * 3 + 2];
+            uint8_t r = video[off * 4];
+            uint8_t g = video[off * 4 + 1];
+            uint8_t b = video[off * 4 + 2];
             tracking->face_detect_buf[off] = RGB2Y(r, g, b);
         }
         break;
@@ -2000,9 +2013,9 @@ update_tracking_video(struct gm_context *ctx,
     case GM_FORMAT_RGBA_U8:
         memcpy(tracking->video, video, width * height * 4);
         foreach_xy_off(width, height) {
-            uint8_t r = video[off * 3];
-            uint8_t g = video[off * 3 + 1];
-            uint8_t b = video[off * 3 + 2];
+            uint8_t r = video[off * 4];
+            uint8_t g = video[off * 4 + 1];
+            uint8_t b = video[off * 4 + 2];
             tracking->face_detect_buf[off] = RGB2Y(r, g, b);
         }
         break;
@@ -2010,7 +2023,10 @@ update_tracking_video(struct gm_context *ctx,
     case GM_FORMAT_LUMINANCE_U8:
         foreach_xy_off(width, height) {
             uint8_t lum = video[off];
-            tracking->video[off] = (lum << 24) | (lum << 16) | (lum << 8) | 0xFF;
+            tracking->video[off * 4] = lum;
+            tracking->video[off * 4 + 1] = lum;
+            tracking->video[off * 4 + 2] = lum;
+            tracking->video[off * 4 + 3] = 0xFF;
         }
         memcpy(tracking->face_detect_buf, video, width * height);
         break;
@@ -2249,8 +2265,8 @@ detector_thread_cb(void *data)
         while (!ctx->frame_ready && !ctx->destroying) {
             pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
         }
-        if (ctx->frame_front)
-            gm_frame_unref(ctx->frame_front);
+        gm_assert(ctx->log, !ctx->frame_front,
+                  "Front buffer exists before acquiring ready frame");
         ctx->frame_front = ctx->frame_ready;
         ctx->frame_ready = NULL;
         pthread_mutex_unlock(&ctx->frame_ready_mutex);
@@ -2264,18 +2280,20 @@ detector_thread_cb(void *data)
             mem_pool_acquire_tracking(ctx->tracking_pool);
         tracking->label_map_rgb_valid = false;
 
-        struct gm_frame *frame = ctx->frame_front;
         update_tracking_depth_from_buffer(ctx,
                                           tracking,
-                                          frame->depth_format,
-                                          frame->depth,
-                                          frame->timestamp);
+                                          ctx->frame_front->depth_format,
+                                          ctx->frame_front->depth,
+                                          ctx->frame_front->timestamp);
 
         update_tracking_video(ctx,
                               tracking,
-                              frame->video_format,
-                              (uint8_t *)frame->video->data,
-                              frame->timestamp);
+                              ctx->frame_front->video_format,
+                              (uint8_t *)ctx->frame_front->video->data,
+                              ctx->frame_front->timestamp);
+
+        gm_frame_unref(ctx->frame_front);
+        ctx->frame_front = NULL;
 
         /* While downsampling on the CPU we currently do that synchronously
          * when we are notified of a new frame.
@@ -2452,8 +2470,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     int video_width = ctx->video_camera_intrinsics.width;
     int video_height = ctx->video_camera_intrinsics.height;
 
-    tracking->video = (uint32_t *)
-      xcalloc(video_width * video_height, sizeof(uint32_t));
+    tracking->video = (uint8_t *)
+      xcalloc(video_width * video_height * 4, sizeof(uint8_t));
 
     tracking->face_detect_buf =
         (uint8_t *)xcalloc(video_width * video_height, 1);
@@ -2563,10 +2581,8 @@ gm_context_destroy(struct gm_context *ctx)
         gm_frame_unref(ctx->frame_ready);
         ctx->frame_ready = NULL;
     }
-    if (ctx->frame_front) {
-        gm_frame_unref(ctx->frame_front);
-        ctx->frame_front = NULL;
-    }
+    gm_assert(ctx->log, !ctx->frame_front,
+              "Front buffer exists after detector thread joined");
     pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
     free(ctx->depth_color_stops);
@@ -3144,6 +3160,20 @@ gm_context_get_training_intrinsics(struct gm_context *ctx)
     return &ctx->training_camera_intrinsics;
 }
 
+uint64_t
+gm_tracking_get_depth_timestamp(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->depth_capture_timestamp;
+}
+
+uint64_t
+gm_tracking_get_video_timestamp(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->video_capture_timestamp;
+}
+
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *_tracking)
 {
@@ -3161,7 +3191,7 @@ gm_tracking_get_depth(struct gm_tracking *_tracking)
     return tracking->depth;
 }
 
-const uint32_t *
+const uint8_t *
 gm_tracking_get_video(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
@@ -3240,6 +3270,25 @@ gm_context_notify_frame(struct gm_context *ctx,
     pthread_mutex_unlock(&ctx->liveness_lock);
 
     return true;
+}
+
+void
+gm_context_flush(struct gm_context *ctx)
+{
+    // Let go of all gm_frame resources
+    pthread_mutex_lock(&ctx->liveness_lock);
+    pthread_mutex_lock(&ctx->frame_ready_mutex);
+
+    if (ctx->frame_ready) {
+        gm_frame_unref(ctx->frame_ready);
+        ctx->frame_ready = nullptr;
+    }
+
+    pthread_mutex_unlock(&ctx->frame_ready_mutex);
+    pthread_mutex_unlock(&ctx->liveness_lock);
+
+    // TODO: Something better than this?
+    while (ctx->frame_front) {};
 }
 
 struct gm_tracking *

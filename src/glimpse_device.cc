@@ -45,6 +45,7 @@
 #include <tango_support_api.h>
 #endif
 
+#include "parson.h"
 #include "half.hpp"
 #include "xalloc.h"
 
@@ -114,14 +115,11 @@ struct gm_device
     union {
         struct {
             int frame;
-            uint64_t time;
-
-            int n_images;
-            half **depth_images;
-            uint8_t **lum_images;
+            uint64_t last_frame_time;
+            JSON_Value *json;
 
             pthread_t io_thread;
-        } dummy;
+        } recording;
 
 #ifdef USE_FREENECT
         struct {
@@ -187,8 +185,7 @@ struct gm_device
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 
-    void (*event_callback)(struct gm_device *dev,
-                           struct gm_device_event *event,
+    void (*event_callback)(struct gm_device_event *event,
                            void *user_data);
 
     void *callback_data;
@@ -220,11 +217,12 @@ get_time(void)
 }
 
 static struct gm_device_event *
-device_event_alloc(enum gm_device_event_type type)
+device_event_alloc(struct gm_device *device, enum gm_device_event_type type)
 {
     struct gm_device_event *event =
         (struct gm_device_event *)xcalloc(sizeof(struct gm_device_event), 1);
 
+    event->device = device;
     event->type = type;
 
     return event;
@@ -329,7 +327,18 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     /* allocated large enough for _RGB format */
     int video_width = dev->video_camera_intrinsics.width;
     int video_height = dev->video_camera_intrinsics.height;
-    buf->base.len = video_width * video_height * 3;
+
+    switch (dev->type) {
+    case GM_DEVICE_TANGO:
+    case GM_DEVICE_KINECT:
+        /* Allocated large enough for RGB data */
+        buf->base.len = video_width * video_height * 3;
+        break;
+    case GM_DEVICE_RECORDING:
+        /* Allocated large enough for RGBA data */
+        buf->base.len = video_width * video_height * 4;
+        break;
+    }
     buf->base.data = xmalloc(buf->base.len);
 
     return buf;
@@ -367,14 +376,17 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     case GM_DEVICE_TANGO:
         /* Allocated large enough for _XYZC_F32_M data */
         buf->base.len = depth_width * depth_height * 16;
-        buf->base.data = xmalloc(buf->base.len);
         break;
-    default:
+    case GM_DEVICE_RECORDING:
+        /* Allocated large enough for _F32_M data */
+        buf->base.len = depth_width * depth_height * 4;
+        break;
+    case GM_DEVICE_KINECT:
         /* Allocated large enough for _U16_MM data */
         buf->base.len = depth_width * depth_height * 2;
-        buf->base.data = xmalloc(buf->base.len);
         break;
     }
+    buf->base.data = xmalloc(buf->base.len);
 
     return buf;
 }
@@ -388,14 +400,15 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
 static void
 notify_frame_locked(struct gm_device *dev)
 {
-    struct gm_device_event *event = device_event_alloc(GM_DEV_EVENT_FRAME_READY);
+    struct gm_device_event *event =
+        device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
 
     gm_debug(dev->log, "notify_frame_locked (requirements = 0x%" PRIx64, dev->frame_request_requirements);
 
     event->frame_ready.met_requirements = dev->frame_request_requirements;
     dev->frame_request_requirements = 0;
 
-    dev->event_callback(dev, event, dev->callback_data);
+    dev->event_callback(event, dev->callback_data);
 }
 
 #ifdef USE_FREENECT
@@ -412,7 +425,10 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = dev->depth_buf_back;
     dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool);
-    dev->frame_time = (uint64_t)timestamp;
+    // TODO: Figure out the Kinect timestamp format to translate it into
+    //       nanoseconds
+    //dev->frame_time = (uint64_t)timestamp;
+    dev->frame_time = get_time();
     dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
 
     freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
@@ -443,7 +459,8 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     struct gm_device_buffer *old = dev->video_buf_ready;
     dev->video_buf_ready = dev->video_buf_back;
     dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool);
-    dev->frame_time = (uint64_t)timestamp;
+    //dev->frame_time = (uint64_t)timestamp;
+    dev->frame_time = get_time();
     dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
 
     freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
@@ -793,86 +810,62 @@ directory_recurse(struct gm_device *dev,
     return ret;
 }
 
+static void
+read_json_intrinsics(JSON_Object *json_intrinsics,
+                     struct gm_intrinsics *intrinsics)
+{
+    intrinsics->width = (uint32_t)round(
+        json_object_get_number(json_intrinsics, "width"));
+    intrinsics->height = (uint32_t)round(
+        json_object_get_number(json_intrinsics, "height"));
+    intrinsics->fx = json_object_get_number(json_intrinsics, "fx");
+    intrinsics->fy = json_object_get_number(json_intrinsics, "fy");
+    intrinsics->cx = json_object_get_number(json_intrinsics, "cx");
+    intrinsics->cy = json_object_get_number(json_intrinsics, "cy");
+}
+
 static bool
 recording_open(struct gm_device *dev,
                struct gm_device_config *config, char **err)
 {
-    /* Load dummy images instead of using Kinect */
-    std::vector<char *> exr_files;
-    std::vector<char *> png_files;
+    const char *recording_name = "glimpse_recording.json";
+    size_t json_path_size = strlen(config->recording.path) +
+                                   strlen(recording_name) + 2;
+    char *json_path = (char *)alloca(json_path_size);
+    snprintf(json_path, json_path_size, "%s/%s",
+             config->recording.path, recording_name);
 
-    if (!directory_recurse(dev, config->recording.path, ".exr", exr_files, err))
-        return false;
-    if (!directory_recurse(dev, config->recording.path, ".png", png_files, err))
-        return false;
-
-    if (exr_files.size() == 0 || png_files.size() == 0) {
-        gm_throw(dev->log, err, "No exr or png files found\n");
-        return false;
-    }
-    if (exr_files.size() != png_files.size()) {
-        gm_throw(dev->log, err, "exr/png quantity mismatch\n");
+    dev->recording.json = json_parse_file(json_path);
+    if (!dev->recording.json) {
+        gm_throw(dev->log, err, "Failed to open recording metadata");
         return false;
     }
 
-    dev->dummy.n_images = exr_files.size();
-    dev->dummy.depth_images = (half**)calloc(sizeof(half*), dev->dummy.n_images);
-    dev->dummy.lum_images = (uint8_t**)calloc(sizeof(uint8_t*), dev->dummy.n_images);
+    JSON_Object *meta = json_object(dev->recording.json);
 
-    int depth_width = 0;
-    int depth_height = 0;
-    for (unsigned i = 0; i < exr_files.size(); i++) {
-        IUImageSpec spec = {};
-        spec.width = depth_width;
-        spec.height = depth_height;
+    JSON_Object *depth_intrinsics =
+        json_object_get_object(meta, "depth_intrinsics");
+    read_json_intrinsics(depth_intrinsics, &dev->depth_camera_intrinsics);
 
-        if (iu_read_exr_from_file(exr_files[i], &spec, (void**)
-                                  &dev->dummy.depth_images[i]) != SUCCESS)
-        {
-            gm_throw(dev->log, err, "Failed to open %s\n", exr_files[i]);
-            return false;
-        }
-        free(exr_files[i]);
+    JSON_Object *video_intrinsics =
+        json_object_get_object(meta, "video_intrinsics");
+    read_json_intrinsics(video_intrinsics, &dev->video_camera_intrinsics);
 
-        depth_width = spec.width;
-        depth_height = spec.height;
+    JSON_Object *extrinsics =
+        json_object_get_object(meta, "depth_to_video_extrinsics");
+    JSON_Array *rotation = json_object_get_array(extrinsics, "rotation");
+    for (int i = 0; i < 9; ++i) {
+        dev->depth_to_video_extrinsics.rotation[i] =
+            (float)json_array_get_number(rotation, i);
     }
-    exr_files.clear();
-
-    dev->depth_camera_intrinsics.width = depth_width;
-    dev->depth_camera_intrinsics.height = depth_height;
-    dev->depth_camera_intrinsics.cx = depth_width / 2;
-    dev->depth_camera_intrinsics.cy = depth_height / 2;
-    //TODO: fill in .fx and .fy based on vertical_fov in meta.json
-    dev->depth_format = GM_FORMAT_Z_F16_M;
-
-    int video_width = 0;
-    int video_height = 0;
-    for (unsigned i = 0; i < png_files.size(); i++) {
-        IUImageSpec spec = {};
-        spec.width = video_width;
-        spec.height = video_height;
-        spec.format = IU_FORMAT_U8;
-
-        if (iu_read_png_from_file(png_files[i], &spec, &dev->dummy.lum_images[i],
-                                  NULL, NULL) != SUCCESS)
-        {
-            gm_throw(dev->log, err, "Failed to open %s\n", png_files[i]);
-            return false;
-        }
-        free(png_files[i]);
-
-        video_width = spec.width;
-        video_height = spec.height;
+    JSON_Array *translation = json_object_get_array(extrinsics, "translation");
+    for (int i = 0; i < 3; ++i) {
+        dev->depth_to_video_extrinsics.translation[i] =
+            (float)json_array_get_number(translation, i);
     }
-    png_files.clear();
 
-    dev->video_camera_intrinsics.width = video_width;
-    dev->video_camera_intrinsics.height = video_height;
-    dev->video_camera_intrinsics.cx = video_width / 2;
-    dev->video_camera_intrinsics.cy = video_height / 2;
-    //TODO: fill in .fx and .fy based on vertical_fov in meta.json
-    dev->video_format = GM_FORMAT_LUMINANCE_U8;
+    dev->depth_format = GM_FORMAT_Z_F32_M;
+    dev->video_format = GM_FORMAT_RGBA_U8;
 
     return true;
 }
@@ -880,82 +873,139 @@ recording_open(struct gm_device *dev,
 static void
 recording_close(struct gm_device *dev)
 {
-    /* FIXME */
+    if (dev->recording.json) {
+        json_value_free(dev->recording.json);
+        dev->recording.json = nullptr;
+    }
 }
 
 static void *
-dummy_io_thread_cb(void *userdata)
+recording_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
-    uint64_t frame_time_ns = 1000000000 / 30;
 
-    while (true) {
-        do {
-            uint64_t time = get_time();
-            uint64_t duration = time - dev->dummy.time;
-            if (duration < frame_time_ns) {
-                uint64_t rem = frame_time_ns - duration;
-                usleep(rem / 1000);
-            } else {
-                dev->dummy.time = time;
-                break;
-            }
-        } while (true);
+    while (dev->running) {
+        JSON_Array *frames =
+            json_object_get_array(json_object(dev->recording.json), "frames");
+        JSON_Object *frame =
+            json_array_get_object(frames, dev->recording.frame);
+        uint64_t frame_time = (uint64_t)
+            json_object_get_number(frame, "depth_timestamp");
+
+        // Spin until the next frame is required
+        uint64_t time = get_time();
+        if (dev->recording.frame > 0) {
+            JSON_Object *last_frame =
+                json_array_get_object(frames, dev->recording.frame  - 1);
+
+            uint64_t frame_duration = frame_time -
+                (uint64_t)json_object_get_number(last_frame, "depth_timestamp");
+
+            do {
+                time = get_time();
+                uint64_t duration = time - dev->recording.last_frame_time;
+                if (dev->running && duration < frame_duration) {
+                    uint64_t rem = frame_duration - duration;
+                    usleep(rem / 1000);
+                } else {
+                    break;
+                }
+            } while (true);
+        }
+        dev->recording.last_frame_time = time;
 
         /* more or less the same as kinect_depth_frame_cb() */
         if (dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
-            half *depth_image = dev->dummy.depth_images[dev->dummy.frame];
-
-            memcpy(dev->depth_buf_back->base.data, depth_image,
-                   dev->depth_buf_back->base.len);
+            IUImageSpec spec = {
+                (int)dev->depth_camera_intrinsics.width,
+                (int)dev->depth_camera_intrinsics.height,
+                IU_FORMAT_FLOAT
+            };
+            const char *filename = json_object_get_string(frame, "depth_file");
 
             pthread_mutex_lock(&dev->swap_buffers_lock);
 
-            if (dev->depth_buf_ready)
-                gm_buffer_unref(&dev->depth_buf_ready->base);
-            dev->depth_buf_ready = dev->depth_buf_back;
             dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool);
-            dev->frame_time = dev->dummy.time;
-            dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+            assert((int)dev->depth_buf_back->base.len ==
+                   spec.width * spec.height * 4);
 
-            pthread_mutex_unlock(&dev->swap_buffers_lock);
+            IUReturnCode ret =
+                iu_read_exr_from_file(filename, &spec,
+                                      &dev->depth_buf_back->base.data);
 
-            pthread_mutex_lock(&dev->request_requirements_lock);
-            if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-                dev->frame_request_requirements)
-            {
-                notify_frame_locked(dev);
+            if (ret == SUCCESS) {
+                if (dev->depth_buf_ready)
+                    gm_buffer_unref(&dev->depth_buf_ready->base);
+                dev->depth_buf_ready = dev->depth_buf_back;
+                dev->depth_buf_back = NULL;
+
+                dev->frame_time = frame_time;
+                dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+
+                pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+                pthread_mutex_lock(&dev->request_requirements_lock);
+                if ((dev->frame_request_requirements &
+                     dev->frame_ready_requirements) ==
+                    dev->frame_request_requirements) {
+                    notify_frame_locked(dev);
+                }
+                pthread_mutex_unlock(&dev->request_requirements_lock);
+            } else {
+                pthread_mutex_unlock(&dev->swap_buffers_lock);
+                fprintf(stderr, "Error %02d reading exr file \"%s\"\n",
+                        ret, filename);
             }
-            pthread_mutex_unlock(&dev->request_requirements_lock);
+
         }
 
         /* more or less the same as kinect_rgb_frame_cb() */
         if (dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
-            uint8_t *video_image = dev->dummy.lum_images[dev->dummy.frame];
-
-            memcpy(dev->video_buf_back->base.data, video_image,
-                   dev->video_buf_back->base.len);
+            IUImageSpec spec = {
+                (int)dev->video_camera_intrinsics.width,
+                (int)dev->video_camera_intrinsics.height,
+                IU_FORMAT_U32
+            };
+            const char *filename = json_object_get_string(frame, "video_file");
 
             pthread_mutex_lock(&dev->swap_buffers_lock);
 
-            if (dev->video_buf_ready)
-                gm_buffer_unref(&dev->video_buf_ready->base);
-            dev->video_buf_ready = dev->video_buf_back;
             dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool);
-            dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+            assert((int)dev->video_buf_back->base.len ==
+                   spec.width * spec.height * 4);
 
-            pthread_mutex_unlock(&dev->swap_buffers_lock);
+            IUReturnCode ret =
+                iu_read_png_from_file(filename, &spec, (uint8_t**)
+                                      &dev->video_buf_back->base.data,
+                                      nullptr, nullptr);
 
-            pthread_mutex_lock(&dev->request_requirements_lock);
-            if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-                dev->frame_request_requirements)
-            {
-                notify_frame_locked(dev);
+            if (ret == SUCCESS) {
+                if (dev->video_buf_ready)
+                  gm_buffer_unref(&dev->video_buf_ready->base);
+                dev->video_buf_ready = dev->video_buf_back;
+                dev->video_buf_back = NULL;
+
+                dev->frame_time = frame_time;
+                dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+                pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+                pthread_mutex_lock(&dev->request_requirements_lock);
+                if ((dev->frame_request_requirements &
+                     dev->frame_ready_requirements) ==
+                    dev->frame_request_requirements) {
+                    notify_frame_locked(dev);
+                }
+                pthread_mutex_unlock(&dev->request_requirements_lock);
+            } else {
+                pthread_mutex_unlock(&dev->swap_buffers_lock);
+                fprintf(stderr, "Error %02d reading png file \"%s\"\n",
+                        ret, filename);
             }
-            pthread_mutex_unlock(&dev->request_requirements_lock);
+
         }
 
-        dev->dummy.frame = (dev->dummy.frame + 1) % dev->dummy.n_images;
+        dev->recording.frame = (dev->recording.frame + 1) %
+          json_array_get_count(frames);
     }
 
     return NULL;
@@ -964,16 +1014,15 @@ dummy_io_thread_cb(void *userdata)
 static void
 recording_start(struct gm_device *dev)
 {
-    dev->dummy.frame = 0;
-    dev->dummy.time = get_time();
+    dev->recording.frame = 0;
 
     /* Set running before starting thread, otherwise it would exit immediately */
     dev->running = true;
-    pthread_create(&dev->dummy.io_thread,
+    pthread_create(&dev->recording.io_thread,
                    NULL,
-                   dummy_io_thread_cb,
+                   recording_io_thread_cb,
                    dev);
-    pthread_setname_np(dev->dummy.io_thread, "Recording IO");
+    pthread_setname_np(dev->recording.io_thread, "Recording IO");
 }
 
 static void
@@ -985,7 +1034,7 @@ recording_stop(struct gm_device *dev)
      * finite amount of time */
     dev->running = false;
 
-    int ret = pthread_join(dev->dummy.io_thread, &retval);
+    int ret = pthread_join(dev->recording.io_thread, &retval);
     if (ret < 0) {
         gm_error(dev->log, "Failed to wait for recording IO thread to exit: %s",
                  strerror(ret));
@@ -1001,9 +1050,9 @@ recording_stop(struct gm_device *dev)
 static void
 notify_device_ready(struct gm_device *dev)
 {
-    struct gm_device_event *event = device_event_alloc(GM_DEV_EVENT_READY);
+    struct gm_device_event *event = device_event_alloc(dev, GM_DEV_EVENT_READY);
 
-    dev->event_callback(dev, event, dev->callback_data);
+    dev->event_callback(event, dev->callback_data);
 }
 
 #ifdef USE_TANGO
@@ -1486,7 +1535,7 @@ gm_device_open(struct gm_logger *log,
                char **err)
 {
     struct gm_device *dev = new gm_device();
-    bool status;
+    bool status = false;
 
     dev->log = log;
     dev->type = config->type;
@@ -1625,8 +1674,7 @@ gm_device_close(struct gm_device *dev)
 
 void
 gm_device_set_event_callback(struct gm_device *dev,
-                             void (*event_callback)(struct gm_device *dev,
-                                                    struct gm_device_event *event,
+                             void (*event_callback)(struct gm_device_event *event,
                                                     void *user_data),
                              void *user_data)
 {
@@ -1657,6 +1705,10 @@ gm_device_start(struct gm_device *dev)
 void
 gm_device_stop(struct gm_device *dev)
 {
+    if (!dev->running) {
+        return;
+    }
+
     switch (dev->type) {
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT

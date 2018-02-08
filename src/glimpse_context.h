@@ -221,6 +221,7 @@ extern "C" {
 #endif
 
 struct gm_context *gm_context_new(struct gm_logger *logger, char **err);
+void gm_context_flush(struct gm_context *ctx);
 void gm_context_destroy(struct gm_context *ctx);
 
 
@@ -278,6 +279,12 @@ gm_context_get_latest_tracking(struct gm_context *ctx);
  * atomically...
  */
 
+uint64_t
+gm_tracking_get_depth_timestamp(struct gm_tracking *tracking);
+
+uint64_t
+gm_tracking_get_video_timestamp(struct gm_tracking *tracking);
+
 const float *
 gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
                                     int *width,
@@ -294,7 +301,7 @@ gm_tracking_get_rgb_depth(struct gm_tracking *tracking);
 const float *
 gm_tracking_get_depth(struct gm_tracking *tracking);
 
-const uint32_t *
+const uint8_t *
 gm_tracking_get_video(struct gm_tracking *tracking);
 
 const float *

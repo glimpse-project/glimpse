@@ -46,6 +46,7 @@ typedef enum {
 typedef enum {
   IU_FORMAT_ANY,
   IU_FORMAT_U8,
+  IU_FORMAT_U32,
   IU_FORMAT_HALF,
   IU_FORMAT_FLOAT,
 } IUImageFormat;

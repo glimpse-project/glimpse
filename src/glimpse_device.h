@@ -41,6 +41,7 @@ enum gm_device_event_type
 
 struct gm_device_event
 {
+    struct gm_device *device;
     enum gm_device_event_type type;
 
     union {
@@ -80,8 +81,7 @@ gm_device_open(struct gm_logger *log,
 
 void
 gm_device_set_event_callback(struct gm_device *dev,
-                             void (*event_callback)(struct gm_device *dev,
-                                                    struct gm_device_event *event,
+                             void (*event_callback)(struct gm_device_event *event,
                                                     void *user_data),
                              void *user_data);
 
