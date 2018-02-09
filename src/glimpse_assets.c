@@ -130,11 +130,7 @@ gm_asset_open(struct gm_logger *log,
     char *full_path = alloca(max_len);
     xsnprintf(full_path, max_len, "%s/%s", root, path);
 
-#ifndef __ANDROID__
-    fd = open(full_path, O_RDWR|O_CLOEXEC);
-#else
     fd = open(full_path, O_RDONLY|O_CLOEXEC);
-#endif
     if (fd < 0) {
         gm_throw(log, err, "Failed to open %s: %s",
                  full_path, strerror(errno));
@@ -149,29 +145,13 @@ gm_asset_open(struct gm_logger *log,
 
     switch (mode) {
     case GM_ASSET_MODE_BUFFER:
-#ifndef __ANDROID__
-        buf = (uint8_t *)mmap(NULL, sb.st_size,
-                              PROT_READ|PROT_WRITE, MAP_SHARED, fd, 0);
+        buf = (uint8_t *)mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
         if (!buf) {
             close(fd);
             gm_throw(log, err, "Failed to mmap %s: %s",
                      full_path, strerror(errno));
             return NULL;
         }
-#else
-        buf = (uint8_t *)malloc(sb.st_size);
-        if (!buf) {
-            close(fd);
-            gm_throw(log, err, "Failed to allocate memory for %s", full_path);
-            return NULL;
-        }
-        if (read(fd, buf, sb.st_size) != sb.st_size) {
-            free(buf);
-            close(fd);
-            gm_throw(log, err, "Failed to read %s", full_path);
-            return NULL;
-        }
-#endif
         break;
     }
 
@@ -202,13 +182,8 @@ gm_asset_close(struct gm_asset *asset)
 {
     switch (asset->mode) {
     case GM_ASSET_MODE_BUFFER:
-#ifndef __ANDROID__
         if (asset->buf)
             munmap(asset->buf, asset->file_len);
-#else
-        if (asset->buf)
-            free(asset->buf);
-#endif
         break;
     }
     close(asset->fd);
