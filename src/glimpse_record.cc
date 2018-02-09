@@ -204,6 +204,8 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
         }
 
         // Save out video frame
+        spec.width = (int)video_intrinsics->width;
+        spec.height = (int)video_intrinsics->height;
         spec.format = IU_FORMAT_U32;
         size_t png_path_size = video_path_len + png_suffix_len + 6;
         char *png_path = (char *)malloc(png_path_size);
