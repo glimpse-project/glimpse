@@ -27,6 +27,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <inttypes.h>
 
 #include <vector>
 
@@ -389,7 +390,7 @@ notify_frame_locked(struct gm_device *dev)
 {
     struct gm_device_event *event = device_event_alloc(GM_DEV_EVENT_FRAME_READY);
 
-    gm_debug(dev->log, "notify_frame_locked (requirements = 0x%llx", dev->frame_request_requirements);
+    gm_debug(dev->log, "notify_frame_locked (requirements = 0x%" PRIx64, dev->frame_request_requirements);
 
     event->frame_ready.met_requirements = dev->frame_request_requirements;
     dev->frame_request_requirements = 0;
@@ -1736,7 +1737,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     dev->last_frame = &frame->base;
 
-    gm_debug(dev->log, "latest frame = %p, requirements = %llx",
+    gm_debug(dev->log, "latest frame = %p, requirements = %" PRIx64,
              frame, dev->frame_ready_requirements);
 
     if (dev->frame_ready_requirements & GM_REQUEST_FRAME_DEPTH) {
