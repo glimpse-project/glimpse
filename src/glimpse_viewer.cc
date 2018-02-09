@@ -429,7 +429,6 @@ draw_controls(Data *data, int x, int y, int width, int height)
 static void
 draw_playback_controls(Data *data, const ImVec4 &bounds)
 {
-    ImGui::SetNextWindowSize(ImVec2(0, 0), ImGuiCond_Always);
     ImGui::Begin("Playback controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize|
@@ -501,10 +500,28 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
     ImGui::Spacing();
 
+    ImGui::SetWindowSize(ImVec2(0, 0), ImGuiCond_Always);
+
     ImVec2 size = ImGui::GetWindowSize();
     ImGui::SetWindowPos(ImVec2(bounds.x + (bounds.z - size.x) / 2,
                                (bounds.y + bounds.w) - size.y - 16.f),
                         ImGuiCond_FirstUseEver);
+
+    // Make sure the window stays within bounds
+    ImVec2 pos = ImGui::GetWindowPos();
+
+    if (pos.x + size.x > bounds.x + bounds.z) {
+        pos.x = (bounds.x + bounds.z) - size.x;
+    } else if (pos.x < bounds.x) {
+        pos.x = bounds.x;
+    }
+    if (pos.y + size.y > bounds.y + bounds.w) {
+        pos.y = (bounds.y + bounds.w) - size.y;
+    } else if (pos.y < bounds.y) {
+        pos.y = bounds.y;
+    }
+
+    ImGui::SetWindowPos(pos, ImGuiCond_Always);
 
     ImGui::End();
 }
@@ -759,6 +776,10 @@ draw_ui(Data *data)
 
         ImGui::End();
 
+        if (current_view != 0) {
+            draw_playback_controls(data, ImVec4(x, y, main_area_size.x,
+                                                main_area_size.y));
+        }
         switch (current_view) {
         case 0:
             draw_controls(data, x, y, main_area_size.x, main_area_size.y);
