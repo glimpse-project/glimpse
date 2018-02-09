@@ -450,8 +450,10 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
     if (ImGui::Button(data->recording ? "Stop" : "Record")) {
         if (data->recording) {
             if (data->records.size()) {
+                const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
                 gm_record_save(data->log, data->device, data->records,
-                               "glimpse_viewer_recording");
+                               record_path ?
+                                  record_path : "glimpse_viewer_recording");
             }
 
             data->recording = false;
@@ -485,7 +487,9 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
             struct gm_device_config config = {};
             config.type = GM_DEVICE_RECORDING;
-            config.recording.path = "glimpse_viewer_recording";
+            const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
+            config.recording.path =
+                record_path ? record_path : "glimpse_viewer_recording";
 
             data->playback_device = gm_device_open(data->log, &config, NULL);
             gm_device_set_event_callback(data->playback_device,
@@ -1952,6 +1956,8 @@ main(int argc, char **argv)
 #ifdef __ANDROID__
 #define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
     setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
+    setenv("GLIMPSE_RECORDING_PATH", ANDROID_ASSETS_ROOT "/ViewerRecording",
+           true);
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
     data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
 #else
