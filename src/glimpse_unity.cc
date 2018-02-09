@@ -777,8 +777,7 @@ on_event_cb(struct gm_context *ctx,
 }
 
 static void
-on_device_event_cb(struct gm_device *dev,
-                   struct gm_device_event *device_event,
+on_device_event_cb(struct gm_device_event *device_event,
                    void *user_data)
 {
     struct glimpse_data *data = (struct glimpse_data *)user_data;
