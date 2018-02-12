@@ -112,19 +112,38 @@ gm_record_write_bin(struct gm_logger *log, const char *path,
 
 void
 gm_record_save(struct gm_logger *log, struct gm_device *device,
-               const std::list<struct gm_frame *> &record, const char *path)
+               const std::list<struct gm_frame *> &record, const char *path,
+               bool overwrite)
 {
     // Create the directory structure for the recording
-    int ret = mkdir(path, 0777);
-    if (ret < 0 && errno != EEXIST) {
-        gm_error(log, "Unable to create directory '%s': %s",
-                 path, strerror(errno));
-        return;
-    }
+    // If the directory exists, append a number
+    int ret;
+    int path_suffix = 0;
+    size_t path_len = strlen(path);
+    char *path_copy = (char *)malloc(strlen(path) + 5);
+    strncpy(path_copy, path, path_len + 1);
+    do {
+        ret = mkdir(path_copy, 0777);
+        if (ret < 0) {
+            if (errno == EEXIST && path_suffix < 9999) {
+                if (overwrite) {
+                    break;
+                }
+
+                ++path_suffix;
+                snprintf(path_copy + path_len, 5, "%04d", path_suffix);
+            } else {
+                gm_error(log, "Unable to create directory '%s': %s",
+                         path, strerror(errno));
+                return;
+            }
+        }
+    } while (ret != 0);
+    path = path_copy;
+    path_len = strlen(path);
 
     // Create depth images directory
     const char *depth_path_suffix = "/depth";
-    size_t path_len = strlen(path);
     size_t depth_path_len = path_len + strlen(depth_path_suffix);
     char *depth_path = (char *)alloca(depth_path_len + 1);
     snprintf(depth_path, depth_path_len + 1, "%s%s", path, depth_path_suffix);
@@ -280,4 +299,5 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
     snprintf(json_path, json_path_size, "%s/%s", path, json_name);
     json_serialize_to_file_pretty(json, json_path);
     json_value_free(json);
+    free(path_copy);
 }

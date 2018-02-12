@@ -25,6 +25,7 @@
 #pragma once
 
 #include <list>
+#include <stdbool.h>
 #include "glimpse_log.h"
 #include "glimpse_context.h"
 #include "glimpse_device.h"
@@ -32,5 +33,6 @@
 void gm_record_save(struct gm_logger *log,
                     struct gm_device *device,
                     const std::list<struct gm_frame *> &record,
-                    const char *path);
+                    const char *path,
+                    bool overwrite);
 

@@ -172,6 +172,7 @@ typedef struct _Data
      * write out the files and metadata when recording finishes.
      */
     bool recording;
+    bool overwrite_recording;
     std::list<struct gm_frame *> records;
 
     bool playback;
@@ -382,6 +383,14 @@ draw_controls(Data *data, int x, int y, int width, int height)
                  ImGuiWindowFlags_NoMove|
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
 
+    ImGui::TextDisabled("Viewer properties...");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
+
+    ImGui::Spacing();
+    ImGui::Separator();
     ImGui::TextDisabled("Device properties...");
     ImGui::Separator();
     ImGui::Spacing();
@@ -452,7 +461,8 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
                 const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
                 gm_record_save(data->log, data->device, data->records,
                                record_path ?
-                                  record_path : "glimpse_viewer_recording");
+                                  record_path : "glimpse_viewer_recording",
+                               data->overwrite_recording);
             }
 
             data->recording = false;
@@ -2030,6 +2040,7 @@ main(int argc, char **argv)
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);
+    data->overwrite_recording = true;
 
 #ifdef USE_GLFW
     viewer_init(data);
