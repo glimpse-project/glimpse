@@ -88,11 +88,18 @@ mem_pool_acquire_resource(struct gm_mem_pool *pool)
     pthread_mutex_lock(&pool->lock);
 
     /* Sanity check with arbitrary upper limit for the number of allocations */
+    /* XXX Had to remove this assertion for recording mode, where we keep
+     *     frame recordings around for an indefinite amount of time. In the
+     *     situation we see memory unexpectedly growing out of control, we
+     *     likely want to re-enable this.
+     */
+#if 0
     gm_assert(pool->log,
               (pool->busy.size() + pool->available.size()) < 100,
               "'%s' memory pool growing out of control (%u allocations)",
               pool->name,
               (pool->busy.size() + pool->available.size()));
+#endif
 
     if (pool->available.size()) {
         resource = pool->available.back();

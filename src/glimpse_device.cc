@@ -335,7 +335,7 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         buf->base.len = video_width * video_height * 3;
         break;
     case GM_DEVICE_RECORDING:
-        /* Allocated large enough for RGBA data */
+        /* Allocated large enough for any data format */
         buf->base.len = video_width * video_height * 4;
         break;
     }
@@ -378,8 +378,8 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         buf->base.len = depth_width * depth_height * 16;
         break;
     case GM_DEVICE_RECORDING:
-        /* Allocated large enough for _F32_M data */
-        buf->base.len = depth_width * depth_height * 4;
+        /* Allocated large enough for any data */
+        buf->base.len = depth_width * depth_height * 16;
         break;
     case GM_DEVICE_KINECT:
         /* Allocated large enough for _U16_MM data */
@@ -864,8 +864,10 @@ recording_open(struct gm_device *dev,
             (float)json_array_get_number(translation, i);
     }
 
-    dev->depth_format = GM_FORMAT_Z_F32_M;
-    dev->video_format = GM_FORMAT_RGBA_U8;
+    dev->depth_format = (enum gm_format)
+        round(json_object_get_number(meta, "depth_format"));
+    dev->video_format = (enum gm_format)
+        round(json_object_get_number(meta, "video_format"));
 
     return true;
 }
@@ -890,7 +892,7 @@ recording_io_thread_cb(void *userdata)
         JSON_Object *frame =
             json_array_get_object(frames, dev->recording.frame);
         uint64_t frame_time = (uint64_t)
-            json_object_get_number(frame, "depth_timestamp");
+            json_object_get_number(frame, "timestamp");
 
         // Spin until the next frame is required
         uint64_t time = get_time();
@@ -899,7 +901,7 @@ recording_io_thread_cb(void *userdata)
                 json_array_get_object(frames, dev->recording.frame  - 1);
 
             uint64_t frame_duration = frame_time -
-                (uint64_t)json_object_get_number(last_frame, "depth_timestamp");
+                (uint64_t)json_object_get_number(last_frame, "timestamp");
 
             do {
                 time = get_time();
@@ -916,90 +918,92 @@ recording_io_thread_cb(void *userdata)
 
         /* more or less the same as kinect_depth_frame_cb() */
         if (dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
-            IUImageSpec spec = {
-                (int)dev->depth_camera_intrinsics.width,
-                (int)dev->depth_camera_intrinsics.height,
-                IU_FORMAT_FLOAT
-            };
             const char *filename = json_object_get_string(frame, "depth_file");
+            size_t depth_len = (size_t)
+                round(json_object_get_number(frame, "depth_len"));
 
-            pthread_mutex_lock(&dev->swap_buffers_lock);
+            FILE *depth_file = fopen(filename, "r");
+            if (depth_file) {
+                pthread_mutex_lock(&dev->swap_buffers_lock);
 
-            dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool);
-            assert((int)dev->depth_buf_back->base.len ==
-                   spec.width * spec.height * 4);
+                dev->depth_buf_back =
+                    mem_pool_acquire_buffer(dev->depth_buf_pool);
 
-            IUReturnCode ret =
-                iu_read_exr_from_file(filename, &spec,
-                                      &dev->depth_buf_back->base.data);
+                if (fread(dev->depth_buf_back->base.data, 1, depth_len,
+                          depth_file) == depth_len) {
+                    dev->depth_buf_back->base.len = depth_len;
+                    if (dev->depth_buf_ready)
+                        gm_buffer_unref(&dev->depth_buf_ready->base);
+                    dev->depth_buf_ready = dev->depth_buf_back;
+                    dev->depth_buf_back = NULL;
 
-            if (ret == SUCCESS) {
-                if (dev->depth_buf_ready)
-                    gm_buffer_unref(&dev->depth_buf_ready->base);
-                dev->depth_buf_ready = dev->depth_buf_back;
-                dev->depth_buf_back = NULL;
+                    dev->frame_time = frame_time;
+                    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
 
-                dev->frame_time = frame_time;
-                dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+                    pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-                pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-                pthread_mutex_lock(&dev->request_requirements_lock);
-                if ((dev->frame_request_requirements &
-                     dev->frame_ready_requirements) ==
-                    dev->frame_request_requirements) {
-                    notify_frame_locked(dev);
+                    pthread_mutex_lock(&dev->request_requirements_lock);
+                    if ((dev->frame_request_requirements &
+                         dev->frame_ready_requirements) ==
+                        dev->frame_request_requirements) {
+                        notify_frame_locked(dev);
+                    }
+                    pthread_mutex_unlock(&dev->request_requirements_lock);
+                } else {
+                    pthread_mutex_unlock(&dev->swap_buffers_lock);
+                    fprintf(stderr, "Error reading depth file '%s'\n",
+                            filename);
                 }
-                pthread_mutex_unlock(&dev->request_requirements_lock);
-            } else {
-                pthread_mutex_unlock(&dev->swap_buffers_lock);
-                fprintf(stderr, "Error %02d reading exr file \"%s\"\n",
-                        ret, filename);
-            }
 
+                if (fclose(depth_file) != 0) {
+                    fprintf(stderr, "Error closing depth file '%s'\n",
+                            filename);
+                }
+            }
         }
 
         /* more or less the same as kinect_rgb_frame_cb() */
         if (dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
-            IUImageSpec spec = {
-                (int)dev->video_camera_intrinsics.width,
-                (int)dev->video_camera_intrinsics.height,
-                IU_FORMAT_U32
-            };
             const char *filename = json_object_get_string(frame, "video_file");
+            size_t video_len = (size_t)
+                round(json_object_get_number(frame, "video_len"));
 
-            pthread_mutex_lock(&dev->swap_buffers_lock);
+            FILE *video_file = fopen(filename, "r");
+            if (video_file) {
+                pthread_mutex_lock(&dev->swap_buffers_lock);
 
-            dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool);
-            assert((int)dev->video_buf_back->base.len ==
-                   spec.width * spec.height * 4);
+                dev->video_buf_back =
+                    mem_pool_acquire_buffer(dev->video_buf_pool);
 
-            IUReturnCode ret =
-                iu_read_png_from_file(filename, &spec, (uint8_t**)
-                                      &dev->video_buf_back->base.data,
-                                      nullptr, nullptr);
+                if (fread(dev->video_buf_back->base.data, 1, video_len,
+                          video_file) == video_len) {
+                    dev->video_buf_back->base.len = video_len;
+                    if (dev->video_buf_ready)
+                      gm_buffer_unref(&dev->video_buf_ready->base);
+                    dev->video_buf_ready = dev->video_buf_back;
+                    dev->video_buf_back = NULL;
 
-            if (ret == SUCCESS) {
-                if (dev->video_buf_ready)
-                  gm_buffer_unref(&dev->video_buf_ready->base);
-                dev->video_buf_ready = dev->video_buf_back;
-                dev->video_buf_back = NULL;
+                    dev->frame_time = frame_time;
+                    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+                    pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-                dev->frame_time = frame_time;
-                dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
-                pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-                pthread_mutex_lock(&dev->request_requirements_lock);
-                if ((dev->frame_request_requirements &
-                     dev->frame_ready_requirements) ==
-                    dev->frame_request_requirements) {
-                    notify_frame_locked(dev);
+                    pthread_mutex_lock(&dev->request_requirements_lock);
+                    if ((dev->frame_request_requirements &
+                         dev->frame_ready_requirements) ==
+                        dev->frame_request_requirements) {
+                        notify_frame_locked(dev);
+                    }
+                    pthread_mutex_unlock(&dev->request_requirements_lock);
+                } else {
+                    pthread_mutex_unlock(&dev->swap_buffers_lock);
+                    fprintf(stderr, "Error reading video file '%s'\n",
+                            filename);
                 }
-                pthread_mutex_unlock(&dev->request_requirements_lock);
-            } else {
-                pthread_mutex_unlock(&dev->swap_buffers_lock);
-                fprintf(stderr, "Error %02d reading png file \"%s\"\n",
-                        ret, filename);
+
+                if (fclose(video_file) != 0) {
+                    fprintf(stderr, "Error closing video file '%s'\n",
+                            filename);
+                }
             }
 
         }
@@ -1543,7 +1547,7 @@ gm_device_open(struct gm_logger *log,
     dev->video_buf_pool = mem_pool_alloc(
                      log,
                      "video",
-                     5, // max size
+                     INT_MAX, // max size
                      device_video_buf_alloc,
                      device_buffer_free,
                      dev); // user data

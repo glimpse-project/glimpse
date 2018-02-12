@@ -31,6 +31,6 @@
 
 void gm_record_save(struct gm_logger *log,
                     struct gm_device *device,
-                    const std::list<struct gm_tracking *> &record,
+                    const std::list<struct gm_frame *> &record,
                     const char *path);
 

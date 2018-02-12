@@ -172,7 +172,7 @@ typedef struct _Data
      * write out the files and metadata when recording finishes.
      */
     bool recording;
-    std::list<struct gm_tracking *> records;
+    std::list<struct gm_frame *> records;
 
     bool playback;
     struct gm_device *playback_device;
@@ -456,9 +456,9 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
             }
 
             data->recording = false;
-            for (std::list<struct gm_tracking *>::iterator it =
+            for (std::list<struct gm_frame *>::iterator it =
                  data->records.begin(); it != data->records.end(); ++it) {
-                gm_tracking_unref(*it);
+                gm_frame_unref(*it);
             }
             data->records.clear();
         } else if (!data->playback) {
@@ -877,6 +877,11 @@ handle_device_frame_updates(Data *data)
             return;
         }
         upload = true;
+
+        if (data->recording) {
+            gm_frame_ref(data->device_frame);
+            data->records.push_back(data->device_frame);
+        }
     }
 
     if (data->context_needs_frame) {
@@ -895,10 +900,15 @@ handle_device_frame_updates(Data *data)
          * at the native capture rate, even though we might not be tracking
          * at that rate.
          *
+         * Similarly, if we're recording, request depth frames so that we can
+         * record at a rate that exceeds the tracking rate.
+         *
          * Note: the requirements may be upgraded to ask for _DEPTH data
          * after the next iteration of skeltal tracking completes.
          */
-        request_device_frame(data, GM_REQUEST_FRAME_VIDEO);
+        request_device_frame(data, data->recording ?
+                             (GM_REQUEST_FRAME_DEPTH | GM_REQUEST_FRAME_VIDEO) :
+                             GM_REQUEST_FRAME_VIDEO);
     }
 
     if (upload) {
@@ -1093,11 +1103,6 @@ handle_context_tracking_updates(Data *data)
     // no tracking to pick up
     if (!data->latest_tracking) {
         return;
-    }
-
-    if (data->recording) {
-        gm_tracking_ref(data->latest_tracking);
-        data->records.push_back(data->latest_tracking);
     }
 
     if (data->joints_recording) {
