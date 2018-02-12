@@ -468,21 +468,43 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
     ImGui::SameLine();
     if (ImGui::Button(data->playback ? "Unload" : "Load") && !data->recording) {
         if (data->playback) {
+            // Stop the playback device
+            data->playback = false;
             gm_device_stop(data->playback_device);
 
+            // Unref the current device frame
             if (data->device_frame) {
                 gm_frame_unref(data->device_frame);
                 data->device_frame = nullptr;
             }
-            gm_context_flush(data->ctx);
 
+            // Unref the latest tracking data
+            if (data->latest_tracking) {
+                gm_tracking_unref(data->latest_tracking);
+                data->latest_tracking = nullptr;
+            }
+
+            // Flush old device-dependent data from the context
+            gm_context_flush(data->ctx, NULL);
+            data->tracking_ready = false;
+
+            // Close the device
             gm_device_close(data->playback_device);
             data->playback_device = nullptr;
 
-            data->playback = false;
+            // Wake up the connected device again
             handle_device_ready(data, data->device);
         } else {
             gm_device_stop(data->device);
+
+            // Unref the latest tracking data
+            if (data->latest_tracking) {
+                gm_tracking_unref(data->latest_tracking);
+                data->latest_tracking = nullptr;
+            }
+
+            gm_context_flush(data->ctx, NULL);
+            data->tracking_ready = false;
 
             struct gm_device_config config = {};
             config.type = GM_DEVICE_RECORDING;
@@ -1066,7 +1088,12 @@ handle_context_tracking_updates(Data *data)
         gm_tracking_unref(data->latest_tracking);
 
     data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
-    assert(data->latest_tracking);
+
+    // When flushing the context, we can end up with notified tracking but
+    // no tracking to pick up
+    if (!data->latest_tracking) {
+        return;
+    }
 
     if (data->recording) {
         gm_tracking_ref(data->latest_tracking);
