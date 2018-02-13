@@ -1184,22 +1184,36 @@ process_raw_joint_predictions(struct gm_context *ctx,
         tracking->joints_processed[idx+2] = tracking->joints[idx+2];
         tracking->joints_predicted[j] = false;
 
-        if (ctx->joint_max_predictions == 0) {
+        if (ctx->joint_max_predictions == 0 || ctx->n_tracking < 2) {
+            LOGI("Joint %s position: %.2f, %.2f, %.2f",
+                 joint_name(j),
+                 tracking->joints[idx],
+                 tracking->joints[idx+1],
+                 tracking->joints[idx+2]);
             continue;
         }
 
-        int np = 0;
-        for (int i = 0; i < ctx->n_tracking; ++i, ++np) {
-            if (!ctx->tracking_history[i]->joints_predicted[j]) {
-                break;
+        // Find the index of the last 2 contiguous unpredicted frames
+        int np;
+        bool run_prediction = false;
+        for (np = 0; np < (ctx->n_tracking-2) && !run_prediction; ++np) {
+            if (ctx->tracking_history[np]->joints_predicted[j]) {
+                continue;
+            }
+
+            run_prediction = true;
+            for (int i = np; i < np + 2; ++i) {
+                if (ctx->tracking_history[i]->joints_predicted[j]) {
+                    run_prediction = false;
+                    break;
+                }
             }
         }
 
-        // Don't keep predicting for longer than half of our tracking
-        // history otherwise we'll certainly be compounding lots of
-        // error. If this happens, just reset to the raw values.
-        if (np >= ctx->joint_max_predictions) {
-            for (int i = 0; i < np; ++i) {
+        // If we couldn't find 2 contiguous unpredicted frames in the tracking
+        // history, reset to all the unpredicted values and go from there.
+        if (!run_prediction) {
+            for (int i = 0; i < ctx->n_tracking; ++i) {
                 ctx->tracking_history[i]->joints_processed[idx] =
                     ctx->tracking_history[i]->joints[idx];
                 ctx->tracking_history[i]->joints_processed[idx+1] =
@@ -1211,28 +1225,24 @@ process_raw_joint_predictions(struct gm_context *ctx,
             np = 0;
         }
 
-        // We need at least 2 unpredicted frames to do reliable prediction
-        if (ctx->n_tracking - np < 2) {
-            LOGI("Joint %s position: %.2f, %.2f, %.2f",
-                 joint_name(j),
-                 tracking->joints[idx],
-                 tracking->joints[idx+1],
-                 tracking->joints[idx+2]);
-            continue;
-        }
-
+        float time = (float)
+            ((tracking->depth_capture_timestamp -
+              ctx->tracking_history[np]->depth_capture_timestamp) / 1e9);
         float distance = distance_between(
             &tracking->joints[idx],
-            &ctx->tracking_history[np]->joints_processed[idx]);
+            &ctx->tracking_history[np]->joints_processed[idx]) / time;
 
+        float prev_time = (float)
+            ((ctx->tracking_history[np]->depth_capture_timestamp -
+              ctx->tracking_history[np+1]->depth_capture_timestamp) / 1e9);
         float prev_dist = distance_between(
             &ctx->tracking_history[np]->joints_processed[idx],
-            &ctx->tracking_history[np+1]->joints_processed[idx]);
+            &ctx->tracking_history[np+1]->joints_processed[idx]) / time;
 
         if (confidence[j] < ctx->min_confidence &&
             distance > ctx->joint_move_threshold &&
             (distance > ctx->joint_max_travel ||
-             distance > prev_dist * ctx->joint_scale_threshold)) {
+             distance > (prev_dist * ctx->joint_scale_threshold))) {
             float prediction[3];
             if (!predict_from_previous_frames(
                     ctx, j, tracking->depth_capture_timestamp,
@@ -1247,23 +1257,27 @@ process_raw_joint_predictions(struct gm_context *ctx,
                 &ctx->tracking_history[np]->joints_processed[idx]);
 
             if (new_distance < distance) {
-                LOGI("Joint %s replaced (%.2f, %.2f, %.2f)->(%.2f, %.2f, %.2f)",
+                LOGI("Joint %s replaced (%.2f, %.2f, %.2f)->(%.2f, %.2f, %.2f) "
+                     "(%.2f, %.2fx, c: %.2f)",
                      joint_name(j),
                      tracking->joints[idx],
                      tracking->joints[idx+1],
                      tracking->joints[idx+2],
-                     prediction[0], prediction[1], prediction[2]);
+                     prediction[0], prediction[1], prediction[2],
+                     distance, distance / prev_dist, confidence[j]);
                 tracking->joints_processed[idx] = prediction[0];
                 tracking->joints_processed[idx+1] = prediction[1];
                 tracking->joints_processed[idx+2] = prediction[2];
                 tracking->joints_predicted[j] = true;
             } else {
-                LOGI("Joint %s remains (%.2f, %.2f, %.2f)<-(%.2f, %.2f, %.2f)",
+                LOGI("Joint %s remains (%.2f, %.2f, %.2f)<-(%.2f, %.2f, %.2f) "
+                     "(%.2f, %.2fx, c: %.2f)",
                      joint_name(j),
                      tracking->joints[idx],
                      tracking->joints[idx+1],
                      tracking->joints[idx+2],
-                     prediction[0], prediction[1], prediction[2]);
+                     prediction[0], prediction[1], prediction[2],
+                     distance, distance / prev_dist, confidence[j]);
             }
         } else {
             LOGI("Joint %s position: %.2f, %.2f, %.2f (%.2f, %.2fx, c: %.2f)",
@@ -3133,37 +3147,40 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 500.f;
     ctx->properties.push_back(prop);
 
-    ctx->joint_move_threshold = 0.05f;
+    ctx->joint_move_threshold = 1.5f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "joint_move_threshold";
-    prop.desc = "Minimum travel distance before considering joint prediction";
+    prop.desc = "Minimum travel distance (m/s) "
+                "before considering joint prediction";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->joint_move_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.1f;
+    prop.float_state.min = 0.3f;
+    prop.float_state.max = 3.0f;
     ctx->properties.push_back(prop);
 
-    ctx->joint_max_travel = 0.3f;
+    ctx->joint_max_travel = 1.8f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "joint_max_travel";
-    prop.desc = "Maximum travel distance before considering joint prediction";
+    prop.desc = "Maximum travel distance (m/s) "
+                "before considering joint prediction";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->joint_max_travel;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
+    prop.float_state.min = 0.3f;
+    prop.float_state.max = 15.0f;
     ctx->properties.push_back(prop);
 
-    ctx->joint_scale_threshold = 8.0f;
+    ctx->joint_scale_threshold = 35.0f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "joint_scale_threshold";
-    prop.desc = "Maximum growth difference before considering joint prediction";
+    prop.desc = "Maximum growth difference (x/s) "
+                "before considering joint prediction";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->joint_scale_threshold;
-    prop.float_state.min = 1.f;
-    prop.float_state.max = 10.f;
+    prop.float_state.min = 5.f;
+    prop.float_state.max = 50.f;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
