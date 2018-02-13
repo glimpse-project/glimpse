@@ -2149,7 +2149,7 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
             COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
         }
         break;
-    case GM_FORMAT_POINTS_XYZC_F32_M:
+    case GM_FORMAT_POINTS_XYZC_F32_M: {
 
         /* FIXME:
          * Avoid clearing this buffer
@@ -2188,7 +2188,49 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
             COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, doff, point_t.z);
         }
 
+        // Our code doesn't deal well with gaps in the data, so make some
+        // effort to fill in gaps that may have been caused by bad data,
+        // distortion transforms, etc.
+        struct blank {
+            int off;
+            float new_depth;
+        };
+        std::vector<struct blank> blanks;
+
+        for (int i = 0; i < width * height; ++i) {
+            if (std::isnormal(depth_copy[i])) {
+                continue;
+            }
+
+            int x = i % width;
+            int y = i / width;
+            float neighbours[4];
+            int n_neighbours = 0;
+
+            if (x > 0 && std::isnormal(depth_copy[i-1])) {
+                neighbours[n_neighbours++] = depth_copy[i-1];
+            }
+            if (x < width - 1 && std::isnormal(depth_copy[i+1])) {
+                neighbours[n_neighbours++] = depth_copy[i+1];
+            }
+            if (y > 0 && std::isnormal(depth_copy[i-width])) {
+                neighbours[n_neighbours++] = depth_copy[i-width];
+            }
+            if (y < height - 1 && std::isnormal(depth_copy[i+width])) {
+                neighbours[n_neighbours++] = depth_copy[i+width];
+            }
+
+            if (n_neighbours > 0) {
+                blanks.push_back({i, neighbours[random() % n_neighbours]});
+            }
+        }
+
+        for (unsigned i = 0; i < blanks.size(); ++i) {
+            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, blanks[i].off,
+                                      blanks[i].new_depth);
+        }
         break;
+    }
     case GM_FORMAT_UNKNOWN:
     case GM_FORMAT_LUMINANCE_U8:
     case GM_FORMAT_RGB_U8:
