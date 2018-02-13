@@ -1184,6 +1184,10 @@ process_raw_joint_predictions(struct gm_context *ctx,
         tracking->joints_processed[idx+2] = tracking->joints[idx+2];
         tracking->joints_predicted[j] = false;
 
+        if (ctx->joint_max_predictions == 0) {
+            continue;
+        }
+
         int np = 0;
         for (int i = 0; i < ctx->n_tracking; ++i, ++np) {
             if (!ctx->tracking_history[i]->joints_predicted[j]) {
