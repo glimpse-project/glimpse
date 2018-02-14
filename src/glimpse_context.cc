@@ -3393,6 +3393,27 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     return tracking;
 }
 
+float *
+gm_context_predict_joint_positions(struct gm_context *ctx,
+                                   struct gm_tracking *_tracking,
+                                   uint64_t timestamp,
+                                   int *n_joints)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    float *predictions = (float*)malloc(ctx->n_joints * 3 * sizeof(float));
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        memcpy(&predictions[j*3], &tracking->joints_processed[j*3],
+               3 * sizeof(float));
+        predict_from_previous_frames(ctx, j, timestamp,
+                                     &predictions[j*3]);
+    }
+
+    if (n_joints) *n_joints = ctx->n_joints;
+
+    return predictions;
+}
+
 void
 gm_context_render_thread_hook(struct gm_context *ctx)
 {

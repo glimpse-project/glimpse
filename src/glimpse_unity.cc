@@ -366,6 +366,10 @@ handle_device_frame_updates(struct glimpse_data *data)
 
         data->context_needs_frame =
             !gm_context_notify_frame(data->ctx, data->last_depth_frame);
+
+        // We don't want to send duplicate frames to tracking, so discard now
+        gm_frame_unref(data->last_depth_frame);
+        data->last_depth_frame = NULL;
     }
 
     data->device_frame_ready = false;

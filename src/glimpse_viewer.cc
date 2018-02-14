@@ -595,6 +595,77 @@ draw_visualisation(int x, int y, int width, int height,
 }
 
 static void
+update_tracking_buffers(Data *data)
+{
+    if (!data->latest_tracking) {
+        return;
+    }
+
+    /*
+     * Update labelled point cloud
+     */
+    data->n_joints = 0;
+    float *joints = gm_context_predict_joint_positions(
+        data->ctx, data->latest_tracking, data->last_video_frame->timestamp,
+        &data->n_joints);
+
+    // TODO: At some point, the API needs to return a list of joints with ids,
+    //       possibly with confidences, so in the situation that a joint isn't
+    //       visible (or possible to determine), we can indicate that.
+    if (data->n_joints) {
+        assert((size_t)data->n_joints ==
+               json_array_get_count(json_array(data->joint_map)));
+    }
+
+    if (data->n_joints) {
+        // Reformat and copy over joint data
+        GlimpsePointXYZRGBA colored_joints[data->n_joints];
+        for (int i = 0, off = 0; i < data->n_joints; i++) {
+            colored_joints[i].x = joints[off++];
+            colored_joints[i].y = joints[off++];
+            colored_joints[i].z = joints[off++];
+            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(GlimpsePointXYZRGBA) * data->n_joints,
+                     colored_joints, GL_DYNAMIC_DRAW);
+
+        // Reformat and copy over bone data
+        // TODO: Don't parse this JSON structure here
+        GlimpsePointXYZRGBA colored_bones[data->n_bones * 2];
+        for (int i = 0, b = 0; i < data->n_joints; i++) {
+            JSON_Object *joint =
+                json_array_get_object(json_array(data->joint_map), i);
+            JSON_Array *connections =
+                json_object_get_array(joint, "connections");
+            for (size_t c = 0; c < json_array_get_count(connections); c++) {
+                const char *joint_name = json_array_get_string(connections, c);
+                for (int j = 0; j < data->n_joints; j++) {
+                    JSON_Object *joint2 = json_array_get_object(
+                        json_array(data->joint_map), j);
+                    if (strcmp(joint_name,
+                               json_object_get_string(joint2, "joint")) == 0) {
+                        colored_bones[b++] = colored_joints[i];
+                        colored_bones[b++] = colored_joints[j];
+                        break;
+                    }
+                }
+            }
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(GlimpsePointXYZRGBA) * data->n_bones * 2,
+                     colored_bones, GL_DYNAMIC_DRAW);
+
+        // Clean-up
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+
+    free(joints);
+}
+
+static void
 update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
 {
     // Ensure the framebuffer texture is valid
@@ -665,6 +736,8 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
     glDrawArrays(GL_POINTS, 0, data->video_width * data->video_height);
 
     glDisableVertexAttribArray(gl_db_attr_depth);
+
+    update_tracking_buffers(data);
 
     // Redraw joints/bones to texture
     if (data->n_joints) {
@@ -944,7 +1017,11 @@ handle_device_frame_updates(Data *data)
         }
 
         data->context_needs_frame =
-            !gm_context_notify_frame(data->ctx, data->last_video_frame);
+            !gm_context_notify_frame(data->ctx, data->last_depth_frame);
+
+        // We don't want to send duplicate frames to tracking, so discard now
+        gm_frame_unref(data->last_depth_frame);
+        data->last_depth_frame = NULL;
     }
 
     data->device_frame_ready = false;
@@ -1078,66 +1155,6 @@ upload_tracking_textures(Data *data)
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                  label_map_width, label_map_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
-
-    /*
-     * Update labelled point cloud
-     */
-    data->n_joints = 0;
-    const float *joints =
-        gm_tracking_get_joint_positions(data->latest_tracking, &data->n_joints);
-
-    // TODO: At some point, the API needs to return a list of joints with ids,
-    //       possibly with confidences, so in the situation that a joint isn't
-    //       visible (or possible to determine), we can indicate that.
-    if (data->n_joints) {
-        assert((size_t)data->n_joints ==
-               json_array_get_count(json_array(data->joint_map)));
-    }
-
-    if (data->n_joints) {
-        // Reformat and copy over joint data
-        GlimpsePointXYZRGBA colored_joints[data->n_joints];
-        for (int i = 0, off = 0; i < data->n_joints; i++) {
-            colored_joints[i].x = joints[off++];
-            colored_joints[i].y = joints[off++];
-            colored_joints[i].z = joints[off++];
-            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
-        }
-        glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     sizeof(GlimpsePointXYZRGBA) * data->n_joints,
-                     colored_joints, GL_DYNAMIC_DRAW);
-
-        // Reformat and copy over bone data
-        // TODO: Don't parse this JSON structure here
-        GlimpsePointXYZRGBA colored_bones[data->n_bones * 2];
-        for (int i = 0, b = 0; i < data->n_joints; i++) {
-            JSON_Object *joint =
-                json_array_get_object(json_array(data->joint_map), i);
-            JSON_Array *connections =
-                json_object_get_array(joint, "connections");
-            for (size_t c = 0; c < json_array_get_count(connections); c++) {
-                const char *joint_name = json_array_get_string(connections, c);
-                for (int j = 0; j < data->n_joints; j++) {
-                    JSON_Object *joint2 = json_array_get_object(
-                        json_array(data->joint_map), j);
-                    if (strcmp(joint_name,
-                               json_object_get_string(joint2, "joint")) == 0) {
-                        colored_bones[b++] = colored_joints[i];
-                        colored_bones[b++] = colored_joints[j];
-                        break;
-                    }
-                }
-            }
-        }
-        glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     sizeof(GlimpsePointXYZRGBA) * data->n_bones * 2,
-                     colored_bones, GL_DYNAMIC_DRAW);
-
-        // Clean-up
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-    }
 }
 
 static void
