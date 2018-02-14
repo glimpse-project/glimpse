@@ -153,9 +153,11 @@ typedef struct _Data
     bool device_frame_ready;
 
     /* Once we've been notified that there's a device frame ready for us then
-     * we store the latest frame from gm_device_get_latest_frame() here...
+     * we store the latest frames from gm_device_get_latest_frame() here...
      */
-    struct gm_frame *device_frame;
+    struct gm_frame *full_frame;
+    struct gm_frame *last_depth_frame;
+    struct gm_frame *last_video_frame;
 
     /* Set when gm_context sends a _REQUEST_FRAME event */
     bool context_needs_frame;
@@ -255,6 +257,29 @@ static void init_basic_opengl(Data *data);
 static void handle_device_ready(Data *data, struct gm_device *dev);
 static void on_device_event_cb(struct gm_device_event *device_event,
                                void *user_data);
+
+static inline gm_frame *
+get_video_frame(Data *data)
+{
+    return data->last_video_frame ? data->last_video_frame : data->full_frame;
+}
+
+static void
+unref_device_frames(Data *data)
+{
+    if (data->full_frame) {
+        gm_frame_unref(data->full_frame);
+        data->full_frame = NULL;
+    }
+    if (data->last_video_frame) {
+        gm_frame_unref(data->last_video_frame);
+        data->last_video_frame = NULL;
+    }
+    if (data->last_depth_frame) {
+        gm_frame_unref(data->last_depth_frame);
+        data->last_depth_frame = NULL;
+    }
+}
 
 static void
 on_profiler_pause_cb(bool pause)
@@ -482,11 +507,8 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
             data->playback = false;
             gm_device_stop(data->playback_device);
 
-            // Unref the current device frame
-            if (data->device_frame) {
-                gm_frame_unref(data->device_frame);
-                data->device_frame = nullptr;
-            }
+            // Unref the current device frames
+            unref_device_frames(data);
 
             // Unref the latest tracking data
             if (data->latest_tracking) {
@@ -506,6 +528,9 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
             handle_device_ready(data, data->device);
         } else {
             gm_device_stop(data->device);
+
+            // Unref the current device frames
+            unref_device_frames(data);
 
             // Unref the latest tracking data
             if (data->latest_tracking) {
@@ -873,32 +898,62 @@ handle_device_frame_updates(Data *data)
     if (!data->device_frame_ready)
         return;
 
-    if (data->device_frame) {
-        ProfileScopedSection(FreeFrame);
-        gm_frame_unref(data->device_frame);
-    }
-
     {
         ProfileScopedSection(GetLatestFrame);
         /* NB: gm_device_get_latest_frame will give us a _ref() */
-        data->device_frame = gm_device_get_latest_frame(data->playback ?
+        gm_frame *device_frame = gm_device_get_latest_frame(data->playback ?
             data->playback_device : data->device);
-        if (!data->device_frame) {
+        if (!device_frame) {
             return;
         }
         upload = true;
 
         if (data->recording) {
-            gm_frame_ref(data->device_frame);
-            data->records.push_back(data->device_frame);
+            gm_frame_ref(device_frame);
+            data->records.push_back(device_frame);
         }
+
+        if (device_frame->depth) {
+            if (data->last_depth_frame) {
+                gm_frame_unref(data->last_depth_frame);
+            }
+            gm_frame_ref(device_frame);
+            data->last_depth_frame = device_frame;
+            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
+        }
+
+        if (device_frame->video) {
+            if (data->last_video_frame) {
+                gm_frame_unref(data->last_video_frame);
+            }
+            gm_frame_ref(device_frame);
+            data->last_video_frame = device_frame;
+            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
+        }
+
+        gm_frame_unref(device_frame);
     }
 
-    if (data->context_needs_frame) {
+    if (data->context_needs_frame &&
+        data->last_depth_frame && data->last_video_frame) {
         ProfileScopedSection(FwdContextFrame);
 
+        if (data->full_frame) {
+            gm_frame_unref(data->full_frame);
+        }
+
+        // Combine the two video/depth frames into a single frame for gm_context
+        data->full_frame =
+            gm_device_combine_frames(data->playback ?
+                                     data->playback_device : data->device,
+                                     data->last_depth_frame->timestamp,
+                                     data->last_depth_frame,
+                                     data->last_video_frame);
+        data->last_depth_frame = NULL;
+        data->last_video_frame = NULL;
+
         data->context_needs_frame =
-            !gm_context_notify_frame(data->ctx, data->device_frame);
+            !gm_context_notify_frame(data->ctx, data->full_frame);
     }
 
     data->device_frame_ready = false;
@@ -921,7 +976,7 @@ handle_device_frame_updates(Data *data)
                              GM_REQUEST_FRAME_VIDEO);
     }
 
-    if (upload) {
+    if (upload && get_video_frame(data)) {
         ProfileScopedSection(UploadFrameTextures);
 
         /*
@@ -936,8 +991,8 @@ handle_device_frame_updates(Data *data)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        void *video_front = data->device_frame->video->data;
-        enum gm_format video_format = data->device_frame->video_format;
+        void *video_front = get_video_frame(data)->video->data;
+        enum gm_format video_format = get_video_frame(data)->video_format;
 
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
@@ -1192,15 +1247,8 @@ handle_device_event(Data *data, struct gm_device_event *event)
         handle_device_ready(data, event->device);
         break;
     case GM_DEV_EVENT_FRAME_READY:
-
-        /* It's always possible that we will see an event for a frame
-         * that was ready before we upgraded the requirements for what
-         * we need, so we skip notifications for frames we can't use.
-         */
-        if (event->frame_ready.met_requirements ==
-            data->pending_frame_requirements)
-        {
-            data->pending_frame_requirements = 0;
+        if (event->frame_ready.met_requirements &
+            data->pending_frame_requirements) {
             data->device_frame_ready = true;
         }
         break;
@@ -1889,8 +1937,7 @@ viewer_destroy(Data *data)
 
     gm_context_destroy(data->ctx);
 
-    if (data->device_frame)
-        gm_frame_unref(data->device_frame);
+    unref_device_frames(data);
 
     gm_device_close(data->device);
     if (data->playback_device) {

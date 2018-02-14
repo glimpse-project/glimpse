@@ -267,9 +267,12 @@ device_frame_recycle(struct gm_frame *self)
 
     gm_assert(frame->dev->log, frame->base.ref == 0, "Unbalanced frame unref");
 
-    mem_pool_recycle_resource(dev->video_buf_pool, self->video);
+    if (self->video)
+        mem_pool_recycle_resource(dev->video_buf_pool, self->video);
+
     if (self->depth)
         mem_pool_recycle_resource(dev->depth_buf_pool, self->depth);
+
     mem_pool_recycle_resource(pool, frame);
 }
 
@@ -405,8 +408,8 @@ notify_frame_locked(struct gm_device *dev)
 
     gm_debug(dev->log, "notify_frame_locked (requirements = 0x%" PRIx64, dev->frame_request_requirements);
 
-    event->frame_ready.met_requirements = dev->frame_request_requirements;
-    dev->frame_request_requirements = 0;
+    event->frame_ready.met_requirements = dev->frame_ready_requirements;
+    dev->frame_request_requirements &= ~dev->frame_ready_requirements;
 
     dev->event_callback(event, dev->callback_data);
 }
@@ -429,7 +432,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
     //       nanoseconds
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
 
     freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
     if (old)
@@ -437,13 +440,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_requirements_lock);
-    if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-        dev->frame_request_requirements)
-    {
-        notify_frame_locked(dev);
-    }
-    pthread_mutex_unlock(&dev->request_requirements_lock);
+    gm_device_request_frame(dev, dev->frame_request_requirements);
 }
 
 static void
@@ -461,7 +458,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool);
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
 
     freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
     if (old)
@@ -469,13 +466,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_requirements_lock);
-    if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-        dev->frame_request_requirements)
-    {
-        notify_frame_locked(dev);
-    }
-    pthread_mutex_unlock(&dev->request_requirements_lock);
+    gm_device_request_frame(dev, dev->frame_request_requirements);
 }
 
 static bool
@@ -942,13 +933,7 @@ recording_io_thread_cb(void *userdata)
 
                     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-                    pthread_mutex_lock(&dev->request_requirements_lock);
-                    if ((dev->frame_request_requirements &
-                         dev->frame_ready_requirements) ==
-                        dev->frame_request_requirements) {
-                        notify_frame_locked(dev);
-                    }
-                    pthread_mutex_unlock(&dev->request_requirements_lock);
+                    gm_device_request_frame(dev, dev->frame_request_requirements);
                 } else {
                     pthread_mutex_unlock(&dev->swap_buffers_lock);
                     fprintf(stderr, "Error reading depth file '%s'\n",
@@ -987,13 +972,8 @@ recording_io_thread_cb(void *userdata)
                     dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
                     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-                    pthread_mutex_lock(&dev->request_requirements_lock);
-                    if ((dev->frame_request_requirements &
-                         dev->frame_ready_requirements) ==
-                        dev->frame_request_requirements) {
-                        notify_frame_locked(dev);
-                    }
-                    pthread_mutex_unlock(&dev->request_requirements_lock);
+                    gm_device_request_frame(dev,
+                                            dev->frame_request_requirements);
                 } else {
                     pthread_mutex_unlock(&dev->swap_buffers_lock);
                     fprintf(stderr, "Error reading video file '%s'\n",
@@ -1124,13 +1104,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_requirements_lock);
-    if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-        dev->frame_request_requirements)
-    {
-        notify_frame_locked(dev);
-    }
-    pthread_mutex_unlock(&dev->request_requirements_lock);
+    gm_device_request_frame(dev, dev->frame_request_requirements);
 }
 
 // This function does nothing. TangoService_connectOnTextureAvailable
@@ -1210,13 +1184,7 @@ tango_frame_available_cb(void *context,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_requirements_lock);
-    if ((dev->frame_request_requirements & dev->frame_ready_requirements) ==
-        dev->frame_request_requirements)
-    {
-        notify_frame_locked(dev);
-    }
-    pthread_mutex_unlock(&dev->request_requirements_lock);
+    gm_device_request_frame(dev, dev->frame_request_requirements);
 }
 
 static bool
@@ -1751,8 +1719,16 @@ gm_device_get_depth_to_video_extrinsics(struct gm_device *dev)
 void
 gm_device_request_frame(struct gm_device *dev, uint64_t requirements)
 {
+    if (!requirements) {
+        return;
+    }
+
     pthread_mutex_lock(&dev->request_requirements_lock);
-    dev->frame_request_requirements = requirements;
+    dev->frame_request_requirements |= requirements;
+    if (dev->frame_request_requirements & dev->frame_ready_requirements)
+    {
+        notify_frame_locked(dev);
+    }
     pthread_mutex_unlock(&dev->request_requirements_lock);
 }
 
@@ -1811,8 +1787,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
         gm_assert(dev->log, frame->base.video != NULL,
                   "Video ready flag set but buffer missing");
         gm_debug(dev->log, "> video = %p", frame->base.video);
-    } else
-        assert(0);
+    }
 
     frame->base.timestamp = dev->frame_time;
 
@@ -1829,6 +1804,32 @@ gm_device_get_latest_frame(struct gm_device *dev)
      */
     gm_assert(dev->log, frame->base.ref == 2,
               "Spurious ref counting for new frame");
+    return &frame->base;
+}
+
+struct gm_frame *
+gm_device_combine_frames(struct gm_device *dev, uint64_t timestamp,
+                         struct gm_frame *depth, struct gm_frame *video)
+{
+    struct gm_device_frame *frame = mem_pool_acquire_frame(dev->frame_pool);
+
+    frame->base.timestamp = timestamp;
+
+    if (depth->depth) {
+        frame->base.depth = depth->depth;
+        frame->base.depth_format = depth->depth_format;
+    }
+
+    if (video->video) {
+        frame->base.video = video->video;
+        frame->base.video_format = video->video_format;
+    }
+
+    depth->depth = NULL;
+    gm_frame_unref(depth);
+    video->video = NULL;
+    gm_frame_unref(video);
+
     return &frame->base;
 }
 

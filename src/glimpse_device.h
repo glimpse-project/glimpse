@@ -122,6 +122,10 @@ gm_device_request_frame(struct gm_device *dev, uint64_t requirements);
 struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev);
 
+struct gm_frame *
+gm_device_combine_frames(struct gm_device *dev, uint64_t timestamp,
+                         struct gm_frame *depth, struct gm_frame *video);
+
 #ifdef __ANDROID__
 void
 gm_device_attach_jvm(struct gm_device *dev, JavaVM *jvm);
