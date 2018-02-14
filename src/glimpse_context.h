@@ -275,6 +275,12 @@ gm_context_render_thread_hook(struct gm_context *ctx);
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
 
+float *
+gm_context_predict_joint_positions(struct gm_context *ctx,
+                                   struct gm_tracking *tracking,
+                                   uint64_t timestamp,
+                                   int *n_joints);
+
 /* XXX: not really a good approach since you can't fetch the latest state
  * atomically...
  */
