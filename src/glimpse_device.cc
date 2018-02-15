@@ -899,13 +899,19 @@ recording_io_thread_cb(void *userdata)
             JSON_Object *last_frame =
                 json_array_get_object(frames, dev->recording.frame  - 1);
 
-            uint64_t frame_duration = frame_time -
+            // Safe-guard against for frame times going backwards
+            uint64_t last_frame_time =
                 (uint64_t)json_object_get_number(last_frame, "timestamp");
+            uint64_t frame_duration = frame_time > last_frame_time ?
+                frame_time - last_frame_time : 1000000000/30;
 
             do {
                 time = get_time();
                 uint64_t duration = time - dev->recording.last_frame_time;
-                if (dev->running && duration < frame_duration) {
+
+                // Safe-guard against get_time going backwards
+                if (dev->running && time > dev->recording.last_frame_time &&
+                    duration < frame_duration) {
                     uint64_t rem = frame_duration - duration;
                     usleep(rem / 1000);
                 } else {

@@ -1000,7 +1000,9 @@ handle_device_frame_updates(Data *data)
             struct gm_frame *full_frame =
                 gm_device_combine_frames(data->playback ?
                                          data->playback_device : data->device,
-                                         data->last_depth_frame->timestamp,
+                                         std::max(
+                                             data->last_video_frame->timestamp,
+                                             data->last_depth_frame->timestamp),
                                          data->last_depth_frame,
                                          data->last_video_frame);
 
@@ -1244,9 +1246,13 @@ handle_device_ready(Data *data, struct gm_device *dev)
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(dev));*/
 
+    uint64_t old_reqs = data->pending_frame_requirements;
     data->pending_frame_requirements = 0;
     gm_device_start(dev);
     gm_context_enable(data->ctx);
+    if (old_reqs) {
+        request_device_frame(data, old_reqs);
+    }
 }
 
 static void
