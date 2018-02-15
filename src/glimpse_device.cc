@@ -116,6 +116,7 @@ struct gm_device
         struct {
             int frame;
             uint64_t last_frame_time;
+            char *path;
             JSON_Value *json;
 
             pthread_t io_thread;
@@ -826,6 +827,7 @@ recording_open(struct gm_device *dev,
     snprintf(json_path, json_path_size, "%s/%s",
              config->recording.path, recording_name);
 
+    dev->recording.path = strdup(config->recording.path);
     dev->recording.json = json_parse_file(json_path);
     if (!dev->recording.json) {
         gm_throw(dev->log, err, "Failed to open recording metadata");
@@ -866,6 +868,10 @@ recording_open(struct gm_device *dev,
 static void
 recording_close(struct gm_device *dev)
 {
+    if (dev->recording.path) {
+        free(dev->recording.path);
+        dev->recording.path = nullptr;
+    }
     if (dev->recording.json) {
         json_value_free(dev->recording.json);
         dev->recording.json = nullptr;
@@ -876,6 +882,8 @@ static void *
 recording_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
+
+    size_t base_path_len = strlen(dev->recording.path);
 
     while (dev->running) {
         JSON_Array *frames =
@@ -908,12 +916,19 @@ recording_io_thread_cb(void *userdata)
         dev->recording.last_frame_time = time;
 
         /* more or less the same as kinect_depth_frame_cb() */
-        if (dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
-            const char *filename = json_object_get_string(frame, "depth_file");
+        const char *filename = json_object_get_string(frame, "depth_file");
+        if (filename &&
+            dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
+            // Concatenate the relative path to the recording file path
+            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
+            char *abs_filename = (char *)malloc(abs_filename_size);
+            snprintf(abs_filename, abs_filename_size, "%s%s",
+                     dev->recording.path, filename);
+
             size_t depth_len = (size_t)
                 round(json_object_get_number(frame, "depth_len"));
 
-            FILE *depth_file = fopen(filename, "r");
+            FILE *depth_file = fopen(abs_filename, "r");
             if (depth_file) {
                 pthread_mutex_lock(&dev->swap_buffers_lock);
 
@@ -945,15 +960,23 @@ recording_io_thread_cb(void *userdata)
                             filename);
                 }
             }
+            free(abs_filename);
         }
 
         /* more or less the same as kinect_rgb_frame_cb() */
-        if (dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
-            const char *filename = json_object_get_string(frame, "video_file");
+        filename = json_object_get_string(frame, "video_file");
+        if (filename &&
+            dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
+            // Concatenate the relative path to the recording file path
+            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
+            char *abs_filename = (char *)malloc(abs_filename_size);
+            snprintf(abs_filename, abs_filename_size, "%s%s",
+                     dev->recording.path, filename);
+
             size_t video_len = (size_t)
                 round(json_object_get_number(frame, "video_len"));
 
-            FILE *video_file = fopen(filename, "r");
+            FILE *video_file = fopen(abs_filename, "r");
             if (video_file) {
                 pthread_mutex_lock(&dev->swap_buffers_lock);
 
@@ -985,7 +1008,7 @@ recording_io_thread_cb(void *userdata)
                             filename);
                 }
             }
-
+            free(abs_filename);
         }
 
         dev->recording.frame = (dev->recording.frame + 1) %

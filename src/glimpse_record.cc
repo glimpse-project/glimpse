@@ -255,7 +255,7 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
                                 (*it)->depth->len);
 
             json_object_set_string(json_object(frame_meta), "depth_file",
-                                   bin_path);
+                                   bin_path + path_len);
             json_object_set_number(json_object(frame_meta), "depth_len",
                                    (double)(*it)->depth->len);
             free(bin_path);
@@ -282,13 +282,17 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
                                 (*it)->video->len);
 
             json_object_set_string(json_object(frame_meta), "video_file",
-                                   bin_path);
+                                   bin_path + path_len);
             json_object_set_number(json_object(frame_meta), "video_len",
                                    (double)(*it)->video->len);
             free(bin_path);
         }
 
-        json_array_append_value(json_array(frames), frame_meta);
+        if ((*it)->depth || (*it)->video) {
+            json_array_append_value(json_array(frames), frame_meta);
+        } else {
+            json_value_free(frame_meta);
+        }
     }
     json_object_set_value(json_object(json), "frames", frames);
 

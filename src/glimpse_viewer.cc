@@ -970,11 +970,6 @@ handle_device_frame_updates(Data *data)
         }
         upload = true;
 
-        if (data->recording) {
-            gm_frame_ref(device_frame);
-            data->records.push_back(device_frame);
-        }
-
         if (device_frame->depth) {
             if (data->last_depth_frame) {
                 gm_frame_unref(data->last_depth_frame);
@@ -1003,7 +998,8 @@ handle_device_frame_updates(Data *data)
         // Combine the two video/depth frames into a single frame for gm_context
         if (data->last_depth_frame != data->last_video_frame) {
             struct gm_frame *full_frame =
-                gm_device_combine_frames(data->device,
+                gm_device_combine_frames(data->playback ?
+                                         data->playback_device : data->device,
                                          data->last_depth_frame->timestamp,
                                          data->last_depth_frame,
                                          data->last_video_frame);
@@ -1022,6 +1018,19 @@ handle_device_frame_updates(Data *data)
         // We don't want to send duplicate frames to tracking, so discard now
         gm_frame_unref(data->last_depth_frame);
         data->last_depth_frame = NULL;
+    }
+
+    if (data->recording &&
+        (data->last_video_frame || data->last_depth_frame)) {
+        if (data->last_video_frame) {
+            gm_frame_ref(data->last_video_frame);
+            data->records.push_back(data->last_video_frame);
+        }
+        if (data->last_depth_frame &&
+            data->last_depth_frame != data->last_video_frame) {
+            gm_frame_ref(data->last_depth_frame);
+            data->records.push_back(data->last_depth_frame);
+        }
     }
 
     data->device_frame_ready = false;
