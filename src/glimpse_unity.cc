@@ -881,11 +881,18 @@ gm_unity_init(void)
     gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
 
     struct gm_device_config config = {};
+    const char *recording_path = getenv("GLIMPSE_RECORDING_PATH");
+    if (recording_path) {
+        config.type = GM_DEVICE_RECORDING;
+        config.recording.path = recording_path;
+    } else {
 #ifdef USE_TANGO
-    config.type = GM_DEVICE_TANGO;
+        config.type = GM_DEVICE_TANGO;
 #else
-    config.type = GM_DEVICE_KINECT;
+        config.type = GM_DEVICE_KINECT;
 #endif
+    }
+
     data->device = gm_device_open(data->log, &config, NULL);
     gm_device_set_event_callback(data->device, on_device_event_cb, plugin_data);
 #ifdef __ANDROID__
