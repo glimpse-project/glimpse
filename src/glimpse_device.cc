@@ -756,52 +756,6 @@ kinect_stop(struct gm_device *dev)
 }
 #endif // USE_FREENECT
 
-static bool
-directory_recurse(struct gm_device *dev,
-                  const char *path, const char *ext,
-                  std::vector<char *> &files,
-                  char **err)
-{
-    struct dirent *entry;
-    struct stat st;
-    size_t ext_len;
-    char *cur_ext;
-    DIR *dir;
-    bool ret = true;
-
-    if (!(dir = opendir(path))) {
-        gm_throw(dev->log, err, "Failed to open directory %s\n", path);
-        return false;
-    }
-
-    ext_len = strlen(ext);
-
-    while ((entry = readdir(dir)) != NULL) {
-        char next_path[1024];
-
-        if (strcmp(entry->d_name, ".") == 0 ||
-            strcmp(entry->d_name, "..") == 0)
-            continue;
-
-        xsnprintf(next_path, sizeof(next_path), "%s/%s", path, entry->d_name);
-
-        stat(next_path, &st);
-        if (S_ISDIR(st.st_mode)) {
-            if (!directory_recurse(dev, next_path, ext, files, err)) {
-                ret = false;
-                break;
-            }
-        } else if ((cur_ext = strstr(entry->d_name, ext)) &&
-                   cur_ext[ext_len] == '\0') {
-            files.push_back(strdup(next_path));
-        }
-    }
-
-    closedir(dir);
-
-    return ret;
-}
-
 static void
 read_json_intrinsics(JSON_Object *json_intrinsics,
                      struct gm_intrinsics *intrinsics)
