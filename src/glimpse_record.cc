@@ -36,6 +36,21 @@
 
 #include "parson.h"
 
+#define DEPTH_PATH "/depth"
+#define VIDEO_PATH "/video"
+#define DEPTH_SUFFIX "-depth.bin"
+#define VIDEO_SUFFIX "-video.bin"
+
+struct gm_recording {
+    struct gm_logger *log;
+    JSON_Value *json;
+    JSON_Value *frames;
+    int n_frames;
+    enum gm_format depth_format;
+    enum gm_format video_format;
+    char *path;
+};
+
 static JSON_Value *
 gm_record_get_json_intrinsics(const struct gm_intrinsics *intrinsics)
 {
@@ -110,10 +125,9 @@ gm_record_write_bin(struct gm_logger *log, const char *path,
     }
 }
 
-void
-gm_record_save(struct gm_logger *log, struct gm_device *device,
-               const std::list<struct gm_frame *> &record, const char *path,
-               bool overwrite)
+struct gm_recording *
+gm_recording_init(struct gm_logger *log, struct gm_device *device,
+                  const char *path, bool overwrite)
 {
     // Create the directory structure for the recording
     // If the directory exists, append a number
@@ -135,7 +149,7 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
             } else {
                 gm_error(log, "Unable to create directory '%s': %s",
                          path, strerror(errno));
-                return;
+                return nullptr;
             }
         }
     } while (ret != 0);
@@ -152,7 +166,7 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
     if (ret < 0 && errno != EEXIST) {
         gm_error(log, "Unable to create directory '%s': %s",
                  depth_path, strerror(errno));
-        return;
+        return nullptr;
     }
 
     // Create video images directory
@@ -165,15 +179,13 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
     if (ret < 0 && errno != EEXIST) {
         gm_error(log, "Unable to create directory '%s': %s",
                  video_path, strerror(errno));
-        return;
+        return nullptr;
     }
 
     // Delete any existing files in the depth/video images directory to avoid
     // accumulating untracked files
-    const char *depth_suffix = "-depth.bin";
-    const char *video_suffix = "-video.bin";
-    delete_files(log, depth_path, depth_suffix);
-    delete_files(log, video_path, video_suffix);
+    delete_files(log, depth_path, DEPTH_SUFFIX);
+    delete_files(log, video_path, VIDEO_SUFFIX);
 
     // Create JSON metadata structure
     JSON_Value *json = json_value_init_object();
@@ -221,87 +233,115 @@ gm_record_save(struct gm_logger *log, struct gm_device *device,
     json_object_set_number(json_object(json), "video_format",
                            (double)GM_FORMAT_UNKNOWN);
 
-    // Save out depth/video frames and metadata
+    // Create an array for frames
     JSON_Value *frames = json_value_init_array();
-    size_t depth_suffix_len = strlen(depth_suffix);
-    size_t video_suffix_len = strlen(video_suffix);
-    int i = 0;
-    for (std::list<struct gm_frame *>::const_iterator it = record.begin();
-         it != record.end(); ++it, ++i) {
+    json_object_set_value(json_object(json), "frames", frames);
 
-        JSON_Value *frame_meta = json_value_init_object();
-        json_object_set_number(json_object(frame_meta), "timestamp",
-                               (double)(*it)->timestamp);
+    // Initialise recording structure and return
+    struct gm_recording *r = (struct gm_recording *)
+        calloc(1, sizeof(struct gm_recording));
+    r->log = log;
+    r->json = json;
+    r->frames = frames;
+    r->depth_format = depth_format;
+    r->video_format = video_format;
+    r->path = path_copy;
 
-        if ((*it)->depth) {
-            // Update depth format
-            if (depth_format == GM_FORMAT_UNKNOWN) {
-                depth_format = (*it)->depth_format;
-                json_object_set_number(json_object(json), "depth_format",
-                                       (double)depth_format);
-            } else if ((*it)->depth_format != depth_format) {
-                gm_error(log, "Depth frame with unexpected format");
-                continue;
-            }
+    return r;
+}
 
+void
+gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
+{
+    if (!frame->video && !frame->depth) {
+        gm_warn(r->log, "Not saving frame with no depth or video buffer");
+        return;
+    }
+
+    JSON_Value *frame_meta = json_value_init_object();
+    json_object_set_number(json_object(frame_meta), "timestamp",
+                           (double)frame->timestamp);
+
+    size_t path_len = strlen(r->path);
+
+    if (frame->depth) {
+        // Update depth format
+        bool save = true;
+        if (r->depth_format == GM_FORMAT_UNKNOWN) {
+            r->depth_format = frame->depth_format;
+            json_object_set_number(json_object(r->json), "depth_format",
+                                   (double)r->depth_format);
+        } else if (frame->depth_format != r->depth_format) {
+            gm_error(r->log, "Depth frame with unexpected format");
+            save = false;
+        }
+
+        if (save) {
             // Save out depth frame
             // 6 characters: 1 = '/', '4' = %04d, '1' = '\0'
-            size_t bin_path_size = depth_path_len + depth_suffix_len + 6;
+            size_t bin_path_size =
+                path_len + strlen(DEPTH_PATH) + strlen(DEPTH_SUFFIX) + 6;
             char *bin_path = (char *)malloc(bin_path_size);
-            snprintf(bin_path, bin_path_size, "%s/%04d%s",
-                     depth_path, i, depth_suffix);
+            snprintf(bin_path, bin_path_size, "%s%s/%04d%s",
+                     r->path, DEPTH_PATH, r->n_frames, DEPTH_SUFFIX);
 
-            gm_record_write_bin(log, bin_path, (*it)->depth->data,
-                                (*it)->depth->len);
+            gm_record_write_bin(r->log, bin_path, frame->depth->data,
+                                frame->depth->len);
 
             json_object_set_string(json_object(frame_meta), "depth_file",
                                    bin_path + path_len);
             json_object_set_number(json_object(frame_meta), "depth_len",
-                                   (double)(*it)->depth->len);
+                                   (double)frame->depth->len);
             free(bin_path);
         }
+    }
 
-        if ((*it)->video) {
-            // Update video format
-            if (video_format == GM_FORMAT_UNKNOWN) {
-                video_format = (*it)->video_format;
-                json_object_set_number(json_object(json), "video_format",
-                                       (double)video_format);
-            } else if ((*it)->video_format != video_format) {
-                gm_error(log, "Video frame with unexpected format");
-                continue;
-            }
+    if (frame->video) {
+        // Update video format
+        bool save = true;
+        if (r->video_format == GM_FORMAT_UNKNOWN) {
+            r->video_format = frame->video_format;
+            json_object_set_number(json_object(r->json), "video_format",
+                                   (double)r->video_format);
+        } else if (frame->video_format != r->video_format) {
+            gm_error(r->log, "Video frame with unexpected format");
+            save = false;
+        }
 
+        if (save) {
             // Save out video frame
-            size_t bin_path_size = video_path_len + video_suffix_len + 6;
+            size_t bin_path_size =
+                path_len + strlen(VIDEO_PATH) + strlen(VIDEO_SUFFIX) + 6;
             char *bin_path = (char *)malloc(bin_path_size);
-            snprintf(bin_path, bin_path_size, "%s/%04d%s",
-                     video_path, i, video_suffix);
+            snprintf(bin_path, bin_path_size, "%s%s/%04d%s",
+                     r->path, VIDEO_PATH, r->n_frames, VIDEO_SUFFIX);
 
-            gm_record_write_bin(log, bin_path, (*it)->video->data,
-                                (*it)->video->len);
+            gm_record_write_bin(r->log, bin_path, frame->video->data,
+                                frame->video->len);
 
             json_object_set_string(json_object(frame_meta), "video_file",
                                    bin_path + path_len);
             json_object_set_number(json_object(frame_meta), "video_len",
-                                   (double)(*it)->video->len);
+                                   (double)frame->video->len);
             free(bin_path);
         }
-
-        if ((*it)->depth || (*it)->video) {
-            json_array_append_value(json_array(frames), frame_meta);
-        } else {
-            json_value_free(frame_meta);
-        }
     }
-    json_object_set_value(json_object(json), "frames", frames);
 
-    // Write to file, free and return
+    json_array_append_value(json_array(r->frames), frame_meta);
+    ++r->n_frames;
+}
+
+void
+gm_recording_close(struct gm_recording *r)
+{
     const char *json_name = "glimpse_recording.json";
-    size_t json_path_size = path_len + strlen(json_name) + 2;
+    size_t json_path_size = strlen(r->path) + strlen(json_name) + 2;
     char *json_path = (char *)alloca(json_path_size);
-    snprintf(json_path, json_path_size, "%s/%s", path, json_name);
-    json_serialize_to_file_pretty(json, json_path);
-    json_value_free(json);
-    free(path_copy);
+    snprintf(json_path, json_path_size, "%s/%s", r->path, json_name);
+
+    json_serialize_to_file_pretty(r->json, json_path);
+
+    json_value_free(r->json);
+    free(r->path);
+    free(r);
 }

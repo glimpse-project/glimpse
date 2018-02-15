@@ -169,12 +169,13 @@ typedef struct _Data
      */
     struct gm_tracking *latest_tracking;
 
-    /* When recording we keep the tracking frames in order in a list and
-     * write out the files and metadata when recording finishes.
+    /* Recording is handled by the gm_recording structure, which saves out
+     * frames as we add them.
      */
-    bool recording;
     bool overwrite_recording;
-    std::list<struct gm_frame *> records;
+    struct gm_recording *recording;
+    bool recorded_depth;
+    bool recorded_video;
 
     bool playback;
     struct gm_device *playback_device;
@@ -471,22 +472,14 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 #endif
     if (ImGui::Button(data->recording ? "Stop" : "Record")) {
         if (data->recording) {
-            if (data->records.size()) {
-                const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
-                gm_record_save(data->log, data->device, data->records,
-                               record_path ?
-                                  record_path : "glimpse_viewer_recording",
-                               data->overwrite_recording);
-            }
-
-            data->recording = false;
-            for (std::list<struct gm_frame *>::iterator it =
-                 data->records.begin(); it != data->records.end(); ++it) {
-                gm_frame_unref(*it);
-            }
-            data->records.clear();
+            gm_recording_close(data->recording);
+            data->recording = NULL;
         } else if (!data->playback) {
-            data->recording = true;
+            const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
+            data->recording = gm_recording_init(data->log, data->device,
+                                                record_path ? record_path :
+                                                "glimpse_viewer_recording",
+                                                data->overwrite_recording);
         }
     }
     ImGui::SameLine();
@@ -977,6 +970,7 @@ handle_device_frame_updates(Data *data)
             gm_frame_ref(device_frame);
             data->last_depth_frame = device_frame;
             data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
+            data->recorded_depth = false;
         }
 
         if (device_frame->video) {
@@ -986,6 +980,7 @@ handle_device_frame_updates(Data *data)
             gm_frame_ref(device_frame);
             data->last_video_frame = device_frame;
             data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
+            data->recorded_video = false;
         }
 
         gm_frame_unref(device_frame);
@@ -1022,16 +1017,25 @@ handle_device_frame_updates(Data *data)
         data->last_depth_frame = NULL;
     }
 
-    if (data->recording &&
-        (data->last_video_frame || data->last_depth_frame)) {
-        if (data->last_video_frame) {
-            gm_frame_ref(data->last_video_frame);
-            data->records.push_back(data->last_video_frame);
-        }
-        if (data->last_depth_frame &&
-            data->last_depth_frame != data->last_video_frame) {
-            gm_frame_ref(data->last_depth_frame);
-            data->records.push_back(data->last_depth_frame);
+    if (data->recording) {
+        if (data->last_video_frame == data->last_depth_frame) {
+            if (!data->recorded_video || !data->recorded_depth) {
+                gm_recording_save_frame(data->recording,
+                                        data->last_video_frame);
+                data->recorded_video = true;
+                data->recorded_depth = true;
+            }
+        } else {
+            if (data->last_video_frame && !data->recorded_video) {
+                gm_recording_save_frame(data->recording,
+                                        data->last_video_frame);
+                data->recorded_video = true;
+            }
+            if (data->last_depth_frame && !data->recorded_depth) {
+                gm_recording_save_frame(data->recording,
+                                        data->last_depth_frame);
+                data->recorded_depth = true;
+            }
         }
     }
 
