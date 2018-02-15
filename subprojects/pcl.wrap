@@ -1,4 +1,4 @@
 [wrap-git]
 directory = pcl
 url = https://github.com/glimpse-project/pcl.git
-revision = 6b6769dd304a20a06cb4c6d2548089aebbcfe85c
+revision = 950a576fe29453e3f8ed19f61d320ff8f625dc21
