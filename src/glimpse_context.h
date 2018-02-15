@@ -49,8 +49,8 @@ enum gm_event_type
     GM_EVENT_TRACKING_READY
 };
 
-#define GM_REQUEST_FRAME_DEPTH  1<<0
-#define GM_REQUEST_FRAME_VIDEO  1<<1
+#define GM_REQUEST_FRAME_DEPTH  1ULL<<0
+#define GM_REQUEST_FRAME_VIDEO  1ULL<<1
 
 struct gm_event
 {
