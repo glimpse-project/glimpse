@@ -155,7 +155,6 @@ typedef struct _Data
     /* Once we've been notified that there's a device frame ready for us then
      * we store the latest frames from gm_device_get_latest_frame() here...
      */
-    struct gm_frame *full_frame;
     struct gm_frame *last_depth_frame;
     struct gm_frame *last_video_frame;
 
@@ -258,19 +257,9 @@ static void handle_device_ready(Data *data, struct gm_device *dev);
 static void on_device_event_cb(struct gm_device_event *device_event,
                                void *user_data);
 
-static inline gm_frame *
-get_video_frame(Data *data)
-{
-    return data->last_video_frame ? data->last_video_frame : data->full_frame;
-}
-
 static void
 unref_device_frames(Data *data)
 {
-    if (data->full_frame) {
-        gm_frame_unref(data->full_frame);
-        data->full_frame = NULL;
-    }
     if (data->last_video_frame) {
         gm_frame_unref(data->last_video_frame);
         data->last_video_frame = NULL;
@@ -938,22 +927,24 @@ handle_device_frame_updates(Data *data)
         data->last_depth_frame && data->last_video_frame) {
         ProfileScopedSection(FwdContextFrame);
 
-        if (data->full_frame) {
-            gm_frame_unref(data->full_frame);
+        // Combine the two video/depth frames into a single frame for gm_context
+        if (data->last_depth_frame != data->last_video_frame) {
+            struct gm_frame *full_frame =
+                gm_device_combine_frames(data->device,
+                                         data->last_depth_frame->timestamp,
+                                         data->last_depth_frame,
+                                         data->last_video_frame);
+
+            // After returning from combine_frames, the two input frames will
+            // have been unref'd and the returned frame will have a single
+            // reference.
+            gm_frame_ref(full_frame);
+            data->last_depth_frame = full_frame;
+            data->last_video_frame = full_frame;
         }
 
-        // Combine the two video/depth frames into a single frame for gm_context
-        data->full_frame =
-            gm_device_combine_frames(data->playback ?
-                                     data->playback_device : data->device,
-                                     data->last_depth_frame->timestamp,
-                                     data->last_depth_frame,
-                                     data->last_video_frame);
-        data->last_depth_frame = NULL;
-        data->last_video_frame = NULL;
-
         data->context_needs_frame =
-            !gm_context_notify_frame(data->ctx, data->full_frame);
+            !gm_context_notify_frame(data->ctx, data->last_video_frame);
     }
 
     data->device_frame_ready = false;
@@ -976,7 +967,7 @@ handle_device_frame_updates(Data *data)
                              GM_REQUEST_FRAME_VIDEO);
     }
 
-    if (upload && get_video_frame(data)) {
+    if (upload && data->last_video_frame) {
         ProfileScopedSection(UploadFrameTextures);
 
         /*
@@ -991,8 +982,8 @@ handle_device_frame_updates(Data *data)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        void *video_front = get_video_frame(data)->video->data;
-        enum gm_format video_format = get_video_frame(data)->video_format;
+        void *video_front = data->last_video_frame->video->data;
+        enum gm_format video_format = data->last_video_frame->video_format;
 
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:

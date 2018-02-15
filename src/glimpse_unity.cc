@@ -103,12 +103,13 @@ struct glimpse_data
     bool device_frame_ready;
 
     /* Once we've been notified that there's a device frame ready for us then
-     * we store the latest frame from gm_device_get_latest_frame() here...
+     * we store the latest frames from gm_device_get_latest_frame() here...
      */
-    struct gm_frame *device_frame;
+    struct gm_frame *last_depth_frame;
+    struct gm_frame *last_video_frame;
 
     /* When we come to render the background we take a reference on the latest
-     * device_frame before uploading to a texture for display.
+     * gm_frame before uploading to a texture for display.
      */
     struct gm_frame *visible_frame;
     GLuint gl_vid_tex;
@@ -315,24 +316,56 @@ handle_device_frame_updates(struct glimpse_data *data)
     if (!data->device_frame_ready)
         return;
 
-    if (data->device_frame) {
-        //ProfileScopedSection(FreeFrame);
-        gm_frame_unref(data->device_frame);
-    }
-
     {
         //ProfileScopedSection(GetLatestFrame);
         /* NB: gm_device_get_latest_frame will give us a _ref() */
-        data->device_frame = gm_device_get_latest_frame(data->device);
-        assert(data->device_frame);
-        //upload = true;
+        struct gm_frame *device_frame = gm_device_get_latest_frame(data->device);
+        assert(device_frame);
+
+        if (device_frame->depth) {
+            if (data->last_depth_frame) {
+                gm_frame_unref(data->last_depth_frame);
+            }
+            gm_frame_ref(device_frame);
+            data->last_depth_frame = device_frame;
+            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
+        }
+
+        if (device_frame->video) {
+            if (data->last_video_frame) {
+                gm_frame_unref(data->last_video_frame);
+            }
+            gm_frame_ref(device_frame);
+            data->last_video_frame = device_frame;
+            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
+            //upload = true;
+        }
+
+        gm_frame_unref(device_frame);
     }
 
-    if (data->context_needs_frame) {
+    if (data->context_needs_frame &&
+        data->last_depth_frame && data->last_video_frame) {
         //ProfileScopedSection(FwdContextFrame);
 
+        // Combine the two video/depth frames into a single frame for gm_context
+        if (data->last_depth_frame != data->last_video_frame) {
+            struct gm_frame *full_frame =
+                gm_device_combine_frames(data->device,
+                                         data->last_depth_frame->timestamp,
+                                         data->last_depth_frame,
+                                         data->last_video_frame);
+
+            // After returning from combine_frames, the two input frames will
+            // have been unref'd and the returned frame will have a single
+            // reference.
+            gm_frame_ref(full_frame);
+            data->last_depth_frame = full_frame;
+            data->last_video_frame = full_frame;
+        }
+
         data->context_needs_frame =
-            !gm_context_notify_frame(data->ctx, data->device_frame);
+            !gm_context_notify_frame(data->ctx, data->last_depth_frame);
     }
 
     data->device_frame_ready = false;
@@ -366,8 +399,9 @@ handle_device_frame_updates(struct glimpse_data *data)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-        void *video_front = gm_frame_get_video_buffer(data->device_frame);
-        enum gm_format video_format = gm_frame_get_video_format(data->device_frame);
+        void *video_front = gm_frame_get_video_buffer(data->last_video_frame);
+        enum gm_format video_format =
+            gm_frame_get_video_format(data->last_video_frame);
 
         assert(video_format == GM_FORMAT_LUMINANCE_U8);
 
@@ -431,7 +465,7 @@ handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
          * that was ready before we upgraded the requirements for what
          * we need, so we skip notifications for frames we can't use.
          */
-        if (event->frame_ready.met_requirements ==
+        if (event->frame_ready.met_requirements &
             data->pending_frame_requirements)
         {
             data->pending_frame_requirements = 0;
@@ -609,8 +643,8 @@ render_ar_video_background(struct glimpse_data *data)
 
     /* Upload latest video frame it it's changed...
      */
-    if (data->device_frame != data->visible_frame) {
-        struct gm_frame *new_frame = gm_frame_ref(data->device_frame);
+    if (data->last_video_frame != data->visible_frame) {
+        struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
 
         if (data->visible_frame)
             gm_frame_unref(data->visible_frame);
@@ -629,7 +663,7 @@ render_ar_video_background(struct glimpse_data *data)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         void *video_front = new_frame->video->data;
-        enum gm_format video_format = data->device_frame->video_format;
+        enum gm_format video_format = data->visible_frame->video_format;
 
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
@@ -996,8 +1030,10 @@ gm_unity_terminate(void)
 
     gm_context_destroy(data->ctx);
 
-    if (data->device_frame)
-        gm_frame_unref(data->device_frame);
+    if (data->last_depth_frame)
+        gm_frame_unref(data->last_depth_frame);
+    if (data->last_video_frame)
+        gm_frame_unref(data->last_video_frame);
 
     gm_device_close(data->device);
 
