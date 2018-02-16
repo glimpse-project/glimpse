@@ -37,8 +37,6 @@ enum gm_device_event_type
 
     /* A new frame has been captured by the device */
     GM_DEV_EVENT_FRAME_READY,
-
-    GM_DEV_EVENT_PROP_CHANGED,
 };
 
 struct gm_device_event
