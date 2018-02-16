@@ -36,56 +36,38 @@ gm_config_load(struct gm_logger *log, const char *json_buf,
         const char *name = json_object_get_name(config, i);
 
         for (int p = 0; p < props->n_properties; ++p) {
-            struct gm_ui_property &prop = props->properties[p];
+            struct gm_ui_property *prop = &props->properties[p];
 
-            // TODO: Decide whether we want to do bounds checking here.
-            if (strcmp(name, prop.name) == 0) {
-                JSON_Value *value =
-                    json_object_get_value_at(config, i);
+            if (strcmp(name, prop->name) != 0)
+                continue;
 
-                switch (prop.type) {
-                case GM_PROPERTY_INT: {
-                    *prop.int_state.ptr = (int)json_value_get_number(value);
-                    break;
-                }
+            JSON_Value *value =
+                json_object_get_value_at(config, i);
 
-                case GM_PROPERTY_ENUM: {
-                    const char *enum_val = json_value_get_string(value);
-                    for (int j = 0; j < prop.enum_state.n_enumerants; ++j) {
-                        const struct gm_ui_enumerant &enumerant =
-                            prop.enum_state.enumerants[j];
-                        if (strcmp(enum_val, enumerant.name) == 0) {
-                            *prop.enum_state.ptr = enumerant.val;
-                            break;
-                        }
-                    }
-                    break;
-                }
-
-                case GM_PROPERTY_BOOL: {
-                    *prop.bool_state.ptr = (bool)
-                        json_value_get_boolean(value);
-                    break;
-                }
-
-                case GM_PROPERTY_FLOAT: {
-                    *prop.float_state.ptr = (float)
-                        json_value_get_number(value);
-                    break;
-                }
-
-                case GM_PROPERTY_FLOAT_VEC3: {
-                    JSON_Array *array = json_value_get_array(value);
-                    gm_assert(log, json_array_get_count(array) == 3,
-                              "Invalid array size for vec3 in config");
-                    for (int j = 0; j < 3; ++j) {
-                        prop.vec3_state.ptr[j] = (float)
-                            json_array_get_number(array, j);
-                    }
-                    break;
-                }
-                }
+            switch (prop->type) {
+            case GM_PROPERTY_INT:
+                gm_prop_set_int(prop, json_value_get_number(value));
                 break;
+            case GM_PROPERTY_ENUM:
+                gm_prop_set_enum_by_name(prop, json_value_get_string(value));
+                break;
+            case GM_PROPERTY_BOOL:
+                gm_prop_set_bool(prop, json_value_get_boolean(value));
+                break;
+            case GM_PROPERTY_FLOAT:
+                gm_prop_set_float(prop, json_value_get_number(value));
+                break;
+            case GM_PROPERTY_FLOAT_VEC3: {
+                JSON_Array *array = json_value_get_array(value);
+                gm_assert(log, json_array_get_count(array) == 3,
+                          "Invalid array size for vec3 in config");
+                float vec3[3];
+                for (int j = 0; j < 3; ++j)
+                    vec3[j] = json_array_get_number(array, j);
+                gm_prop_set_vec3(prop, vec3);
+                break;
+            }
+
             }
         }
     }
@@ -100,47 +82,43 @@ gm_config_save(struct gm_logger *log, struct gm_ui_properties *props)
     JSON_Object *config = json_object(json);
 
     for (int p = 0; p < props->n_properties; ++p) {
-        struct gm_ui_property &prop = props->properties[p];
+        struct gm_ui_property *prop = &props->properties[p];
 
-        switch (prop.type) {
-        case GM_PROPERTY_INT: {
-            json_object_set_number(config, prop.name,
-                                   (double)*prop.int_state.ptr);
+        switch (prop->type) {
+        case GM_PROPERTY_INT:
+            json_object_set_number(config, prop->name,
+                                   gm_prop_get_int(prop));
             break;
-        }
-
         case GM_PROPERTY_ENUM: {
-            for (int i = 0; i < prop.enum_state.n_enumerants; ++i) {
-                const struct gm_ui_enumerant &enumerant =
-                    prop.enum_state.enumerants[i];
-                if (enumerant.val == *prop.enum_state.ptr) {
-                    json_object_set_string(config, prop.name, enumerant.name);
+            int val = gm_prop_get_enum(prop);
+            for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
+                const struct gm_ui_enumerant *enumerant =
+                    &prop->enum_state.enumerants[i];
+                if (enumerant->val == val) {
+                    json_object_set_string(config, prop->name, enumerant->name);
                     break;
                 }
             }
             break;
         }
-
-        case GM_PROPERTY_BOOL: {
-            json_object_set_boolean(config, prop.name, *prop.bool_state.ptr);
+        case GM_PROPERTY_BOOL:
+            json_object_set_boolean(config, prop->name, gm_prop_get_bool(prop));
             break;
-        }
-
-        case GM_PROPERTY_FLOAT: {
-            json_object_set_number(config, prop.name,
-                                   (double)*prop.float_state.ptr);
+        case GM_PROPERTY_FLOAT:
+            json_object_set_number(config, prop->name, gm_prop_get_float(prop));
             break;
-        }
-
         case GM_PROPERTY_FLOAT_VEC3: {
             JSON_Value *array_val = json_value_init_array();
             JSON_Array *array = json_array(array_val);
+            float vec3[3];
+            gm_prop_get_vec3(prop, vec3);
             for (int i = 0; i < 3; ++i) {
-                json_array_append_number(array, (double)prop.vec3_state.ptr[i]);
+                json_array_append_number(array, vec3[i]);
             }
-            json_object_set_value(config, prop.name, array_val);
+            json_object_set_value(config, prop->name, array_val);
             break;
         }
+
         }
     }
 

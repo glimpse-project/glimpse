@@ -52,35 +52,35 @@ struct gm_ui_property {
             int *ptr;
             int min;
             int max;
-            int (*get)(void *object);
-            void (*set)(void *object, int val);
+            int (*get)(struct gm_ui_property *prop);
+            void (*set)(struct gm_ui_property *prop, int val);
         } int_state;
         struct {
             int *ptr;
             int n_enumerants;
             const struct gm_ui_enumerant *enumerants;
-            int (*get)(void *object);
-            void (*set)(void *object, int val);
+            int (*get)(struct gm_ui_property *prop);
+            void (*set)(struct gm_ui_property *prop, int val);
         } enum_state;
         struct {
             bool *ptr;
-            bool (*get)(void *object);
-            void (*set)(void *object, bool val);
+            bool (*get)(struct gm_ui_property *prop);
+            void (*set)(struct gm_ui_property *prop, bool val);
         } bool_state;
         struct {
             float *ptr;
             float min;
             float max;
-            float (*get)(void *object);
-            void (*set)(void *object, float val);
+            float (*get)(struct gm_ui_property *prop);
+            void (*set)(struct gm_ui_property *prop, float val);
         } float_state;
         struct {
             float *ptr;
             const char *components[3];
             float min[3];
             float max[3];
-            void (*get)(void *object, float *out);
-            void (*set)(void *object, float *val);
+            void (*get)(struct gm_ui_property *prop, float *out);
+            void (*set)(struct gm_ui_property *prop, float *val);
         } vec3_state;
     };
     bool read_only;
@@ -126,6 +126,29 @@ inline void gm_prop_set_vec3(struct gm_ui_property *prop, float *vec3)
         prop->vec3_state.set(prop, vec3);
     else
         memcpy(prop->vec3_state.ptr, vec3, sizeof(float) * 3);
+}
+
+inline void gm_prop_set_enum_by_name(struct gm_ui_property *prop, const char *name)
+{
+    for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
+        const struct gm_ui_enumerant *enumerant =
+            &prop->enum_state.enumerants[i];
+        if (strcmp(name, enumerant->name) == 0) {
+            gm_prop_set_enum(prop, enumerant->val);
+            break;
+        }
+    }
+}
+
+inline const char *gm_prop_set_enum_name(struct gm_ui_property *prop, int val)
+{
+    for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
+        const struct gm_ui_enumerant *enumerant =
+            &prop->enum_state.enumerants[i];
+        if (enumerant->val == val)
+            return enumerant->name;
+    }
+    return NULL;
 }
 
 /* During development and testing it's convenient to have direct tuneables
