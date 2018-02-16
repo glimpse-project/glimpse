@@ -1221,7 +1221,7 @@ process_raw_joint_predictions(struct gm_context *ctx,
               ctx->tracking_history[prev[1]]->depth_capture_timestamp) / 1e9);
         float prev_dist = distance_between(
             &ctx->tracking_history[prev[0]]->joints_processed[idx],
-            &ctx->tracking_history[prev[1]]->joints_processed[idx]) / time;
+            &ctx->tracking_history[prev[1]]->joints_processed[idx]) / prev_time;
 
         if (confidence[j] < ctx->min_confidence &&
             distance > ctx->joint_move_threshold &&

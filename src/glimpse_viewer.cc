@@ -436,7 +436,7 @@ draw_controls(Data *data, int x, int y, int width, int height)
 
         if (snprintf(filename, sizeof(filename), "%s/%s",
                      assets_root, "glimpse-config.json") <
-            sizeof(filename))
+            (int)sizeof(filename))
         {
             FILE *output = fopen(filename, "w");
             if (output) {
