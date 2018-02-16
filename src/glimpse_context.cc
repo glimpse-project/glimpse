@@ -1716,6 +1716,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
                            r[6], r[7], r[8]);
         const float *t = ctx->depth_to_video_extrinsics.translation;
         translate = glm::vec3(t[0], t[1], t[2]);
+    } else {
+        rotate = glm::mat3();
+        translate = glm::vec3();
     }
 
     std::vector<float*> depth_images;
