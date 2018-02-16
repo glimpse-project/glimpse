@@ -429,19 +429,30 @@ draw_controls(Data *data, int x, int y, int width, int height)
 
     if (ImGui::Button("Save config")) {
         char *json = gm_config_save(data->log, props);
+        const char *assets_root = getenv("GLIMPSE_ASSETS_ROOT");
+        if (!assets_root)
+            assets_root = ".";
+        char filename[512];
 
-        FILE *output = fopen("glimpse-config.json", "w");
-        if (output) {
-            if (fputs(json, output) == EOF) {
-                gm_error(data->log, "Error writing config: %s",
-                         strerror(errno));
+        if (snprintf(filename, sizeof(filename), "%s/%s",
+                     assets_root, "glimpse-config.json") <
+            sizeof(filename))
+        {
+            FILE *output = fopen(filename, "w");
+            if (output) {
+                if (fputs(json, output) == EOF) {
+                    gm_error(data->log, "Error writing config: %s",
+                             strerror(errno));
+                } else {
+                    gm_debug(data->log, "Wrote %s", filename);
+                }
+                if (fclose(output) == EOF) {
+                    gm_error(data->log, "Error closing config: %s",
+                             strerror(errno));
+                }
+            } else {
+                gm_error(data->log, "Error saving config: %s", strerror(errno));
             }
-            if (fclose(output) == EOF) {
-                gm_error(data->log, "Error closing config: %s",
-                         strerror(errno));
-            }
-        } else {
-            gm_error(data->log, "Error saving config: %s", strerror(errno));
         }
 
         free(json);
