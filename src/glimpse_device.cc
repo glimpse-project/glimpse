@@ -114,7 +114,8 @@ struct gm_device
 
     union {
         struct {
-            int frame;
+            int32_t frame;
+            int32_t last_frame;
             uint64_t last_frame_time;
             char *path;
             JSON_Value *json;
@@ -407,7 +408,8 @@ notify_frame_locked(struct gm_device *dev)
     struct gm_device_event *event =
         device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
 
-    gm_debug(dev->log, "notify_frame_locked (requirements = 0x%" PRIx64, dev->frame_request_requirements);
+    gm_debug(dev->log, "notify_frame_locked (requirements = 0x%" PRIx64,
+             dev->frame_request_requirements);
 
     event->frame_ready.met_requirements = dev->frame_ready_requirements;
     dev->frame_request_requirements &= ~dev->frame_ready_requirements;
@@ -816,6 +818,9 @@ recording_open(struct gm_device *dev,
     dev->video_format = (enum gm_format)
         round(json_object_get_number(meta, "video_format"));
 
+    dev->recording.frame = 0;
+    dev->recording.last_frame = -1;
+
     return true;
 }
 
@@ -844,10 +849,92 @@ recording_io_thread_cb(void *userdata)
             json_object_get_array(json_object(dev->recording.json), "frames");
         JSON_Object *frame =
             json_array_get_object(frames, dev->recording.frame);
+
+        // Load last depth frame
+        const char *filename = NULL;
+        for (int i = dev->recording.frame;
+             i > dev->recording.last_frame && !filename; --i) {
+            filename = json_object_get_string(json_array_get_object(frames, i),
+                                              "depth_file");
+        }
+        if (filename) {
+            // Concatenate the relative path to the recording file path
+            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
+            char *abs_filename = (char *)malloc(abs_filename_size);
+            snprintf(abs_filename, abs_filename_size, "%s%s",
+                     dev->recording.path, filename);
+
+            size_t depth_len = (size_t)
+                round(json_object_get_number(frame, "depth_len"));
+
+            FILE *depth_file = fopen(abs_filename, "r");
+            if (depth_file) {
+                if (!dev->depth_buf_back) {
+                    dev->depth_buf_back =
+                        mem_pool_acquire_buffer(dev->depth_buf_pool);
+                }
+
+                if (fread(dev->depth_buf_back->base.data, 1, depth_len,
+                          depth_file) == depth_len) {
+                    dev->depth_buf_back->base.len = depth_len;
+                } else {
+                    fprintf(stderr, "Error reading depth file '%s'\n",
+                            filename);
+                }
+
+                if (fclose(depth_file) != 0) {
+                    fprintf(stderr, "Error closing depth file '%s'\n",
+                            filename);
+                }
+            }
+            free(abs_filename);
+        }
+
+        // Load last video frame
+        filename = NULL;
+        for (int i = dev->recording.frame;
+             i > dev->recording.last_frame && !filename; --i) {
+            filename = json_object_get_string(json_array_get_object(frames, i),
+                                              "video_file");
+        }
+        if (filename) {
+            // Concatenate the relative path to the recording file path
+            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
+            char *abs_filename = (char *)malloc(abs_filename_size);
+            snprintf(abs_filename, abs_filename_size, "%s%s",
+                     dev->recording.path, filename);
+
+            size_t video_len = (size_t)
+                round(json_object_get_number(frame, "video_len"));
+
+            FILE *video_file = fopen(abs_filename, "r");
+            if (video_file) {
+                if (!dev->video_buf_back) {
+                    dev->video_buf_back =
+                        mem_pool_acquire_buffer(dev->video_buf_pool);
+                }
+
+                if (fread(dev->video_buf_back->base.data, 1, video_len,
+                          video_file) == video_len) {
+                    dev->video_buf_back->base.len = video_len;
+                } else {
+                    fprintf(stderr, "Error reading video file '%s'\n",
+                            filename);
+                }
+
+                if (fclose(video_file) != 0) {
+                    fprintf(stderr, "Error closing video file '%s'\n",
+                            filename);
+                }
+            }
+            free(abs_filename);
+        }
+
+        // Wait until the appropriate time has elapsed before notifying the
+        // frame
         uint64_t frame_time = (uint64_t)
             json_object_get_number(frame, "timestamp");
-
-        // Spin until the next frame is required
+        uint64_t current_time = frame_time;
         uint64_t time = get_time();
         if (dev->recording.frame > 0) {
             JSON_Object *last_frame =
@@ -864,115 +951,59 @@ recording_io_thread_cb(void *userdata)
                 uint64_t duration = time - dev->recording.last_frame_time;
 
                 // Safe-guard against get_time going backwards
-                if (dev->running && time > dev->recording.last_frame_time &&
+                if (dev->running && time >= dev->recording.last_frame_time &&
                     duration < frame_duration) {
-                    uint64_t rem = frame_duration - duration;
-                    usleep(rem / 1000);
+                    useconds_t wait = ((frame_duration - duration) / 1000) / 2;
+                    if (wait == 0) break;
+                    usleep(wait);
                 } else {
                     break;
                 }
             } while (true);
+
+            current_time = last_frame_time +
+              (time - dev->recording.last_frame_time);
         }
         dev->recording.last_frame_time = time;
 
-        /* more or less the same as kinect_depth_frame_cb() */
-        const char *filename = json_object_get_string(frame, "depth_file");
-        if (filename &&
-            dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
-            // Concatenate the relative path to the recording file path
-            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
-            char *abs_filename = (char *)malloc(abs_filename_size);
-            snprintf(abs_filename, abs_filename_size, "%s%s",
-                     dev->recording.path, filename);
-
-            size_t depth_len = (size_t)
-                round(json_object_get_number(frame, "depth_len"));
-
-            FILE *depth_file = fopen(abs_filename, "r");
-            if (depth_file) {
-                pthread_mutex_lock(&dev->swap_buffers_lock);
-
-                dev->depth_buf_back =
-                    mem_pool_acquire_buffer(dev->depth_buf_pool);
-
-                if (fread(dev->depth_buf_back->base.data, 1, depth_len,
-                          depth_file) == depth_len) {
-                    dev->depth_buf_back->base.len = depth_len;
-                    if (dev->depth_buf_ready)
-                        gm_buffer_unref(&dev->depth_buf_ready->base);
-                    dev->depth_buf_ready = dev->depth_buf_back;
-                    dev->depth_buf_back = NULL;
-
-                    dev->frame_time = frame_time;
-                    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
-
-                    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-                    gm_device_request_frame(dev, dev->frame_request_requirements);
-                } else {
-                    pthread_mutex_unlock(&dev->swap_buffers_lock);
-                    fprintf(stderr, "Error reading depth file '%s'\n",
-                            filename);
-                }
-
-                if (fclose(depth_file) != 0) {
-                    fprintf(stderr, "Error closing depth file '%s'\n",
-                            filename);
-                }
+        // Swap buffers
+        if (dev->depth_buf_back || dev->video_buf_back) {
+            pthread_mutex_lock(&dev->swap_buffers_lock);
+            dev->frame_time = frame_time;
+            if (dev->depth_buf_back &&
+                dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
+                if (dev->depth_buf_ready)
+                    gm_buffer_unref(&dev->depth_buf_ready->base);
+                dev->depth_buf_ready = dev->depth_buf_back;
+                dev->depth_buf_back = NULL;
+                dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
             }
-            free(abs_filename);
+
+            if (dev->video_buf_back &&
+                dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
+                if (dev->video_buf_ready)
+                    gm_buffer_unref(&dev->video_buf_ready->base);
+                dev->video_buf_ready = dev->video_buf_back;
+                dev->video_buf_back = NULL;
+                dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+            }
+            pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+            gm_device_request_frame(dev, dev->frame_request_requirements);
         }
 
-        /* more or less the same as kinect_rgb_frame_cb() */
-        filename = json_object_get_string(frame, "video_file");
-        if (filename &&
-            dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
-            // Concatenate the relative path to the recording file path
-            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
-            char *abs_filename = (char *)malloc(abs_filename_size);
-            snprintf(abs_filename, abs_filename_size, "%s%s",
-                     dev->recording.path, filename);
-
-            size_t video_len = (size_t)
-                round(json_object_get_number(frame, "video_len"));
-
-            FILE *video_file = fopen(abs_filename, "r");
-            if (video_file) {
-                pthread_mutex_lock(&dev->swap_buffers_lock);
-
-                dev->video_buf_back =
-                    mem_pool_acquire_buffer(dev->video_buf_pool);
-
-                if (fread(dev->video_buf_back->base.data, 1, video_len,
-                          video_file) == video_len) {
-                    dev->video_buf_back->base.len = video_len;
-                    if (dev->video_buf_ready)
-                      gm_buffer_unref(&dev->video_buf_ready->base);
-                    dev->video_buf_ready = dev->video_buf_back;
-                    dev->video_buf_back = NULL;
-
-                    dev->frame_time = frame_time;
-                    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
-                    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-                    gm_device_request_frame(dev,
-                                            dev->frame_request_requirements);
-                } else {
-                    pthread_mutex_unlock(&dev->swap_buffers_lock);
-                    fprintf(stderr, "Error reading video file '%s'\n",
-                            filename);
-                }
-
-                if (fclose(video_file) != 0) {
-                    fprintf(stderr, "Error closing video file '%s'\n",
-                            filename);
-                }
+        // Skip frames if we spent too long on this one
+        dev->recording.last_frame = dev->recording.frame;
+        do {
+            ++dev->recording.frame;
+            if (dev->recording.frame >= (int32_t)json_array_get_count(frames)) {
+                dev->recording.last_frame = -1;
+                dev->recording.frame = 0;
+                break;
             }
-            free(abs_filename);
-        }
-
-        dev->recording.frame = (dev->recording.frame + 1) %
-          json_array_get_count(frames);
+        } while ((uint64_t)json_object_get_number(
+            json_array_get_object(frames, dev->recording.frame),
+            "timestamp") <= current_time);
     }
 
     return NULL;
