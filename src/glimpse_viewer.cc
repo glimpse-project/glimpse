@@ -169,8 +169,6 @@ typedef struct _Data
 
     struct gm_device *active_device;
 
-    enum gm_rotation camera_rotation;
-
     /* Events from the gm_context and gm_device apis may be delivered via any
      * arbitrary thread which we don't want to block, and at a time where
      * the gm_ apis may not be reentrant due to locks held during event
@@ -879,7 +877,7 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
         data,
         x, y, width, height,
         depth_width, depth_height,
-        "Cloud", 0, data->camera_rotation);
+        "Cloud", 0, GM_ROTATION_0);
 
     update_cloud_vis(data, win_size, uiScale);
 
@@ -931,7 +929,7 @@ draw_ui(Data *data)
             gm_context_rotate_intrinsics(data->ctx,
                                          video_intrinsics,
                                          &rotated_video_intrinsics,
-                                         data->camera_rotation);
+                                         data->last_video_frame->camera_rotation);
 
             const struct gm_intrinsics *depth_intrinsics =
                 gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
@@ -958,7 +956,7 @@ draw_ui(Data *data)
                                rotated_video_intrinsics.width,
                                rotated_video_intrinsics.height,
                                "Video Buffer", gl_vid_tex,
-                               data->camera_rotation);
+                               data->last_video_frame->camera_rotation);
 
             // Draw label inference visualisation in top-right
             draw_visualisation(data,
@@ -1006,7 +1004,7 @@ draw_ui(Data *data)
             gm_context_rotate_intrinsics(data->ctx,
                                          video_intrinsics,
                                          &rotated_video_intrinsics,
-                                         data->camera_rotation);
+                                         data->last_video_frame->camera_rotation);
 
             const struct gm_intrinsics *depth_intrinsics =
                 gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
@@ -1032,7 +1030,7 @@ draw_ui(Data *data)
                                    rotated_video_intrinsics.width,
                                    rotated_video_intrinsics.height,
                                    "Video Buffer", gl_vid_tex,
-                                   data->camera_rotation);
+                                   data->last_video_frame->camera_rotation);
                 break;
             case 3:
                 draw_visualisation(data,
@@ -1405,16 +1403,6 @@ handle_device_ready(Data *data, struct gm_device *dev)
 }
 
 static void
-handle_device_property_changed(Data *data, struct gm_ui_property *prop)
-{
-    /* XXX: not ideal to match properties by string names */
-    if (strcmp(prop->name, "rotation") == 0) {
-        data->camera_rotation = (enum gm_rotation)gm_prop_get_enum(prop);
-        gm_context_set_camera_rotation(data->ctx, data->camera_rotation);
-    }
-}
-
-static void
 handle_device_event(Data *data, struct gm_device_event *event)
 {
     // Ignore unexpected device events
@@ -1432,9 +1420,6 @@ handle_device_event(Data *data, struct gm_device_event *event)
             data->pending_frame_requirements) {
             data->device_frame_ready = true;
         }
-        break;
-    case GM_DEV_EVENT_PROP_CHANGED:
-        handle_device_property_changed(data, event->prop_changed.prop);
         break;
     }
 

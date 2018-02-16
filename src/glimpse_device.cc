@@ -1067,30 +1067,6 @@ notify_device_ready(struct gm_device *dev)
     dev->event_callback(event, dev->callback_data);
 }
 
-static void
-notify_property_changed(struct gm_ui_property *prop, int rotation)
-{
-    struct gm_device *dev = (struct gm_device *)prop->object;
-    struct gm_device_event *event =
-        device_event_alloc(dev, GM_DEV_EVENT_PROP_CHANGED);
-
-    gm_debug(dev->log, "notify %s property changed", prop->name);
-
-    event->prop_changed.prop = prop;
-
-    dev->event_callback(event, dev->callback_data);
-}
-
-static void
-device_set_rotation_prop(struct gm_ui_property *prop, int rotation)
-{
-    struct gm_device *dev = (struct gm_device *)prop->object;
-
-    dev->camera_rotation = rotation;
-
-    notify_property_changed(prop, rotation);
-}
-
 #ifdef USE_TANGO
 static bool
 tango_open(struct gm_device *dev, struct gm_device_config *config, char **err)
@@ -1440,8 +1416,7 @@ tango_set_display_rotation(struct gm_device *dev, enum gm_rotation display_rotat
              90 * camera_rotation,
              ((int)display_rotation)*90);
 
-    struct gm_ui_property *prop = &dev->properties[dev->camera_rotation_prop_id];
-    device_set_rotation_prop(prop, camera_rotation);
+    dev->camera_rotation = camera_rotation;
 }
 
 static void
@@ -1752,7 +1727,6 @@ gm_device_open(struct gm_logger *log,
     prop.desc = "Rotation of camera images relative to current display orientation";
     prop.type = GM_PROPERTY_ENUM;
     prop.enum_state.ptr = &dev->camera_rotation;
-    prop.enum_state.set = device_set_rotation_prop;
     //prop.read_only = true;
 
     for (int i = 0; i < 4; i++) {
@@ -2010,6 +1984,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
     }
 
     frame->base.timestamp = dev->frame_time;
+    frame->base.camera_rotation = (enum gm_rotation)dev->camera_rotation;
 
     dev->frame_ready_requirements = 0;
 

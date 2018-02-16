@@ -145,6 +145,8 @@ struct gm_frame
      * want a stable ABI.
      */
     uint64_t timestamp;
+    enum gm_rotation camera_rotation;
+
     enum gm_format depth_format;
     struct gm_buffer *depth;
     enum gm_format video_format;
@@ -270,10 +272,6 @@ gm_context_set_event_callback(struct gm_context *ctx,
 
 void
 gm_context_event_free(struct gm_event *event);
-
-void
-gm_context_set_camera_rotation(struct gm_context *ctx,
-                               enum gm_rotation rotation);
 
 /* Should be called every frame from the render thread with a gles context
  * bound to have a chance to use the gpu.

@@ -90,8 +90,6 @@ struct glimpse_data
 
     bool device_ready;
 
-    enum gm_rotation camera_rotation;
-
     /* When we request gm_device for a frame we set requirements for what the
      * frame should include. We track the requirements so we avoid sending
      * subsequent frame requests that would downgrade the requirements
@@ -450,18 +448,6 @@ handle_device_ready(struct glimpse_data *data)
 }
 
 static void
-handle_device_property_changed(struct glimpse_data *data, struct gm_ui_property *prop)
-{
-    /* XXX: not ideal to match properties by string names */
-    if (strcmp(prop->name, "rotation") == 0) {
-        data->camera_rotation = (enum gm_rotation)gm_prop_get_enum(prop);
-        gm_context_set_camera_rotation(data->ctx, data->camera_rotation);
-        gm_debug(data->log, "camera rotation changed to %d degrees",
-                 ((int)data->camera_rotation) * 90);
-    }
-}
-
-static void
 handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
 {
     switch (event->type) {
@@ -481,9 +467,6 @@ handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
             data->pending_frame_requirements = 0;
             data->device_frame_ready = true;
         }
-        break;
-    case GM_DEV_EVENT_PROP_CHANGED:
-        handle_device_property_changed(data, event->prop_changed.prop);
         break;
     }
 
@@ -753,7 +736,7 @@ render_ar_video_background(struct glimpse_data *data)
     }
 #endif
 
-    if (data->gl_vid_tex != 0) {
+    if (data->gl_vid_tex != 0 && data->last_video_frame != NULL) {
 
 #ifdef USE_TANGO
         if (TangoService_updateTextureExternalOes(
@@ -763,7 +746,7 @@ render_ar_video_background(struct glimpse_data *data)
         }
 #endif
 
-        enum gm_rotation rotation = data->camera_rotation;
+        enum gm_rotation rotation = data->last_video_frame->camera_rotation;
 
         struct {
             float x, y, s, t;

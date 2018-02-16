@@ -223,7 +223,6 @@ struct gm_tracking_impl
     struct gm_intrinsics training_camera_intrinsics;
     struct gm_extrinsics depth_to_video_extrinsics;
     bool extrinsics_set;
-    enum gm_rotation camera_rotation;
 
     struct gm_frame *frame;
 
@@ -281,8 +280,6 @@ struct gm_context
     struct gm_intrinsics basis_training_camera_intrinsics;
     struct gm_extrinsics basis_depth_to_video_extrinsics;
     bool basis_extrinsics_set;
-
-    enum gm_rotation camera_rotation;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -1102,7 +1099,7 @@ tracking_create_video_rgb_image(struct gm_tracking_impl *tracking)
     int height = ctx->basis_video_camera_intrinsics.height;
     int rot_width = tracking->video_camera_intrinsics.width;
     enum gm_format format = tracking->frame->video_format;
-    enum gm_rotation rotation = tracking->camera_rotation;
+    enum gm_rotation rotation = tracking->frame->camera_rotation;
     uint8_t *video = (uint8_t *)tracking->frame->video->data;
     uint8_t *video_rgb = (uint8_t *)tracking->video_rgb;
 
@@ -2219,7 +2216,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     int height = ctx->basis_depth_camera_intrinsics.height;
     int rot_width = tracking->depth_camera_intrinsics.width;
     int rot_height = tracking->depth_camera_intrinsics.height;
-    enum gm_rotation rotation = tracking->camera_rotation;
+    enum gm_rotation rotation = tracking->frame->camera_rotation;
     void *depth = buffer->data;
     float *depth_copy = tracking->depth;
 
@@ -2473,8 +2470,6 @@ detector_thread_cb(void *data)
 
         tracking->frame = frame;
 
-        tracking->camera_rotation = ctx->camera_rotation;
-
         /* FIXME: rotate the camera extrinsics according to the display rotation */
         tracking->extrinsics_set = ctx->basis_extrinsics_set;
         tracking->depth_to_video_extrinsics = ctx->basis_depth_to_video_extrinsics;
@@ -2482,11 +2477,11 @@ detector_thread_cb(void *data)
         gm_context_rotate_intrinsics(ctx,
                                      &ctx->basis_video_camera_intrinsics,
                                      &tracking->video_camera_intrinsics,
-                                     tracking->camera_rotation);
+                                     tracking->frame->camera_rotation);
         gm_context_rotate_intrinsics(ctx,
                                      &ctx->basis_depth_camera_intrinsics,
                                      &tracking->depth_camera_intrinsics,
-                                     tracking->camera_rotation);
+                                     tracking->frame->camera_rotation);
 
         tracking->training_camera_intrinsics = ctx->basis_training_camera_intrinsics;
 
@@ -3398,13 +3393,6 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
     } else {
         ctx->basis_extrinsics_set = false;
     }
-}
-
-void
-gm_context_set_camera_rotation(struct gm_context *ctx,
-                               enum gm_rotation rotation)
-{
-    ctx->camera_rotation = rotation;
 }
 
 const gm_intrinsics *
