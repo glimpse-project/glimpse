@@ -58,6 +58,11 @@
 #define GLSL_SHADER_VERSION "#version 150\n"
 #endif
 
+#ifdef USE_TANGO
+#include <tango_client_api.h>
+#include <tango_support_api.h>
+#endif
+
 using half_float::half;
 
 enum event_type
@@ -85,13 +90,7 @@ struct glimpse_data
 
     bool device_ready;
 
-    /* A convenience for accessing the depth_camera_intrinsics.width/height */
-    int depth_width;
-    int depth_height;
-
-    /* A convenience for accessing the video_camera_intrinsics.width/height */
-    int video_width;
-    int video_height;
+    enum gm_rotation camera_rotation;
 
     /* When we request gm_device for a frame we set requirements for what the
      * frame should include. We track the requirements so we avoid sending
@@ -439,20 +438,27 @@ handle_device_ready(struct glimpse_data *data)
 {
     struct gm_intrinsics *depth_intrinsics =
         gm_device_get_depth_intrinsics(data->device);
-    data->depth_width = depth_intrinsics->width;
-    data->depth_height = depth_intrinsics->height;
+    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
 
     struct gm_intrinsics *video_intrinsics =
         gm_device_get_video_intrinsics(data->device);
-    data->video_width = video_intrinsics->width;
-    data->video_height = video_intrinsics->height;
-
-    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(data->device));*/
 
     data->device_ready = true;
+}
+
+static void
+handle_device_property_changed(struct glimpse_data *data, struct gm_ui_property *prop)
+{
+    /* XXX: not ideal to match properties by string names */
+    if (strcmp(prop->name, "rotation") == 0) {
+        data->camera_rotation = (enum gm_rotation)gm_prop_get_enum(prop);
+        gm_context_set_camera_rotation(data->ctx, data->camera_rotation);
+        gm_debug(data->log, "camera rotation changed to %d degrees",
+                 ((int)data->camera_rotation) * 90);
+    }
 }
 
 static void
@@ -475,6 +481,9 @@ handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
             data->pending_frame_requirements = 0;
             data->device_frame_ready = true;
         }
+        break;
+    case GM_DEV_EVENT_PROP_CHANGED:
+        handle_device_property_changed(data, event->prop_changed.prop);
         break;
     }
 
@@ -534,19 +543,10 @@ gm_unity_process_events(void)
 }
 
 static void
-draw_video_quad(struct glimpse_data *data,
-                float s0, float t0,
-                float s1, float t1)
+draw_video(struct glimpse_data *data,
+           float *xyst_verts,
+           int n_verts)
 {
-    struct {
-        float x, y, s, t;
-    } quad_strip[4] = {
-        { -1,  1, s0, t0, }, //  0  2
-        { -1, -1, s0, t1, }, //  | /|
-        {  1,  1, s1, t0, }, //  |/ |
-        {  1, -1, s1, t1  }  //  1  3
-    };
-
     /* Try our best to save and restore and GL state we use, to avoid confusing
      * any caching of state that Unity does.
      */
@@ -556,11 +556,15 @@ draw_video_quad(struct glimpse_data *data,
     GLint saved_array_buffer;
     glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_array_buffer);
 
+    GLboolean saved_depth_test_enable = glIsEnabled(GL_DEPTH_TEST);
+
     if (!data->attrib_quad_bo) {
         glGenBuffers(1, &data->attrib_quad_bo);
-        glBindBuffer(GL_ARRAY_BUFFER, data->attrib_quad_bo);
-        glBufferData(GL_ARRAY_BUFFER, sizeof(quad_strip), quad_strip, GL_STATIC_DRAW);
     }
+    /* XXX: we could just cache buffers for each rotation */
+    glBindBuffer(GL_ARRAY_BUFFER, data->attrib_quad_bo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * n_verts,
+                 xyst_verts, GL_STATIC_DRAW);
 
     if (!data->video_program) {
         const char *vert_shader =
@@ -576,9 +580,16 @@ draw_video_quad(struct glimpse_data *data,
             "}\n";
         const char *frag_shader =
             GLSL_SHADER_VERSION
+#ifdef USE_TANGO
+            "#extension GL_OES_EGL_image_external_essl3 : require\n"
+#endif
             "precision highp float;\n"
             "precision highp int;\n"
+#ifdef USE_TANGO
+            "uniform samplerExternalOES tex_sampler;\n"
+#else
             "uniform sampler2D tex_sampler;\n"
+#endif
             "in vec2 tex_coords;\n"
             "out lowp vec4 frag_color;\n"
             "void main() {\n"
@@ -605,32 +616,40 @@ draw_video_quad(struct glimpse_data *data,
 
     glEnableVertexAttribArray(data->attrib_quad_pos);
     glVertexAttribPointer(data->attrib_quad_pos,
-                          2, GL_FLOAT, GL_FALSE, sizeof(quad_strip[0]), (void *)0);
+                          2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)0);
 
     if (data->attrib_quad_tex_coords != -1) {
         glEnableVertexAttribArray(data->attrib_quad_tex_coords);
         glVertexAttribPointer(data->attrib_quad_tex_coords,
-                              2, GL_FLOAT, GL_FALSE, sizeof(quad_strip[0]), (void *)8);
+                              2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)8);
     }
 
+    GLenum target = GL_TEXTURE_2D;
 #ifdef __ANDROID__
-    glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+#ifdef USE_TANGO
+    target = GL_TEXTURE_EXTERNAL_OES;
+    glBindTexture(target, data->gl_vid_tex);
+#else
+    glBindTexture(target, data->gl_vid_tex);
+#endif
 #else
     glBindTextureUnit(0, data->gl_vid_tex);
 #endif
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     /* Don't touch the depth buffer, otherwise everything rendered by later
      * cameras will likely be discarded...
      */
     glDepthMask(GL_FALSE);
-    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+    glDisable(GL_DEPTH_TEST);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, n_verts);
+    gm_debug(data->log, "draw_video");
     glDepthMask(GL_TRUE);
 
-    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindTexture(target, 0);
 
     glDisableVertexAttribArray(data->attrib_quad_pos);
     if (data->attrib_quad_tex_coords != -1)
@@ -638,6 +657,11 @@ draw_video_quad(struct glimpse_data *data,
 
     glBindBuffer(GL_ARRAY_BUFFER, saved_array_buffer);
     glUseProgram(saved_program);
+
+    if (saved_depth_test_enable)
+        glEnable(GL_DEPTH_TEST);
+    else
+        glDisable(GL_DEPTH_TEST);
 }
 
 static void
@@ -645,9 +669,15 @@ render_ar_video_background(struct glimpse_data *data)
 {
     gm_assert(data->log, !!data->ctx, "render_ar_video_background, NULL ctx");
 
+#ifndef USE_TANGO
     /* Upload latest video frame it it's changed...
      */
     if (data->last_video_frame != data->visible_frame) {
+        const struct gm_intrinsics *video_intrinsics =
+            gm_device_get_video_intrinsics(data->device);
+        int video_width = video_intrinsics->width;
+        int video_height = video_intrinsics->height;
+
         struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
 
         if (data->visible_frame)
@@ -669,29 +699,33 @@ render_ar_video_background(struct glimpse_data *data)
         void *video_front = new_frame->video->data;
         enum gm_format video_format = data->visible_frame->video_format;
 
+        if (data->gl_vid_tex == 0) {
+            glGenTextures(1, &data->gl_vid_tex);
+            glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        }
+
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
-            gm_debug(data->log, "uploading U8 %dx%d",
-                     data->video_width, data->video_height);
+            gm_debug(data->log, "uploading U8 %dx%d", video_width, video_height);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                         data->video_width, data->video_height,
+                         video_width, video_height,
                          0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
             break;
 
         case GM_FORMAT_RGB_U8:
-            gm_debug(data->log, "uploading RGB8 %dx%d",
-                     data->video_width, data->video_height);
+            gm_debug(data->log, "uploading RGB8 %dx%d", video_width, video_height);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                         data->video_width, data->video_height,
+                         video_width, video_height,
                          0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
             break;
 
         case GM_FORMAT_RGBX_U8:
         case GM_FORMAT_RGBA_U8:
-            gm_debug(data->log, "uploading RGBA8 %dx%d",
-                     data->video_width, data->video_height);
+            gm_debug(data->log, "uploading RGBA8 %dx%d", video_width, video_height);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                         data->video_width, data->video_height,
+                         video_width, video_height,
                          0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
             break;
 
@@ -707,13 +741,76 @@ render_ar_video_background(struct glimpse_data *data)
         glBindTexture(GL_TEXTURE_2D, 0);
         gm_debug(data->log, "render_ar_video_background DEBUG 6");
     }
+#else
+    if (data->gl_vid_tex == 0) {
+        glGenTextures(1, &data->gl_vid_tex);
+        glBindTexture(GL_TEXTURE_EXTERNAL_OES, data->gl_vid_tex);
 
-    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
-    if (tracking) {
-        gm_tracking_unref(tracking);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
+#endif
 
-    draw_video_quad(data, 0, 0, 1, 1);
+    if (data->gl_vid_tex != 0) {
+
+#ifdef USE_TANGO
+        if (TangoService_updateTextureExternalOes(
+                TANGO_CAMERA_COLOR, data->gl_vid_tex,
+                NULL /* ignore timestamp */) != TANGO_SUCCESS) {
+            gm_warn(data->log, "Failed to get a color image.");
+        }
+#endif
+
+        enum gm_rotation rotation = data->camera_rotation;
+
+        struct {
+            float x, y, s, t;
+        } xyst_verts[4] = {
+            { -1,  1, 0, 0, }, //  0 -- 1
+            {  1,  1, 1, 0, }, //  | \  |
+            {  1, -1, 1, 1  }, //  |  \ |
+            { -1, -1, 0, 1, }, //  3 -- 2
+        };
+        gm_debug(data->log, "rendering background with camera rotation of %d degrees",
+                 ((int)rotation) * 90);
+
+        switch (rotation) {
+        case GM_ROTATION_0:
+            break;
+        case GM_ROTATION_90:
+            xyst_verts[0].s = 1; xyst_verts[0].t = 0;
+            xyst_verts[1].s = 1; xyst_verts[1].t = 1;
+            xyst_verts[2].s = 0; xyst_verts[2].t = 1;
+            xyst_verts[3].s = 0; xyst_verts[3].t = 0;
+            break;
+        case GM_ROTATION_180:
+            xyst_verts[0].s = 1; xyst_verts[0].t = 1;
+            xyst_verts[1].s = 0; xyst_verts[1].t = 1;
+            xyst_verts[2].s = 0; xyst_verts[2].t = 0;
+            xyst_verts[3].s = 1; xyst_verts[3].t = 0;
+            break;
+        case GM_ROTATION_270:
+            xyst_verts[0].s = 0; xyst_verts[0].t = 1;
+            xyst_verts[1].s = 0; xyst_verts[1].t = 0;
+            xyst_verts[2].s = 1; xyst_verts[2].t = 0;
+            xyst_verts[3].s = 1; xyst_verts[3].t = 1;
+            break;
+        }
+
+        gm_debug(data->log, "UVs: %f,%f %f,%f %f,%f, %f,%f",
+                 xyst_verts[0].s,
+                 xyst_verts[0].t,
+                 xyst_verts[1].s,
+                 xyst_verts[1].t,
+                 xyst_verts[2].s,
+                 xyst_verts[2].t,
+                 xyst_verts[3].s,
+                 xyst_verts[3].t);
+
+        draw_video(data, (float *)xyst_verts, 4);
+    }
 }
 
 static void

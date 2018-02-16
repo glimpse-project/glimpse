@@ -113,7 +113,6 @@ typedef struct _Data
     bool gl_initialized;
 
     struct gm_context *ctx;
-    struct gm_device *device;
 
 #ifdef USE_GLFW
     GLFWwindow *window;
@@ -122,18 +121,6 @@ typedef struct _Data
 #endif
     int win_width;
     int win_height;
-
-    /* A convenience for accessing the depth_camera_intrinsics.width/height */
-    int depth_width;
-    int depth_height;
-
-    /* A convenience for accessing the video_camera_intrinsics.width/height */
-    int video_width;
-    int video_height;
-
-    /* A convenience for accessing training_camera_intrinsics.width/height */
-    int training_width;
-    int training_height;
 
     /* A convenience for accessing number of joints in latest tracking */
     int n_joints;
@@ -176,9 +163,13 @@ typedef struct _Data
     struct gm_recording *recording;
     bool recorded_depth;
     bool recorded_video;
+    struct gm_device *recording_device;
 
-    bool playback;
     struct gm_device *playback_device;
+
+    struct gm_device *active_device;
+
+    enum gm_rotation camera_rotation;
 
     /* Events from the gm_context and gm_device apis may be delivered via any
      * arbitrary thread which we don't want to block, and at a time where
@@ -252,7 +243,8 @@ static bool permissions_check_passed;
 #endif
 
 static void viewer_init(Data *data);
-static void refresh_viewer_opengl(Data *data, struct gm_device *dev);
+
+static void init_viewer_opengl(Data *data);
 static void init_basic_opengl(Data *data);
 static void handle_device_ready(Data *data, struct gm_device *dev);
 static void on_device_event_cb(struct gm_device_event *device_event,
@@ -278,7 +270,7 @@ on_profiler_pause_cb(bool pause)
 }
 
 glm::mat4
-intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
+intrinsics_to_project_matrix(const struct gm_intrinsics *intrinsics,
                              float near, float far)
 {
   float width = intrinsics->width;
@@ -381,9 +373,9 @@ adjust_aspect(ImVec2 &input, int width, int height)
     } else {
         output.x = input.y * aspect;
     }
-
-    ImGui::SetCursorPosX((input.x - output.x) / 2.f);
-    ImGui::SetCursorPosY((input.y - output.y) / 2.f);
+    ImVec2 cur = ImGui::GetCursorPos();
+    ImGui::SetCursorPosX(cur.x + (input.x - output.x) / 2.f);
+    ImGui::SetCursorPosY(cur.y + (input.y - output.y) / 2.f);
     input = output;
 }
 
@@ -411,8 +403,7 @@ draw_controls(Data *data, int x, int y, int width, int height)
     ImGui::Spacing();
 
     struct gm_ui_properties *props =
-        gm_device_get_ui_properties(data->playback ?
-                                    data->playback_device : data->device);
+        gm_device_get_ui_properties(data->active_device);
     draw_properties(props);
 
     ImGui::Spacing();
@@ -462,6 +453,28 @@ draw_controls(Data *data, int x, int y, int width, int height)
 }
 
 static void
+viewer_close_playback_device(Data *data)
+{
+    gm_device_stop(data->playback_device);
+
+    unref_device_frames(data);
+
+    if (data->latest_tracking) {
+        gm_tracking_unref(data->latest_tracking);
+        data->latest_tracking = nullptr;
+    }
+
+    // Flush old device-dependent data from the context
+    gm_context_flush(data->ctx, NULL);
+    data->tracking_ready = false;
+
+    gm_device_close(data->playback_device);
+    data->playback_device = nullptr;
+
+    data->active_device = data->recording_device;
+}
+
+static void
 draw_playback_controls(Data *data, const ImVec4 &bounds)
 {
     ImGui::Begin("Playback controls", NULL,
@@ -485,47 +498,28 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
         if (data->recording) {
             gm_recording_close(data->recording);
             data->recording = NULL;
-        } else if (!data->playback) {
+        } else if (!data->playback_device) {
             const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
-            data->recording = gm_recording_init(data->log, data->device,
+            data->recording = gm_recording_init(data->log, data->recording_device,
                                                 record_path ? record_path :
                                                 "glimpse_viewer_recording",
                                                 data->overwrite_recording);
         }
     }
     ImGui::SameLine();
-    if (ImGui::Button(data->playback ? "Unload" : "Load") && !data->recording) {
-        if (data->playback) {
-            // Stop the playback device
-            data->playback = false;
-            gm_device_stop(data->playback_device);
+    if (ImGui::Button(data->playback_device ? "Unload" : "Load") &&
+        !data->recording)
+    {
+        if (data->playback_device) {
+            viewer_close_playback_device(data);
 
-            // Unref the current device frames
-            unref_device_frames(data);
-
-            // Unref the latest tracking data
-            if (data->latest_tracking) {
-                gm_tracking_unref(data->latest_tracking);
-                data->latest_tracking = nullptr;
-            }
-
-            // Flush old device-dependent data from the context
-            gm_context_flush(data->ctx, NULL);
-            data->tracking_ready = false;
-
-            // Close the device
-            gm_device_close(data->playback_device);
-            data->playback_device = nullptr;
-
-            // Wake up the connected device again
-            handle_device_ready(data, data->device);
+            // Wake up the recording device again
+            handle_device_ready(data, data->recording_device);
         } else {
-            gm_device_stop(data->device);
+            gm_device_stop(data->recording_device);
 
-            // Unref the current device frames
             unref_device_frames(data);
 
-            // Unref the latest tracking data
             if (data->latest_tracking) {
                 gm_tracking_unref(data->latest_tracking);
                 data->latest_tracking = nullptr;
@@ -543,7 +537,8 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
             data->playback_device = gm_device_open(data->log, &config, NULL);
             gm_device_set_event_callback(data->playback_device,
                                          on_device_event_cb, data);
-            data->playback = true;
+            data->active_device = data->playback_device;
+
             gm_device_commit_config(data->playback_device, NULL);
         }
     }
@@ -577,9 +572,11 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 }
 
 static ImVec2
-draw_visualisation(int x, int y, int width, int height,
+draw_visualisation(Data *data,
+                   int x, int y, int width, int height,
                    int aspect_width, int aspect_height,
-                   const char *name, GLuint tex)
+                   const char *name, GLuint tex,
+                   enum gm_rotation rotation)
 {
     ImGui::SetNextWindowPos(ImVec2(x, y));
     ImGui::SetNextWindowSize(ImVec2(width, height));
@@ -589,13 +586,57 @@ draw_visualisation(int x, int y, int width, int height,
                  ImGuiWindowFlags_NoScrollWithMouse |
                  ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
-    ImVec2 win_size = ImGui::GetContentRegionMax();
-    adjust_aspect(win_size, aspect_width, aspect_height);
+    ImVec2 area_size = ImGui::GetContentRegionAvail();
+    adjust_aspect(area_size, aspect_width, aspect_height);
+
     if (tex != 0) {
-        ImGui::Image((void *)(intptr_t)tex, win_size);
+        ImVec2 uv0, uv1, uv2, uv3;
+
+        switch (rotation) {
+        case GM_ROTATION_0:
+            uv0 = ImVec2(0, 0);
+            uv1 = ImVec2(1, 0);
+            uv2 = ImVec2(1, 1);
+            uv3 = ImVec2(0, 1);
+            break;
+        case GM_ROTATION_90:
+            uv0 = ImVec2(1, 0);
+            uv1 = ImVec2(1, 1);
+            uv2 = ImVec2(0, 1);
+            uv3 = ImVec2(0, 0);
+            break;
+        case GM_ROTATION_180:
+            uv0 = ImVec2(1, 1);
+            uv1 = ImVec2(0, 1);
+            uv2 = ImVec2(0, 0);
+            uv3 = ImVec2(1, 0);
+            break;
+        case GM_ROTATION_270:
+            uv0 = ImVec2(0, 1);
+            uv1 = ImVec2(0, 0);
+            uv2 = ImVec2(1, 0);
+            uv3 = ImVec2(1, 1);
+            break;
+        }
+
+        ImDrawList *draw_list = ImGui::GetWindowDrawList();
+        ImVec2 cur = ImGui::GetCursorScreenPos();
+        draw_list->PushTextureID((void *)(intptr_t)tex);
+
+        draw_list->PrimReserve(6, 4);
+        draw_list->PrimQuadUV(ImVec2(cur.x, cur.y),
+                              ImVec2(cur.x+area_size.x, cur.y),
+                              ImVec2(cur.x+area_size.x, cur.y+area_size.y),
+                              ImVec2(cur.x, cur.y+area_size.y),
+                              uv0,
+                              uv1,
+                              uv2,
+                              uv3,
+                              ImGui::GetColorU32(ImVec4(1,1,1,1)));
+        draw_list->PopTextureID();
         ImGui::End();
     }
-    return win_size;
+    return area_size;
 }
 
 static void
@@ -672,6 +713,16 @@ update_tracking_buffers(Data *data)
 static void
 update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
 {
+    const struct gm_intrinsics *video_intrinsics =
+        gm_tracking_get_video_camera_intrinsics(data->latest_tracking);
+    int video_width = video_intrinsics->width;
+    int video_height = video_intrinsics->height;
+
+    const struct gm_intrinsics *depth_intrinsics =
+        gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
+    int depth_width = depth_intrinsics->width;
+    int depth_height = depth_intrinsics->height;
+
     // Ensure the framebuffer texture is valid
     if (!cloud_tex_valid) {
         int width = win_size.x * uiScale.x;
@@ -709,10 +760,7 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
     }
 
     // Calculate the projection matrix
-    struct gm_intrinsics *intrinsics =
-      gm_device_get_depth_intrinsics(data->playback ?
-                                     data->playback_device : data->device);
-    glm::mat4 proj = intrinsics_to_project_matrix(intrinsics, 0.01f, 10);
+    glm::mat4 proj = intrinsics_to_project_matrix(depth_intrinsics, 0.01f, 10);
     glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
     mvp = glm::translate(mvp, data->focal_point);
     mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
@@ -732,12 +780,30 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
     glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
     glUniform1f(gl_db_uni_pt_size, 2.f);
 
+    // Update camera intrinsics
+    glUniform2i(gl_db_uni_depth_size,
+                (GLint)depth_width,
+                (GLint)depth_height);
+    glUniform2f(gl_db_uni_video_size,
+                (GLfloat)video_width,
+                (GLfloat)video_height);
+    glUniform4f(gl_db_uni_depth_intrinsics,
+                (GLfloat)depth_intrinsics->fx,
+                (GLfloat)depth_intrinsics->fy,
+                (GLfloat)depth_intrinsics->cx,
+                (GLfloat)depth_intrinsics->cy);
+    glUniform4f(gl_db_uni_video_intrinsics,
+                (GLfloat)video_intrinsics->fx,
+                (GLfloat)video_intrinsics->fy,
+                (GLfloat)video_intrinsics->cx,
+                (GLfloat)video_intrinsics->cy);
+
     glEnableVertexAttribArray(gl_db_attr_depth);
     glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
     glVertexAttribPointer(gl_db_attr_depth, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
 
     glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
-    glDrawArrays(GL_POINTS, 0, data->video_width * data->video_height);
+    glDrawArrays(GL_POINTS, 0, depth_width * depth_height);
 
     glDisableVertexAttribArray(gl_db_attr_depth);
 
@@ -805,10 +871,15 @@ static void
 draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
                          int x, int y, int width, int height)
 {
+    const struct gm_intrinsics *depth_intrinsics =
+        gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
+    int depth_width = depth_intrinsics->width;
+    int depth_height = depth_intrinsics->height;
     ImVec2 win_size = draw_visualisation(
+        data,
         x, y, width, height,
-        data->depth_width, data->depth_height,
-        "Cloud", 0);
+        depth_width, depth_height,
+        "Cloud", 0, data->camera_rotation);
 
     update_cloud_vis(data, win_size, uiScale);
 
@@ -853,29 +924,56 @@ draw_ui(Data *data)
         int vis_width = main_area_size.x/2;
         int vis_height = main_area_size.y/2;
 
-        // Draw depth buffer visualisation in top-left
-        draw_visualisation(origin.x + left_col, origin.y,
-                           vis_width, vis_height,
-                           data->depth_width, data->depth_height,
-                           "Depth Buffer", gl_depth_rgb_tex);
+        if (data->latest_tracking) {
+            const struct gm_intrinsics *video_intrinsics =
+                gm_device_get_video_intrinsics(data->active_device);
+            gm_intrinsics rotated_video_intrinsics;
+            gm_context_rotate_intrinsics(data->ctx,
+                                         video_intrinsics,
+                                         &rotated_video_intrinsics,
+                                         data->camera_rotation);
 
-        // Draw video buffer visualisation in bottom-left
-        draw_visualisation(origin.x + left_col, origin.y + vis_height,
-                           vis_width, vis_height,
-                           data->video_width, data->video_height,
-                           "Video Buffer", gl_vid_tex);
+            const struct gm_intrinsics *depth_intrinsics =
+                gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
+            int depth_width = depth_intrinsics->width;
+            int depth_height = depth_intrinsics->height;
 
-        // Draw label inference visualisation in top-right
-        draw_visualisation(origin.x + left_col + vis_width, origin.y,
-                           vis_width, vis_height,
-                           data->training_width, data->training_height,
-                           "Labels", gl_labels_tex);
+            const struct gm_intrinsics *training_intrinsics =
+                gm_tracking_get_training_camera_intrinsics(data->latest_tracking);
+            int training_width = training_intrinsics->width;
+            int training_height = training_intrinsics->height;
 
-        // Draw point cloud and joint visualisation in bottom-left
-        draw_cloud_visualisation(data, uiScale,
-                                 origin.x + left_col + vis_width,
-                                 origin.y + vis_height,
-                                 vis_width, vis_height);
+            // Draw depth buffer visualisation in top-left
+            draw_visualisation(data,
+                               origin.x + left_col, origin.y,
+                               vis_width, vis_height,
+                               depth_width, depth_height,
+                               "Depth Buffer", gl_depth_rgb_tex,
+                               GM_ROTATION_0);
+
+            // Draw video buffer visualisation in bottom-left
+            draw_visualisation(data,
+                               origin.x + left_col, origin.y + vis_height,
+                               vis_width, vis_height,
+                               rotated_video_intrinsics.width,
+                               rotated_video_intrinsics.height,
+                               "Video Buffer", gl_vid_tex,
+                               data->camera_rotation);
+
+            // Draw label inference visualisation in top-right
+            draw_visualisation(data,
+                               origin.x + left_col + vis_width, origin.y,
+                               vis_width, vis_height,
+                               training_width, training_height,
+                               "Labels", gl_labels_tex,
+                               GM_ROTATION_0);
+
+            // Draw point cloud and joint visualisation in bottom-left
+            draw_cloud_visualisation(data, uiScale,
+                                     origin.x + left_col + vis_width,
+                                     origin.y + vis_height,
+                                     vis_width, vis_height);
+        }
     } else {
         // Draw a view-picker at the top
         const char *views[] = {
@@ -899,33 +997,60 @@ draw_ui(Data *data)
 
         ImGui::End();
 
+        if (current_view == 0) {
+            draw_controls(data, x, y, main_area_size.x, main_area_size.y);
+        } else if (data->latest_tracking != NULL) {
+            const struct gm_intrinsics *video_intrinsics =
+                gm_device_get_video_intrinsics(data->active_device);
+            gm_intrinsics rotated_video_intrinsics;
+            gm_context_rotate_intrinsics(data->ctx,
+                                         video_intrinsics,
+                                         &rotated_video_intrinsics,
+                                         data->camera_rotation);
+
+            const struct gm_intrinsics *depth_intrinsics =
+                gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
+            int depth_width = depth_intrinsics->width;
+            int depth_height = depth_intrinsics->height;
+
+            const struct gm_intrinsics *training_intrinsics =
+                gm_tracking_get_training_camera_intrinsics(data->latest_tracking);
+            int training_width = training_intrinsics->width;
+            int training_height = training_intrinsics->height;
+
+            switch (current_view) {
+            case 1:
+                draw_visualisation(data,
+                                   x, y, main_area_size.x, main_area_size.y,
+                                   depth_width, depth_height,
+                                   "Depth Buffer", gl_depth_rgb_tex,
+                                   GM_ROTATION_0);
+                break;
+            case 2:
+                draw_visualisation(data,
+                                   x, y, main_area_size.x, main_area_size.y,
+                                   rotated_video_intrinsics.width,
+                                   rotated_video_intrinsics.height,
+                                   "Video Buffer", gl_vid_tex,
+                                   data->camera_rotation);
+                break;
+            case 3:
+                draw_visualisation(data,
+                                   x, y, main_area_size.x, main_area_size.y,
+                                   training_width, training_height,
+                                   "Labels", gl_labels_tex,
+                                   GM_ROTATION_0);
+                break;
+            case 4:
+                draw_cloud_visualisation(data, uiScale,
+                                         x, y, main_area_size.x, main_area_size.y);
+                break;
+            }
+        }
+
         if (current_view != 0) {
             draw_playback_controls(data, ImVec4(x, y, main_area_size.x,
                                                 main_area_size.y));
-        }
-        switch (current_view) {
-        case 0:
-            draw_controls(data, x, y, main_area_size.x, main_area_size.y);
-            break;
-        case 1:
-            draw_visualisation(x, y, main_area_size.x, main_area_size.y,
-                               data->depth_width, data->depth_height,
-                               "Depth Buffer", gl_depth_rgb_tex);
-            break;
-        case 2:
-            draw_visualisation(x, y, main_area_size.x, main_area_size.y,
-                               data->video_width, data->video_height,
-                               "Video Buffer", gl_vid_tex);
-            break;
-        case 3:
-            draw_visualisation(x, y, main_area_size.x, main_area_size.y,
-                               data->training_width, data->training_height,
-                               "Labels", gl_labels_tex);
-            break;
-        case 4:
-            draw_cloud_visualisation(data, uiScale,
-                                     x, y, main_area_size.x, main_area_size.y);
-            break;
         }
     }
 
@@ -948,9 +1073,7 @@ request_device_frame(Data *data, uint64_t requirements)
     uint64_t new_requirements = data->pending_frame_requirements | requirements;
 
     if (data->pending_frame_requirements != new_requirements) {
-        gm_device_request_frame(data->playback ?
-                                data->playback_device : data->device,
-                                new_requirements);
+        gm_device_request_frame(data->active_device, new_requirements);
         data->pending_frame_requirements = new_requirements;
     }
 }
@@ -967,8 +1090,7 @@ handle_device_frame_updates(Data *data)
     {
         ProfileScopedSection(GetLatestFrame);
         /* NB: gm_device_get_latest_frame will give us a _ref() */
-        gm_frame *device_frame = gm_device_get_latest_frame(data->playback ?
-            data->playback_device : data->device);
+        gm_frame *device_frame = gm_device_get_latest_frame(data->active_device);
         if (!device_frame) {
             return;
         }
@@ -1004,8 +1126,7 @@ handle_device_frame_updates(Data *data)
         // Combine the two video/depth frames into a single frame for gm_context
         if (data->last_depth_frame != data->last_video_frame) {
             struct gm_frame *full_frame =
-                gm_device_combine_frames(data->playback ?
-                                         data->playback_device : data->device,
+                gm_device_combine_frames(data->active_device,
                                          std::max(
                                              data->last_video_frame->timestamp,
                                              data->last_depth_frame->timestamp),
@@ -1071,6 +1192,11 @@ handle_device_frame_updates(Data *data)
     }
 
     if (upload && data->last_video_frame) {
+        const struct gm_intrinsics *video_intrinsics =
+            gm_device_get_video_intrinsics(data->active_device);
+        int video_width = video_intrinsics->width;
+        int video_height = video_intrinsics->height;
+
         ProfileScopedSection(UploadFrameTextures);
 
         /*
@@ -1091,20 +1217,20 @@ handle_device_frame_updates(Data *data)
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                         data->video_width, data->video_height,
+                         video_width, video_height,
                          0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
             break;
 
         case GM_FORMAT_RGB_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                         data->video_width, data->video_height,
+                         video_width, video_height,
                          0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
             break;
 
         case GM_FORMAT_RGBX_U8:
         case GM_FORMAT_RGBA_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                         data->video_width, data->video_height,
+                         video_width, video_height,
                          0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
             break;
 
@@ -1122,6 +1248,16 @@ handle_device_frame_updates(Data *data)
 static void
 upload_tracking_textures(Data *data)
 {
+    const struct gm_intrinsics *video_intrinsics =
+        gm_tracking_get_video_camera_intrinsics(data->latest_tracking);
+    int video_width = video_intrinsics->width;
+    int video_height = video_intrinsics->height;
+
+    const struct gm_intrinsics *depth_intrinsics =
+        gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
+    int depth_width = depth_intrinsics->width;
+    int depth_height = depth_intrinsics->height;
+
     ProfileScopedSection(UploadTrackingBufs);
 
     /*
@@ -1138,14 +1274,14 @@ upload_tracking_textures(Data *data)
 
     uint8_t *depth_rgb = (uint8_t *)gm_tracking_get_rgb_depth(data->latest_tracking);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->depth_width, data->depth_height,
+                 depth_width, depth_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
 
     /* Update depth buffer and colour buffer */
     const float *depth = gm_tracking_get_depth(data->latest_tracking);
     glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(float) * data->depth_width * data->depth_height,
+                 sizeof(float) * depth_width * depth_height,
                  depth, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -1154,10 +1290,10 @@ upload_tracking_textures(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    const uint8_t *color = gm_tracking_get_video(data->latest_tracking);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                 data->video_width, data->video_height,
-                 0, GL_RGBA, GL_UNSIGNED_BYTE, color);
+    uint8_t *video_rgb = (uint8_t *)gm_tracking_get_rgb_video(data->latest_tracking);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                 video_width, video_height,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, video_rgb);
 
     /*
      * Update inferred label map
@@ -1241,23 +1377,21 @@ handle_context_tracking_updates(Data *data)
 static void
 handle_device_ready(Data *data, struct gm_device *dev)
 {
-    fprintf(stderr, "%s device ready\n",
-            data->playback ? "Playback" : "Default");
+    gm_debug(data->log, "%s device ready\n",
+            dev == data->playback_device ? "Playback" : "Default");
+
+    if (!data->gl_initialized) {
+        init_viewer_opengl(data);
+    }
 
     struct gm_intrinsics *depth_intrinsics =
         gm_device_get_depth_intrinsics(dev);
-    data->depth_width = depth_intrinsics->width;
-    data->depth_height = depth_intrinsics->height;
+    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
 
     struct gm_intrinsics *video_intrinsics =
         gm_device_get_video_intrinsics(dev);
-    data->video_width = video_intrinsics->width;
-    data->video_height = video_intrinsics->height;
-
-    refresh_viewer_opengl(data, dev);
-
-    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
     gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
+
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(dev));*/
 
@@ -1271,11 +1405,20 @@ handle_device_ready(Data *data, struct gm_device *dev)
 }
 
 static void
+handle_device_property_changed(Data *data, struct gm_ui_property *prop)
+{
+    /* XXX: not ideal to match properties by string names */
+    if (strcmp(prop->name, "rotation") == 0) {
+        data->camera_rotation = (enum gm_rotation)gm_prop_get_enum(prop);
+        gm_context_set_camera_rotation(data->ctx, data->camera_rotation);
+    }
+}
+
+static void
 handle_device_event(Data *data, struct gm_device_event *event)
 {
     // Ignore unexpected device events
-    if ((data->playback && event->device != data->playback_device) ||
-        (!data->playback && event->device != data->device)) {
+    if (event->device != data->active_device) {
         gm_device_event_free(event);
         return;
     }
@@ -1290,6 +1433,9 @@ handle_device_event(Data *data, struct gm_device_event *event)
             data->device_frame_ready = true;
         }
         break;
+    case GM_DEV_EVENT_PROP_CHANGED:
+        handle_device_property_changed(data, event->prop_changed.prop);
+        break;
     }
 
     gm_device_event_free(event);
@@ -1300,7 +1446,7 @@ handle_context_event(Data *data, struct gm_event *event)
 {
     switch (event->type) {
     case GM_EVENT_REQUEST_FRAME:
-        fprintf(stderr, "Requesting frame\n");
+        gm_debug(data->log, "Requesting frame\n");
         data->context_needs_frame = true;
         request_device_frame(data,
                              (GM_REQUEST_FRAME_DEPTH |
@@ -1383,16 +1529,16 @@ app_focus_cb(GLFMDisplay *display, bool focused)
     gm_debug(data->log, focused ? "Focused" : "Unfocused");
 
     if (focused) {
-        if (data->playback) {
+        if (data->playback_device) {
             gm_device_start(data->playback_device);
         } else {
-            gm_device_start(data->device);
+            gm_device_start(data->recording_device);
         }
     } else {
-        if (data->playback) {
+        if (data->playback_device) {
             gm_device_stop(data->playback_device);
         } else {
-            gm_device_stop(data->device);
+            gm_device_stop(data->recording_device);
         }
     }
 }
@@ -1505,20 +1651,22 @@ on_khr_debug_message_cb(GLenum source,
                         GLenum gl_severity,
                         GLsizei length,
                         const GLchar *message,
-                        void *userParam)
+                        void *user_data)
 {
+    Data *data = (Data *)user_data;
+
     switch (gl_severity) {
     case GL_DEBUG_SEVERITY_HIGH:
-        fprintf(stderr, "GL DEBUG: HIGH SEVERITY: %s\n", message);
+        gm_log(data->log, GM_LOG_ERROR, "Viewer GL", "%s", message);
         break;
     case GL_DEBUG_SEVERITY_MEDIUM:
-        fprintf(stderr, "GL DEBUG: MEDIUM SEVERITY: %s\n", message);
+        gm_log(data->log, GM_LOG_WARN, "Viewer GL", "%s", message);
         break;
     case GL_DEBUG_SEVERITY_LOW:
-        fprintf(stderr, "GL DEBUG: LOW SEVERITY: %s\n", message);
+        gm_log(data->log, GM_LOG_WARN, "Viewer GL", "%s", message);
         break;
     case GL_DEBUG_SEVERITY_NOTIFICATION:
-        fprintf(stderr, "GL DEBUG: NOTIFICATION: %s\n", message);
+        gm_log(data->log, GM_LOG_INFO, "Viewer GL", "%s", message);
         break;
     }
 }
@@ -1644,8 +1792,9 @@ init_viewer_opengl(Data *data)
         "  fy = video_intrinsics.y;\n"
         "  cx = video_intrinsics.z;\n"
         "  cy = video_intrinsics.w;\n"
+
         "  float tx = ((dx * fx / depth) + cx) / video_size.x;\n"
-        "  float ty = ((dy * fy / depth) + cy) / video_size.y;\n"
+        "  float ty = ((dy * fy / depth) + (video_size.y - cy)) / video_size.y;\n"
 
         // Output values for the fragment shader
         "  gl_PointSize = pt_size;\n"
@@ -1664,6 +1813,11 @@ init_viewer_opengl(Data *data)
         "layout(location = 0) out vec4 color;\n\n"
 
         "void main() {\n"
+
+        /* XXX: Mesa bug? glsl es 300 should support texture() but this isn't
+         * working with Mesa (and it's not complaining about the
+         * "#version 300 es")
+         */
 #ifdef __ANDROID__
         "  color = texture(texture, v_tex_coord.st);\n"
 #else
@@ -1754,40 +1908,6 @@ init_viewer_opengl(Data *data)
     data->gl_initialized = true;
 }
 
-static void
-refresh_viewer_opengl(Data *data, struct gm_device *dev)
-{
-    if (!data->gl_initialized) {
-        init_viewer_opengl(data);
-    }
-
-    glUseProgram(gl_db_program);
-
-    // Update camera intrinsics
-    struct gm_intrinsics *depth_intrinsics =
-      gm_device_get_depth_intrinsics(dev);
-    struct gm_intrinsics *video_intrinsics =
-      gm_device_get_video_intrinsics(dev);
-
-    glUniform2i(gl_db_uni_depth_size,
-                (GLint)depth_intrinsics->width,
-                (GLint)depth_intrinsics->height);
-    glUniform2f(gl_db_uni_video_size,
-                (GLfloat)video_intrinsics->width,
-                (GLfloat)video_intrinsics->height);
-    glUniform4f(gl_db_uni_depth_intrinsics,
-                (GLfloat)depth_intrinsics->fx,
-                (GLfloat)depth_intrinsics->fy,
-                (GLfloat)depth_intrinsics->cx,
-                (GLfloat)depth_intrinsics->cy);
-    glUniform4f(gl_db_uni_video_intrinsics,
-                (GLfloat)video_intrinsics->fx,
-                (GLfloat)video_intrinsics->fy,
-                (GLfloat)video_intrinsics->cx,
-                (GLfloat)video_intrinsics->cy);
-
-    glUseProgram(0);
-}
 static void
 logger_cb(struct gm_logger *logger,
           enum gm_log_level level,
@@ -1939,6 +2059,10 @@ init_winsys_glfw(Data *data)
 static void __attribute__((unused))
 viewer_destroy(Data *data)
 {
+    if (data->playback_device) {
+        viewer_close_playback_device(data);
+    }
+
     /* Destroying the context' tracking pool will assert that all tracking
      * resources have been released first...
      */
@@ -1955,10 +2079,7 @@ viewer_destroy(Data *data)
      * release device resources (which need to be release before the device
      * can be cleanly closed).
      */
-    gm_device_stop(data->device);
-    if (data->playback_device) {
-        gm_device_stop(data->playback_device);
-    }
+    gm_device_stop(data->recording_device);
 
     for (unsigned i = 0; i < data->events_back->size(); i++) {
         struct event event = (*data->events_back)[i];
@@ -1977,10 +2098,7 @@ viewer_destroy(Data *data)
 
     unref_device_frames(data);
 
-    gm_device_close(data->device);
-    if (data->playback_device) {
-        gm_device_close(data->playback_device);
-    }
+    gm_device_close(data->recording_device);
 
     json_value_free(data->joint_map);
 
@@ -2054,11 +2172,6 @@ viewer_init(Data *data)
 
     data->ctx = gm_context_new(data->log, NULL);
 
-    const struct gm_intrinsics *training_intrinsics =
-        gm_context_get_training_intrinsics(data->ctx);
-    data->training_width = training_intrinsics->width;
-    data->training_height = training_intrinsics->height;
-
     gm_context_set_event_callback(data->ctx, on_event_cb, data);
 
     struct gm_asset *config_asset =
@@ -2073,19 +2186,19 @@ viewer_init(Data *data)
         free(open_err);
     }
 
-
     struct gm_device_config config = {};
 #ifdef USE_TANGO
     config.type = GM_DEVICE_TANGO;
 #else
     config.type = GM_DEVICE_KINECT;
 #endif
-    data->device = gm_device_open(data->log, &config, NULL);
-    gm_device_set_event_callback(data->device, on_device_event_cb, data);
+    data->recording_device = gm_device_open(data->log, &config, NULL);
+    data->active_device = data->recording_device;
+    gm_device_set_event_callback(data->recording_device, on_device_event_cb, data);
 #ifdef __ANDROID__
-    gm_device_attach_jvm(data->device, android_jvm_singleton);
+    gm_device_attach_jvm(data->recording_device, android_jvm_singleton);
 #endif
-    gm_device_commit_config(data->device, NULL);
+    gm_device_commit_config(data->recording_device, NULL);
 
     data->initialized = true;
 }

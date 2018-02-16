@@ -11,6 +11,8 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.Context;
 import android.content.ComponentName;
+import android.hardware.display.DisplayManager;
+import android.view.Display;
 
 import com.impossible.glimpse.GlimpseJNI;
 import com.impossible.glimpse.GlimpseConfig;
@@ -45,7 +47,7 @@ public class GlimpseUnityActivity extends UnityPlayerActivity
             mTangoServiceConnection = new ServiceConnection() {
                 public void onServiceConnected(ComponentName name, IBinder service) {
                     GlimpseJNI.onTangoServiceConnected(service);
-                    //setAndroidOrientation();
+                    forwardDisplayRotation();
                     Log.d("GlimpseUnityActivity", "Tango Service Connected!");
                 }
                 public void onServiceDisconnected(ComponentName name) {
@@ -53,6 +55,25 @@ public class GlimpseUnityActivity extends UnityPlayerActivity
                     // in the event that Tango itself crashes/gets upgraded while running.
                 }
             };
+        }
+
+        DisplayManager displayManager =
+            (DisplayManager)getSystemService(DISPLAY_SERVICE);
+        if (displayManager != null) {
+            displayManager.registerDisplayListener(new DisplayManager.DisplayListener() {
+                @Override
+                public void onDisplayAdded(int displayId) {}
+
+                @Override
+                public void onDisplayChanged(int displayId) {
+                    synchronized (this) {
+                        forwardDisplayRotation();
+                    }
+                }
+
+                @Override
+                public void onDisplayRemoved(int displayId) {}
+            }, null);
         }
     }
 
@@ -91,4 +112,13 @@ public class GlimpseUnityActivity extends UnityPlayerActivity
             unbindService(mTangoServiceConnection);
         }
     }
+
+    private void forwardDisplayRotation() {
+        Display display = getWindowManager().getDefaultDisplay();
+        int rotation = display.getRotation();
+        Log.d("GlimpseUnityActivity", "calling OnDisplayRotation " + rotation);
+        OnDisplayRotate(rotation);
+    }
+
+    native static void OnDisplayRotate(int rotation);
 }

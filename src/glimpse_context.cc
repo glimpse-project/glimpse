@@ -108,6 +108,42 @@
     for (int y = 0, off = 0; y < (int)height; ++y) \
         for (int x = 0; x < (int)width; ++x, ++off)
 
+/* A suboptimal but convenient way for us to handle image rotations inline with
+ * copies/format conversions.
+ *
+ * x, y, width and height are coordinates and the size relative to the input
+ * image.
+ *
+ * rot_width is the width of the rotated image
+ */
+#define with_rotated_rx_ry_roff(x, y, width, height, \
+                                rotation, rot_width, block) \
+    do { \
+        int rx = x; \
+        int ry = y; \
+        switch (rotation) { \
+        case GM_ROTATION_0: \
+            rx = x; \
+            ry = y; \
+            break; \
+        case GM_ROTATION_90: \
+            rx = y; \
+            ry = width - x - 1; \
+            break; \
+        case GM_ROTATION_180: \
+            rx = width - x - 1; \
+            ry = height - y - 1; \
+            break; \
+        case GM_ROTATION_270: \
+            rx = height - y - 1; \
+            ry = x; \
+            break; \
+        } \
+        int roff = rot_width * ry + rx; \
+        block \
+    }while (0)
+
+
 #define CLIPH(X) ((X) > 255 ? 255 : (X))
 #define RGB2Y(R, G, B) ((uint8_t)CLIPH(((66 * (uint32_t)(R) + \
                                          129 * (uint32_t)(G) + \
@@ -179,17 +215,28 @@ struct gm_tracking_impl
 
     struct gm_context *ctx;
 
-    uint64_t depth_capture_timestamp;
-    uint64_t video_capture_timestamp;
+    /* Note: these are derived from the corresponding ctx->basis_* state except
+     * they take into account the device rotation at the start of tracking.
+     */
+    struct gm_intrinsics depth_camera_intrinsics;
+    struct gm_intrinsics video_camera_intrinsics;
+    struct gm_intrinsics training_camera_intrinsics;
+    struct gm_extrinsics depth_to_video_extrinsics;
+    bool extrinsics_set;
+    enum gm_rotation camera_rotation;
+
+    struct gm_frame *frame;
 
     // Depth data, in meters
     float *depth;
 
     // Colour data, RGBA
-    uint8_t *video;
+    uint8_t *video_rgb;
+    bool video_rgb_valid;
 
     // Depth data mapped to colour for visualisation
     uint8_t *depth_rgb;
+    bool depth_rgb_valid;
 
     // Label inference data
     uint8_t *label_map;
@@ -221,14 +268,6 @@ struct gm_tracking_impl
     size_t face_detect_buf_height;
 };
 
-enum gm_rotation {
-  GM_ROTATION_UNKNOWN = -1,
-  GM_ROTATION_0 = 0,
-  GM_ROTATION_90 = 1,
-  GM_ROTATION_180 = 2,
-  GM_ROTATION_270 = 3
-};
-
 struct gm_context
 {
     struct gm_logger *log;
@@ -237,13 +276,13 @@ struct gm_context
     pthread_mutex_t liveness_lock;
     bool destroying;
 
-    //struct gm_intrinsics color_camera_intrinsics;
-    //struct gm_intrinsics rgbir_camera_intrinsics;
-    struct gm_intrinsics depth_camera_intrinsics;
-    struct gm_intrinsics video_camera_intrinsics;
-    struct gm_intrinsics training_camera_intrinsics;
-    struct gm_extrinsics depth_to_video_extrinsics;
-    bool extrinsics_set;
+    struct gm_intrinsics basis_depth_camera_intrinsics;
+    struct gm_intrinsics basis_video_camera_intrinsics;
+    struct gm_intrinsics basis_training_camera_intrinsics;
+    struct gm_extrinsics basis_depth_to_video_extrinsics;
+    bool basis_extrinsics_set;
+
+    enum gm_rotation camera_rotation;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -278,7 +317,7 @@ struct gm_context
     GLuint yuv_frame_scale_program;
     GLuint scale_program;
 
-    enum gm_rotation current_attrib_bo_rotation_ = { GM_ROTATION_UNKNOWN };
+    enum gm_rotation current_attrib_bo_rotation_ = { GM_ROTATION_0 };
     GLuint attrib_quad_rot_scale_bo;
 
     GLuint attrib_quad_rot_scale_pos;
@@ -386,7 +425,6 @@ struct gm_context
     pthread_mutex_t frame_ready_mutex;
     pthread_cond_t frame_ready_cond;
     struct gm_frame *frame_ready;
-    struct gm_frame *frame_front;
 
     void (*event_callback)(struct gm_context *ctx,
                            struct gm_event *event,
@@ -986,8 +1024,8 @@ tracking_create_rgb_label_map(struct gm_context *ctx,
                               struct gm_tracking_impl *tracking,
                               int debug_label)
 {
-    int width = ctx->training_camera_intrinsics.width;
-    int height = ctx->training_camera_intrinsics.height;
+    int width = tracking->training_camera_intrinsics.width;
+    int height = tracking->training_camera_intrinsics.height;
     uint8_t n_labels = ctx->n_labels;
     uint8_t *rgb_label_map = tracking->label_map_rgb;
 
@@ -1033,6 +1071,94 @@ tracking_create_rgb_label_map(struct gm_context *ctx,
     tracking->label_map_rgb_valid = true;
 }
 
+static void
+tracking_create_depth_rgb_image(struct gm_tracking_impl *tracking)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int width = tracking->depth_camera_intrinsics.width;
+    int height = tracking->depth_camera_intrinsics.height;
+
+    float *depth_buf = tracking->depth;
+    uint8_t *depth_rgb_buf = tracking->depth_rgb;
+
+    foreach_xy_off(width, height) {
+        float depth_m = depth_buf[off];
+        struct color rgb = stops_color_from_val(ctx->depth_color_stops,
+                                                ctx->n_depth_color_stops,
+                                                ctx->depth_color_stops_range,
+                                                depth_m);
+        uint8_t *depth_rgb = depth_rgb_buf + off * 3;
+        depth_rgb[0] = rgb.r;
+        depth_rgb[1] = rgb.g;
+        depth_rgb[2] = rgb.b;
+    }
+}
+
+static void
+tracking_create_video_rgb_image(struct gm_tracking_impl *tracking)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int width = ctx->basis_video_camera_intrinsics.width;
+    int height = ctx->basis_video_camera_intrinsics.height;
+    int rot_width = tracking->video_camera_intrinsics.width;
+    enum gm_format format = tracking->frame->video_format;
+    enum gm_rotation rotation = tracking->camera_rotation;
+    uint8_t *video = (uint8_t *)tracking->frame->video->data;
+    uint8_t *video_rgb = (uint8_t *)tracking->video_rgb;
+
+    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
+    // us easily combine our rotation with our copy...
+    //
+    // XXX: it could be worth reading multiple scanlines at a time so we could
+    // write out cache lines at a time instead of only 4 bytes (for rotated
+    // images).
+    //
+    switch(format) {
+    case GM_FORMAT_RGB_U8:
+        foreach_xy_off(width, height) {
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    {
+                                        video_rgb[roff * 3] = video[off * 3];
+                                        video_rgb[roff * 3 + 1] = video[off * 3 + 1];
+                                        video_rgb[roff * 3 + 2] = video[off * 3 + 2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_RGBX_U8:
+    case GM_FORMAT_RGBA_U8:
+        foreach_xy_off(width, height) {
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    {
+                                        video_rgb[roff * 3] = video[off * 4];
+                                        video_rgb[roff * 3 + 1] = video[off * 4 + 1];
+                                        video_rgb[roff * 3 + 2] = video[off * 4 + 2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_LUMINANCE_U8:
+        foreach_xy_off(width, height) {
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    {
+                                        uint8_t lum = video[off];
+                                        video_rgb[roff * 3] = lum;
+                                        video_rgb[roff * 3 + 1] = lum;
+                                        video_rgb[roff * 3 + 2] = lum;
+                                    });
+        }
+        break;
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_Z_U16_MM:
+    case GM_FORMAT_Z_F32_M:
+    case GM_FORMAT_Z_F16_M:
+    case GM_FORMAT_POINTS_XYZC_F32_M:
+        gm_assert(ctx->log, 0, "Unexpected format for video buffer");
+        return;
+    }
+}
+
 static bool
 predict_from_previous_frames(struct gm_context *ctx, int joint,
                              uint64_t timestamp, float *prediction)
@@ -1054,9 +1180,9 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
         p[i].z = tracking->joints_processed[joint*3+2];
     }
 
-    float t = (timestamp - ctx->tracking_history[0]->depth_capture_timestamp) /
-        (ctx->tracking_history[0]->depth_capture_timestamp -
-         ctx->tracking_history[3]->depth_capture_timestamp);
+    float t = (timestamp - ctx->tracking_history[0]->frame->timestamp) /
+        (ctx->tracking_history[0]->frame->timestamp -
+         ctx->tracking_history[3]->frame->timestamp);
     glm::vec3 q = 0.5f *
         ((2.f * p[1]) +
          (-p[0] + p[2]) * t +
@@ -1210,15 +1336,15 @@ process_raw_joint_predictions(struct gm_context *ctx,
         }
 
         float time = (float)
-            ((tracking->depth_capture_timestamp -
-              ctx->tracking_history[prev[0]]->depth_capture_timestamp) / 1e9);
+            ((tracking->frame->timestamp -
+              ctx->tracking_history[prev[0]]->frame->timestamp) / 1e9);
         float distance = distance_between(
             &tracking->joints[idx],
             &ctx->tracking_history[prev[0]]->joints_processed[idx]) / time;
 
         float prev_time = (float)
-            ((ctx->tracking_history[prev[0]]->depth_capture_timestamp -
-              ctx->tracking_history[prev[1]]->depth_capture_timestamp) / 1e9);
+            ((ctx->tracking_history[prev[0]]->frame->timestamp -
+              ctx->tracking_history[prev[1]]->frame->timestamp) / 1e9);
         float prev_dist = distance_between(
             &ctx->tracking_history[prev[0]]->joints_processed[idx],
             &ctx->tracking_history[prev[1]]->joints_processed[idx]) / prev_time;
@@ -1229,7 +1355,7 @@ process_raw_joint_predictions(struct gm_context *ctx,
              distance > (prev_dist * ctx->joint_scale_threshold))) {
             float prediction[3];
             if (!predict_from_previous_frames(
-                    ctx, j, tracking->depth_capture_timestamp,
+                    ctx, j, tracking->frame->timestamp,
                     prediction)) {
                 tracking->joints_predicted[j] = false;
                 LOGI("Prediction for joint %s failed", joint_name(j));
@@ -1405,20 +1531,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
     pcl::PointCloud<pcl::PointXYZ>::Ptr hires_cloud(
         new pcl::PointCloud<pcl::PointXYZ>);
-    hires_cloud->width = ctx->depth_camera_intrinsics.width / ctx->cloud_res;
-    hires_cloud->height = ctx->depth_camera_intrinsics.height / ctx->cloud_res;
+    hires_cloud->width = tracking->depth_camera_intrinsics.width / ctx->cloud_res;
+    hires_cloud->height = tracking->depth_camera_intrinsics.height / ctx->cloud_res;
     hires_cloud->points.resize(hires_cloud->width * hires_cloud->height);
     hires_cloud->is_dense = false;
 
     int n_points = 0;
 
-    float inv_fx = 1.0f / ctx->depth_camera_intrinsics.fx;
-    float inv_fy = -1.0f / ctx->depth_camera_intrinsics.fy;
-    float cx = ctx->depth_camera_intrinsics.cx;
-    float cy = ctx->depth_camera_intrinsics.cy;
+    float inv_fx = 1.0f / tracking->depth_camera_intrinsics.fx;
+    float inv_fy = -1.0f / tracking->depth_camera_intrinsics.fy;
+    float cx = tracking->depth_camera_intrinsics.cx;
+    float cy = tracking->depth_camera_intrinsics.cy;
 
     foreach_xy_off(hires_cloud->width, hires_cloud->height) {
-        int doff = (y * ctx->cloud_res) * ctx->depth_camera_intrinsics.width +
+        int doff = (y * ctx->cloud_res) * tracking->depth_camera_intrinsics.width +
                    (x * ctx->cloud_res);
         float depth = tracking->depth[doff];
         if (std::isnormal(depth) &&
@@ -1653,20 +1779,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // Reproject this point into the depth buffer space to get an offset
         // and check if the point exists in the dense cloud.
         int x = (int)
-            ((centroid[0] * ctx->depth_camera_intrinsics.fx / centroid[2]) +
-             ctx->depth_camera_intrinsics.cx);
-        if (x < 0 || x >= (int)ctx->depth_camera_intrinsics.width) {
+            ((centroid[0] * tracking->depth_camera_intrinsics.fx / centroid[2]) +
+             tracking->depth_camera_intrinsics.cx);
+        if (x < 0 || x >= (int)tracking->depth_camera_intrinsics.width) {
             continue;
         }
 
         int y = (int)
-            ((centroid[0] * ctx->depth_camera_intrinsics.fy / centroid[2]) +
-             ctx->depth_camera_intrinsics.cy);
-        if (y < 0 || y >= (int)ctx->depth_camera_intrinsics.height) {
+            ((centroid[0] * tracking->depth_camera_intrinsics.fy / centroid[2]) +
+             tracking->depth_camera_intrinsics.cy);
+        if (y < 0 || y >= (int)tracking->depth_camera_intrinsics.height) {
             continue;
         }
 
-        int off = y * ctx->depth_camera_intrinsics.width + x;
+        int off = y * tracking->depth_camera_intrinsics.width + x;
         if (std::isnan(hires_cloud->points[off].z) ||
             fabsf(centroid[2] - hires_cloud->points[off].z) >
             centroid_tolerance) {
@@ -1689,16 +1815,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
         return false;
     }
 
-    if (ctx->depth_camera_intrinsics.width == 0 ||
-        ctx->depth_camera_intrinsics.height == 0)
+    if (tracking->depth_camera_intrinsics.width == 0 ||
+        tracking->depth_camera_intrinsics.height == 0)
     {
         LOGE("Skipping detection: depth camera intrinsics uninitialized\n");
         return false;
     }
 
     start = get_time();
-    int width = ctx->training_camera_intrinsics.width;
-    int height = ctx->training_camera_intrinsics.height;
+    int width = tracking->training_camera_intrinsics.width;
+    int height = tracking->training_camera_intrinsics.height;
 
     if (width == 0 || height == 0) {
         LOGE("Skipping detection: training camera intrinsics uninitialized\n");
@@ -1709,12 +1835,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // into training camera space.
     glm::mat3 rotate;
     glm::vec3 translate;
-    if (ctx->extrinsics_set) {
-        const float *r = ctx->depth_to_video_extrinsics.rotation;
+    if (tracking->extrinsics_set) {
+        const float *r = tracking->depth_to_video_extrinsics.rotation;
         rotate = glm::mat3(r[0], r[1], r[2],
                            r[3], r[4], r[5],
                            r[6], r[7], r[8]);
-        const float *t = ctx->depth_to_video_extrinsics.translation;
+        const float *t = tracking->depth_to_video_extrinsics.translation;
         translate = glm::vec3(t[0], t[1], t[2]);
     } else {
         rotate = glm::mat3();
@@ -1747,21 +1873,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
                                       hires_cloud->points[off].y,
                                       hires_cloud->points[off].z);
 
-                    if (ctx->extrinsics_set) {
+                    if (tracking->extrinsics_set) {
                         point_t = (rotate * point_t) + translate;
                     }
 
                     int x = (int)
-                        ((point_t.x * ctx->training_camera_intrinsics.fx /
-                          point_t.z) + ctx->training_camera_intrinsics.cx);
+                        ((point_t.x * tracking->training_camera_intrinsics.fx /
+                          point_t.z) + tracking->training_camera_intrinsics.cx);
 
                     if (x < 0 || x >= width) {
                         continue;
                     }
 
                     int y = (int)
-                        ((point_t.y * ctx->training_camera_intrinsics.fy /
-                          point_t.z) + ctx->training_camera_intrinsics.cy);
+                        ((point_t.y * tracking->training_camera_intrinsics.fy /
+                          point_t.z) + tracking->training_camera_intrinsics.cy);
 
                     if (y < 0 || y >= height) {
                         continue;
@@ -1785,7 +1911,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
-                               ctx->training_camera_intrinsics.fy));
+                               tracking->training_camera_intrinsics.fy));
     float best_confidence = 0.f;
     float *weights = (float*)
         xmalloc(width * height * ctx->n_joints * sizeof(float));
@@ -1865,11 +1991,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
 #if 0
     // Normal or plane-label visualisation, replacing the video buffer output
-    foreach_xy_off(ctx->video_camera_intrinsics.width,
-                   ctx->video_camera_intrinsics.height) {
-        int dx = (int)((x / (float)ctx->video_camera_intrinsics.width) *
+    foreach_xy_off(tracking->video_camera_intrinsics.width,
+                   tracking->video_camera_intrinsics.height) {
+        int dx = (int)((x / (float)tracking->video_camera_intrinsics.width) *
                        lores_cloud->width);
-        int dy = (int)((y / (float)ctx->video_camera_intrinsics.height) *
+        int dy = (int)((y / (float)tracking->video_camera_intrinsics.height) *
                        lores_cloud->height);
         int doff = dy * lores_cloud->width + dx;
 
@@ -1901,12 +2027,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
 #if 0
     // Greyscale filtered depth visualisation, replacing coloured, unfiltered
     // depth visualisation.
-    foreach_xy_off(ctx->depth_camera_intrinsics.width,
-                   ctx->depth_camera_intrinsics.height) {
+    foreach_xy_off(tracking->depth_camera_intrinsics.width,
+                   tracking->depth_camera_intrinsics.height) {
         int dx = (int)(x * (lores_cloud->width / (float)
-                            ctx->depth_camera_intrinsics.width));
+                            tracking->depth_camera_intrinsics.width));
         int dy = (int)(y * (lores_cloud->height / (float)
-                            ctx->depth_camera_intrinsics.height));
+                            tracking->depth_camera_intrinsics.height));
         int doff = dy * lores_cloud->width + dx;
         float depth = lores_cloud->points[doff].z;
 
@@ -1966,14 +2092,13 @@ notify_tracking(struct gm_context *ctx)
 }
 
 void
-update_tracking_video(struct gm_context *ctx,
-                      struct gm_tracking_impl *tracking,
-                      enum gm_format format,
-                      uint8_t *video,
-                      uint64_t timestamp)
+update_face_detect_luminance_buffer(struct gm_context *ctx,
+                                    struct gm_tracking_impl *tracking,
+                                    enum gm_format format,
+                                    uint8_t *video)
 {
-    int width = ctx->video_camera_intrinsics.width;
-    int height = ctx->video_camera_intrinsics.height;
+    int width = tracking->video_camera_intrinsics.width;
+    int height = tracking->video_camera_intrinsics.height;
 
     if (!ctx->grey_width) {
         ctx->grey_width = width;
@@ -1991,32 +2116,20 @@ update_tracking_video(struct gm_context *ctx,
     switch(format) {
     case GM_FORMAT_RGB_U8:
         foreach_xy_off(width, height) {
-            tracking->video[off * 4] = video[off * 3];
-            tracking->video[off * 4 + 1] = video[off * 3 + 1];
-            tracking->video[off * 4 + 2] = video[off * 3 + 2];
-            tracking->video[off * 4 + 3] = 0xFF;
             tracking->face_detect_buf[off] = RGB2Y(video[off * 3],
                                                    video[off * 3 + 1],
                                                    video[off * 3 + 2]);
         }
         break;
-
     case GM_FORMAT_RGBX_U8:
         foreach_xy_off(width, height) {
-            tracking->video[off * 4] = video[off * 4];
-            tracking->video[off * 4 + 1] = video[off * 4 + 1];
-            tracking->video[off * 4 + 2] = video[off * 4 + 2];
-            tracking->video[off * 4 + 3] = 0xFF;
-
             uint8_t r = video[off * 4];
             uint8_t g = video[off * 4 + 1];
             uint8_t b = video[off * 4 + 2];
             tracking->face_detect_buf[off] = RGB2Y(r, g, b);
         }
         break;
-
     case GM_FORMAT_RGBA_U8:
-        memcpy(tracking->video, video, width * height * 4);
         foreach_xy_off(width, height) {
             uint8_t r = video[off * 4];
             uint8_t g = video[off * 4 + 1];
@@ -2024,18 +2137,9 @@ update_tracking_video(struct gm_context *ctx,
             tracking->face_detect_buf[off] = RGB2Y(r, g, b);
         }
         break;
-
     case GM_FORMAT_LUMINANCE_U8:
-        foreach_xy_off(width, height) {
-            uint8_t lum = video[off];
-            tracking->video[off * 4] = lum;
-            tracking->video[off * 4 + 1] = lum;
-            tracking->video[off * 4 + 2] = lum;
-            tracking->video[off * 4 + 3] = 0xFF;
-        }
         memcpy(tracking->face_detect_buf, video, width * height);
         break;
-
     case GM_FORMAT_UNKNOWN:
     case GM_FORMAT_Z_U16_MM:
     case GM_FORMAT_Z_F32_M:
@@ -2103,69 +2207,67 @@ update_tracking_video(struct gm_context *ctx,
 
 
 #endif // !DOWNSAMPLE_ON_GPU
-
-    tracking->video_capture_timestamp = timestamp;
 }
 
 static void
-update_tracking_depth_from_buffer(struct gm_context *ctx,
-                                  struct gm_tracking_impl *tracking,
-                                  enum gm_format format,
-                                  struct gm_buffer *buffer,
-                                  uint64_t timestamp)
+copy_and_rotate_depth_buffer(struct gm_context *ctx,
+                             struct gm_tracking_impl *tracking,
+                             enum gm_format format,
+                             struct gm_buffer *buffer)
 {
-    int width = ctx->depth_camera_intrinsics.width;
-    int height = ctx->depth_camera_intrinsics.height;
+    int width = ctx->basis_depth_camera_intrinsics.width;
+    int height = ctx->basis_depth_camera_intrinsics.height;
+    int rot_width = tracking->depth_camera_intrinsics.width;
+    int rot_height = tracking->depth_camera_intrinsics.height;
+    enum gm_rotation rotation = tracking->camera_rotation;
     void *depth = buffer->data;
-
-#define COPY_AND_MAP_DEPTH_TO_RGB(DEPTH_COPY, DEPTH_RGB_BUF, OFF, DEPTH) \
-    do { \
-        struct color rgb = stops_color_from_val(ctx->depth_color_stops, \
-                                                ctx->n_depth_color_stops, \
-                                                ctx->depth_color_stops_range, \
-                                                DEPTH); \
-        uint8_t *depth_rgb = DEPTH_RGB_BUF + OFF * 3; \
-        depth_rgb[0] = rgb.r; \
-        depth_rgb[1] = rgb.g; \
-        depth_rgb[2] = rgb.b; \
-        depth_copy[OFF] = DEPTH; \
-    } while (0)
-
     float *depth_copy = tracking->depth;
-    uint8_t *depth_rgb_back = tracking->depth_rgb;
+
     int num_points;
 
+    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
+    // us easily combine our rotation with our copy...
+    //
+    // XXX: it could be worth reading multiple scanlines at a time so we could
+    // write out cache lines at a time instead of only 4 bytes (for rotated
+    // images).
+    //
     switch (format) {
     case GM_FORMAT_Z_U16_MM:
         foreach_xy_off(width, height) {
             float depth_m = ((uint16_t *)depth)[off] / 1000.f;
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
+
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = depth_m; });
         }
         break;
     case GM_FORMAT_Z_F32_M:
         foreach_xy_off(width, height) {
             float depth_m = ((float *)depth)[off];
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
+
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = depth_m; });
         }
         break;
     case GM_FORMAT_Z_F16_M:
         foreach_xy_off(width, height) {
             float depth_m = ((half *)depth)[off];
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, off, depth_m);
+
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = depth_m; });
         }
         break;
     case GM_FORMAT_POINTS_XYZC_F32_M: {
 
-        /* FIXME:
-         * Avoid clearing this buffer
-         * Avoid copying this data
-         * Avoid redundantly reprojecting from a point cloud into an image
-         * only to later turn into a pcl point cloud later! :/
-         *
-         * Urgh
+        /* XXX: Tango doesn't give us a 2D depth buffer which we would prefer
+         * and we can't be sure that the re-projected point cloud will fill our
+         * 2D depth buffer 100% so we're forced to clear it first too :(
          */
         memset(depth_copy, 0, width * height * sizeof(float));
-        memset(depth_rgb_back, 0, width * height * 3);
+
         num_points = buffer->len / 16;
         for (int off = 0; off < num_points; off++) {
             float *xyzc = ((float *)buffer->data) + 4 * off;
@@ -2174,23 +2276,24 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
             glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
 
             int x = (int)
-                ((point_t.x * ctx->depth_camera_intrinsics.fx /
-                  point_t.z) + ctx->depth_camera_intrinsics.cx);
+                ((point_t.x * ctx->basis_depth_camera_intrinsics.fx /
+                  point_t.z) + ctx->basis_depth_camera_intrinsics.cx);
 
             if (x < 0 || x >= width) {
                 continue;
             }
 
             int y = (int)
-                ((point_t.y * ctx->depth_camera_intrinsics.fy /
-                  point_t.z) + ctx->depth_camera_intrinsics.cy);
+                ((point_t.y * ctx->basis_depth_camera_intrinsics.fy /
+                  point_t.z) + ctx->basis_depth_camera_intrinsics.cy);
 
             if (y < 0 || y >= height) {
                 continue;
             }
 
-            int doff = width * y + x;
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, doff, point_t.z);
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = point_t.z; });
         }
 
         // Our code doesn't deal well with gaps in the data, so make some
@@ -2202,37 +2305,34 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
         };
         std::vector<struct blank> blanks;
 
-        for (int i = 0; i < width * height; ++i) {
-            if (std::isnormal(depth_copy[i])) {
+        foreach_xy_off(rot_width, rot_height) {
+            if (std::isnormal(depth_copy[off])) {
                 continue;
             }
 
-            int x = i % width;
-            int y = i / width;
             float neighbours[4];
             int n_neighbours = 0;
 
-            if (x > 0 && std::isnormal(depth_copy[i-1])) {
-                neighbours[n_neighbours++] = depth_copy[i-1];
+            if (x > 0 && std::isnormal(depth_copy[off-1])) {
+                neighbours[n_neighbours++] = depth_copy[off-1];
             }
-            if (x < width - 1 && std::isnormal(depth_copy[i+1])) {
-                neighbours[n_neighbours++] = depth_copy[i+1];
+            if (x < width - 1 && std::isnormal(depth_copy[off+1])) {
+                neighbours[n_neighbours++] = depth_copy[off+1];
             }
-            if (y > 0 && std::isnormal(depth_copy[i-width])) {
-                neighbours[n_neighbours++] = depth_copy[i-width];
+            if (y > 0 && std::isnormal(depth_copy[off-rot_width])) {
+                neighbours[n_neighbours++] = depth_copy[off-rot_width];
             }
-            if (y < height - 1 && std::isnormal(depth_copy[i+width])) {
-                neighbours[n_neighbours++] = depth_copy[i+width];
+            if (y < height - 1 && std::isnormal(depth_copy[off+rot_width])) {
+                neighbours[n_neighbours++] = depth_copy[off+rot_width];
             }
 
             if (n_neighbours > 0) {
-                blanks.push_back({i, neighbours[random() % n_neighbours]});
+                blanks.push_back({off, neighbours[random() % n_neighbours]});
             }
         }
 
         for (unsigned i = 0; i < blanks.size(); ++i) {
-            COPY_AND_MAP_DEPTH_TO_RGB(depth_copy, depth_rgb_back, blanks[i].off,
-                                      blanks[i].new_depth);
+            depth_copy[blanks[i].off] = blanks[i].new_depth;
         }
         break;
     }
@@ -2244,10 +2344,6 @@ update_tracking_depth_from_buffer(struct gm_context *ctx,
         gm_assert(ctx->log, 0, "Unexpected format for depth buffer");
         break;
     }
-
-#undef COPY_AND_MAP_DEPTH_TO_RGB
-
-    tracking->depth_capture_timestamp = timestamp;
 }
 
 static struct gm_tracking_impl *
@@ -2260,6 +2356,49 @@ mem_pool_acquire_tracking(struct gm_mem_pool *pool)
     tracking->success = false;
 
     return tracking;
+}
+
+void
+gm_context_rotate_intrinsics(struct gm_context *ctx,
+                             const struct gm_intrinsics *intrinsics_in,
+                             struct gm_intrinsics *intrinsics_out,
+                             enum gm_rotation rotation)
+{
+    switch (rotation) {
+    case GM_ROTATION_0:
+        *intrinsics_out = *intrinsics_in;
+        break;
+    case GM_ROTATION_90:
+        intrinsics_out->width = intrinsics_in->height;
+        intrinsics_out->height = intrinsics_in->width;
+
+        intrinsics_out->cx = intrinsics_in->cy;
+        intrinsics_out->cy = intrinsics_in->width - intrinsics_in->cx;
+
+        intrinsics_out->fx = intrinsics_in->fy;
+        intrinsics_out->fy = intrinsics_in->fx;
+        break;
+    case GM_ROTATION_180:
+        intrinsics_out->width = intrinsics_in->width;
+        intrinsics_out->height = intrinsics_in->height;
+
+        intrinsics_out->cx = intrinsics_in->width - intrinsics_in->cx;
+        intrinsics_out->cy = intrinsics_in->height - intrinsics_in->cy;
+
+        intrinsics_out->fx = intrinsics_in->fx;
+        intrinsics_out->fy = intrinsics_in->fy;
+        break;
+    case GM_ROTATION_270:
+        intrinsics_out->width = intrinsics_in->height;
+        intrinsics_out->height = intrinsics_in->width;
+
+        intrinsics_out->cx = intrinsics_in->height - intrinsics_in->cy;
+        intrinsics_out->cy = intrinsics_in->cx;
+
+        intrinsics_out->fx = intrinsics_in->fy;
+        intrinsics_out->fy = intrinsics_in->fx;
+        break;
+    }
 }
 
 static void *
@@ -2307,41 +2446,57 @@ detector_thread_cb(void *data)
     }
 
     while (!ctx->destroying) {
+        struct gm_frame *frame = NULL;
+
         LOGI("Waiting for new frame to start tracking\n");
         pthread_mutex_lock(&ctx->frame_ready_mutex);
         while (!ctx->frame_ready && !ctx->destroying) {
             pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
         }
-        gm_assert(ctx->log, !ctx->frame_front,
-                  "Front buffer exists before acquiring ready frame");
-        ctx->frame_front = ctx->frame_ready;
+        frame = ctx->frame_ready;
         ctx->frame_ready = NULL;
         pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
         if (ctx->destroying) {
             gm_debug(ctx->log, "Stopping tracking after frame acquire (context being destroyed)");
+            if (frame)
+                gm_frame_unref(frame);
             break;
         }
 
+        start = get_time();
+        LOGI("Starting tracking iteration (%" PRIu64 ")\n",
+             frame->timestamp);
+
         struct gm_tracking_impl *tracking =
             mem_pool_acquire_tracking(ctx->tracking_pool);
-        tracking->label_map_rgb_valid = false;
 
-        update_tracking_depth_from_buffer(ctx,
-                                          tracking,
-                                          ctx->frame_front->depth_format,
-                                          ctx->frame_front->depth,
-                                          ctx->frame_front->timestamp);
+        tracking->frame = frame;
 
-        update_tracking_video(ctx,
-                              tracking,
-                              ctx->frame_front->video_format,
-                              (uint8_t *)ctx->frame_front->video->data,
-                              ctx->frame_front->timestamp);
+        tracking->camera_rotation = ctx->camera_rotation;
 
-        gm_frame_unref(ctx->frame_front);
-        ctx->frame_front = NULL;
+        /* FIXME: rotate the camera extrinsics according to the display rotation */
+        tracking->extrinsics_set = ctx->basis_extrinsics_set;
+        tracking->depth_to_video_extrinsics = ctx->basis_depth_to_video_extrinsics;
 
+        gm_context_rotate_intrinsics(ctx,
+                                     &ctx->basis_video_camera_intrinsics,
+                                     &tracking->video_camera_intrinsics,
+                                     tracking->camera_rotation);
+        gm_context_rotate_intrinsics(ctx,
+                                     &ctx->basis_depth_camera_intrinsics,
+                                     &tracking->depth_camera_intrinsics,
+                                     tracking->camera_rotation);
+
+        tracking->training_camera_intrinsics = ctx->basis_training_camera_intrinsics;
+
+        copy_and_rotate_depth_buffer(ctx,
+                                     tracking,
+                                     frame->depth_format,
+                                     frame->depth);
+
+        /* FIXME: re-enable support for face detection */
+#if 0
         /* While downsampling on the CPU we currently do that synchronously
          * when we are notified of a new frame.
          */
@@ -2360,13 +2515,16 @@ detector_thread_cb(void *data)
             gm_tracking_unref(tracking);
             break;
         }
+#else
+        update_face_detect_luminance_buffer(ctx,
+                                            tracking,
+                                            frame->video_format,
+                                            (uint8_t *)frame->video->data);
+
 #endif
 
-        start = get_time();
-        LOGI("Starting tracking iteration (%lu)\n",
-             tracking->depth_capture_timestamp);
-
-        //gm_context_detect_faces(ctx, tracking);
+        gm_context_detect_faces(ctx, tracking);
+#endif
 
         bool tracked = gm_context_track_skeleton(ctx, tracking);
 
@@ -2453,8 +2611,12 @@ tracking_state_free(struct gm_mem_pool *pool,
     free(tracking->depth);
     free(tracking->depth_rgb);
 
-    free(tracking->video);
+    free(tracking->video_rgb);
     free(tracking->face_detect_buf);
+
+    if (tracking->frame) {
+        gm_frame_unref(tracking->frame);
+    }
 
     delete tracking;
 }
@@ -2467,6 +2629,13 @@ tracking_state_recycle(struct gm_tracking *self)
 
     gm_assert(tracking->ctx->log, tracking->base.ref == 0,
               "Unbalanced tracking unref");
+
+    gm_frame_unref(tracking->frame);
+    tracking->frame = NULL;
+
+    tracking->label_map_rgb_valid = false;
+    tracking->depth_rgb_valid = false;
+    tracking->video_rgb_valid = false;
 
     mem_pool_recycle_resource(pool, tracking);
 }
@@ -2485,8 +2654,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     tracking->pool = pool;
     tracking->ctx = ctx;
 
-    int labels_width = ctx->training_camera_intrinsics.width;
-    int labels_height = ctx->training_camera_intrinsics.height;
+    int labels_width = ctx->basis_training_camera_intrinsics.width;
+    int labels_height = ctx->basis_training_camera_intrinsics.height;
 
     assert(labels_width);
     assert(labels_height);
@@ -2504,8 +2673,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
         tracking->joints_predicted[i] = true;
     }
 
-    int depth_width = ctx->depth_camera_intrinsics.width;
-    int depth_height = ctx->depth_camera_intrinsics.height;
+    int depth_width = ctx->basis_depth_camera_intrinsics.width;
+    int depth_height = ctx->basis_depth_camera_intrinsics.height;
 
     assert(depth_width);
     assert(depth_height);
@@ -2514,11 +2683,10 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
       xcalloc(depth_width * depth_height, sizeof(float));
     tracking->depth_rgb = (uint8_t *)xcalloc(depth_width * depth_height, 3);
 
-    int video_width = ctx->video_camera_intrinsics.width;
-    int video_height = ctx->video_camera_intrinsics.height;
+    int video_width = ctx->basis_video_camera_intrinsics.width;
+    int video_height = ctx->basis_video_camera_intrinsics.height;
 
-    tracking->video = (uint8_t *)
-      xcalloc(video_width * video_height * 4, sizeof(uint8_t));
+    tracking->video_rgb = (uint8_t *)xcalloc(video_width * video_height, 3);
 
     tracking->face_detect_buf =
         (uint8_t *)xcalloc(video_width * video_height, 1);
@@ -2665,8 +2833,6 @@ gm_context_destroy(struct gm_context *ctx)
         gm_frame_unref(ctx->frame_ready);
         ctx->frame_ready = NULL;
     }
-    gm_assert(ctx->log, !ctx->frame_front,
-              "Front buffer exists after detector thread joined");
     pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
     free(ctx->depth_color_stops);
@@ -2792,12 +2958,12 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     int labels_width = 172;
     int labels_height = 224;
-    ctx->training_camera_intrinsics.width = labels_width;
-    ctx->training_camera_intrinsics.height = labels_height;
-    ctx->training_camera_intrinsics.cx = 86;
-    ctx->training_camera_intrinsics.cy = 112;
-    ctx->training_camera_intrinsics.fx = 217.461437772;
-    ctx->training_camera_intrinsics.fy = 217.461437772;
+    ctx->basis_training_camera_intrinsics.width = labels_width;
+    ctx->basis_training_camera_intrinsics.height = labels_height;
+    ctx->basis_training_camera_intrinsics.cx = 86;
+    ctx->basis_training_camera_intrinsics.cy = 112;
+    ctx->basis_training_camera_intrinsics.fx = 217.461437772;
+    ctx->basis_training_camera_intrinsics.fy = 217.461437772;
 
     ctx->joint_map = NULL;
     char *open_err = NULL;
@@ -3212,14 +3378,14 @@ void
 gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
                                        struct gm_intrinsics *intrinsics)
 {
-    ctx->depth_camera_intrinsics = *intrinsics;
+    ctx->basis_depth_camera_intrinsics = *intrinsics;
 }
 
 void
 gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
                                        struct gm_intrinsics *intrinsics)
 {
-    ctx->video_camera_intrinsics = *intrinsics;
+    ctx->basis_video_camera_intrinsics = *intrinsics;
 }
 
 void
@@ -3227,40 +3393,69 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
                                                 struct gm_extrinsics *extrinsics)
 {
     if (extrinsics) {
-        ctx->depth_to_video_extrinsics = *extrinsics;
-        ctx->extrinsics_set = true;
+        ctx->basis_depth_to_video_extrinsics = *extrinsics;
+        ctx->basis_extrinsics_set = true;
     } else {
-        ctx->extrinsics_set = false;
+        ctx->basis_extrinsics_set = false;
     }
+}
+
+void
+gm_context_set_camera_rotation(struct gm_context *ctx,
+                               enum gm_rotation rotation)
+{
+    ctx->camera_rotation = rotation;
 }
 
 const gm_intrinsics *
 gm_context_get_training_intrinsics(struct gm_context *ctx)
 {
-    return &ctx->training_camera_intrinsics;
+    return &ctx->basis_training_camera_intrinsics;
 }
 
-uint64_t
-gm_tracking_get_depth_timestamp(struct gm_tracking *_tracking)
+const gm_intrinsics *
+gm_tracking_get_video_camera_intrinsics(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->depth_capture_timestamp;
+    return &tracking->video_camera_intrinsics;
 }
 
-uint64_t
-gm_tracking_get_video_timestamp(struct gm_tracking *_tracking)
+const gm_intrinsics *
+gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->video_capture_timestamp;
+    return &tracking->depth_camera_intrinsics;
+}
+
+const gm_intrinsics *
+gm_tracking_get_training_camera_intrinsics(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return &tracking->training_camera_intrinsics;
 }
 
 const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
+
+    if (!tracking->depth_rgb_valid) {
+        tracking_create_depth_rgb_image(tracking);
+    }
 
     return tracking->depth_rgb;
+}
+
+const uint8_t *
+gm_tracking_get_rgb_video(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    if (!tracking->video_rgb_valid) {
+        tracking_create_video_rgb_image(tracking);
+    }
+
+    return tracking->video_rgb;
 }
 
 const float *
@@ -3269,14 +3464,6 @@ gm_tracking_get_depth(struct gm_tracking *_tracking)
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
 
     return tracking->depth;
-}
-
-const uint8_t *
-gm_tracking_get_video(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    return tracking->video;
 }
 
 const float *
@@ -3297,8 +3484,8 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *_tracking,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     struct gm_context *ctx = tracking->ctx;
 
-    *width = ctx->training_camera_intrinsics.width;
-    *height = ctx->training_camera_intrinsics.height;
+    *width = tracking->training_camera_intrinsics.width;
+    *height = tracking->training_camera_intrinsics.height;
 
     if (!tracking->label_map_rgb_valid) {
         tracking_create_rgb_label_map(ctx, tracking, ctx->debug_label);
@@ -3313,10 +3500,9 @@ gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
                                     int *height)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
 
-    *width = ctx->training_camera_intrinsics.width;
-    *height = ctx->training_camera_intrinsics.height;
+    *width = tracking->training_camera_intrinsics.width;
+    *height = tracking->training_camera_intrinsics.height;
 
     return tracking->label_probs;
 }
@@ -3364,8 +3550,6 @@ gm_context_flush(struct gm_context *ctx, char **err)
         gm_frame_unref(ctx->frame_ready);
         ctx->frame_ready = NULL;
     }
-    gm_assert(ctx->log, !ctx->frame_front,
-              "Front buffer exists after detector thread joined");
     pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
     ctx->destroying = false;

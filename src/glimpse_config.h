@@ -28,6 +28,14 @@
 #include <string.h>
 #include "glimpse_log.h"
 
+
+enum gm_rotation {
+  GM_ROTATION_0 = 0,
+  GM_ROTATION_90 = 1,
+  GM_ROTATION_180 = 2,
+  GM_ROTATION_270 = 3
+};
+
 enum gm_property_type {
     GM_PROPERTY_INT,
     GM_PROPERTY_ENUM,

@@ -243,6 +243,12 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
 const gm_intrinsics *
 gm_context_get_training_intrinsics(struct gm_context *ctx);
 
+void
+gm_context_rotate_intrinsics(struct gm_context *ctx,
+                             const struct gm_intrinsics *intrinsics_in,
+                             struct gm_intrinsics *intrinsics_out,
+                             enum gm_rotation rotation);
+
 /* Enable skeletal tracking */
 void
 gm_context_enable(struct gm_context *ctx);
@@ -265,6 +271,10 @@ gm_context_set_event_callback(struct gm_context *ctx,
 void
 gm_context_event_free(struct gm_event *event);
 
+void
+gm_context_set_camera_rotation(struct gm_context *ctx,
+                               enum gm_rotation rotation);
+
 /* Should be called every frame from the render thread with a gles context
  * bound to have a chance to use the gpu.
  */
@@ -281,15 +291,14 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
                                    uint64_t timestamp,
                                    int *n_joints);
 
-/* XXX: not really a good approach since you can't fetch the latest state
- * atomically...
- */
+const gm_intrinsics *
+gm_tracking_get_video_camera_intrinsics(struct gm_tracking *tracking);
 
-uint64_t
-gm_tracking_get_depth_timestamp(struct gm_tracking *tracking);
+const gm_intrinsics *
+gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *tracking);
 
-uint64_t
-gm_tracking_get_video_timestamp(struct gm_tracking *tracking);
+const gm_intrinsics *
+gm_tracking_get_training_camera_intrinsics(struct gm_tracking *tracking);
 
 const float *
 gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
@@ -302,13 +311,13 @@ gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
                               int *height);
 
 const uint8_t *
+gm_tracking_get_rgb_video(struct gm_tracking *_tracking);
+
+const uint8_t *
 gm_tracking_get_rgb_depth(struct gm_tracking *tracking);
 
 const float *
 gm_tracking_get_depth(struct gm_tracking *tracking);
-
-const uint8_t *
-gm_tracking_get_video(struct gm_tracking *tracking);
 
 const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,

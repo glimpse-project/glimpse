@@ -140,9 +140,14 @@ struct gm_device
 #ifdef USE_TANGO
         struct {
             TangoConfig tango_config;
+            enum gm_rotation display_rotation;
+            enum gm_rotation display_to_camera_rotation;
         } tango;
 #endif
     };
+
+    int camera_rotation; // enum gm_rotation
+    int camera_rotation_prop_id;
 
     struct gm_intrinsics video_camera_intrinsics;
     struct gm_intrinsics depth_camera_intrinsics;
@@ -184,6 +189,7 @@ struct gm_device
     /* If depth_mid buffer is valid then corresponding _DEPTH bit is set */
     uint64_t frame_ready_requirements;
 
+    std::vector<struct gm_ui_enumerant> rotation_enumerants;
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 
@@ -199,14 +205,26 @@ struct gm_device
 #endif
 };
 
+static const char *rotation_names[] = {
+    "None",
+    "90 degrees",
+    "180 degrees",
+    "270 degrees",
+};
+
 #ifdef USE_TANGO
 static pthread_mutex_t jni_lock;
 static jobject early_tango_service_binder;
 
-/* For our JNI callbacks we assume there can only be a single device
- * corresponding to our Tango camera...
+/* For our JNI callbacks we assume there can only be a single device...
  */
 static struct gm_device *tango_singleton_dev;
+
+/* We only care about the display rotation if we're running with Tango
+ * and in other cases we're playing back a recording which my have
+ * synthetic rotations
+ */
+static enum gm_rotation tango_display_rotation;
 #endif
 
 static uint64_t
@@ -655,10 +673,6 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     prop.read_only = true;
     dev->properties.push_back(prop);
 
-    dev->properties_state.n_properties = dev->properties.size();
-    pthread_mutex_init(&dev->properties_state.lock, NULL);
-    dev->properties_state.properties = &dev->properties[0];
-
     return true;
 }
 
@@ -1053,6 +1067,30 @@ notify_device_ready(struct gm_device *dev)
     dev->event_callback(event, dev->callback_data);
 }
 
+static void
+notify_property_changed(struct gm_ui_property *prop, int rotation)
+{
+    struct gm_device *dev = (struct gm_device *)prop->object;
+    struct gm_device_event *event =
+        device_event_alloc(dev, GM_DEV_EVENT_PROP_CHANGED);
+
+    gm_debug(dev->log, "notify %s property changed", prop->name);
+
+    event->prop_changed.prop = prop;
+
+    dev->event_callback(event, dev->callback_data);
+}
+
+static void
+device_set_rotation_prop(struct gm_ui_property *prop, int rotation)
+{
+    struct gm_device *dev = (struct gm_device *)prop->object;
+
+    dev->camera_rotation = rotation;
+
+    notify_property_changed(prop, rotation);
+}
+
 #ifdef USE_TANGO
 static bool
 tango_open(struct gm_device *dev, struct gm_device_config *config, char **err)
@@ -1322,7 +1360,138 @@ tango_set_up_config(struct gm_device *dev, char **err)
         return false;
     }
 #endif
+
     return true;
+}
+
+static enum gm_rotation
+tango_infer_camera_orientation(struct gm_device *dev)
+{
+    float texture_coords[8] = {
+        0.0f, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.0f
+    };
+    float rotated_texture_coords[8];
+
+    gm_debug(dev->log, "    default UVs: %f,%f %f,%f %f,%f, %f,%f",
+             texture_coords[0],
+             texture_coords[1],
+             texture_coords[2],
+             texture_coords[3],
+             texture_coords[4],
+             texture_coords[5],
+             texture_coords[6],
+             texture_coords[7]);
+
+    for (int i = 0; i < 4; i++) {
+        TangoErrorType r =
+            TangoSupport_getVideoOverlayUVBasedOnDisplayRotation(texture_coords,
+                                                                 (TangoSupportRotation)i,
+                                                                 rotated_texture_coords);
+        if (r == TANGO_SUCCESS) {
+            gm_debug(dev->log, "%3d degrees UVs: %f,%f %f,%f %f,%f, %f,%f",
+                     i*90,
+                     rotated_texture_coords[0],
+                     rotated_texture_coords[1],
+                     rotated_texture_coords[2],
+                     rotated_texture_coords[3],
+                     rotated_texture_coords[4],
+                     rotated_texture_coords[5],
+                     rotated_texture_coords[6],
+                     rotated_texture_coords[7]);
+        } else {
+            gm_error(dev->log, "Failed to query Tango UV coords for display rotation of %d degrees",
+                     90 * i);
+            return GM_ROTATION_0;
+        }
+    }
+    TangoErrorType r =
+        TangoSupport_getVideoOverlayUVBasedOnDisplayRotation(texture_coords,
+                                                             ROTATION_0,
+                                                             rotated_texture_coords);
+    if (r == TANGO_SUCCESS) {
+        int i = 0;
+        for (i = 0; i < 4; i++) {
+            if (rotated_texture_coords[2*i] == 0 && rotated_texture_coords[2*i+1] == 0)
+                break;
+        }
+        if (i == 4) {
+            gm_error(dev->log, "Couldn't infer the camera's rotation relative to the display");
+            return GM_ROTATION_0;
+        }
+        gm_debug(dev->log, "Tango camera is rotated %d degrees, relative to the display",
+                 i * 90);
+        return (enum gm_rotation)i;
+    } else {
+        gm_error(dev->log, "Failed to query Tango UV coords for natural display orientation");
+        return GM_ROTATION_0;
+    }
+}
+
+static void
+tango_set_display_rotation(struct gm_device *dev, enum gm_rotation display_rotation)
+{
+    dev->tango.display_rotation = display_rotation;
+
+    int camera_rotation = (int)display_rotation;
+    camera_rotation += dev->tango.display_to_camera_rotation;
+    camera_rotation %= 4;
+
+    gm_debug(dev->log, "Tango camera is rotated %d degrees, relative to current display orientation (rotated %d degrees)",
+             90 * camera_rotation,
+             ((int)display_rotation)*90);
+
+    struct gm_ui_property *prop = &dev->properties[dev->camera_rotation_prop_id];
+    device_set_rotation_prop(prop, camera_rotation);
+}
+
+static void
+print_basis_and_rotated_intrinsics(struct gm_device *dev,
+                                   const char *name,
+                                   TangoCameraId camera_id,
+                                   const TangoCameraIntrinsics *intrinsics)
+{
+#define DEGREES(RAD) (RAD * (360.0 / (M_PI * 2.0)))
+    float hfov = 2.0 * atan(0.5 * intrinsics->width /
+                                  intrinsics->fx);
+    float vfov = 2.0 * atan(0.5 * intrinsics->height /
+                                  intrinsics->fy);
+    gm_debug(dev->log,
+             "%s: %dx%d fx=%f,fy=%f (hfov=%f,vfov=%f), cx=%f,cy=%f",
+             name,
+             (int)intrinsics->width,
+             (int)intrinsics->height,
+             intrinsics->fx,
+             intrinsics->fy,
+             DEGREES(hfov), DEGREES(vfov),
+             intrinsics->cx,
+             intrinsics->cy);
+
+    /* We print the rotated intrinsics just so we can double check they are
+     * consistent with our gm_context_rotate_intrinsics() implementation
+     */
+    for (int i = 0; i < 4; i++) {
+        TangoCameraIntrinsics rot_intrinsics;
+        TangoErrorType err = TangoSupport_getCameraIntrinsicsBasedOnDisplayRotation(
+            camera_id,
+            (TangoSupportRotation)i,
+            &rot_intrinsics);
+
+        if (err == TANGO_SUCCESS) {
+            hfov = 2.0 * atan(0.5 * intrinsics->width / intrinsics->fx);
+            vfov = 2.0 * atan(0.5 * intrinsics->height / intrinsics->fy);
+            gm_debug(dev->log,
+                     "> @ %3d deg: %dx%d fx=%f,fy=%f (hfov=%f,vfov=%f), cx=%f,cy=%f",
+                     90 * i,
+                     (int)rot_intrinsics.width,
+                     (int)rot_intrinsics.height,
+                     rot_intrinsics.fx,
+                     rot_intrinsics.fy,
+                     DEGREES(hfov), DEGREES(vfov),
+                     rot_intrinsics.cx,
+                     rot_intrinsics.cy);
+        }
+    }
+#undef DEGREES
 }
 
 static bool
@@ -1340,6 +1509,10 @@ tango_connect(struct gm_device *dev, char **err)
         gm_throw(dev->log, err, "Failed to connect to the Tango service.");
         return false;
     }
+
+    // Initialize TangoSupport context.
+    TangoSupport_initialize(TangoService_getPoseAtTime,
+                            TangoService_getCameraIntrinsics);
 
     // Get the intrinsics for the color camera and pass them on to the depth
     // image. We need these to know how to project the point cloud into the color
@@ -1366,17 +1539,9 @@ tango_connect(struct gm_device *dev, char **err)
     dev->video_camera_intrinsics.cx = color_camera_intrinsics.cx;
     dev->video_camera_intrinsics.cy = color_camera_intrinsics.cy;
 
-#define DEGREES(RAD) (RAD * (360.0 / (M_PI * 2.0)))
-
-    float color_hfov = 2.0 * atan(0.5 * color_camera_intrinsics.width /
-                                  color_camera_intrinsics.fx);
-    float color_vfov = 2.0 * atan(0.5 * color_camera_intrinsics.height /
-                                  color_camera_intrinsics.fy);
-    gm_debug(dev->log,
-             "ColorCamera: %dx%d H-FOV: %f, V-FOV: %f",
-             (int)color_camera_intrinsics.width,
-             (int)color_camera_intrinsics.height,
-             DEGREES(color_hfov), DEGREES(color_vfov));
+    print_basis_and_rotated_intrinsics(dev, "ColorCamera",
+                                       TANGO_CAMERA_COLOR,
+                                       &color_camera_intrinsics);
 
     ret = TangoService_getCameraIntrinsics(TANGO_CAMERA_DEPTH,
                                            &depth_camera_intrinsics);
@@ -1393,14 +1558,9 @@ tango_connect(struct gm_device *dev, char **err)
     dev->depth_camera_intrinsics.cx = depth_camera_intrinsics.cx;
     dev->depth_camera_intrinsics.cy = depth_camera_intrinsics.cy;
 
-    float depth_hfov = 2.0 * atan(0.5 * depth_camera_intrinsics.width /
-                                  depth_camera_intrinsics.fx);
-    float depth_vfov = 2.0 * atan(0.5 * depth_camera_intrinsics.height /
-                                  depth_camera_intrinsics.fy);
-    gm_debug(dev->log, "DepthCamera: %dx%d H-FOV: %f, V-FOV: %f",
-             (int)depth_camera_intrinsics.width,
-             (int)depth_camera_intrinsics.height,
-             DEGREES(depth_hfov), DEGREES(depth_vfov));
+    print_basis_and_rotated_intrinsics(dev, "DepthCamera",
+                                       TANGO_CAMERA_DEPTH,
+                                       &depth_camera_intrinsics);
 
     TangoCoordinateFramePair pair = { TANGO_COORDINATE_FRAME_CAMERA_COLOR,
         TANGO_COORDINATE_FRAME_CAMERA_DEPTH };
@@ -1448,9 +1608,8 @@ tango_connect(struct gm_device *dev, char **err)
          DEGREES(ir_hfov), DEGREES(ir_vfov));
 #endif
 
-    // Initialize TangoSupport context.
-    TangoSupport_initialize(TangoService_getPoseAtTime,
-                            TangoService_getCameraIntrinsics);
+    dev->tango.display_to_camera_rotation = tango_infer_camera_orientation(dev);
+    tango_set_display_rotation(dev, dev->tango.display_rotation);
 
     return true;
 }
@@ -1477,18 +1636,19 @@ tango_set_service_binder(struct gm_device *dev, JNIEnv *jni_env, jobject binder)
 static bool
 tango_configure(struct gm_device *dev, char **err)
 {
+    /* Some JNI calls set global state that will get checked while configuring
+     * the device. We don't want a race between setting that global state and
+     * checking that state during configuration.
+     *
+     * Some JNI calls will check for a non-null tango_singleton_dev and
+     * notify changes via that device instead (or in addition) to setting the
+     * global state.
+     */
+    pthread_mutex_lock(&jni_lock);
+
     dev->configured = true;
 
     gm_debug(dev->log, "Tango Device Configure");
-
-    pthread_mutex_lock(&jni_lock);
-
-    /* We wait until now to set the global tango_singleton_dev pointer so that
-     * JNI callbacks won't see the device until it's safe to e.g. deliver
-     * events from the device
-     */
-    gm_assert(dev->log, tango_singleton_dev == NULL, "Attempted to open multiple Tango devices");
-    tango_singleton_dev = dev;
 
     if (early_tango_service_binder) {
         JNIEnv *jni_env = 0;
@@ -1496,6 +1656,13 @@ tango_configure(struct gm_device *dev, char **err)
 
         tango_set_service_binder(dev, jni_env, early_tango_service_binder);
     }
+
+    /* Now that the device is configured we set the global tango_singleton_dev
+     * pointer making the device visible to JNI callbacks...
+     */
+    gm_assert(dev->log, tango_singleton_dev == NULL,
+              "Attempted to open multiple Tango devices");
+    tango_singleton_dev = dev;
 
     pthread_mutex_unlock(&jni_lock);
 
@@ -1573,6 +1740,37 @@ gm_device_open(struct gm_logger *log,
         return NULL;
     }
 
+    struct gm_ui_property prop;
+
+    /* XXX: there should probably be separate rotation state for the depth
+     * and video cameras
+     */
+    struct gm_ui_enumerant enumerant;
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "rotation";
+    prop.desc = "Rotation of camera images relative to current display orientation";
+    prop.type = GM_PROPERTY_ENUM;
+    prop.enum_state.ptr = &dev->camera_rotation;
+    prop.enum_state.set = device_set_rotation_prop;
+    //prop.read_only = true;
+
+    for (int i = 0; i < 4; i++) {
+        enumerant = gm_ui_enumerant();
+        enumerant.name = rotation_names[i];
+        enumerant.desc = rotation_names[i];
+        enumerant.val = i;
+        dev->rotation_enumerants.push_back(enumerant);
+    }
+    prop.enum_state.n_enumerants = dev->rotation_enumerants.size();
+    prop.enum_state.enumerants = dev->rotation_enumerants.data();
+    dev->camera_rotation_prop_id = dev->properties.size();
+    dev->properties.push_back(prop);
+
+    dev->properties_state.n_properties = dev->properties.size();
+    pthread_mutex_init(&dev->properties_state.lock, NULL);
+    dev->properties_state.properties = &dev->properties[0];
+
     return dev;
 }
 
@@ -1594,12 +1792,7 @@ gm_device_commit_config(struct gm_device *dev, char **err)
         break;
     }
 
-    if (!status) {
-        gm_device_close(dev);
-        return false;
-    }
-
-    return true;
+    return status;
 }
 
 void
@@ -1722,6 +1915,19 @@ struct gm_intrinsics *
 gm_device_get_video_intrinsics(struct gm_device *dev)
 {
     return &dev->video_camera_intrinsics;
+}
+
+enum gm_rotation
+gm_device_get_camera_rotation(struct gm_device *dev)
+{
+    switch (dev->type) {
+#ifdef USE_TANGO
+    case GM_DEVICE_TANGO:
+        return dev->tango.display_to_camera_rotation;
+#endif
+    default:
+        return GM_ROTATION_0;
+    }
 }
 
 struct gm_extrinsics *
@@ -1859,7 +2065,40 @@ gm_device_attach_jvm(struct gm_device *dev, JavaVM *jvm)
 {
     dev->jvm = jvm;
 }
+
+static void
+handle_jni_OnDisplayRotate(jint rotation)
+{
+#ifdef USE_TANGO
+    // we might race with gm_device_configure which also wants to check the
+    // latest display rotation
+    pthread_mutex_lock(&jni_lock);
+
+    tango_display_rotation = (enum gm_rotation)rotation;
+
+    if (tango_singleton_dev) {
+        tango_set_display_rotation(tango_singleton_dev, (enum gm_rotation)rotation);
+    } else {
+        __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onDisplayRotate JNI");
+    }
+
+    pthread_mutex_unlock(&jni_lock);
 #endif
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_impossible_glimpse_GlimpseNativeActivity_OnDisplayRotate(
+    JNIEnv* /*env*/, jobject /*obj*/, jint rotation)
+{
+    handle_jni_OnDisplayRotate(rotation);
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_impossible_glimpse_GlimpseUnityActivity_OnDisplayRotate(
+    JNIEnv* /*env*/, jobject /*obj*/, jint rotation)
+{
+    handle_jni_OnDisplayRotate(rotation);
+}
 
 #ifdef USE_TANGO
 extern "C" JNIEXPORT void JNICALL
@@ -1881,3 +2120,5 @@ Java_com_impossible_glimpse_GlimpseJNI_onTangoServiceConnected(JNIEnv *env,
     pthread_mutex_unlock(&jni_lock);
 }
 #endif
+
+#endif // __ANDROID__

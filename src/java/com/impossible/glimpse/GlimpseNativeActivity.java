@@ -34,6 +34,8 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.Context;
 import android.content.ComponentName;
+import android.hardware.display.DisplayManager;
+import android.view.Display;
 
 import com.impossible.glimpse.GlimpseJNI;
 import com.impossible.glimpse.GlimpseConfig;
@@ -46,20 +48,22 @@ public class GlimpseNativeActivity extends NativeActivity
     protected void onCreate(Bundle savedInstanceState)
     {
         if (GlimpseConfig.USE_TANGO) {
+            Log.d("GlimpseNativeActivity ", "onCreate called! (With Tango support)");
+
             // XXX: Make sure we try and load libtango_client_api.so before
             // the native activity tries to load our library which is linked
             // against libtango_client_api.so
             if (GlimpseJNI.loadTangoSharedLibrary() == GlimpseJNI.ARCH_ERROR) {
                 Log.e("TangoJNINative", "ERROR! Unable to load libtango_client_api.so!");
             }
+        } else {
+            Log.d("GlimpseNativeActivity", "onCreate called! (No Tango support)");
         }
 
         // FIXME: avoid having this class be glimpse_viewer specific...
         System.loadLibrary("glimpse_viewer_android");
 
         super.onCreate(savedInstanceState);
-
-        Log.d("GlimpseUnityActivity", "onCreate called!");
 
         String[] accessPermissions = new String[] {
             Manifest.permission.CAMERA,
@@ -72,8 +76,8 @@ public class GlimpseNativeActivity extends NativeActivity
             mTangoServiceConnection = new ServiceConnection() {
                 public void onServiceConnected(ComponentName name, IBinder service) {
                     GlimpseJNI.onTangoServiceConnected(service);
-                    //setAndroidOrientation();
-                    Log.d("GlimpseUnityActivity", "Tango Service Connected!");
+                    forwardDisplayRotation();
+                    Log.d("GlimpseNativeActivity", "Tango Service Connected!");
                 }
                 public void onServiceDisconnected(ComponentName name) {
                     // Handle this if you need to gracefully shutdown/retry
@@ -81,8 +85,26 @@ public class GlimpseNativeActivity extends NativeActivity
                 }
             };
         }
-    }
 
+        DisplayManager displayManager =
+            (DisplayManager)getSystemService(DISPLAY_SERVICE);
+        if (displayManager != null) {
+            displayManager.registerDisplayListener(new DisplayManager.DisplayListener() {
+                @Override
+                public void onDisplayAdded(int displayId) {}
+
+                @Override
+                public void onDisplayChanged(int displayId) {
+                    synchronized (this) {
+                        forwardDisplayRotation();
+                    }
+                }
+
+                @Override
+                public void onDisplayRemoved(int displayId) {}
+            }, null);
+        }
+    }
 
     public static final boolean bindTangoService(final Context context,
             ServiceConnection connection)
@@ -138,4 +160,13 @@ public class GlimpseNativeActivity extends NativeActivity
     }
 
     native static void OnPermissionsCheckResult(boolean granted);
+
+    private void forwardDisplayRotation() {
+        Display display = getWindowManager().getDefaultDisplay();
+        int rotation = display.getRotation();
+        Log.d("GlimpseNativeActivity", "calling OnDisplayRotation " + rotation);
+        OnDisplayRotate(rotation);
+    }
+
+    native static void OnDisplayRotate(int rotation);
 }
