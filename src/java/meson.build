@@ -46,3 +46,22 @@ if need_glimpse_native_jar
                                 '-classpath',  android_sdk_jar,
                              ])
 endif
+
+if need_glimpse_service_jar
+    service_java_src = [
+        'com/impossible/glimpse/GlimpseService.java'
+    ]
+    glimpse_service_jar = jar('GlimpseService',
+                             service_java_src,
+
+                             # XXX: this is a workaround that results in meson
+                             # passing -sourcedir ../src/java (relative to the
+                             # build directory) so that the javac -implicit:class
+                             # behaviour is able to find the source code of
+                             # classes that the current file depends on...
+                             include_directories: include_directories('.'),
+
+                             java_args: [
+                                '-classpath',  android_sdk_jar,
+                             ])
+endif

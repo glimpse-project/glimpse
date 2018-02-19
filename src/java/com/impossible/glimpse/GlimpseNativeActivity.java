@@ -43,6 +43,7 @@ import com.impossible.glimpse.GlimpseConfig;
 public class GlimpseNativeActivity extends NativeActivity
 {
     ServiceConnection mTangoServiceConnection;
+    ServiceConnection mGlimpseServiceConnection;
 
     @Override
     protected void onCreate(Bundle savedInstanceState)
@@ -86,6 +87,17 @@ public class GlimpseNativeActivity extends NativeActivity
             };
         }
 
+        Log.d("GlimpseNativeActivity", "Instantiating ServiceConnection for Glimpse Service");
+        mGlimpseServiceConnection = new ServiceConnection() {
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                Log.d("GlimpseNativeActivity", "Glimpse Service Connected!");
+            }
+            public void onServiceDisconnected(ComponentName name) {
+                // Handle this if you need to gracefully shutdown/retry
+                // in the event that Tango itself crashes/gets upgraded while running.
+            }
+        };
+
         DisplayManager displayManager =
             (DisplayManager)getSystemService(DISPLAY_SERVICE);
         if (displayManager != null) {
@@ -122,6 +134,31 @@ public class GlimpseNativeActivity extends NativeActivity
             return false;
         }
     }
+    public static final boolean bindGlimpseService(final Context context,
+            ServiceConnection connection)
+    {
+        Log.d("GlimpseNativeActivity", "bindGlimpseService called");
+        Intent intent = new Intent("com.impossible.glimpse.glimpse_service.GlimpseServiceI");
+        intent.setClassName("com.impossible.glimpse.glimpse_service",
+                            "com.impossible.glimpse.GlimpseSevice");
+
+        //if (context.getPackageManager().resolveService(intent, 0) != null)
+        //{
+            if (context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
+                Log.d("GlimpseNativeActivity", "bindGlimpseService succeeded calling bindService()");
+                return true;
+            } else {
+                Log.d("GlimpseNativeActivity", "bindGlimpseService failed to bindService()");
+                return false;
+            }
+        //}
+        //else
+       // {
+            //Log.d("GlimpseNativeActivity", "bindGlimpseService failed to resolveService()");
+            // TODO: bubble something up to the user!
+        //    return false;
+        //}
+    }
 
     @Override
     protected void onResume() {
@@ -130,6 +167,8 @@ public class GlimpseNativeActivity extends NativeActivity
         if (GlimpseConfig.USE_TANGO) {
             bindTangoService(this, mTangoServiceConnection);
         }
+
+        bindGlimpseService(this, mGlimpseServiceConnection);
     }
 
     @Override

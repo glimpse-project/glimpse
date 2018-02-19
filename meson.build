@@ -267,6 +267,31 @@ if compiler.get_define('__ANDROID__') != ''
     need_glimpse_native_jar = true
 endif
 
+need_glimpse_service_jar = false
+if compiler.get_define('__ANDROID__') != ''
+    if tango_enabled
+        service_deps = client_api_deps + [ tango_deps ]
+        service_defines = client_api_defines + [ '-DUSE_TANGO=1' ]
+    else
+        service_deps = client_api_deps
+        service_defines = client_api_defines
+    endif
+
+    use_asset_manager = get_option('use_asset_manager')
+    if use_asset_manager
+        service_defines += [ '-DUSE_ANDROID_ASSET_MANAGER_API' ]
+    endif
+
+    android_service = shared_library('glimpse_service_android',
+        [ 'src/glimpse_service.cc' ] + client_api_src,
+        include_directories: inc,
+        dependencies: service_deps,
+        c_args: service_defines,
+        cpp_args: service_defines)
+
+    need_glimpse_service_jar = true
+endif
+
 subdir('src/java')
 
 if not meson.is_cross_build()
@@ -434,6 +459,7 @@ if compiler.get_define('__ANDROID__') != ''
         'src/glimpse_viewer_android/AndroidManifest.xml',
         'src/glimpse_viewer_android/res',
         'glimpse_viewer',
+        'GlimpseNative',
     ]
     if tango_enabled
         build_apk_args += [ '--tango-libs', get_option('android_tango_sdk') ]
@@ -442,4 +468,25 @@ if compiler.get_define('__ANDROID__') != ''
     run_target('viewer_apk',
                command: [ 'build_apk.py' ] +  build_apk_args,
                depends: [ android_viewer, glimpse_native_jar ])
+
+    build_apk_args = [
+        '--buildtype', get_option('buildtype'),
+        '--android-sdk', android_sdk_home,
+        '--android-build-tools', android_build_tools,
+        '--android-api', android_api,
+        '--android-ndk', android_ndk_home,
+        '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
+        '--strip', meson.get_cross_property('_strip_binary'),
+        'src/glimpse_service_android/AndroidManifest.xml',
+        'src/glimpse_service_android/res',
+        'glimpse_service',
+        'GlimpseService',
+    ]
+    if tango_enabled
+        build_apk_args += [ '--tango-libs', get_option('android_tango_sdk') ]
+    endif
+
+    run_target('service_apk',
+               command: [ 'build_apk.py' ] +  build_apk_args,
+               depends: [ android_service, glimpse_service_jar ])
 endif

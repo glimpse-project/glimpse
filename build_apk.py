@@ -60,6 +60,7 @@ parser.add_argument('--key_alias',
 parser.add_argument('manifest', help='Manifest file for package (relative paths are relative to the top of the repository)')
 parser.add_argument('res', help='Path to res/ resources to include in APK (relative paths are relative to the top of the repository)')
 parser.add_argument('name', help='Package Name')
+parser.add_argument('jar_target', help='Jar target that should be packaged')
 args = parser.parse_args()
 
 
@@ -182,11 +183,11 @@ do_check_call(package_cmd)
 do_check_call([
     'javac',
     '-classpath', android_jar_path,
-    'gen/com/impossible/glimpse/glimpse_viewer/R.java',
+    'gen/com/impossible/glimpse/' + args.name + '/R.java',
     '-d', 'bin'])
 
 for target in targets:
-    if target['name'] == 'GlimpseNative':
+    if target['name'] == args.jar_target:
         do_check_call([dx_path, '--dex', '--verbose', '--min-sdk-version=%d' % args.android_api, '--output=classes.dex', 'bin', os.path.join(build_dir, target['filename'])])
 
 do_check_call([aapt_path, 'add', unaligned_apk_name, 'classes.dex' ])
