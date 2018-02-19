@@ -229,38 +229,22 @@ struct gm_tracking_impl
     // Depth data, in meters
     float *depth;
 
-    // Colour data, RGBA
-    uint8_t *video_rgb;
-    bool video_rgb_valid;
-
-    // Depth data mapped to colour for visualisation
-    uint8_t *depth_rgb;
-    bool depth_rgb_valid;
-
     // Label inference data
     uint8_t *label_map;
-
-    // Label inference data in RGB (3x size of label_map) for visualisation
-    uint8_t *label_map_rgb;
-    bool label_map_rgb_valid;
 
     // Label probability tables
     float *label_probs;
 
+    // Estimated normals for the depth buffer
+    pcl::PointCloud<pcl::Normal>::Ptr normals;
+
+    // Whether any person clouds were tracked in this frame
     bool success;
 
     // Inferred joint positions
     float *joints;
     float *joints_processed;
     bool *joints_predicted;
-
-    // Coloured point cloud
-    GlimpsePointXYZRGBA* cloud;
-    int cloud_size;
-
-    // Labelled point-cloud for visualisation
-    GlimpsePointXYZRGBA* label_cloud;
-    int label_cloud_size;
 
     uint8_t *face_detect_buf;
     size_t face_detect_buf_width;
@@ -1016,146 +1000,6 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
 #endif
 }
 
-static void
-tracking_create_rgb_label_map(struct gm_context *ctx,
-                              struct gm_tracking_impl *tracking,
-                              int debug_label)
-{
-    int width = tracking->training_camera_intrinsics.width;
-    int height = tracking->training_camera_intrinsics.height;
-    uint8_t n_labels = ctx->n_labels;
-    uint8_t *rgb_label_map = tracking->label_map_rgb;
-
-    gm_assert(ctx->log, debug_label < n_labels,
-              "Can't create RGB map of invalid label %u",
-              debug_label);
-
-    foreach_xy_off(width, height) {
-        uint8_t label = 0;
-        float pr = -1.0;
-        int pos = y * width + x;
-        float *pr_table = &tracking->label_probs[pos * n_labels];
-        for (uint8_t l = 0; l < n_labels; l++) {
-            if (pr_table[l] > pr) {
-                label = l;
-                pr = pr_table[l];
-            }
-        }
-
-        uint8_t r;
-        uint8_t g;
-        uint8_t b;
-
-        if (debug_label == -1) {
-            r = default_palette[label].red;
-            g = default_palette[label].green;
-            b = default_palette[label].blue;
-        } else {
-            struct color col = stops_color_from_val(ctx->heat_color_stops,
-                                                    ctx->n_heat_color_stops,
-                                                    1,
-                                                    pr_table[debug_label]);
-            r = col.r;
-            g = col.g;
-            b = col.b;
-        }
-
-        rgb_label_map[pos * 3] = r;
-        rgb_label_map[pos * 3 + 1] = g;
-        rgb_label_map[pos * 3 + 2] = b;
-    }
-
-    tracking->label_map_rgb_valid = true;
-}
-
-static void
-tracking_create_depth_rgb_image(struct gm_tracking_impl *tracking)
-{
-    struct gm_context *ctx = tracking->ctx;
-    int width = tracking->depth_camera_intrinsics.width;
-    int height = tracking->depth_camera_intrinsics.height;
-
-    float *depth_buf = tracking->depth;
-    uint8_t *depth_rgb_buf = tracking->depth_rgb;
-
-    foreach_xy_off(width, height) {
-        float depth_m = depth_buf[off];
-        struct color rgb = stops_color_from_val(ctx->depth_color_stops,
-                                                ctx->n_depth_color_stops,
-                                                ctx->depth_color_stops_range,
-                                                depth_m);
-        uint8_t *depth_rgb = depth_rgb_buf + off * 3;
-        depth_rgb[0] = rgb.r;
-        depth_rgb[1] = rgb.g;
-        depth_rgb[2] = rgb.b;
-    }
-}
-
-static void
-tracking_create_video_rgb_image(struct gm_tracking_impl *tracking)
-{
-    struct gm_context *ctx = tracking->ctx;
-    int width = ctx->basis_video_camera_intrinsics.width;
-    int height = ctx->basis_video_camera_intrinsics.height;
-    int rot_width = tracking->video_camera_intrinsics.width;
-    enum gm_format format = tracking->frame->video_format;
-    enum gm_rotation rotation = tracking->frame->camera_rotation;
-    uint8_t *video = (uint8_t *)tracking->frame->video->data;
-    uint8_t *video_rgb = (uint8_t *)tracking->video_rgb;
-
-    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
-    // us easily combine our rotation with our copy...
-    //
-    // XXX: it could be worth reading multiple scanlines at a time so we could
-    // write out cache lines at a time instead of only 4 bytes (for rotated
-    // images).
-    //
-    switch(format) {
-    case GM_FORMAT_RGB_U8:
-        foreach_xy_off(width, height) {
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                                    {
-                                        video_rgb[roff * 3] = video[off * 3];
-                                        video_rgb[roff * 3 + 1] = video[off * 3 + 1];
-                                        video_rgb[roff * 3 + 2] = video[off * 3 + 2];
-                                    });
-        }
-        break;
-    case GM_FORMAT_RGBX_U8:
-    case GM_FORMAT_RGBA_U8:
-        foreach_xy_off(width, height) {
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                                    {
-                                        video_rgb[roff * 3] = video[off * 4];
-                                        video_rgb[roff * 3 + 1] = video[off * 4 + 1];
-                                        video_rgb[roff * 3 + 2] = video[off * 4 + 2];
-                                    });
-        }
-        break;
-    case GM_FORMAT_LUMINANCE_U8:
-        foreach_xy_off(width, height) {
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                                    {
-                                        uint8_t lum = video[off];
-                                        video_rgb[roff * 3] = lum;
-                                        video_rgb[roff * 3 + 1] = lum;
-                                        video_rgb[roff * 3 + 2] = lum;
-                                    });
-        }
-        break;
-    case GM_FORMAT_UNKNOWN:
-    case GM_FORMAT_Z_U16_MM:
-    case GM_FORMAT_Z_F32_M:
-    case GM_FORMAT_Z_F16_M:
-    case GM_FORMAT_POINTS_XYZC_F32_M:
-        gm_assert(ctx->log, 0, "Unexpected format for video buffer");
-        return;
-    }
-}
-
 static bool
 predict_from_previous_frames(struct gm_context *ctx, int joint,
                              uint64_t timestamp, float *prediction)
@@ -1596,6 +1440,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
 
     // Estimate normals of depth cloud
+    tracking->normals = pcl::PointCloud<pcl::Normal>::Ptr(
+        new pcl::PointCloud<pcl::Normal>);
     pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
 #if 0
     pcl::IntegralImageNormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
@@ -1605,14 +1451,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
     ne.setNormalSmoothingSize(ctx->normal_smooth);
     //ne.setRectSize(lores_cloud->width, lores_cloud->height);
     ne.setInputCloud(lores_cloud);
-    ne.compute(*normals);
+    ne.compute(*tracking->normals);
 #else
     pcl::LinearLeastSquaresNormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
     ne.setNormalSmoothingSize(ctx->normal_smooth);
     ne.setMaxDepthChangeFactor(ctx->normal_depth_change);
     ne.setDepthDependentSmoothing(false);
     ne.setInputCloud(lores_cloud);
-    ne.compute(*normals);
+    ne.compute(*tracking->normals);
 #endif
 
     end = get_time();
@@ -1631,7 +1477,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     seg.setDistanceThreshold(ctx->distance_threshold);
     seg.setMaximumCurvature(ctx->max_curvature);
     seg.setInputCloud(lores_cloud);
-    seg.setInputNormals(normals);
+    seg.setInputNormals(tracking->normals);
 
     std::vector<pcl::ModelCoefficients> plane_coeffs;
     std::vector<pcl::PointIndices> plane_indices;
@@ -1724,7 +1570,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     DepthComparator<pcl::PointXYZ, pcl::Normal>::Ptr depth_cluster(
         new DepthComparator<pcl::PointXYZ, pcl::Normal>);
     depth_cluster->setInputCloud(lores_cloud);
-    depth_cluster->setInputNormals(normals);
+    depth_cluster->setInputNormals(tracking->normals);
     depth_cluster->setDepthThreshold(ctx->cluster_tolerance);
 
     pcl::PointCloud<pcl::Label> cluster_labels;
@@ -1986,69 +1832,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration));
     }
 
-#if 0
-    // Normal or plane-label visualisation, replacing the video buffer output
-    foreach_xy_off(tracking->video_camera_intrinsics.width,
-                   tracking->video_camera_intrinsics.height) {
-        int dx = (int)((x / (float)tracking->video_camera_intrinsics.width) *
-                       lores_cloud->width);
-        int dy = (int)((y / (float)tracking->video_camera_intrinsics.height) *
-                       lores_cloud->height);
-        int doff = dy * lores_cloud->width + dx;
-
-#if 1
-        pcl::Normal &norm = normals->points[doff];
-        if (std::isnan(norm.normal_z)) {
-            tracking->video[off * 4] = 0;
-            tracking->video[off * 4 + 1] = 0;
-            tracking->video[off * 4 + 2] = 0;
-            tracking->video[off * 4 + 3] = 0;
-        } else {
-            uint8_t r = (uint8_t)((norm.normal_x * 127) + 127);
-            uint8_t g = (uint8_t)((norm.normal_y * 127) + 127);
-            uint8_t b = (uint8_t)(255 - ((norm.normal_z * 127) + 127));
-            tracking->video[off * 4] = r;
-            tracking->video[off * 4 + 1] = g;
-            tracking->video[off * 4 + 2] = b;
-            tracking->video[off * 4 + 3] = 0xFF;
-        }
-#else
-        pcl::Label &label = plane_labels->points[doff];
-        tracking->video[off*4] = (label.label * 20);
-        tracking->video[off*4 + 1] = (label.label * 20)<<8;
-        tracking->video[off*4 + 2] = (label.label * 20)<<16;
-        tracking->video[off*4 + 3] = 0xFF;
-#endif
-    }
-#endif
-#if 0
-    // Greyscale filtered depth visualisation, replacing coloured, unfiltered
-    // depth visualisation.
-    foreach_xy_off(tracking->depth_camera_intrinsics.width,
-                   tracking->depth_camera_intrinsics.height) {
-        int dx = (int)(x * (lores_cloud->width / (float)
-                            tracking->depth_camera_intrinsics.width));
-        int dy = (int)(y * (lores_cloud->height / (float)
-                            tracking->depth_camera_intrinsics.height));
-        int doff = dy * lores_cloud->width + dx;
-        float depth = lores_cloud->points[doff].z;
-
-        if (std::isnan(depth) || depth < ctx->min_depth ||
-            depth >= ctx->max_depth) {
-            tracking->depth_rgb[off * 3] = 0;
-            tracking->depth_rgb[off * 3 + 1] = 0;
-            tracking->depth_rgb[off * 3 + 2] = 0;
-            continue;
-        }
-
-        uint8_t shade = (uint8_t)((depth - ctx->min_depth) /
-                                  (ctx->max_depth - ctx->min_depth) * 255.f);
-        tracking->depth_rgb[off * 3] = shade;
-        tracking->depth_rgb[off * 3 + 1] = shade;
-        tracking->depth_rgb[off * 3 + 2] = shade;
-    }
-#endif
-
     return true;
 }
 
@@ -2233,7 +2016,6 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     case GM_FORMAT_Z_U16_MM:
         foreach_xy_off(width, height) {
             float depth_m = ((uint16_t *)depth)[off] / 1000.f;
-
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
                                     { depth_copy[roff] = depth_m; });
@@ -2242,7 +2024,6 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     case GM_FORMAT_Z_F32_M:
         foreach_xy_off(width, height) {
             float depth_m = ((float *)depth)[off];
-
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
                                     { depth_copy[roff] = depth_m; });
@@ -2251,7 +2032,6 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     case GM_FORMAT_Z_F16_M:
         foreach_xy_off(width, height) {
             float depth_m = ((half *)depth)[off];
-
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
                                     { depth_copy[roff] = depth_m; });
@@ -2597,16 +2377,13 @@ tracking_state_free(struct gm_mem_pool *pool,
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
 
-    free(tracking->label_map_rgb);
     free(tracking->label_probs);
     free(tracking->joints);
     free(tracking->joints_processed);
     free(tracking->joints_predicted);
 
     free(tracking->depth);
-    free(tracking->depth_rgb);
 
-    free(tracking->video_rgb);
     free(tracking->face_detect_buf);
 
     if (tracking->frame) {
@@ -2627,10 +2404,6 @@ tracking_state_recycle(struct gm_tracking *self)
 
     gm_frame_unref(tracking->frame);
     tracking->frame = NULL;
-
-    tracking->label_map_rgb_valid = false;
-    tracking->depth_rgb_valid = false;
-    tracking->video_rgb_valid = false;
 
     mem_pool_recycle_resource(pool, tracking);
 }
@@ -2655,7 +2428,6 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     assert(labels_width);
     assert(labels_height);
 
-    tracking->label_map_rgb = (uint8_t *)xcalloc(labels_width * labels_height, 3);
     tracking->label_probs = (float *)xcalloc(labels_width *
                                              labels_height *
                                              ctx->n_labels, sizeof(float));
@@ -2676,12 +2448,9 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     tracking->depth = (float *)
       xcalloc(depth_width * depth_height, sizeof(float));
-    tracking->depth_rgb = (uint8_t *)xcalloc(depth_width * depth_height, 3);
 
     int video_width = ctx->basis_video_camera_intrinsics.width;
     int video_height = ctx->basis_video_camera_intrinsics.height;
-
-    tracking->video_rgb = (uint8_t *)xcalloc(video_width * video_height, 3);
 
     tracking->face_detect_buf =
         (uint8_t *)xcalloc(video_width * video_height, 1);
@@ -3422,30 +3191,6 @@ gm_tracking_get_training_camera_intrinsics(struct gm_tracking *_tracking)
     return &tracking->training_camera_intrinsics;
 }
 
-const uint8_t *
-gm_tracking_get_rgb_depth(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    if (!tracking->depth_rgb_valid) {
-        tracking_create_depth_rgb_image(tracking);
-    }
-
-    return tracking->depth_rgb;
-}
-
-const uint8_t *
-gm_tracking_get_rgb_video(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    if (!tracking->video_rgb_valid) {
-        tracking_create_video_rgb_image(tracking);
-    }
-
-    return tracking->video_rgb;
-}
-
 const float *
 gm_tracking_get_depth(struct gm_tracking *_tracking)
 {
@@ -3464,22 +3209,193 @@ gm_tracking_get_joint_positions(struct gm_tracking *_tracking,
     return tracking->joints_processed;
 }
 
-const uint8_t *
-gm_tracking_get_rgb_label_map(struct gm_tracking *_tracking,
-                              int *width,
-                              int *height)
+void
+gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
+                                 int *width, int *height, uint8_t **output)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     struct gm_context *ctx = tracking->ctx;
 
-    *width = tracking->training_camera_intrinsics.width;
-    *height = tracking->training_camera_intrinsics.height;
+    uint8_t n_labels = ctx->n_labels;
 
-    if (!tracking->label_map_rgb_valid) {
-        tracking_create_rgb_label_map(ctx, tracking, ctx->debug_label);
+    *width = (int)ctx->basis_training_camera_intrinsics.width;
+    *height = (int)ctx->basis_training_camera_intrinsics.height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
     }
 
-    return tracking->label_map_rgb;
+    gm_assert(ctx->log, ctx->debug_label < n_labels,
+              "Can't create RGB map of invalid label %u",
+              ctx->debug_label);
+
+    foreach_xy_off(*width, *height) {
+        uint8_t label = 0;
+        float pr = -1.0;
+        float *pr_table = &tracking->label_probs[off * n_labels];
+        for (uint8_t l = 0; l < n_labels; l++) {
+            if (pr_table[l] > pr) {
+                label = l;
+                pr = pr_table[l];
+            }
+        }
+
+        uint8_t r;
+        uint8_t g;
+        uint8_t b;
+
+        if (ctx->debug_label == -1) {
+            r = default_palette[label].red;
+            g = default_palette[label].green;
+            b = default_palette[label].blue;
+        } else {
+            struct color col = stops_color_from_val(ctx->heat_color_stops,
+                                                    ctx->n_heat_color_stops,
+                                                    1,
+                                                    pr_table[ctx->debug_label]);
+            r = col.r;
+            g = col.g;
+            b = col.b;
+        }
+
+        (*output)[off * 3] = r;
+        (*output)[off * 3 + 1] = g;
+        (*output)[off * 3 + 2] = b;
+    }
+}
+
+void
+gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
+                             int *width, int *height, uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    *width = (int)tracking->depth_camera_intrinsics.width;
+    *height = (int)tracking->depth_camera_intrinsics.height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        float depth = tracking->depth[off];
+        struct color rgb = stops_color_from_val(ctx->depth_color_stops,
+                                                ctx->n_depth_color_stops,
+                                                ctx->depth_color_stops_range,
+                                                depth);
+        (*output)[off * 3] = rgb.r;
+        (*output)[off * 3 + 1] = rgb.g;
+        (*output)[off * 3 + 2] = rgb.b;
+    }
+}
+
+void
+gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
+                             int *width, int *height, uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    *width = (int)ctx->basis_video_camera_intrinsics.width;
+    *height = (int)ctx->basis_video_camera_intrinsics.height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    int rot_width = tracking->video_camera_intrinsics.width;
+    enum gm_format format = tracking->frame->video_format;
+    enum gm_rotation rotation = tracking->frame->camera_rotation;
+    uint8_t *video = (uint8_t *)tracking->frame->video->data;
+
+    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
+    // us easily combine our rotation with our copy...
+    //
+    // XXX: it could be worth reading multiple scanlines at a time so we could
+    // write out cache lines at a time instead of only 4 bytes (for rotated
+    // images).
+    //
+    switch(format) {
+    case GM_FORMAT_RGB_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*3];
+                                        (*output)[roff*3+1] = video[off*3+1];
+                                        (*output)[roff*3+2] = video[off*3+2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_RGBX_U8:
+    case GM_FORMAT_RGBA_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*4];
+                                        (*output)[roff*3+1] = video[off*4+1];
+                                        (*output)[roff*3+2] = video[off*4+2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_LUMINANCE_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        uint8_t lum = video[off];
+                                        (*output)[roff*3] = lum;
+                                        (*output)[roff*3+1] = lum;
+                                        (*output)[roff*3+2] = lum;
+                                    });
+        }
+        break;
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_Z_U16_MM:
+    case GM_FORMAT_Z_F32_M:
+    case GM_FORMAT_Z_F16_M:
+    case GM_FORMAT_POINTS_XYZC_F32_M:
+        gm_assert(ctx->log, 0, "Unexpected format for video buffer");
+        return;
+    }
+
+    // Output is rotated, so make sure output width/height are correct
+    if (rotation == GM_ROTATION_90 || rotation == GM_ROTATION_270) {
+        std::swap(*width, *height);
+    }
+}
+
+void
+gm_tracking_create_rgb_normals(struct gm_tracking *_tracking,
+                               int *width, int *height, uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    //struct gm_context *ctx = tracking->ctx;
+
+    *width = (int)tracking->normals->width;
+    *height = (int)tracking->normals->height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        pcl::Normal &norm = tracking->normals->points[off];
+        if (std::isnan(norm.normal_z)) {
+            (*output)[off * 3] = 0;
+            (*output)[off * 3 + 1] = 0;
+            (*output)[off * 3 + 2] = 0;
+        } else {
+            uint8_t r = (uint8_t)((norm.normal_x * 127) + 127);
+            uint8_t g = (uint8_t)((norm.normal_y * 127) + 127);
+            uint8_t b = (uint8_t)(255 - ((norm.normal_z * 127) + 127));
+            (*output)[off * 3] = r;
+            (*output)[off * 3 + 1] = g;
+            (*output)[off * 3 + 2] = b;
+        }
+    }
 }
 
 const float *

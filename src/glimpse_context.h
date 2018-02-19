@@ -303,23 +303,41 @@ gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
                                     int *width,
                                     int *height);
 
-const uint8_t *
-gm_tracking_get_rgb_label_map(struct gm_tracking *tracking,
-                              int *width,
-                              int *height);
-
-const uint8_t *
-gm_tracking_get_rgb_video(struct gm_tracking *_tracking);
-
-const uint8_t *
-gm_tracking_get_rgb_depth(struct gm_tracking *tracking);
-
 const float *
 gm_tracking_get_depth(struct gm_tracking *tracking);
 
 const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,
                                 int *n_joints);
+
+/* Creates an RGB visualisation of the label map. */
+void
+gm_tracking_create_rgb_label_map(struct gm_tracking *tracking,
+                                 int *width,
+                                 int *height,
+                                 uint8_t **output);
+
+/* Creates an RGB visualisation of the depth buffer. */
+void
+gm_tracking_create_rgb_depth(struct gm_tracking *tracking,
+                             int *width,
+                             int *height,
+                             uint8_t **output);
+
+/* Creates an RGB visualisation of the video buffer. */
+void
+gm_tracking_create_rgb_video(struct gm_tracking *tracking,
+                             int *width,
+                             int *height,
+                             uint8_t **output);
+
+/* Creates an RGB visualisation of the estimated normals of the depth buffer. */
+void
+gm_tracking_create_rgb_normals(struct gm_tracking *tracking,
+                               int *width,
+                               int *height,
+                               uint8_t **output);
+
 #ifdef __cplusplus
 }
 #endif

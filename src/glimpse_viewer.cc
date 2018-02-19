@@ -50,6 +50,8 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <imgui.h>
+#include <imgui_internal.h> // For PushItemFlags(ImGuiItemFlags_Disabled)
+
 #ifdef __ANDROID__
 #    include <android/log.h>
 #    include <jni.h>
@@ -76,7 +78,7 @@
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 #define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
 
-#define TOOLBAR_LEFT_WIDTH 300
+#define TOOLBAR_WIDTH 300
 
 #define xsnprintf(dest, n, fmt, ...) do { \
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
@@ -121,6 +123,22 @@ typedef struct _Data
 #endif
     int win_width;
     int win_height;
+
+    /* The size of the depth buffer visualisation texture */
+    int depth_rgb_width;
+    int depth_rgb_height;
+
+    /* The size of the video buffer visualisation texture */
+    int video_rgb_width;
+    int video_rgb_height;
+
+    /* The size of the normals visualisation texture */
+    int normals_rgb_width;
+    int normals_rgb_height;
+
+    /* The size of the labels visualisation texture */
+    int labels_rgb_width;
+    int labels_rgb_height;
 
     /* A convenience for accessing number of joints in latest tracking */
     int n_joints;
@@ -206,6 +224,7 @@ static uint32_t joint_palette[] = {
 
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
+static GLuint gl_normals_rgb_tex;
 static GLuint gl_rgb_tex;
 static GLuint gl_vid_tex;
 
@@ -377,8 +396,8 @@ adjust_aspect(ImVec2 &input, int width, int height)
     input = output;
 }
 
-static void
-draw_controls(Data *data, int x, int y, int width, int height)
+static bool
+draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 {
     ImGui::SetNextWindowPos(ImVec2(x, y));
     ImGui::SetNextWindowSize(ImVec2(width, height));
@@ -387,6 +406,12 @@ draw_controls(Data *data, int x, int y, int width, int height)
                  ImGuiWindowFlags_NoResize|
                  ImGuiWindowFlags_NoMove|
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    if (disabled) {
+        ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+    }
+
+    bool focused = ImGui::IsWindowFocused();
 
     ImGui::TextDisabled("Viewer properties...");
     ImGui::Separator();
@@ -447,7 +472,13 @@ draw_controls(Data *data, int x, int y, int width, int height)
         free(json);
     }
 
+    if (disabled) {
+        ImGui::PopItemFlag();
+    }
+
     ImGui::End();
+
+    return focused;
 }
 
 static void
@@ -546,8 +577,7 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
     ImGui::SetWindowSize(ImVec2(0, 0), ImGuiCond_Always);
 
     ImVec2 size = ImGui::GetWindowSize();
-    ImGui::SetWindowPos(ImVec2(bounds.x + (bounds.z - size.x) / 2,
-                               (bounds.y + bounds.w) - size.y - 16.f),
+    ImGui::SetWindowPos(ImVec2(bounds.x + (bounds.z - size.x) / 2, 16.f),
                         ImGuiCond_FirstUseEver);
 
     // Make sure the window stays within bounds
@@ -569,9 +599,8 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
     ImGui::End();
 }
 
-static ImVec2
-draw_visualisation(Data *data,
-                   int x, int y, int width, int height,
+static bool
+draw_visualisation(Data *data, int x, int y, int width, int height,
                    int aspect_width, int aspect_height,
                    const char *name, GLuint tex,
                    enum gm_rotation rotation)
@@ -579,62 +608,69 @@ draw_visualisation(Data *data,
     ImGui::SetNextWindowPos(ImVec2(x, y));
     ImGui::SetNextWindowSize(ImVec2(width, height));
     ImGui::Begin(name, NULL,
+                 ImGuiWindowFlags_NoTitleBar |
                  ImGuiWindowFlags_NoScrollbar |
                  ImGuiWindowFlags_NoResize |
                  ImGuiWindowFlags_NoScrollWithMouse |
                  ImGuiWindowFlags_NoCollapse |
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
+    bool focused = ImGui::IsWindowFocused();
+    if (tex == 0) {
+        return focused;
+    }
+
+    ImVec2 uv0, uv1, uv2, uv3;
+
+    switch (rotation) {
+    case GM_ROTATION_0:
+        uv0 = ImVec2(0, 0);
+        uv1 = ImVec2(1, 0);
+        uv2 = ImVec2(1, 1);
+        uv3 = ImVec2(0, 1);
+        break;
+    case GM_ROTATION_90:
+        uv0 = ImVec2(1, 0);
+        uv1 = ImVec2(1, 1);
+        uv2 = ImVec2(0, 1);
+        uv3 = ImVec2(0, 0);
+        std::swap(aspect_width, aspect_height);
+        break;
+    case GM_ROTATION_180:
+        uv0 = ImVec2(1, 1);
+        uv1 = ImVec2(0, 1);
+        uv2 = ImVec2(0, 0);
+        uv3 = ImVec2(1, 0);
+        break;
+    case GM_ROTATION_270:
+        uv0 = ImVec2(0, 1);
+        uv1 = ImVec2(0, 0);
+        uv2 = ImVec2(1, 0);
+        uv3 = ImVec2(1, 1);
+        std::swap(aspect_width, aspect_height);
+        break;
+    }
+
     ImVec2 area_size = ImGui::GetContentRegionAvail();
     adjust_aspect(area_size, aspect_width, aspect_height);
 
-    if (tex != 0) {
-        ImVec2 uv0, uv1, uv2, uv3;
+    ImDrawList *draw_list = ImGui::GetWindowDrawList();
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+    draw_list->PushTextureID((void *)(intptr_t)tex);
 
-        switch (rotation) {
-        case GM_ROTATION_0:
-            uv0 = ImVec2(0, 0);
-            uv1 = ImVec2(1, 0);
-            uv2 = ImVec2(1, 1);
-            uv3 = ImVec2(0, 1);
-            break;
-        case GM_ROTATION_90:
-            uv0 = ImVec2(1, 0);
-            uv1 = ImVec2(1, 1);
-            uv2 = ImVec2(0, 1);
-            uv3 = ImVec2(0, 0);
-            break;
-        case GM_ROTATION_180:
-            uv0 = ImVec2(1, 1);
-            uv1 = ImVec2(0, 1);
-            uv2 = ImVec2(0, 0);
-            uv3 = ImVec2(1, 0);
-            break;
-        case GM_ROTATION_270:
-            uv0 = ImVec2(0, 1);
-            uv1 = ImVec2(0, 0);
-            uv2 = ImVec2(1, 0);
-            uv3 = ImVec2(1, 1);
-            break;
-        }
+    draw_list->PrimReserve(6, 4);
+    draw_list->PrimQuadUV(ImVec2(cur.x, cur.y),
+                          ImVec2(cur.x+area_size.x, cur.y),
+                          ImVec2(cur.x+area_size.x, cur.y+area_size.y),
+                          ImVec2(cur.x, cur.y+area_size.y),
+                          uv0,
+                          uv1,
+                          uv2,
+                          uv3,
+                          ImGui::GetColorU32(ImVec4(1,1,1,1)));
+    draw_list->PopTextureID();
+    ImGui::End();
 
-        ImDrawList *draw_list = ImGui::GetWindowDrawList();
-        ImVec2 cur = ImGui::GetCursorScreenPos();
-        draw_list->PushTextureID((void *)(intptr_t)tex);
-
-        draw_list->PrimReserve(6, 4);
-        draw_list->PrimQuadUV(ImVec2(cur.x, cur.y),
-                              ImVec2(cur.x+area_size.x, cur.y),
-                              ImVec2(cur.x+area_size.x, cur.y+area_size.y),
-                              ImVec2(cur.x, cur.y+area_size.y),
-                              uv0,
-                              uv1,
-                              uv2,
-                              uv3,
-                              ImGui::GetColorU32(ImVec4(1,1,1,1)));
-        draw_list->PopTextureID();
-        ImGui::End();
-    }
-    return area_size;
+    return focused;
 }
 
 static void
@@ -865,7 +901,7 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
     glDisable(GL_DEPTH_TEST);
 }
 
-static void
+static bool
 draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
                          int x, int y, int width, int height)
 {
@@ -873,12 +909,13 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
         gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
     int depth_width = depth_intrinsics->width;
     int depth_height = depth_intrinsics->height;
-    ImVec2 win_size = draw_visualisation(
-        data,
-        x, y, width, height,
-        depth_width, depth_height,
-        "Cloud", 0, GM_ROTATION_0);
 
+    bool focused = draw_visualisation(data, x, y, width, height,
+                                      depth_width, depth_height,
+                                      "Cloud", 0, GM_ROTATION_0);
+
+    ImVec2 win_size = ImGui::GetContentRegionMax();
+    adjust_aspect(win_size, depth_width, depth_height);
     update_cloud_vis(data, win_size, uiScale);
 
     ImGui::Image((void *)(intptr_t)gl_cloud_tex, win_size);
@@ -894,12 +931,70 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
     }
 
     ImGui::End();
+
+    return focused;
+}
+
+static bool
+draw_view(Data *data, int view, ImVec2 &uiScale,
+          int x, int y, int width, int height, bool disabled)
+{
+    switch(view) {
+    case 0:
+        return draw_controls(data, x, y, width, height, disabled);
+    case 1: {
+        if (!data->last_video_frame) {
+            return false;
+        }
+        const struct gm_intrinsics *video_intrinsics =
+            gm_device_get_video_intrinsics(data->active_device);
+        int video_width = video_intrinsics->width;
+        int video_height = video_intrinsics->height;
+
+        return draw_visualisation(data, x, y, width, height,
+                                  video_width, video_height,
+                                  "Video Buffer", gl_vid_tex,
+                                  data->last_video_frame->camera_rotation);
+    }
+    case 2:
+        return draw_visualisation(data, x, y, width, height,
+                                  data->depth_rgb_width,
+                                  data->depth_rgb_height,
+                                  "Depth Buffer", gl_depth_rgb_tex,
+                                  GM_ROTATION_0);
+    case 3:
+        return draw_visualisation(data, x, y, width, height,
+                                  data->normals_rgb_width,
+                                  data->normals_rgb_height,
+                                  "Normals", gl_normals_rgb_tex,
+                                  GM_ROTATION_0);
+    case 4:
+        return draw_visualisation(data, x, y, width, height,
+                                  data->labels_rgb_width,
+                                  data->labels_rgb_height,
+                                  "Labels", gl_labels_tex,
+                                  GM_ROTATION_0);
+    case 5:
+        if (!data->latest_tracking) {
+            return false;
+        }
+        return draw_cloud_visualisation(data, uiScale,
+                                        x, y, width, height);
+    }
+
+    return false;
 }
 
 static void
 draw_ui(Data *data)
 {
-    float left_col = TOOLBAR_LEFT_WIDTH;
+    const char *views[] = {
+        "Controls", "Video Buffer", "Depth Buffer",
+        "Normals", "Labels", "Cloud" };
+    static int cloud_view = ARRAY_LEN(views) - 1;
+    static int main_view = 1;
+    int current_view = main_view;
+
     ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
 
     ImGuiIO& io = ImGui::GetIO();
@@ -910,147 +1005,68 @@ draw_ui(Data *data)
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
-    if (win_size.x >= 1024 && win_size.y >= 600) {
-        // Draw playback controls
+    bool skip_controls = false;
+    if (current_view != 0) {
+        // Draw playback controls if UI controls isn't the main view
         draw_playback_controls(data, ImVec4(0, 0, win_size.x, win_size.y));
-
-        // Draw control panel on the left
-        draw_controls(data, origin.x, origin.y,
-                      left_col + origin.x, win_size.y - origin.y);
-
-        ImVec2 main_area_size = ImVec2(win_size.x - left_col, win_size.y);
-        int vis_width = main_area_size.x/2;
-        int vis_height = main_area_size.y/2;
-
-        if (data->latest_tracking) {
-            const struct gm_intrinsics *video_intrinsics =
-                gm_device_get_video_intrinsics(data->active_device);
-            gm_intrinsics rotated_video_intrinsics;
-            gm_context_rotate_intrinsics(data->ctx,
-                                         video_intrinsics,
-                                         &rotated_video_intrinsics,
-                                         data->last_video_frame->camera_rotation);
-
-            const struct gm_intrinsics *depth_intrinsics =
-                gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
-            int depth_width = depth_intrinsics->width;
-            int depth_height = depth_intrinsics->height;
-
-            const struct gm_intrinsics *training_intrinsics =
-                gm_tracking_get_training_camera_intrinsics(data->latest_tracking);
-            int training_width = training_intrinsics->width;
-            int training_height = training_intrinsics->height;
-
-            // Draw depth buffer visualisation in top-left
-            draw_visualisation(data,
-                               origin.x + left_col, origin.y,
-                               vis_width, vis_height,
-                               depth_width, depth_height,
-                               "Depth Buffer", gl_depth_rgb_tex,
-                               GM_ROTATION_0);
-
-            // Draw video buffer visualisation in bottom-left
-            draw_visualisation(data,
-                               origin.x + left_col, origin.y + vis_height,
-                               vis_width, vis_height,
-                               rotated_video_intrinsics.width,
-                               rotated_video_intrinsics.height,
-                               "Video Buffer", gl_vid_tex,
-                               data->last_video_frame->camera_rotation);
-
-            // Draw label inference visualisation in top-right
-            draw_visualisation(data,
-                               origin.x + left_col + vis_width, origin.y,
-                               vis_width, vis_height,
-                               training_width, training_height,
-                               "Labels", gl_labels_tex,
-                               GM_ROTATION_0);
-
-            // Draw point cloud and joint visualisation in bottom-left
-            draw_cloud_visualisation(data, uiScale,
-                                     origin.x + left_col + vis_width,
-                                     origin.y + vis_height,
-                                     vis_width, vis_height);
-        }
-    } else {
-        // Draw a view-picker at the top
-        const char *views[] = {
-            "Controls", "Depth Buffer", "Video Buffer", "Labels", "Cloud" };
-        static int current_view = ARRAY_LEN(views) - 1;
-
-        ImGui::SetNextWindowPos(origin);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(win_size.x, 0),
-                                            ImVec2(win_size.x, win_size.y));
-        ImGui::Begin("View picker", NULL,
-                     ImGuiWindowFlags_NoTitleBar|
-                     ImGuiWindowFlags_NoResize|
-                     ImGuiWindowFlags_NoMove|
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
-        ImGui::Combo("View", &current_view, views, ARRAY_LEN(views));
-
-        int x = origin.x;
-        int y = ImGui::GetWindowHeight() + origin.y;
-        ImVec2 main_area_size = ImVec2(win_size.x,
-                                       win_size.y - ImGui::GetWindowHeight());
-
-        ImGui::End();
-
-        if (current_view == 0) {
-            draw_controls(data, x, y, main_area_size.x, main_area_size.y);
-        } else if (data->latest_tracking != NULL) {
-            const struct gm_intrinsics *video_intrinsics =
-                gm_device_get_video_intrinsics(data->active_device);
-            gm_intrinsics rotated_video_intrinsics;
-            gm_context_rotate_intrinsics(data->ctx,
-                                         video_intrinsics,
-                                         &rotated_video_intrinsics,
-                                         data->last_video_frame->camera_rotation);
-
-            const struct gm_intrinsics *depth_intrinsics =
-                gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
-            int depth_width = depth_intrinsics->width;
-            int depth_height = depth_intrinsics->height;
-
-            const struct gm_intrinsics *training_intrinsics =
-                gm_tracking_get_training_camera_intrinsics(data->latest_tracking);
-            int training_width = training_intrinsics->width;
-            int training_height = training_intrinsics->height;
-
-            switch (current_view) {
-            case 1:
-                draw_visualisation(data,
-                                   x, y, main_area_size.x, main_area_size.y,
-                                   depth_width, depth_height,
-                                   "Depth Buffer", gl_depth_rgb_tex,
-                                   GM_ROTATION_0);
-                break;
-            case 2:
-                draw_visualisation(data,
-                                   x, y, main_area_size.x, main_area_size.y,
-                                   rotated_video_intrinsics.width,
-                                   rotated_video_intrinsics.height,
-                                   "Video Buffer", gl_vid_tex,
-                                   data->last_video_frame->camera_rotation);
-                break;
-            case 3:
-                draw_visualisation(data,
-                                   x, y, main_area_size.x, main_area_size.y,
-                                   training_width, training_height,
-                                   "Labels", gl_labels_tex,
-                                   GM_ROTATION_0);
-                break;
-            case 4:
-                draw_cloud_visualisation(data, uiScale,
-                                         x, y, main_area_size.x, main_area_size.y);
-                break;
-            }
-        }
-
-        if (current_view != 0) {
-            draw_playback_controls(data, ImVec4(x, y, main_area_size.x,
-                                                main_area_size.y));
-        }
     }
+    if (win_size.x >= 1024 && win_size.y >= 600) {
+        // Draw control panel on the left if we have a large window
+        draw_controls(data, origin.x, origin.y,
+                      TOOLBAR_WIDTH + origin.x, win_size.y - origin.y, false);
+
+        win_size.x -= TOOLBAR_WIDTH;
+        origin.x += TOOLBAR_WIDTH;
+
+        skip_controls = true;
+    }
+
+    // Draw sub-views on the axis with the most space
+    int n_views = ARRAY_LEN(views) - (skip_controls ? 2 : 1);
+    int subview_width, subview_height;
+    if (win_size.x > win_size.y) {
+        subview_height = win_size.y / n_views;
+        subview_width = data->depth_rgb_height ?
+            subview_height * (data->video_rgb_width /
+                              (float)data->video_rgb_height) :
+            subview_height;
+    } else {
+        subview_width = win_size.x / n_views;
+        subview_height = data->depth_rgb_width ?
+            subview_width * (data->video_rgb_height /
+                             (float)data->video_rgb_width) :
+            subview_width;
+    }
+    for (int i = skip_controls ? 1 : 0, v = 0; i < (int)ARRAY_LEN(views); ++i) {
+        if (i == current_view) {
+            continue;
+        }
+
+        int x, y;
+        if (win_size.x > win_size.y) {
+            x = origin.x + win_size.x - subview_width;
+            y = origin.y + (subview_height * v);
+        } else {
+            y = origin.y + (win_size.y - subview_height);
+            x = origin.x + (subview_width * v);
+        }
+
+        if (draw_view(data, i, uiScale, x, y,
+                      subview_width, subview_height, i == 0)) {
+            main_view = i;
+        }
+        ++v;
+    }
+
+    if (win_size.x > win_size.y) {
+        win_size.x -= subview_width;
+    } else {
+        win_size.y -= subview_height;
+    }
+
+    // Draw the main view in the remaining space in the center
+    draw_view(data, current_view, uiScale, origin.x, origin.y,
+              win_size.x, win_size.y, false);
 
     ImGui::PopStyleVar();
 
@@ -1060,6 +1076,13 @@ draw_ui(Data *data)
     ProfileDrawUI();
 
     ImGui::Render();
+
+    // If we've toggled between the cloud view, invalidate the texture so
+    // it gets recreated at the right size next time it's displayed.
+    if (main_view != current_view &&
+        (main_view == cloud_view || current_view == cloud_view)) {
+        cloud_tex_valid = false;
+    }
 }
 
 /* If we've already requested gm_device for a frame then this won't submit
@@ -1246,16 +1269,6 @@ handle_device_frame_updates(Data *data)
 static void
 upload_tracking_textures(Data *data)
 {
-    const struct gm_intrinsics *video_intrinsics =
-        gm_tracking_get_video_camera_intrinsics(data->latest_tracking);
-    int video_width = video_intrinsics->width;
-    int video_height = video_intrinsics->height;
-
-    const struct gm_intrinsics *depth_intrinsics =
-        gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
-    int depth_width = depth_intrinsics->width;
-    int depth_height = depth_intrinsics->height;
-
     ProfileScopedSection(UploadTrackingBufs);
 
     /*
@@ -1270,16 +1283,21 @@ upload_tracking_textures(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    uint8_t *depth_rgb = (uint8_t *)gm_tracking_get_rgb_depth(data->latest_tracking);
+    uint8_t *depth_rgb = NULL;
+    gm_tracking_create_rgb_depth(data->latest_tracking,
+                                 &data->depth_rgb_width,
+                                 &data->depth_rgb_height,
+                                 &depth_rgb);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 depth_width, depth_height,
+                 data->depth_rgb_width, data->depth_rgb_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
+    free(depth_rgb);
 
     /* Update depth buffer and colour buffer */
     const float *depth = gm_tracking_get_depth(data->latest_tracking);
     glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(float) * depth_width * depth_height,
+                 sizeof(float) * data->depth_rgb_width * data->depth_rgb_height,
                  depth, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
@@ -1288,10 +1306,31 @@ upload_tracking_textures(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    uint8_t *video_rgb = (uint8_t *)gm_tracking_get_rgb_video(data->latest_tracking);
+    uint8_t *video_rgb = NULL;
+    gm_tracking_create_rgb_video(data->latest_tracking,
+                                 &data->video_rgb_width,
+                                 &data->video_rgb_height,
+                                 &video_rgb);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 video_width, video_height,
+                 data->video_rgb_width, data->video_rgb_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, video_rgb);
+    free(video_rgb);
+
+    /* Update normals buffer */
+    glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    uint8_t *normals_rgb = NULL;
+    gm_tracking_create_rgb_normals(data->latest_tracking,
+                                   &data->normals_rgb_width,
+                                   &data->normals_rgb_height,
+                                   &normals_rgb);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                 data->normals_rgb_width, data->normals_rgb_height,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, normals_rgb);
+    free(normals_rgb);
 
     /*
      * Update inferred label map
@@ -1305,16 +1344,15 @@ upload_tracking_textures(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
-    int label_map_width = 0;
-    int label_map_height = 0;
-
-    const uint8_t *labels_rgb =
-        gm_tracking_get_rgb_label_map(data->latest_tracking,
-                                      &label_map_width,
-                                      &label_map_height);
+    uint8_t *labels_rgb = NULL;
+    gm_tracking_create_rgb_label_map(data->latest_tracking,
+                                     &data->labels_rgb_width,
+                                     &data->labels_rgb_height,
+                                     &labels_rgb);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 label_map_width, label_map_height,
+                 data->labels_rgb_width, data->labels_rgb_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
+    free(labels_rgb);
 }
 
 static void
@@ -1858,11 +1896,6 @@ init_viewer_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glGenTextures(1, &gl_depth_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
     glGenTextures(1, &gl_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
@@ -1870,6 +1903,11 @@ init_viewer_opengl(Data *data)
 
     glGenTextures(1, &gl_vid_tex);
     glBindTexture(GL_TEXTURE_2D, gl_vid_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glGenTextures(1, &gl_normals_rgb_tex);
+    glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
@@ -2004,8 +2042,8 @@ init_winsys_glfw(Data *data)
         exit(1);
     }
 
-    data->win_width = 980 + TOOLBAR_LEFT_WIDTH;
-    data->win_height = 768;
+    data->win_width = 1280;
+    data->win_height = 720;
 
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  0) ;
