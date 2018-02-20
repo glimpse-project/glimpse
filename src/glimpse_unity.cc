@@ -1121,10 +1121,19 @@ gm_unity_terminate(void)
 
     gm_context_destroy(data->ctx);
 
-    if (data->last_depth_frame)
+
+    if (data->visible_frame) {
+        gm_frame_unref(data->visible_frame);
+        data->visible_frame = NULL;
+    }
+    if (data->last_depth_frame) {
         gm_frame_unref(data->last_depth_frame);
-    if (data->last_video_frame)
+        data->last_depth_frame = NULL;
+    }
+    if (data->last_video_frame) {
         gm_frame_unref(data->last_video_frame);
+        data->last_video_frame = NULL;
+    }
 
     gm_device_close(data->device);
 
