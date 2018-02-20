@@ -353,12 +353,12 @@ handle_device_frame_updates(struct glimpse_data *data)
                                          data->last_depth_frame,
                                          data->last_video_frame);
 
-            // After returning from combine_frames, the two input frames will
-            // have been unref'd and the returned frame will have a single
-            // reference.
-            gm_frame_ref(full_frame);
+            // We don't need the individual frames any more
+            gm_frame_unref(data->last_depth_frame);
+            gm_frame_unref(data->last_video_frame);
+
             data->last_depth_frame = full_frame;
-            data->last_video_frame = full_frame;
+            data->last_video_frame = gm_frame_ref(full_frame);
         }
 
         data->context_needs_frame =

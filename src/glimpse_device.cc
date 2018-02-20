@@ -2010,28 +2010,26 @@ gm_device_get_latest_frame(struct gm_device *dev)
     return &frame->base;
 }
 
+/* XXX: not clear how we should handle incompatible frames, e.g. due to
+ * mismatching rotations?
+ */
 struct gm_frame *
 gm_device_combine_frames(struct gm_device *dev, uint64_t timestamp,
                          struct gm_frame *depth, struct gm_frame *video)
 {
-    struct gm_device_frame *frame = mem_pool_acquire_frame(dev->frame_pool);
+    struct gm_device_frame *frame = mem_pool_acquire_frame(dev->frame_pool, "combined frame");
+    gm_assert(dev->log, depth->depth != NULL,
+              "Spurios request to combine frame with depth frame having no depth buffer");
+    gm_assert(dev->log, video->video != NULL,
+              "Spurios request to combine frame with video frame having no video buffer");
 
     frame->base.timestamp = timestamp;
 
-    if (depth->depth) {
-        frame->base.depth = depth->depth;
-        frame->base.depth_format = depth->depth_format;
-    }
+    frame->base.depth = gm_buffer_ref(depth->depth);
+    frame->base.depth_format = depth->depth_format;
 
-    if (video->video) {
-        frame->base.video = video->video;
-        frame->base.video_format = video->video_format;
-    }
-
-    depth->depth = NULL;
-    gm_frame_unref(depth);
-    video->video = NULL;
-    gm_frame_unref(video);
+    frame->base.video = gm_buffer_ref(video->video);
+    frame->base.video_format = video->video_format;
 
     return &frame->base;
 }
