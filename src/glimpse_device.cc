@@ -944,6 +944,10 @@ recording_io_thread_cb(void *userdata)
             free(abs_filename);
         }
 
+        // Retrieve rotation
+        enum gm_rotation rotation = (enum gm_rotation)
+            json_object_get_number(frame, "camera_rotation");
+
         // Wait until the appropriate time has elapsed before notifying the
         // frame
         uint64_t frame_time = (uint64_t)
@@ -984,6 +988,7 @@ recording_io_thread_cb(void *userdata)
         if (dev->depth_buf_back || dev->video_buf_back) {
             pthread_mutex_lock(&dev->swap_buffers_lock);
             dev->frame_time = frame_time;
+            dev->camera_rotation = rotation;
             if (dev->depth_buf_back &&
                 dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
                 if (dev->depth_buf_ready)

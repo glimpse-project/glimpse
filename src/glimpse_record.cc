@@ -327,6 +327,10 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
         }
     }
 
+    // Save out camera rotation
+    json_object_set_number(json_object(frame_meta), "camera_rotation",
+                           (double)frame->camera_rotation);
+
     json_array_append_value(json_array(r->frames), frame_meta);
     ++r->n_frames;
 }

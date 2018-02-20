@@ -179,8 +179,6 @@ typedef struct _Data
      */
     bool overwrite_recording;
     struct gm_recording *recording;
-    bool recorded_depth;
-    bool recorded_video;
     struct gm_device *recording_device;
 
     struct gm_device *playback_device;
@@ -1124,7 +1122,6 @@ handle_device_frame_updates(Data *data)
             gm_frame_ref(device_frame);
             data->last_depth_frame = device_frame;
             data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
-            data->recorded_depth = false;
         }
 
         if (device_frame->video) {
@@ -1134,7 +1131,10 @@ handle_device_frame_updates(Data *data)
             gm_frame_ref(device_frame);
             data->last_video_frame = device_frame;
             data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
-            data->recorded_video = false;
+        }
+
+        if (data->recording) {
+            gm_recording_save_frame(data->recording, device_frame);
         }
 
         gm_frame_unref(device_frame);
@@ -1168,28 +1168,6 @@ handle_device_frame_updates(Data *data)
         // We don't want to send duplicate frames to tracking, so discard now
         gm_frame_unref(data->last_depth_frame);
         data->last_depth_frame = NULL;
-    }
-
-    if (data->recording) {
-        if (data->last_video_frame == data->last_depth_frame) {
-            if (!data->recorded_video || !data->recorded_depth) {
-                gm_recording_save_frame(data->recording,
-                                        data->last_video_frame);
-                data->recorded_video = true;
-                data->recorded_depth = true;
-            }
-        } else {
-            if (data->last_video_frame && !data->recorded_video) {
-                gm_recording_save_frame(data->recording,
-                                        data->last_video_frame);
-                data->recorded_video = true;
-            }
-            if (data->last_depth_frame && !data->recorded_depth) {
-                gm_recording_save_frame(data->recording,
-                                        data->last_depth_frame);
-                data->recorded_depth = true;
-            }
-        }
     }
 
     data->device_frame_ready = false;
