@@ -66,6 +66,11 @@ gm_logger_new(void (*log_cb)(struct gm_logger *logger,
                              void *user_data),
               void *user_data);
 
+int
+gm_backtrace(void **frame_pointers,
+             int skip_n_frames,
+             int n_frame_pointers);
+
 /* XXX: This api is not thread-safe so it's assumed that the backtrace level
  * and size are set before the logger is used
  */

@@ -27,6 +27,7 @@
 #include <assert.h>
 
 #include "glimpse_config.h"
+#include "glimpse_log.h"
 #include "loader.h"
 
 enum gm_format {
@@ -77,6 +78,8 @@ struct gm_event
 struct gm_buffer_vtable
 {
     void (*free)(struct gm_buffer *self);
+    void (*add_breadcrumb)(struct gm_buffer *self,
+                           const char *name);
 };
 
 struct gm_buffer
@@ -95,9 +98,17 @@ struct gm_buffer
     void *data;
 };
 
+inline void
+gm_buffer_add_breadcrumb(struct gm_buffer *buffer, const char *tag)
+{
+    buffer->api->add_breadcrumb(buffer, tag);
+}
+
 inline struct gm_buffer *
 gm_buffer_ref(struct gm_buffer *buffer)
 {
+    assert(buffer->ref >= 0); // implies use after free!
+    gm_buffer_add_breadcrumb(buffer, "ref");
     buffer->ref++;
     return buffer;
 }
@@ -105,6 +116,7 @@ gm_buffer_ref(struct gm_buffer *buffer)
 inline void
 gm_buffer_unref(struct gm_buffer *buffer)
 {
+    gm_buffer_add_breadcrumb(buffer, "unref");
     if (__builtin_expect(--(buffer->ref) < 1, 0))
         buffer->api->free(buffer);
 }
@@ -133,6 +145,8 @@ gm_buffer_unref(struct gm_buffer *buffer)
 struct gm_frame_vtable
 {
     void (*free)(struct gm_frame *self);
+    void (*add_breadcrumb)(struct gm_frame *self,
+                      const char *name);
 };
 
 struct gm_frame
@@ -153,9 +167,17 @@ struct gm_frame
     struct gm_buffer *video;
 };
 
+inline void
+gm_frame_add_breadcrumb(struct gm_frame *frame, const char *tag)
+{
+    frame->api->add_breadcrumb(frame, tag);
+}
+
 inline struct gm_frame *
 gm_frame_ref(struct gm_frame *frame)
 {
+    assert(frame->ref >= 0); // implies use after free!
+    gm_frame_add_breadcrumb(frame, "ref");
     frame->ref++;
     return frame;
 }
@@ -163,6 +185,7 @@ gm_frame_ref(struct gm_frame *frame)
 inline void
 gm_frame_unref(struct gm_frame *frame)
 {
+    gm_frame_add_breadcrumb(frame, "unref");
     if (__builtin_expect(--(frame->ref) < 1, 0))
         frame->api->free(frame);
 }

@@ -255,8 +255,15 @@ struct gm_context
 {
     struct gm_logger *log;
 
-    /* E.g taken during the render hook to block the context from being destroyed */
+    /* E.g taken during the render hook to block the context from being stopped
+     * or destroyed
+     */
     pthread_mutex_t liveness_lock;
+    /* A pre-requisite to destroying the context is to stop tracking, which
+     * will stop  the tracking thread. It's possible to only stop tracking
+     * without destroying the context via gm_context_stop_tracking()
+     */
+    bool stopping;
     bool destroying;
 
     struct gm_intrinsics basis_depth_camera_intrinsics;
@@ -2222,19 +2229,19 @@ detector_thread_cb(void *data)
         free(err);
     }
 
-    while (!ctx->destroying) {
+    while (!ctx->stopping) {
         struct gm_frame *frame = NULL;
 
         LOGI("Waiting for new frame to start tracking\n");
         pthread_mutex_lock(&ctx->frame_ready_mutex);
-        while (!ctx->frame_ready && !ctx->destroying) {
+        while (!ctx->frame_ready && !ctx->stopping) {
             pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
         }
         frame = ctx->frame_ready;
         ctx->frame_ready = NULL;
         pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
-        if (ctx->destroying) {
+        if (ctx->stopping) {
             gm_debug(ctx->log, "Stopping tracking after frame acquire (context being destroyed)");
             if (frame)
                 gm_frame_unref(frame);
@@ -2279,13 +2286,13 @@ detector_thread_cb(void *data)
         LOGI("Waiting for new scaled frame for face detection");
         pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
         ctx->need_new_scaled_frame = true;
-        while (ctx->need_new_scaled_frame && !ctx->destroying) {
+        while (ctx->need_new_scaled_frame && !ctx->stopping) {
             pthread_cond_wait(&ctx->scaled_frame_available_cond,
                               &ctx->scaled_frame_cond_mutex);
         }
         pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 
-        if (ctx->destroying) {
+        if (ctx->stopping) {
             gm_debug(ctx->log, "Stopping tracking after frame downsample (context being destroyed)");
             gm_tracking_unref(tracking);
             break;
@@ -2506,39 +2513,14 @@ gm_context_start_tracking(struct gm_context *ctx, char **err)
 static void
 gm_context_stop_tracking(struct gm_context *ctx)
 {
-    /* XXX: The context may be accessed asynchronously in the following ways:
-     *
-     *  1) The tracking thread
-     *  2) The render thread hook
-     *  3) Various thread safe getter or notify entry-points
-     *
-     * We created/own the tracking thread and so we have to stop this thread
-     * anyway after which we don't have to worry about it accessing ctx state.
-     *
-     * The render thread hook will take the liveness_lock and assert
-     * ctx->destroying == false before accessing the ctx state, so assuming the
-     * render hook always completes in a finite time we can simply wait until
-     * we've acquired this lock before starting to destroy the context. Note:
-     * the hook can use an assertion to check ctx->destroying because it's the
-     * callers responsibility to ensure that the render hook doesn't continue
-     * to be called with a context pointer that's about to become invalid. I.e.
-     * We're only concerned about render hooks that are already running when
-     * gm_context_stop_tracking() is called.
-     *
-     * Any other thread-safe entry-points should take the liveness_lock and
-     * assert ctx->destroying == false. We should expect that the caller has
-     * ensured that these functions will no longer be called because the caller
-     * knows that the context pointer is about to become invalid, but should
-     * also scatter some assertions to try and catch spurious notifications
-     * during destruction.
-     */
+    gm_debug(ctx->log, "stopping context tracking");
 
     pthread_mutex_lock(&ctx->liveness_lock);
 
     /* The tracking thread checks for this, such that we can now expect it to
      * exit within a finite amount of time.
      */
-    ctx->destroying = true;
+    ctx->stopping = true;
 
     /* Note: we intentionally don't keep this lock for the duration of
      * destruction because the assumption is that we only need to wait for
@@ -2579,7 +2561,46 @@ gm_context_stop_tracking(struct gm_context *ctx)
 void
 gm_context_destroy(struct gm_context *ctx)
 {
-    /* Ensure the tracking thread has stopped running */
+    /* XXX: The context may be accessed asynchronously in the following ways:
+     *
+     *  1) The tracking thread
+     *  2) The render thread hook
+     *  3) Various thread safe getter or notify entry-points
+     *
+     * We created/own the tracking thread and so we have to stop this thread
+     * anyway after which we don't have to worry about it accessing ctx state.
+     *
+     * The render thread hook will take the liveness_lock and assert
+     * ctx->destroying == false before accessing the ctx state, so assuming the
+     * render hook always completes in a finite time we can simply wait until
+     * we've acquired this lock before starting to destroy the context. Note:
+     * the hook can use an assertion to check ctx->destroying because it's the
+     * callers responsibility to ensure that the render hook doesn't continue
+     * to be called with a context pointer that's about to become invalid. I.e.
+     * We're only concerned about render hooks that are already running when
+     * gm_context_stop_tracking() is called.
+     *
+     * Any other thread-safe entry-points should take the liveness_lock and
+     * assert ctx->destroying == false. We should expect that the caller has
+     * ensured that these functions will no longer be called because the caller
+     * knows that the context pointer is about to become invalid, but should
+     * also scatter some assertions to try and catch spurious notifications
+     * during destruction.
+     */
+
+    pthread_mutex_lock(&ctx->liveness_lock);
+
+    ctx->destroying = true;
+
+    /* Note: we intentionally don't keep this lock for the duration of
+     * destruction because the assumption is that we only need to wait for
+     * the render hook or other entrypoints that were already running to
+     * finish. The caller should otherwise ensure no further calls are made.
+     * Dropping the lock asap increases the chance of our debug assertions
+     * recognising any mistake made.
+     */
+    pthread_mutex_unlock(&ctx->liveness_lock);
+
     gm_context_stop_tracking(ctx);
 
     /* Make sure all resourced are returned to their pools before destroying
@@ -3456,7 +3477,7 @@ gm_context_flush(struct gm_context *ctx, char **err)
     }
     pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
-    ctx->destroying = false;
+    ctx->stopping = false;
     gm_debug(ctx->log, "Glimpse context flushed, restarting tracking thread");
 
     int ret = gm_context_start_tracking(ctx, NULL);
@@ -3556,6 +3577,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     };
 
     uint64_t start, end, duration_ns;
+
 
     LOGI("Downsampling via GLES");
 

@@ -60,8 +60,16 @@
             exit(1); \
     } while(0)
 
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
 using half_float::half;
+
+struct trail_crumb
+{
+    char tag[32];
+    int n_frames;
+    void *backtrace_frame_pointers[10];
+};
 
 struct gm_device_buffer
 {
@@ -71,6 +79,12 @@ struct gm_device_buffer
 
     struct gm_device *dev;
     struct gm_mem_pool *pool;
+
+    /* Lets us debug when we've failed to release frame resources when
+     * we come to destroy our resource pools
+     */
+    pthread_mutex_t trail_lock;
+    std::vector<struct trail_crumb> trail;
 };
 
 struct gm_device_frame
@@ -87,8 +101,13 @@ struct gm_device_frame
     enum gm_rotation rotation;
     float down[3];
 #endif
-};
 
+    /* Lets us debug when we've failed to release frame resources when
+     * we come to destroy our resource pools
+     */
+    pthread_mutex_t trail_lock;
+    std::vector<struct trail_crumb> trail;
+};
 
 struct gm_device
 {
@@ -255,10 +274,13 @@ gm_device_event_free(struct gm_device_event *event)
 }
 
 static struct gm_device_frame *
-mem_pool_acquire_frame(struct gm_mem_pool *pool)
+mem_pool_acquire_frame(struct gm_mem_pool *pool, const char *bread_crumb)
 {
     struct gm_device_frame *frame = (struct gm_device_frame *)
         mem_pool_acquire_resource(pool);
+
+    gm_assert(frame->dev->log, frame->base.ref == 0,
+              "frame was used after last free");
 
     frame->base.ref = 1;
     frame->base.depth = NULL;
@@ -266,15 +288,24 @@ mem_pool_acquire_frame(struct gm_mem_pool *pool)
     frame->base.video = NULL;
     frame->base.video_format = GM_FORMAT_UNKNOWN;
 
+    gm_frame_add_breadcrumb(&frame->base, bread_crumb);
+
     return frame;
 }
 
 static struct gm_device_buffer *
-mem_pool_acquire_buffer(struct gm_mem_pool *pool)
+mem_pool_acquire_buffer(struct gm_mem_pool *pool, const char *bread_crumb)
 {
     struct gm_device_buffer *buffer = (struct gm_device_buffer *)
         mem_pool_acquire_resource(pool);
+
+    gm_assert(buffer->dev->log, buffer->base.ref == 0,
+              "%s buffer was used after last free", mem_pool_get_name(pool));
+
     buffer->base.ref = 1;
+
+    gm_buffer_add_breadcrumb(&buffer->base, bread_crumb);
+
     return buffer;
 }
 
@@ -296,6 +327,8 @@ device_frame_recycle(struct gm_frame *self)
         self->depth = NULL;
     }
 
+    frame->trail.clear();
+
     mem_pool_recycle_resource(pool, frame);
 }
 
@@ -304,22 +337,42 @@ device_frame_free(struct gm_mem_pool *pool, void *resource, void *user_data)
 {
     //struct gm_device *dev = user_data;
     struct gm_device_frame *frame = (struct gm_device_frame *)resource;
+    gm_debug(frame->dev->log, "freeing frame %p", frame);
 
-    xfree(frame);
+    delete frame;
+}
+
+static void
+device_frame_add_breadcrumb(struct gm_frame *self, const char *tag)
+{
+    struct gm_device_frame *frame = (struct gm_device_frame *)self;
+    struct trail_crumb crumb;
+
+    gm_assert(frame->dev->log, frame->base.ref >= 0,
+              "Use of frame after free");
+
+    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
+
+    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
+                                  1, // skip top stack frame
+                                  10);
+
+    pthread_mutex_lock(&frame->trail_lock);
+    frame->trail.push_back(crumb);
+    pthread_mutex_unlock(&frame->trail_lock);
 }
 
 static void *
 device_frame_alloc(struct gm_mem_pool *pool, void *user_data)
 {
     struct gm_device *dev = (struct gm_device *)user_data;
-    struct gm_device_frame *frame =
-        (struct gm_device_frame *)xcalloc(sizeof(*frame), 1);
+    struct gm_device_frame *frame = new gm_device_frame();
 
     frame->vtable.free = device_frame_recycle;
+    frame->vtable.add_breadcrumb = device_frame_add_breadcrumb;
     frame->dev = dev;
     frame->pool = pool;
 
-    frame->base.ref = 1;
     frame->base.api = &frame->vtable;
 
     return frame;
@@ -331,23 +384,44 @@ device_buffer_recycle(struct gm_buffer *self)
     struct gm_device_buffer *buf = (struct gm_device_buffer *)self;
     struct gm_mem_pool *pool = buf->pool;
 
-    gm_assert(buf->dev->log, buf->base.ref == 0, "Unbalanced buffer unref");
+    buf->trail.clear();
 
     mem_pool_recycle_resource(pool, buf);
+
+    gm_assert(buf->dev->log, buf->base.ref == 0, "Unbalanced buffer unref");
+}
+
+static void
+device_buffer_add_breadcrumb(struct gm_buffer *self, const char *tag)
+{
+    struct gm_device_buffer *buffer = (struct gm_device_buffer *)self;
+    struct trail_crumb crumb;
+
+    gm_assert(buffer->dev->log, buffer->base.ref >= 0,
+              "Use of buffer after free");
+
+    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
+
+    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
+                                  1, // skip top stack frame
+                                  10);
+
+    pthread_mutex_lock(&buffer->trail_lock);
+    buffer->trail.push_back(crumb);
+    pthread_mutex_unlock(&buffer->trail_lock);
 }
 
 static void *
 device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
 {
     struct gm_device *dev = (struct gm_device *)user_data;
-    struct gm_device_buffer *buf =
-        (struct gm_device_buffer *)xcalloc(sizeof(*buf), 1);
+    struct gm_device_buffer *buf = new gm_device_buffer();
 
     buf->vtable.free = device_buffer_recycle;
+    buf->vtable.add_breadcrumb = device_buffer_add_breadcrumb;
     buf->dev = dev;
     buf->pool = pool;
 
-    buf->base.ref = 1;
     buf->base.api = &buf->vtable;
 
     /* allocated large enough for _RGB format */
@@ -378,21 +452,21 @@ device_buffer_free(struct gm_mem_pool *pool,
     //struct gm_device *dev = user_data
     struct gm_device_buffer *buf = (struct gm_device_buffer *)resource;
     xfree(buf->base.data);
-    xfree(buf);
+
+    delete buf;
 }
 
 static void *
 device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
 {
     struct gm_device *dev = (struct gm_device *)user_data;
-    struct gm_device_buffer *buf =
-        (struct gm_device_buffer *)xcalloc(sizeof(*buf), 1);
+    struct gm_device_buffer *buf = new gm_device_buffer();
 
     buf->vtable.free = device_buffer_recycle;
+    buf->vtable.add_breadcrumb = device_buffer_add_breadcrumb;
     buf->dev = dev;
     buf->pool = pool;
 
-    buf->base.ref = 1;
     buf->base.api = &buf->vtable;
 
     int depth_width = dev->depth_camera_intrinsics.width;
@@ -451,7 +525,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = dev->depth_buf_back;
-    dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool);
+    dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool, "kinect depth");
     // TODO: Figure out the Kinect timestamp format to translate it into
     //       nanoseconds
     //dev->frame_time = (uint64_t)timestamp;
@@ -479,7 +553,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 
     struct gm_device_buffer *old = dev->video_buf_ready;
     dev->video_buf_ready = dev->video_buf_back;
-    dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool);
+    dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool, "kinect rgb");
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
     dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
@@ -607,7 +681,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     freenect_set_video_mode(dev->kinect.fdev,
                             freenect_find_video_mode(FREENECT_RESOLUTION_MEDIUM,
                                                      FREENECT_VIDEO_RGB));
-    dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool);
+    dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool, "kinect rgb");
     freenect_set_video_buffer(dev->kinect.fdev, dev->video_buf_back->base.data);
 
     freenect_set_depth_callback(dev->kinect.fdev, kinect_depth_frame_cb);
@@ -617,7 +691,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     /*freenect_set_depth_mode(dev->kinect.fdev,
                             freenect_find_depth_mode(FREENECT_RESOLUTION_MEDIUM,
                                                      FREENECT_DEPTH_MM));*/
-    dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool);
+    dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool, "kinect depth");
     freenect_set_depth_buffer(dev->kinect.fdev, dev->depth_buf_back->base.data);
 
 
@@ -888,7 +962,7 @@ recording_io_thread_cb(void *userdata)
             if (depth_file) {
                 if (!dev->depth_buf_back) {
                     dev->depth_buf_back =
-                        mem_pool_acquire_buffer(dev->depth_buf_pool);
+                        mem_pool_acquire_buffer(dev->depth_buf_pool, "recording depth");
                 }
 
                 if (fread(dev->depth_buf_back->base.data, 1, depth_len,
@@ -928,7 +1002,7 @@ recording_io_thread_cb(void *userdata)
             if (video_file) {
                 if (!dev->video_buf_back) {
                     dev->video_buf_back =
-                        mem_pool_acquire_buffer(dev->video_buf_pool);
+                        mem_pool_acquire_buffer(dev->video_buf_pool, "recording video");
                 }
 
                 if (fread(dev->video_buf_back->base.data, 1, video_len,
@@ -1115,7 +1189,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
     }
 
     struct gm_device_buffer *depth_buf_back =
-        mem_pool_acquire_buffer(dev->depth_buf_pool);
+        mem_pool_acquire_buffer(dev->depth_buf_pool, "tango depth");
 
     gm_assert(dev->log,
               point_cloud->num_points < (dev->depth_camera_intrinsics.width *
@@ -1199,7 +1273,7 @@ tango_frame_available_cb(void *context,
         return;
 
     struct gm_device_buffer *video_buf_back =
-        mem_pool_acquire_buffer(dev->video_buf_pool);
+        mem_pool_acquire_buffer(dev->video_buf_pool, "tango video");
 
     /* XXX: we're just keeping the luminance for now... */
     memcpy(video_buf_back->base.data,
@@ -1777,6 +1851,71 @@ gm_device_commit_config(struct gm_device *dev, char **err)
     return status;
 }
 
+static void
+print_trail_for(struct gm_logger *log, void *object, std::vector<struct trail_crumb> *trail)
+{
+    gm_debug(log, "Trail for %p:", object);
+
+    for (unsigned i = 0; i < trail->size(); i++) {
+        struct trail_crumb crumb = trail->at(i);
+        if (crumb.n_frames) {
+            struct gm_backtrace backtrace = {
+                crumb.n_frames,
+                (const void **)crumb.backtrace_frame_pointers
+            };
+            int line_len = 100;
+            char *formatted = (char *)alloca(crumb.n_frames * line_len);
+
+            gm_debug(log, "%d) tag = %s", i, crumb.tag);
+            gm_logger_get_backtrace_strings(log, &backtrace,
+                                            line_len, (char *)formatted);
+            for (int i = 0; i < crumb.n_frames; i++) {
+                char *line = formatted + line_len * i;
+                gm_debug(log, "   #%i %s", i, line);
+            }
+        }
+    }
+}
+
+static void
+print_frame_info_cb(struct gm_mem_pool *pool,
+                    void *resource,
+                    void *user_data)
+{
+    struct gm_device *dev = (struct gm_device *)user_data;
+    struct gm_device_frame *frame = (struct gm_device_frame *)resource;
+
+    gm_assert(dev->log, frame != NULL, "Spurious NULL frame resource");
+    gm_error(dev->log, "Unreleased frame %p, ref count = %d, paper trail len = %d",
+             frame,
+             frame->base.ref,
+             (int)frame->trail.size());
+
+    if (frame->trail.size())
+        print_trail_for(dev->log, frame, &frame->trail);
+}
+
+static void
+print_buf_info_cb(struct gm_mem_pool *pool,
+                  void *resource,
+                  void *user_data)
+{
+    struct gm_device *dev = (struct gm_device *)user_data;
+    struct gm_device_buffer *buf = (struct gm_device_buffer *)resource;
+    const char *pool_name = mem_pool_get_name(pool);
+
+    gm_assert(dev->log, buf != NULL, "Spurious NULL %s resource", pool_name);
+
+    gm_error(dev->log, "Unreleased %s buffer %p, ref count = %d, paper trail len = %d",
+             pool_name,
+             buf,
+             buf->base.ref,
+             (int)buf->trail.size());
+
+    if (buf->trail.size())
+        print_trail_for(dev->log, buf, &buf->trail);
+}
+
 void
 gm_device_close(struct gm_device *dev)
 {
@@ -1826,9 +1965,25 @@ gm_device_close(struct gm_device *dev)
         dev->video_buf_ready = NULL;
     }
 
-    mem_pool_free(dev->depth_buf_pool);
-    mem_pool_free(dev->video_buf_pool);
+    /* We free the pools in order of dependence (parents, then children) so
+     * that if we hit any assertions for resource leaks then we will know about
+     * the most significant object first because it's then implied there would
+     * likely be downstream assertions too.
+     */
+    mem_pool_foreach(dev->frame_pool,
+                     print_frame_info_cb,
+                     dev);
     mem_pool_free(dev->frame_pool);
+
+    mem_pool_foreach(dev->depth_buf_pool,
+                     print_buf_info_cb,
+                     dev);
+    mem_pool_free(dev->depth_buf_pool);
+
+    mem_pool_foreach(dev->video_buf_pool,
+                     print_buf_info_cb,
+                     dev);
+    mem_pool_free(dev->video_buf_pool);
 
     delete dev;
 }
@@ -1951,7 +2106,8 @@ recording_update_frame(struct gm_device *dev, struct gm_frame *frame)
 struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev)
 {
-    struct gm_device_frame *frame = mem_pool_acquire_frame(dev->frame_pool);
+    struct gm_device_frame *frame = mem_pool_acquire_frame(dev->frame_pool,
+                                                           "get latest");
 
 #if 0
     switch (dev->type) {

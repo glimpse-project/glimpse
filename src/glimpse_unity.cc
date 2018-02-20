@@ -101,7 +101,11 @@ struct glimpse_data
 
     /* Once we've been notified that there's a device frame ready for us then
      * we store the latest frames from gm_device_get_latest_frame() here...
+     *
+     * We have the lock considering that unity's rendering happens in a separate
+     * thread and also needs to access these pointers.
      */
+    pthread_mutex_t swap_frames_lock;
     struct gm_frame *last_depth_frame;
     struct gm_frame *last_video_frame;
 
@@ -324,26 +328,39 @@ handle_device_frame_updates(struct glimpse_data *data)
         //ProfileScopedSection(GetLatestFrame);
         /* NB: gm_device_get_latest_frame will give us a _ref() */
         struct gm_frame *device_frame = gm_device_get_latest_frame(data->device);
+
         assert(device_frame);
+
+        /* XXX: we have to consider that the rendering is in another thread
+         * and we don't want to unref (and potentially free) the last frame
+         * while the render thread might reference the same pointer...
+         */
+        pthread_mutex_lock(&data->swap_frames_lock);
 
         if (device_frame->depth) {
             if (data->last_depth_frame) {
+                gm_frame_add_breadcrumb(data->last_depth_frame, "unity: discard old depth frame");
                 gm_frame_unref(data->last_depth_frame);
             }
             gm_frame_ref(device_frame);
             data->last_depth_frame = device_frame;
             data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
+            gm_frame_add_breadcrumb(device_frame, "unity: latest depth frame");
         }
 
         if (device_frame->video) {
             if (data->last_video_frame) {
+                gm_frame_add_breadcrumb(data->last_video_frame, "unity: discard old video frame");
                 gm_frame_unref(data->last_video_frame);
             }
             gm_frame_ref(device_frame);
             data->last_video_frame = device_frame;
             data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
+            gm_frame_add_breadcrumb(device_frame, "unity: latest video frame");
             //upload = true;
         }
+
+        pthread_mutex_unlock(&data->swap_frames_lock);
 
         gm_frame_unref(device_frame);
     }
@@ -360,20 +377,35 @@ handle_device_frame_updates(struct glimpse_data *data)
                                          data->last_depth_frame,
                                          data->last_video_frame);
 
+            /* XXX: we have to consider that the rendering is in another thread
+             * and we don't want to unref (and potentially free) the last frame
+             * while the render thread might reference the same pointer...
+             *
+             * XXX: be careful making changes here to not end up holding this
+             * lock for too long and blocking the rendering thread. E.g.
+             * we avoid having the scope of the lock include the call into
+             * gm_context_notify_frame().
+             */
+            pthread_mutex_lock(&data->swap_frames_lock);
+
             // We don't need the individual frames any more
             gm_frame_unref(data->last_depth_frame);
             gm_frame_unref(data->last_video_frame);
 
             data->last_depth_frame = full_frame;
             data->last_video_frame = gm_frame_ref(full_frame);
+
+            pthread_mutex_unlock(&data->swap_frames_lock);
         }
 
         data->context_needs_frame =
             !gm_context_notify_frame(data->ctx, data->last_depth_frame);
 
         // We don't want to send duplicate frames to tracking, so discard now
+        pthread_mutex_lock(&data->swap_frames_lock);
         gm_frame_unref(data->last_depth_frame);
         data->last_depth_frame = NULL;
+        pthread_mutex_unlock(&data->swap_frames_lock);
     }
 
     data->device_frame_ready = false;
@@ -660,7 +692,7 @@ render_ar_video_background(struct glimpse_data *data)
     gm_assert(data->log, !!data->ctx, "render_ar_video_background, NULL ctx");
 
 #ifndef USE_TANGO
-    /* Upload latest video frame it it's changed...
+    /* Upload latest video frame if it's changed...
      */
     if (data->last_video_frame != data->visible_frame) {
         const struct gm_intrinsics *video_intrinsics =
@@ -668,11 +700,19 @@ render_ar_video_background(struct glimpse_data *data)
         int video_width = video_intrinsics->width;
         int video_height = video_intrinsics->height;
 
+        pthread_mutex_lock(&data->swap_frames_lock);
+
         struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
 
-        if (data->visible_frame)
+        gm_frame_add_breadcrumb(new_frame, "render thread visible");
+
+        if (data->visible_frame) {
+            gm_frame_add_breadcrumb(data->visible_frame, "render thread discard");
             gm_frame_unref(data->visible_frame);
+        }
         data->visible_frame = new_frame;
+
+        pthread_mutex_unlock(&data->swap_frames_lock);
 
         /*
          * Update video from camera
@@ -687,7 +727,7 @@ render_ar_video_background(struct glimpse_data *data)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         void *video_front = new_frame->video->data;
-        enum gm_format video_format = data->visible_frame->video_format;
+        enum gm_format video_format = new_frame->video_format;
 
         if (data->gl_vid_tex == 0) {
             glGenTextures(1, &data->gl_vid_tex);
@@ -729,7 +769,6 @@ render_ar_video_background(struct glimpse_data *data)
         }
 
         glBindTexture(GL_TEXTURE_2D, 0);
-        gm_debug(data->log, "render_ar_video_background DEBUG 6");
     }
 #else
     if (data->gl_vid_tex == 0) {
@@ -983,6 +1022,8 @@ gm_unity_init(void)
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
+    pthread_mutex_init(&data->swap_frames_lock, NULL);
+
     data->ctx = gm_context_new(data->log, NULL);
     gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
 
@@ -1148,6 +1189,11 @@ gm_unity_terminate(void)
     gm_context_destroy(data->ctx);
 
 
+    /* locking redundant here, but help serve as a reminder that
+     * this state should only be touched with this lock held...
+     */
+    pthread_mutex_lock(&data->swap_frames_lock);
+
     if (data->visible_frame) {
         gm_frame_unref(data->visible_frame);
         data->visible_frame = NULL;
@@ -1160,6 +1206,8 @@ gm_unity_terminate(void)
         gm_frame_unref(data->last_video_frame);
         data->last_video_frame = NULL;
     }
+
+    pthread_mutex_unlock(&data->swap_frames_lock);
 
     gm_device_close(data->device);
 

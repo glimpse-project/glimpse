@@ -143,6 +143,20 @@ get_backtrace(void **buffer, int skip, int size)
 }
 #endif
 
+int
+gm_backtrace(void **frame_pointers,
+             int skip_n_frames,
+             int n_frame_pointers)
+{
+#ifdef USE_LIBUNWIND
+    return get_backtrace(frame_pointers,
+                         skip_n_frames,
+                         n_frame_pointers);
+#else
+    return 0;
+#endif
+}
+
 void
 gm_logger_get_backtrace_strings(struct gm_logger *logger,
                                 struct gm_backtrace *backtrace,

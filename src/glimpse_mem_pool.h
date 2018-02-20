@@ -53,6 +53,15 @@ mem_pool_recycle_resource(struct gm_mem_pool *pool, void *resource);
 void
 mem_pool_free_resources(struct gm_mem_pool *pool);
 
+const char *
+mem_pool_get_name(struct gm_mem_pool *pool);
+
+void
+mem_pool_foreach(struct gm_mem_pool *pool,
+                 void (*callback)(struct gm_mem_pool *pool,
+                                  void *resource,
+                                  void *user_data),
+                 void *user_data);
 
 #ifdef __cplusplus
 }

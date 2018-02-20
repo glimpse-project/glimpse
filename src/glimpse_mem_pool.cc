@@ -80,12 +80,31 @@ mem_pool_free(struct gm_mem_pool *pool)
     delete pool;
 }
 
+static void __attribute__((unused))
+debug_print_busy_and_available_lists(struct gm_mem_pool *pool)
+{
+    gm_debug(pool->log, "pool %p (%s) lists:",
+             pool, pool->name);
+
+    unsigned size = pool->busy.size();
+    for (unsigned i = 0; i < size; i++) {
+        gm_debug(pool->log, "busy> %p", pool->busy[i]);
+    }
+    size = pool->available.size();
+    for (unsigned i = 0; i < size; i++) {
+        gm_debug(pool->log, "available> %p", pool->available[i]);
+    }
+}
+
 void *
 mem_pool_acquire_resource(struct gm_mem_pool *pool)
 {
     void *resource;
 
     pthread_mutex_lock(&pool->lock);
+
+    //gm_error(pool->log, "mem_pool_acquire_resource: lists before");
+    //debug_print_busy_and_available_lists(pool);
 
     /* Sanity check with arbitrary upper limit for the number of allocations */
     /* XXX Had to remove this assertion for recording mode, where we keep
@@ -121,6 +140,9 @@ mem_pool_acquire_resource(struct gm_mem_pool *pool)
 
     pool->busy.push_back(resource);
 
+    //gm_debug(pool->log, "mem_pool_acquire_resource %p: lists after", resource);
+    //debug_print_busy_and_available_lists(pool);
+
     pthread_mutex_unlock(&pool->lock);
 
     return resource;
@@ -130,6 +152,9 @@ void
 mem_pool_recycle_resource(struct gm_mem_pool *pool, void *resource)
 {
     pthread_mutex_lock(&pool->lock);
+
+    //gm_error(pool->log, "mem_pool_recycle_resource %p: lists before", resource);
+    //debug_print_busy_and_available_lists(pool);
 
     unsigned size = pool->busy.size();
     for (unsigned i = 0; i < size; i++) {
@@ -147,6 +172,10 @@ mem_pool_recycle_resource(struct gm_mem_pool *pool, void *resource)
               pool->name);
 
     pool->available.push_back(resource);
+
+    //gm_debug(pool->log, "mem_pool_recycle_resource %p: lists after", resource);
+    //debug_print_busy_and_available_lists(pool);
+
     pthread_cond_broadcast(&pool->available_cond);
     pthread_mutex_unlock(&pool->lock);
 }
@@ -156,7 +185,8 @@ mem_pool_free_resources(struct gm_mem_pool *pool)
 {
     gm_assert(pool->log,
               pool->busy.size() == 0,
-              "Shouldn't be freeing a pool with resources still in use");
+              "Shouldn't be freeing a pool (%s) with resources still in use",
+              pool->name);
 
     while (pool->available.size()) {
         void *resource = pool->available.back();
@@ -165,4 +195,27 @@ mem_pool_free_resources(struct gm_mem_pool *pool)
     }
 }
 
+const char *
+mem_pool_get_name(struct gm_mem_pool *pool)
+{
+    return pool->name;
+}
 
+void
+mem_pool_foreach(struct gm_mem_pool *pool,
+                 void (*callback)(struct gm_mem_pool *pool,
+                                  void *resource,
+                                  void *user_data),
+                 void *user_data)
+{
+    pthread_mutex_lock(&pool->lock);
+
+    //debug_print_busy_and_available_lists(pool);
+
+    unsigned size = pool->busy.size();
+    for (unsigned i = 0; i < size; i++) {
+        callback(pool, pool->busy[i], user_data);
+    }
+
+    pthread_mutex_unlock(&pool->lock);
+}
