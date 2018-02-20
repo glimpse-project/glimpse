@@ -282,16 +282,19 @@ static void
 device_frame_recycle(struct gm_frame *self)
 {
     struct gm_device_frame *frame = (struct gm_device_frame *)self;
-    struct gm_device *dev = frame->dev;
     struct gm_mem_pool *pool = frame->pool;
 
     gm_assert(frame->dev->log, frame->base.ref == 0, "Unbalanced frame unref");
 
-    if (self->video)
-        mem_pool_recycle_resource(dev->video_buf_pool, self->video);
+    if (self->video) {
+        gm_buffer_unref(self->video);
+        self->video = NULL;
+    }
 
-    if (self->depth)
-        mem_pool_recycle_resource(dev->depth_buf_pool, self->depth);
+    if (self->depth) {
+        gm_buffer_unref(self->depth);
+        self->depth = NULL;
+    }
 
     mem_pool_recycle_resource(pool, frame);
 }
