@@ -378,6 +378,8 @@ struct gm_context
     struct joint_info *joint_stats;
     int n_joints;
 
+    int min_neighbours;
+    int gap_dist;
     int cloud_res;
     float min_depth;
     float max_depth;
@@ -1567,7 +1569,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     end = get_time();
     duration = end - start;
     LOGI("Plane removal (%d planes) took %.3f%s\n",
-         (int)plane_coeffs.size(),
+         (int)plane_indices.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -2097,20 +2099,22 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
             float neighbours[4];
             int n_neighbours = 0;
 
-            if (x > 0 && std::isnormal(depth_copy[off-1])) {
-                neighbours[n_neighbours++] = depth_copy[off-1];
-            }
-            if (x < width - 1 && std::isnormal(depth_copy[off+1])) {
-                neighbours[n_neighbours++] = depth_copy[off+1];
-            }
-            if (y > 0 && std::isnormal(depth_copy[off-rot_width])) {
-                neighbours[n_neighbours++] = depth_copy[off-rot_width];
-            }
-            if (y < height - 1 && std::isnormal(depth_copy[off+rot_width])) {
-                neighbours[n_neighbours++] = depth_copy[off+rot_width];
+            // Use a diamond pattern to check for surrounding pixels
+            for (int oy = -std::min(y, ctx->gap_dist);
+                 oy <= std::min((rot_height - 1) - y, ctx->gap_dist); ++oy) {
+                int n = ctx->gap_dist - abs(oy);
+                int noff1 = off + (oy * rot_width) - n;
+                int noff2 = off + (oy * rot_width) + n;
+                if (x - n >= 0 && std::isnormal(depth_copy[noff1])) {
+                    neighbours[n_neighbours++] = depth_copy[noff1];
+                }
+                if (noff2 != noff1 && x + n < rot_width &&
+                    std::isnormal(depth_copy[noff2])) {
+                    neighbours[n_neighbours++] = depth_copy[noff2];
+                }
             }
 
-            if (n_neighbours > 0) {
+            if (n_neighbours >= ctx->min_neighbours) {
                 blanks.push_back({off, neighbours[random() % n_neighbours]});
             }
         }
@@ -2921,6 +2925,29 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
+    ctx->gap_dist = 3;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "gap_dist";
+    prop.desc = "The distance in 2d pixels at which to look at neighbouring "
+                "pixels to fill in gaps when input data is a point cloud.";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->gap_dist;
+    prop.int_state.min = 0;
+    prop.int_state.max = 5;
+    ctx->properties.push_back(prop);
+
+    ctx->min_neighbours = 4;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "min_neighbours";
+    prop.desc = "The minimum number of neighbouring pixels when filling gaps";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->min_neighbours;
+    prop.int_state.min = 1;
+    prop.int_state.max = 20;
+    ctx->properties.push_back(prop);
+
     ctx->cloud_res = 1;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -2984,7 +3011,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->normal_smooth;
     prop.float_state.min = 1.0f;
-    prop.float_state.max = 5.f;
+    prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
     ctx->min_inliers = 50;
@@ -3028,7 +3055,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->max_curvature;
     prop.float_state.min = 0.0005f;
-    prop.float_state.max = 0.005f;
+    prop.float_state.max = 0.01f;
     ctx->properties.push_back(prop);
 
     ctx->refinement_steps = 1;

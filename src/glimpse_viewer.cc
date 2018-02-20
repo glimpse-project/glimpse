@@ -2242,6 +2242,11 @@ main(int argc, char **argv)
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);
     data->overwrite_recording = true;
 
+#ifdef __ANDROID__
+    // Quick hack to make scrollbars a bit more usable on small devices
+    ImGui::GetStyle().ScrollbarSize *= 2;
+#endif
+
 #ifdef USE_GLFW
     viewer_init(data);
 
