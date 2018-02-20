@@ -810,7 +810,8 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
 
     glUseProgram(gl_db_program);
     glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-    glUniform1f(gl_db_uni_pt_size, 2.f);
+    float pt_size = ceilf((win_size.x * uiScale.x) / depth_width);
+    glUniform1f(gl_db_uni_pt_size, pt_size);
 
     // Update camera intrinsics
     glUniform2i(gl_db_uni_depth_size,
@@ -873,7 +874,7 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
         glClear(GL_DEPTH_BUFFER_BIT);
 
         // Set point size for joints
-        glUniform1f(gl_cloud_uni_size, 6.f);
+        glUniform1f(gl_cloud_uni_size, pt_size * 3.f);
 
         // Bind joints buffer-object
         glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
