@@ -79,6 +79,7 @@
 #define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
 
 #define TOOLBAR_WIDTH 300
+#define MAX_VIEWS 4
 
 #define xsnprintf(dest, n, fmt, ...) do { \
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
@@ -135,6 +136,14 @@ typedef struct _Data
     /* The size of the normals visualisation texture */
     int normals_rgb_width;
     int normals_rgb_height;
+
+    /* The size of the normal clusters visualisation texture */
+    int nclusters_rgb_width;
+    int nclusters_rgb_height;
+
+    /* The size of the candidate clusters visualisation texture */
+    int cclusters_rgb_width;
+    int cclusters_rgb_height;
 
     /* The size of the labels visualisation texture */
     int labels_rgb_width;
@@ -223,6 +232,8 @@ static uint32_t joint_palette[] = {
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_normals_rgb_tex;
+static GLuint gl_nclusters_rgb_tex;
+static GLuint gl_cclusters_rgb_tex;
 static GLuint gl_rgb_tex;
 static GLuint gl_vid_tex;
 
@@ -247,6 +258,10 @@ static GLuint gl_bones_bo;
 static GLuint gl_cloud_fbo;
 static GLuint gl_cloud_depth_bo;
 static GLuint gl_cloud_tex;
+
+static const char *views[] = {
+    "Controls", "Video Buffer", "Depth Buffer",
+    "Normals", "Normal clusters", "Candidate clusters", "Labels", "Cloud" };
 
 static bool cloud_tex_valid = false;
 
@@ -952,28 +967,40 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
 
         return draw_visualisation(data, x, y, width, height,
                                   video_width, video_height,
-                                  "Video Buffer", gl_vid_tex,
+                                  views[view], gl_vid_tex,
                                   data->last_video_frame->camera_rotation);
     }
     case 2:
         return draw_visualisation(data, x, y, width, height,
                                   data->depth_rgb_width,
                                   data->depth_rgb_height,
-                                  "Depth Buffer", gl_depth_rgb_tex,
+                                  views[view], gl_depth_rgb_tex,
                                   GM_ROTATION_0);
     case 3:
         return draw_visualisation(data, x, y, width, height,
                                   data->normals_rgb_width,
                                   data->normals_rgb_height,
-                                  "Normals", gl_normals_rgb_tex,
+                                  views[view], gl_normals_rgb_tex,
                                   GM_ROTATION_0);
     case 4:
         return draw_visualisation(data, x, y, width, height,
-                                  data->labels_rgb_width,
-                                  data->labels_rgb_height,
-                                  "Labels", gl_labels_tex,
+                                  data->nclusters_rgb_width,
+                                  data->nclusters_rgb_height,
+                                  views[view], gl_nclusters_rgb_tex,
                                   GM_ROTATION_0);
     case 5:
+        return draw_visualisation(data, x, y, width, height,
+                                  data->cclusters_rgb_width,
+                                  data->cclusters_rgb_height,
+                                  views[view], gl_cclusters_rgb_tex,
+                                  GM_ROTATION_0);
+    case 6:
+        return draw_visualisation(data, x, y, width, height,
+                                  data->labels_rgb_width,
+                                  data->labels_rgb_height,
+                                  views[view], gl_labels_tex,
+                                  GM_ROTATION_0);
+    case 7:
         if (!data->latest_tracking) {
             return false;
         }
@@ -987,9 +1014,6 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
 static void
 draw_ui(Data *data)
 {
-    const char *views[] = {
-        "Controls", "Video Buffer", "Depth Buffer",
-        "Normals", "Labels", "Cloud" };
     static int cloud_view = ARRAY_LEN(views) - 1;
     static int main_view = 1;
     int current_view = main_view;
@@ -1021,46 +1045,51 @@ draw_ui(Data *data)
     }
 
     // Draw sub-views on the axis with the most space
-    int n_views = ARRAY_LEN(views) - (skip_controls ? 2 : 1);
-    int subview_width, subview_height;
-    if (win_size.x > win_size.y) {
-        subview_height = win_size.y / n_views;
-        subview_width = data->depth_rgb_height ?
-            subview_height * (data->video_rgb_width /
-                              (float)data->video_rgb_height) :
-            subview_height;
-    } else {
-        subview_width = win_size.x / n_views;
-        subview_height = data->depth_rgb_width ?
-            subview_width * (data->video_rgb_height /
-                             (float)data->video_rgb_width) :
-            subview_width;
-    }
-    for (int i = skip_controls ? 1 : 0, v = 0; i < (int)ARRAY_LEN(views); ++i) {
-        if (i == current_view) {
-            continue;
-        }
-
-        int x, y;
+    int view = skip_controls ? 1 : 0;
+    int n_views = ARRAY_LEN(views) - (skip_controls ? 1 : 0);
+    for (int s = 0; s <= (n_views - 1) / MAX_VIEWS; ++s) {
+        int subview_width, subview_height;
         if (win_size.x > win_size.y) {
-            x = origin.x + win_size.x - subview_width;
-            y = origin.y + (subview_height * v);
+            subview_height = win_size.y / MAX_VIEWS;
+            subview_width = data->depth_rgb_height ?
+                subview_height * (data->video_rgb_width /
+                                  (float)data->video_rgb_height) :
+                subview_height;
         } else {
-            y = origin.y + (win_size.y - subview_height);
-            x = origin.x + (subview_width * v);
+            subview_width = win_size.x / MAX_VIEWS;
+            subview_height = data->depth_rgb_width ?
+                subview_width * (data->video_rgb_height /
+                                 (float)data->video_rgb_width) :
+                subview_width;
+        }
+        for (int i = 0; i < MAX_VIEWS; ++i, ++view) {
+            if (view == current_view) {
+                ++view;
+            }
+            if (view >= (int)ARRAY_LEN(views)) {
+                break;
+            }
+
+            int x, y;
+            if (win_size.x > win_size.y) {
+                x = origin.x + win_size.x - subview_width;
+                y = origin.y + (subview_height * i);
+            } else {
+                y = origin.y + (win_size.y - subview_height);
+                x = origin.x + (subview_width * i);
+            }
+
+            if (draw_view(data, view, uiScale, x, y,
+                          subview_width, subview_height, view == 0)) {
+                main_view = view;
+            }
         }
 
-        if (draw_view(data, i, uiScale, x, y,
-                      subview_width, subview_height, i == 0)) {
-            main_view = i;
+        if (win_size.x > win_size.y) {
+            win_size.x -= subview_width;
+        } else {
+            win_size.y -= subview_height;
         }
-        ++v;
-    }
-
-    if (win_size.x > win_size.y) {
-        win_size.x -= subview_width;
-    } else {
-        win_size.y -= subview_height;
     }
 
     // Draw the main view in the remaining space in the center
@@ -1310,6 +1339,38 @@ upload_tracking_textures(Data *data)
                  data->normals_rgb_width, data->normals_rgb_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, normals_rgb);
     free(normals_rgb);
+
+    /* Update normal clusters buffer */
+    glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    uint8_t *nclusters_rgb = NULL;
+    gm_tracking_create_rgb_normal_clusters(data->latest_tracking,
+                                           &data->nclusters_rgb_width,
+                                           &data->nclusters_rgb_height,
+                                           &nclusters_rgb);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                 data->nclusters_rgb_width, data->nclusters_rgb_height,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, nclusters_rgb);
+    free(nclusters_rgb);
+
+    /* Update candidate clusters buffer */
+    glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
+    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    uint8_t *cclusters_rgb = NULL;
+    gm_tracking_create_rgb_candidate_clusters(data->latest_tracking,
+                                              &data->cclusters_rgb_width,
+                                              &data->cclusters_rgb_height,
+                                              &cclusters_rgb);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                 data->cclusters_rgb_width, data->cclusters_rgb_height,
+                 0, GL_RGB, GL_UNSIGNED_BYTE, cclusters_rgb);
+    free(cclusters_rgb);
 
     /*
      * Update inferred label map
@@ -1887,6 +1948,16 @@ init_viewer_opengl(Data *data)
 
     glGenTextures(1, &gl_normals_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glGenTextures(1, &gl_nclusters_rgb_tex);
+    glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glGenTextures(1, &gl_cclusters_rgb_tex);
+    glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 

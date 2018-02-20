@@ -238,6 +238,12 @@ struct gm_tracking_impl
     // Estimated normals for the depth buffer
     pcl::PointCloud<pcl::Normal>::Ptr normals;
 
+    // Labels based on similar normals
+    pcl::PointCloud<pcl::Label>::Ptr normal_labels;
+
+    // Labels based on clustering after plane removal
+    pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
+
     // Whether any person clouds were tracked in this frame
     bool success;
 
@@ -573,6 +579,7 @@ static const uint32_t heat_map_rainbow[] = {
     0x0000ffff, //blue
     0xffffffff, //white
 };
+
 
 static struct color
 rainbow_stop_from_val(const uint32_t *rainbow, int n_rainbow_bands,
@@ -1494,15 +1501,15 @@ gm_context_track_skeleton(struct gm_context *ctx,
         plane_centroids;
     std::vector<Eigen::Matrix3f, Eigen::aligned_allocator<Eigen::Matrix3f>>
         plane_covariances;
-    pcl::PointCloud<pcl::Label>::Ptr plane_labels(new
-        pcl::PointCloud<pcl::Label>);
+    tracking->normal_labels =
+        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
     std::vector<pcl::PointIndices> plane_label_indices;
     seg.segment(plane_coeffs, plane_indices, plane_centroids,
-                plane_covariances, *plane_labels, plane_label_indices);
+                plane_covariances, *tracking->normal_labels, plane_label_indices);
 
     for (int i = 0; i < ctx->refinement_steps; ++i) {
         seg.refine(plane_coeffs, plane_indices, plane_centroids,
-                   plane_covariances, plane_labels, plane_label_indices);
+                   plane_covariances, tracking->normal_labels, plane_label_indices);
     }
 
 #if 0
@@ -1582,12 +1589,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
     depth_cluster->setInputNormals(tracking->normals);
     depth_cluster->setDepthThreshold(ctx->cluster_tolerance);
 
-    pcl::PointCloud<pcl::Label> cluster_labels;
+    tracking->cluster_labels =
+        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
     std::vector<pcl::PointIndices> cluster_indices;
     pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZ, pcl::Label>
         depth_connector(depth_cluster);
     depth_connector.setInputCloud(lores_cloud);
-    depth_connector.segment(cluster_labels, cluster_indices);
+    depth_connector.segment(*tracking->cluster_labels, cluster_indices);
 
     end = get_time();
     duration = end - start;
@@ -3443,6 +3451,58 @@ gm_tracking_create_rgb_normals(struct gm_tracking *_tracking,
             (*output)[off * 3 + 1] = g;
             (*output)[off * 3 + 2] = b;
         }
+    }
+}
+
+void
+gm_tracking_create_rgb_normal_clusters(struct gm_tracking *_tracking,
+                                       int *width, int *height,
+                                       uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    //struct gm_context *ctx = tracking->ctx;
+
+    *width = (int)tracking->normal_labels->width;
+    *height = (int)tracking->normal_labels->height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        int label = tracking->normal_labels->points[off].label;
+        png_color *color =
+            &default_palette[label % ARRAY_LEN(default_palette)];
+        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 30.f;
+        (*output)[off * 3] = (uint8_t)(color->red * shade);
+        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
+        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
+    }
+}
+
+void
+gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
+                                          int *width, int *height,
+                                          uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    //struct gm_context *ctx = tracking->ctx;
+
+    *width = (int)tracking->cluster_labels->width;
+    *height = (int)tracking->cluster_labels->height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        int label = tracking->cluster_labels->points[off].label;
+        png_color *color =
+            &default_palette[label % ARRAY_LEN(default_palette)];
+        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
+        (*output)[off * 3] = (uint8_t)(color->red * shade);
+        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
+        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
     }
 }
 
