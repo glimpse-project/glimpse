@@ -3514,6 +3514,14 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
 
     float *predictions = (float*)malloc(ctx->n_joints * 3 * sizeof(float));
+
+    /* We don't control what thread this API is used from so we need to ensure
+     * the history that the prediction is based on will remain consistent while
+     * predicting each joint. The tracking thread takes this lock before before
+     * updating the history...
+     */
+    pthread_mutex_lock(&ctx->tracking_swap_mutex);
+
     for (int j = 0; j < ctx->n_joints; ++j) {
         memcpy(&predictions[j*3], &tracking->joints_processed[j*3],
                3 * sizeof(float));
@@ -3522,6 +3530,8 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
     }
 
     if (n_joints) *n_joints = ctx->n_joints;
+
+    pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
     return predictions;
 }
