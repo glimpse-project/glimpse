@@ -162,6 +162,13 @@ static IUnityGraphics *unity_graphics;
 
 static UnityGfxRenderer unity_renderer_type = kUnityGfxRendererNull;
 
+/* Considering that Unity renders in a separate thread which is awkward to
+ * synchronize with from C# we need to take extra care while terminating
+ * our plugin state because it's possible we might still see render
+ * event callbacks which shouldn't try and access the plugin state
+ */
+static pthread_mutex_t life_cycle_lock;
+static bool terminating; // checked in on_render_event_cb()
 static struct glimpse_data *plugin_data;
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -832,6 +839,19 @@ on_khr_debug_message_cb(GLenum source,
 static void UNITY_INTERFACE_API
 on_render_event_cb(int event)
 {
+    /* Holding this lock while rendering implies it's not possible to start
+     * terminating the plugin state during a render event callback...
+     */
+    pthread_mutex_lock(&life_cycle_lock);
+
+    /* If we've already started terminating the plugin state though, then
+     * we should bail immediately...
+     */
+    if (terminating) {
+        pthread_mutex_unlock(&life_cycle_lock);
+        return;
+    }
+
     gm_debug(plugin_data->log, "Render Event %d DEBUG\n", event);
 
     /* We just assume Unity isn't registering a GL debug callback and
@@ -865,6 +885,8 @@ on_render_event_cb(int event)
         render_ar_video_background(plugin_data);
         break;
     }
+
+    pthread_mutex_unlock(&life_cycle_lock);
 }
 
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1087,6 +1109,10 @@ gm_unity_terminate(void)
     struct glimpse_data *data = plugin_data;
 
     gm_debug(data->log, "GLIMPSE: Terminate\n");
+
+    pthread_mutex_lock(&life_cycle_lock);
+    terminating = true;
+    pthread_mutex_unlock(&life_cycle_lock);
 
     /* Destroying the context' tracking pool will assert that all tracking
      * resources have been released first...
