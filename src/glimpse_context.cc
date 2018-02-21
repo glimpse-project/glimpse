@@ -77,6 +77,7 @@
 #include "wrapper_image.h"
 #include "infer.h"
 #include "loader.h"
+#include "image_utils.h"
 
 #include "glimpse_log.h"
 #include "glimpse_mem_pool.h"
@@ -386,6 +387,8 @@ struct gm_context
     struct joint_info *joint_stats;
     int n_joints;
 
+    bool depth_gap_fill;
+    bool apply_depth_distortion;
     int gap_dist;
     int cloud_res;
     float min_depth;
@@ -2100,24 +2103,86 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
         memset(depth_copy, 0, width * height * sizeof(float));
 
         num_points = buffer->len / 16;
+
+        float fx = ctx->basis_depth_camera_intrinsics.fx;
+        float fy = ctx->basis_depth_camera_intrinsics.fy;
+        float cx = ctx->basis_depth_camera_intrinsics.cx;
+        float cy = ctx->basis_depth_camera_intrinsics.cy;
+
+        float k1, k2, k3;
+
+        /* XXX: we only support applying the brown's model... */
+        bool apply_distortion = ctx->apply_depth_distortion;
+        if (apply_distortion) {
+            switch (ctx->basis_depth_camera_intrinsics.distortion_model) {
+            case GM_DISTORTION_NONE:
+                apply_distortion = false;
+                break;
+            case GM_DISTORTION_FOV_MODEL:
+                apply_distortion = false;
+                break;
+            case GM_DISTORTION_BROWN_K1_K2:
+                k1 = ctx->basis_depth_camera_intrinsics.distortion[0];
+                k2 = ctx->basis_depth_camera_intrinsics.distortion[1];
+                k3 = 0;
+                break;
+            case GM_DISTORTION_BROWN_K1_K2_K3:
+                k1 = ctx->basis_depth_camera_intrinsics.distortion[0];
+                k2 = ctx->basis_depth_camera_intrinsics.distortion[1];
+                k3 = ctx->basis_depth_camera_intrinsics.distortion[2];
+                break;
+            case GM_DISTORTION_BROWN_K1_K2_P1_P2_K3:
+                k1 = ctx->basis_depth_camera_intrinsics.distortion[0];
+                k2 = ctx->basis_depth_camera_intrinsics.distortion[1];
+                k3 = ctx->basis_depth_camera_intrinsics.distortion[4];
+                /* Ignoring tangential distortion */
+                break;
+            }
+        }
+
         for (int off = 0; off < num_points; off++) {
             float *xyzc = ((float *)buffer->data) + 4 * off;
+            float ru, ru2, ru3, ru4, ru5, ru6, ru7;
+            float rd;
 
             // Reproject this point into training camera space
             glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
 
-            int x = (int)
-                ((point_t.x * ctx->basis_depth_camera_intrinsics.fx /
-                  point_t.z) + ctx->basis_depth_camera_intrinsics.cx);
+            int x;
+            if (apply_distortion) {
+                ru = sqrtf((point_t.x*point_t.x + point_t.y*point_t.y) /
+                                 (point_t.z*point_t.z));
+                ru2 = ru*ru;
+                ru3 = ru2*ru;
+                ru4 = ru3*ru;
+                ru5 = ru4*ru;
+                ru6 = ru5*ru;
+                ru7 = ru6*ru;
+
+                // Google documented their POLY_3 distortion model should
+                // be evaluated as:
+                //   rd = ru + k1 * ru^3 + k2 * ru^5 + k3 * ru^7
+                // they also refer to the same model as Brown's with only
+                // k1, k2 and k3 coefficients, but e.g. referencing Wikipedia
+                // and looking for other interpretations of the Brown-Conrady
+                // model then it looks like there's some inconsistency with
+                // the ru exponents used. Wikipedia uses:
+                //   k1 * ru^2 + k2 * ru^4 + k3 * ru^6
+                rd = ru + k1 * ru3 + k2 * ru5 + k3 * ru7;
+
+                x = (int)(point_t.x / point_t.z * fx * rd / ru + cx);
+            } else
+                x = (int)((point_t.x * fx / point_t.z) + cx);
 
             if (x < 0 || x >= width) {
                 continue;
             }
 
-            int y = (int)
-                ((point_t.y * ctx->basis_depth_camera_intrinsics.fy /
-                  point_t.z) + ctx->basis_depth_camera_intrinsics.cy);
-
+            int y;
+            if (apply_distortion)
+                y = (int)(point_t.y / point_t.z * fy * rd / ru + cy);
+            else
+                y = (int)((point_t.y * fy / point_t.z) + cy);
             if (y < 0 || y >= height) {
                 continue;
             }
@@ -2127,94 +2192,96 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                                     { depth_copy[roff] = point_t.z; });
         }
 
-        // Our code doesn't deal well with gaps in the data, so make some
-        // effort to fill in gaps that may have been caused by bad data,
-        // distortion transforms, etc.
-        struct blank {
-            int off;
-            float new_depth;
-        };
-        std::vector<struct blank> blanks;
+        if (ctx->depth_gap_fill) {
+            // Our code doesn't deal well with gaps in the data, so make some
+            // effort to fill in gaps that may have been caused by bad data,
+            // distortion transforms, etc.
+            struct blank {
+                int off;
+                float new_depth;
+            };
+            std::vector<struct blank> blanks;
 
-        foreach_xy_off(rot_width, rot_height) {
-            if (std::isnormal(depth_copy[off])) {
-                continue;
-            }
+            foreach_xy_off(rot_width, rot_height) {
+                if (std::isnormal(depth_copy[off])) {
+                    continue;
+                }
 
-            // Check to see if gaps can be filled by surrounding pixels on
-            // either the horizontal or vertical axis
-            int left = 0, right = 0, up = 0, down = 0;
-            for (int i = 1;
-                 i <= ctx->gap_dist && !(left && right) && !(up && down); ++i) {
-                if (!left && (x - i) >= 0 && std::isnormal(depth_copy[off-i])) {
-                    left = i;
-                }
-                if (!right && (x + i) < rot_width &&
-                    std::isnormal(depth_copy[off+i])) {
-                    right = i;
-                }
-                if (!up && (y - i) >= 0 &&
-                    std::isnormal(depth_copy[off - (i * rot_width)])) {
-                    up = i;
-                }
-                if (!down && (y + i) < rot_height &&
-                    std::isnormal(depth_copy[off + (i * rot_width)])) {
-                    down = i;
-                }
-            }
-
-            bool hvalid = false;
-            if (left && right) {
-                float lval = depth_copy[off-left];
-                float rval = depth_copy[off+right];
-                float distance = fabsf(rval - lval);
-                if (distance < ctx->cluster_tolerance * (left + right)) {
-                    hvalid = true;
-                }
-            }
-            bool vvalid = false;
-            if (up && down) {
-                int pix_dist = up + down;
-                float uval = depth_copy[off-(up * rot_width)];
-                float dval = depth_copy[off+(down * rot_width)];
-                float distance = fabsf(dval - uval);
-                if (distance < ctx->cluster_tolerance * pix_dist) {
-                    if (pix_dist < left + right || !(left && right)) {
-                        vvalid = true;
-                        hvalid = false;
+                // Check to see if gaps can be filled by surrounding pixels on
+                // either the horizontal or vertical axis
+                int left = 0, right = 0, up = 0, down = 0;
+                for (int i = 1;
+                     i <= ctx->gap_dist && !(left && right) && !(up && down); ++i) {
+                    if (!left && (x - i) >= 0 && std::isnormal(depth_copy[off-i])) {
+                        left = i;
+                    }
+                    if (!right && (x + i) < rot_width &&
+                        std::isnormal(depth_copy[off+i])) {
+                        right = i;
+                    }
+                    if (!up && (y - i) >= 0 &&
+                        std::isnormal(depth_copy[off - (i * rot_width)])) {
+                        up = i;
+                    }
+                    if (!down && (y + i) < rot_height &&
+                        std::isnormal(depth_copy[off + (i * rot_width)])) {
+                        down = i;
                     }
                 }
-            }
 
-            if (hvalid || vvalid) {
-                // Note, this interpolation isn't correct because it doesn't
-                // take depth into account. This has a more extreme effect
-                // at oblique angles, but hopefully we won't be filling in
-                // too many pixels so it shouldn't matter too much.
-                if (hvalid) {
-                    int pix_dist = left + right;
+                bool hvalid = false;
+                if (left && right) {
                     float lval = depth_copy[off-left];
                     float rval = depth_copy[off+right];
-                    for (int o = -left + 1, i = 0; o < right; ++o, ++i) {
-                        float new_depth = ((lval * ((pix_dist - 1) - o)) +
-                                (rval * o)) / (float)(pix_dist - 1);
-                        blanks.push_back({off + o, new_depth});
+                    float distance = fabsf(rval - lval);
+                    if (distance < ctx->cluster_tolerance * (left + right)) {
+                        hvalid = true;
                     }
-                } else {
+                }
+                bool vvalid = false;
+                if (up && down) {
                     int pix_dist = up + down;
                     float uval = depth_copy[off-(up * rot_width)];
                     float dval = depth_copy[off+(down * rot_width)];
-                    for (int o = -up + 1, i = 0; o < down; ++o, ++i) {
-                        float new_depth = ((uval * ((pix_dist - 1) - o)) +
-                                (dval * o)) / (float)(pix_dist - 1);
-                        blanks.push_back({off + (o * rot_width), new_depth});
+                    float distance = fabsf(dval - uval);
+                    if (distance < ctx->cluster_tolerance * pix_dist) {
+                        if (pix_dist < left + right || !(left && right)) {
+                            vvalid = true;
+                            hvalid = false;
+                        }
+                    }
+                }
+
+                if (hvalid || vvalid) {
+                    // Note, this interpolation isn't correct because it doesn't
+                    // take depth into account. This has a more extreme effect
+                    // at oblique angles, but hopefully we won't be filling in
+                    // too many pixels so it shouldn't matter too much.
+                    if (hvalid) {
+                        int pix_dist = left + right;
+                        float lval = depth_copy[off-left];
+                        float rval = depth_copy[off+right];
+                        for (int o = -left + 1, i = 0; o < right; ++o, ++i) {
+                            float new_depth = ((lval * ((pix_dist - 1) - o)) +
+                                               (rval * o)) / (float)(pix_dist - 1);
+                            blanks.push_back({off + o, new_depth});
+                        }
+                    } else {
+                        int pix_dist = up + down;
+                        float uval = depth_copy[off-(up * rot_width)];
+                        float dval = depth_copy[off+(down * rot_width)];
+                        for (int o = -up + 1, i = 0; o < down; ++o, ++i) {
+                            float new_depth = ((uval * ((pix_dist - 1) - o)) +
+                                               (dval * o)) / (float)(pix_dist - 1);
+                            blanks.push_back({off + (o * rot_width), new_depth});
+                        }
                     }
                 }
             }
-        }
 
-        for (unsigned i = 0; i < blanks.size(); ++i) {
-            depth_copy[blanks[i].off] = blanks[i].new_depth;
+            for (unsigned i = 0; i < blanks.size(); ++i) {
+                depth_copy[blanks[i].off] = blanks[i].new_depth;
+            }
         }
         break;
     }
@@ -3029,6 +3096,24 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.ptr = &ctx->gap_dist;
     prop.int_state.min = 0;
     prop.int_state.max = 5;
+    ctx->properties.push_back(prop);
+
+    ctx->depth_gap_fill = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "depth_gap_fill";
+    prop.desc = "Fill small gaps in the depth buffers";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->depth_gap_fill;
+    ctx->properties.push_back(prop);
+
+    ctx->apply_depth_distortion = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "apply_depth_distortion";
+    prop.desc = "Apply the distortion model of depth camera";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->apply_depth_distortion;
     ctx->properties.push_back(prop);
 
     ctx->cloud_res = 1;
