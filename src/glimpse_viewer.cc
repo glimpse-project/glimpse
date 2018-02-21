@@ -2189,10 +2189,19 @@ viewer_init(Data *data)
     }
 
     struct gm_device_config config = {};
+    config.type = GM_DEVICE_KINECT;
 #ifdef USE_TANGO
     config.type = GM_DEVICE_TANGO;
-#else
-    config.type = GM_DEVICE_KINECT;
+#elif defined(__ANDROID__)
+    if (getenv("GLIMPSE_RECORDING_PATH")) {
+        const char *recording_path = getenv("GLIMPSE_RECORDING_PATH");
+        struct stat sb;
+
+        if (stat(recording_path, &sb) == 0) {
+            config.type = GM_DEVICE_RECORDING;
+            config.recording.path = recording_path;
+        }
+    }
 #endif
     data->recording_device = gm_device_open(data->log, &config, NULL);
     data->active_device = data->recording_device;
