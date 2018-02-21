@@ -215,6 +215,27 @@ gm_tracking_unref(struct gm_tracking *tracking)
         tracking->api->free(tracking);
 }
 
+enum gm_distortion_model {
+    GM_DISTORTION_NONE,
+
+    /* The 'FOV model' described in:
+     * > Frédéric Devernay, Olivier Faugeras. Straight lines have to be straight:
+     * > automatic calibration and re-moval of distortion from scenes of
+     * > structured enviroments. Machine Vision and Applications, Springer
+     * > Verlag, 2001, 13 (1), pp.14-24. <10.1007/PL00013269>. <inria-00267247>
+     *
+     * (for fish-eye lenses)
+     */
+    GM_DISTORTION_FOV_MODEL,
+
+    /* Brown's distortion model, with k1, k2 parameters */
+    GM_DISTORTION_BROWN_K1_K2,
+    /* Brown's distortion model, with k1, k2, k3 parameters */
+    GM_DISTORTION_BROWN_K1_K2_K3,
+    /* Brown's distortion model, with k1, k2, p1, p2, k3 parameters */
+    GM_DISTORTION_BROWN_K1_K2_P1_P2_K3,
+};
+
 struct gm_intrinsics {
   uint32_t width;
   uint32_t height;
@@ -224,7 +245,12 @@ struct gm_intrinsics {
   double cx;
   double cy;
 
-  /* TODO: add distortion model description */
+  enum gm_distortion_model distortion_model;
+
+  /* XXX: maybe we should hide these coeficients since we can't represent
+   * more complex models e.g. using a triangle mesh
+   */
+  double distortion[5];
 };
 
 struct gm_extrinsics {
