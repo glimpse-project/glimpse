@@ -75,6 +75,7 @@
 #include "wrapper_image.h"
 #include "infer.h"
 #include "loader.h"
+#include "image_utils.h"
 
 #include "glimpse_log.h"
 #include "glimpse_mem_pool.h"
@@ -2052,34 +2053,189 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
          */
         memset(depth_copy, 0, width * height * sizeof(float));
 
+#define APPLY_DISTORTION_MODEL
+//#define DUMP_POINT_DEPTH_PNG
+//#define INFILL_DEPTH
+#ifdef DUMP_POINT_DEPTH_PNG
+        float scale = 8;
+        int high_width = rot_width * scale;
+        int high_height = rot_height * scale;
+        uint8_t *depth_rgb_low = (uint8_t *)calloc(rot_width * rot_height, 4);
+        uint8_t *depth_rgb_high = (uint8_t *)calloc(high_width * high_height, 4);
+#endif
+#ifdef APPLY_DISTORTION_MODEL
+        double k1=-0.153640, k2=-1.362370, p1=0.002750, p2=-0.002711, k3=2.946330;
+#endif
+
         num_points = buffer->len / 16;
+
+        int lost_data = 0;
+
+        float fx = ctx->basis_depth_camera_intrinsics.fx;
+        float fy = ctx->basis_depth_camera_intrinsics.fy;
+        float cx = ctx->basis_depth_camera_intrinsics.cx;
+        float cy = ctx->basis_depth_camera_intrinsics.cy;
+
         for (int off = 0; off < num_points; off++) {
             float *xyzc = ((float *)buffer->data) + 4 * off;
 
             // Reproject this point into training camera space
             glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
 
-            int x = (int)
-                ((point_t.x * ctx->basis_depth_camera_intrinsics.fx /
-                  point_t.z) + ctx->basis_depth_camera_intrinsics.cx);
+#ifdef APPLY_DISTORTION_MODEL
+            float ru = sqrtf((point_t.x*point_t.x + point_t.y*point_t.y) /
+                             (point_t.z*point_t.z));
+            float ru2 = ru*ru;
+            float ru3 = ru2*ru;
+            float ru4 = ru3*ru;
+            float ru5 = ru4*ru;
+            float ru6 = ru5*ru;
+            float ru7 = ru6*ru;
 
+            float rd = ru + k1 * ru3 + k2 * ru5 + k3 * ru7; // Google interpretation
+            //float rd = ru + k1 * ru2 + k2 * ru4 + k3 * ru6; // Wikipedia interpretation
+
+            float px =
+                p1 * (ru2 + 2 * (point_t.x*point_t.x)) +
+                2 * p2 * (point_t.x * point_t.y);
+
+            float py = 
+                2 * p1 * (point_t.x * point_t.y) +
+                p2 * (ru2 + 2 * (point_t.y*point_t.y));
+
+            // Google documented their POLY_3 distortion model should
+            // be evaluated as:
+            //   rd = ru + k1 * ru^3 + k2 * ru^5 + k3 * ru^7
+            // they also refer to the same model as Brown's with only
+            // k1, k2 and k3 coefficients, but e.g. referencing Wikipedia
+            // and looking for other interpretations of the Brown-Conrady
+            // model then it looks like there's some inconsistency with
+            // the ru exponents used. Wikipedia uses:
+            //   k1 * ru^2 + k2 * ru^4 + k3 * ru^6
+            //int x = (int)(point_t.x / point_t.z * fx * rd / ru + px + cx);
+            int x = (int)(point_t.x / point_t.z * fx * rd / ru + cx);
+#else
+            int x = (int)((point_t.x * fx / point_t.z) + cx);
+#endif
             if (x < 0 || x >= width) {
                 continue;
             }
 
-            int y = (int)
-                ((point_t.y * ctx->basis_depth_camera_intrinsics.fy /
-                  point_t.z) + ctx->basis_depth_camera_intrinsics.cy);
-
+#ifdef APPLY_DISTORTION_MODEL
+            //int y = (int)(point_t.y / point_t.z * fy * rd / ru + py + cy);
+            int y = (int)(point_t.y / point_t.z * fy * rd / ru + cy);
+#else
+            int y = (int)((point_t.y * fy / point_t.z) + cy);
+#endif
             if (y < 0 || y >= height) {
                 continue;
             }
 
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
-                                    { depth_copy[roff] = point_t.z; });
+            {
+                float depth = point_t.z;
+                bool lost = false;
+
+                if (depth && depth_copy[roff]) {
+                    lost_data++;
+                    lost = true;
+                }
+                depth_copy[roff] = depth;
+
+#ifdef DUMP_POINT_DEPTH_PNG
+                if (!lost) {
+                    struct color rgb = stops_color_from_val(ctx->depth_color_stops,
+                                                            ctx->n_depth_color_stops,
+                                                            ctx->depth_color_stops_range,
+                                                            depth);
+
+                    depth_rgb_low[roff * 4] = rgb.r;
+                    depth_rgb_low[roff * 4 + 1] = rgb.g;
+                    depth_rgb_low[roff * 4 + 2] = rgb.b;
+                    depth_rgb_low[roff * 4 + 3] = 0xff;
+                } else {
+                    depth_rgb_low[roff * 4] = 0xff;
+                    depth_rgb_low[roff * 4 + 1] = 0xff;
+                    depth_rgb_low[roff * 4 + 2] = 0xff;
+                    depth_rgb_low[roff * 4 + 3] = 0xff;
+                }
+#endif
+            });
+        }
+        if (lost_data) {
+            gm_error(ctx->log, "Lost %d depth points during reprojection",
+                     lost_data);
         }
 
+#ifdef DUMP_POINT_DEPTH_PNG
+        for (int y = 0; y < rot_height * scale; y++) {
+            for (int x = 0; x < rot_width * scale; x++) {
+                int off = y * rot_width * scale + x;
+                int low_x = x / scale;
+                int low_y = y / scale;
+                int low_off = low_y * rot_width + low_x;
+
+                depth_rgb_high[off * 4] = depth_rgb_low[low_off * 4];
+                depth_rgb_high[off * 4 + 1] = depth_rgb_low[low_off * 4 + 1];
+                depth_rgb_high[off * 4 + 2] = depth_rgb_low[low_off * 4 + 2];
+                depth_rgb_high[off * 4 + 3] = 0xff;
+            }
+        }
+
+        for (int off = 0; off < num_points; off++) {
+            float *xyzc = ((float *)buffer->data) + 4 * off;
+
+            // Reproject this point into training camera space
+            glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
+
+#ifdef APPLY_DISTORTION_MODEL
+            float ru = sqrtf((point_t.x*point_t.x + point_t.y*point_t.y) /
+                             (point_t.z*point_t.z));
+            float ru3 = ru*ru*ru;
+            float ru5 = ru3*ru*ru;
+            float ru7 = ru5*ru*ru;
+            float rd = ru + k1 * ru3 + k2 * ru5 + k3 * ru7;
+
+            int x = (int)((point_t.x / point_t.z * fx * rd / ru + cx) * scale);
+#else
+            int x = (int)(((point_t.x * fx / point_t.z) + cx) * scale);
+#endif
+            if (x < 0 || x >= (int)(width * scale)) {
+                continue;
+            }
+
+#ifdef APPLY_DISTORTION_MODEL
+            int y = (int)((point_t.y / point_t.z * fy * rd / ru + cy) * scale);
+#else
+            int y = (int)(((point_t.y * fy / point_t.z) + cy) * scale);
+#endif
+            if (y < 0 || y >= (int)(height * scale)) {
+                continue;
+            }
+
+            with_rotated_rx_ry_roff(x, y, width * scale, height * scale,
+                                    rotation, rot_width * scale,
+            {
+                depth_rgb_high[roff * 4] = 0xff;
+                depth_rgb_high[roff * 4 + 1] = 0x00;
+                depth_rgb_high[roff * 4 + 2] = 0x00;
+                depth_rgb_high[roff * 4 + 3] = 0xff;
+            });
+        }
+
+        IUImageSpec spec = { high_width, high_height, IU_FORMAT_U32 };
+        iu_write_png_to_file("depth.png",
+                             &spec,
+                             depth_rgb_high,
+                             NULL, //no pallet
+                             0); //pallet size
+
+        free(depth_rgb_low);
+        free(depth_rgb_high);
+#endif // DUMP_POINT_DEPTH_PNG
+
+#ifdef INFILL_DEPTH
         // Our code doesn't deal well with gaps in the data, so make some
         // effort to fill in gaps that may have been caused by bad data,
         // distortion transforms, etc.
@@ -2118,6 +2274,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
         for (unsigned i = 0; i < blanks.size(); ++i) {
             depth_copy[blanks[i].off] = blanks[i].new_depth;
         }
+#endif
         break;
     }
     case GM_FORMAT_UNKNOWN:
