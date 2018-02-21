@@ -133,11 +133,9 @@ struct gm_device
 
     union {
         struct {
-            int32_t frame;
-            int32_t last_frame;
-            uint64_t last_frame_time;
             char *path;
             JSON_Value *json;
+            int frame;
 
             pthread_t io_thread;
         } recording;
@@ -180,7 +178,9 @@ struct gm_device
     /* What data is required for the next frame?
      * E.g. _DEPTH | _VIDEO
      */
-    uint64_t frame_request_requirements;
+    pthread_mutex_t request_buffers_mask_lock;
+    uint64_t frame_request_buffers_mask;
+    uint64_t frame_ready_buffers_mask;
 
     pthread_mutex_t swap_buffers_lock;
 
@@ -205,9 +205,6 @@ struct gm_device
     struct gm_mem_pool *frame_pool;
     struct gm_frame *last_frame;
 
-    /* If depth_mid buffer is valid then corresponding _DEPTH bit is set */
-    uint64_t frame_ready_requirements;
-
     std::vector<struct gm_ui_enumerant> rotation_enumerants;
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -216,8 +213,6 @@ struct gm_device
                            void *user_data);
 
     void *callback_data;
-
-    pthread_mutex_t request_requirements_lock;
 
 #ifdef __ANDROID__
     JavaVM *jvm;
@@ -491,11 +486,11 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     return buf;
 }
 
-/* XXX: the request_requirements_lock must be held while calling this.
+/* XXX: the request_buffers_mask_lock must be held while calling this.
  *
  * Note: this implies that it's not currently safe for the reciever of the
  * event to synchronously request a new frame or call any device api that
- * might affect these requirements (needing the same lock)
+ * might affect this buffers_mask (needing the same lock)
  */
 static void
 notify_frame_locked(struct gm_device *dev)
@@ -503,13 +498,22 @@ notify_frame_locked(struct gm_device *dev)
     struct gm_device_event *event =
         device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
 
-    gm_debug(dev->log, "notify_frame_locked (requirements = 0x%" PRIx64,
-             dev->frame_request_requirements);
+    gm_debug(dev->log, "notify_frame_locked (buffers_mask = 0x%" PRIx64,
+             dev->frame_request_buffers_mask);
 
-    event->frame_ready.met_requirements = dev->frame_ready_requirements;
-    dev->frame_request_requirements &= ~dev->frame_ready_requirements;
+    event->frame_ready.buffers_mask = dev->frame_ready_buffers_mask;
+    dev->frame_request_buffers_mask &= ~dev->frame_ready_buffers_mask;
 
     dev->event_callback(event, dev->callback_data);
+}
+
+static void
+maybe_notify_frame_locked(struct gm_device *dev)
+{
+    if (dev->frame_request_buffers_mask & dev->frame_ready_buffers_mask)
+    {
+        notify_frame_locked(dev);
+    }
 }
 
 #ifdef USE_FREENECT
@@ -518,7 +522,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 {
     struct gm_device *dev = (struct gm_device *)freenect_get_user(fdev);
 
-    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH))
+    if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_DEPTH))
         return;
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
@@ -530,7 +534,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
     //       nanoseconds
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
 
     freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
     if (old)
@@ -538,7 +542,9 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    gm_device_request_frame(dev, dev->frame_request_requirements);
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void
@@ -546,7 +552,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 {
     struct gm_device *dev = (struct gm_device *)freenect_get_user(fdev);
 
-    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO))
+    if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_VIDEO))
         return;
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
@@ -556,7 +562,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool, "kinect rgb");
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
 
     freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
     if (old)
@@ -564,7 +570,9 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    gm_device_request_frame(dev, dev->frame_request_requirements);
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -927,7 +935,19 @@ recording_open(struct gm_device *dev,
         round(json_object_get_number(meta, "video_format"));
 
     dev->recording.frame = 0;
-    dev->recording.last_frame = -1;
+
+    struct gm_ui_property prop;
+
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "frame";
+    prop.desc = "Frame";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &dev->recording.frame;
+    prop.int_state.min = 0;
+    prop.int_state.max = INT_MAX;
+    prop.read_only = true;
+    dev->properties.push_back(prop);
 
     return true;
 }
@@ -945,178 +965,184 @@ recording_close(struct gm_device *dev)
     }
 }
 
+static struct gm_buffer *
+read_frame_buffer(struct gm_device *dev,
+                  JSON_Object *frame,
+                  const char *filename_prop,
+                  const char *len_prop,
+                  struct gm_mem_pool *buf_pool)
+{
+    size_t base_path_len = strlen(dev->recording.path);
+    const char *filename = json_object_get_string(frame, filename_prop);
+    if (!filename)
+        return NULL;
+
+    size_t abs_filename_size = strlen(filename) + base_path_len + 2;
+    char *abs_filename = (char *)alloca(abs_filename_size);
+    snprintf(abs_filename, abs_filename_size, "%s/%s",
+             dev->recording.path, filename);
+
+    size_t len = (size_t)json_object_get_number(frame, len_prop);
+
+    FILE *fp = fopen(abs_filename, "r");
+    if (!fp) {
+        gm_error(dev->log, "Failed to open recording frame '%s'\n",
+                 abs_filename);
+        return NULL;
+    }
+
+    struct gm_buffer *buf = (struct gm_buffer *)
+        mem_pool_acquire_buffer(buf_pool, "recording buffer");
+
+    if (fread(buf->data, 1, len, fp) != len) {
+        gm_error(dev->log, "Failed to open recording frame '%s'\n",
+                 abs_filename);
+        mem_pool_recycle_resource(buf_pool, buf);
+        fclose(fp);
+        return NULL;
+    }
+
+    buf->len = len;
+
+    fclose(fp);
+
+    return buf;
+}
+
 static void *
 recording_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
 
-    size_t base_path_len = strlen(dev->recording.path);
+    JSON_Array *frames =
+        json_object_get_array(json_object(dev->recording.json), "frames");
+    int n_frames = json_array_get_count(frames);
+    JSON_Object *frame0 = json_array_get_object(frames, 0);
+
+    uint64_t start = get_time();
+    uint64_t frame0_timestamp = (uint64_t)
+            json_object_get_number(frame0, "timestamp");
 
     while (dev->running) {
-        JSON_Array *frames =
-            json_object_get_array(json_object(dev->recording.json), "frames");
-        JSON_Object *frame =
-            json_array_get_object(frames, dev->recording.frame);
+        uint64_t time = get_time();
+        uint64_t real_progress = time - start;
 
-        // Load last depth frame
-        const char *filename = NULL;
-        for (int i = dev->recording.frame;
-             i > dev->recording.last_frame && !filename; --i) {
-            filename = json_object_get_string(json_array_get_object(frames, i),
-                                              "depth_file");
-        }
-        if (filename) {
-            // Concatenate the relative path to the recording file path
-            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
-            char *abs_filename = (char *)malloc(abs_filename_size);
-            snprintf(abs_filename, abs_filename_size, "%s%s",
-                     dev->recording.path, filename);
+        if (dev->recording.frame == n_frames - 1) {
+            dev->recording.frame = 0;
+            start = time;
+        } else
+            dev->recording.frame++;
 
-            size_t depth_len = (size_t)
-                round(json_object_get_number(frame, "depth_len"));
+        JSON_Object *frame = json_array_get_object(frames, dev->recording.frame);
+        uint64_t frame_timestamp = (uint64_t)
+            json_object_get_number(frame, "timestamp");
+        uint64_t recording_progress = frame_timestamp - frame0_timestamp;
 
-            FILE *depth_file = fopen(abs_filename, "r");
-            if (depth_file) {
-                if (!dev->depth_buf_back) {
-                    dev->depth_buf_back =
-                        mem_pool_acquire_buffer(dev->depth_buf_pool, "recording depth");
-                }
+        /* XXX: Skip frames if we're > 16ms behind */
+        if (recording_progress < (real_progress - 16000000)) {
+            gm_warn(dev->log, "slow playback, skipping recorded frames");
 
-                if (fread(dev->depth_buf_back->base.data, 1, depth_len,
-                          depth_file) == depth_len) {
-                    dev->depth_buf_back->base.len = depth_len;
-                } else {
-                    fprintf(stderr, "Error reading depth file '%s'\n",
-                            filename);
-                }
+            int last_depth = -1;
+            int i;
+            for (i = dev->recording.frame + 1;
+                 i < n_frames && (recording_progress < real_progress);
+                 i++)
+            {
+                frame = json_array_get_object(frames, i);
+                frame_timestamp = (uint64_t)
+                    json_object_get_number(frame, "timestamp");
+                recording_progress = frame_timestamp - frame0_timestamp;
 
-                if (fclose(depth_file) != 0) {
-                    fprintf(stderr, "Error closing depth file '%s'\n",
-                            filename);
-                }
-            }
-            free(abs_filename);
-        }
-
-        // Load last video frame
-        filename = NULL;
-        for (int i = dev->recording.frame;
-             i > dev->recording.last_frame && !filename; --i) {
-            filename = json_object_get_string(json_array_get_object(frames, i),
-                                              "video_file");
-        }
-        if (filename) {
-            // Concatenate the relative path to the recording file path
-            size_t abs_filename_size = strlen(filename) + base_path_len + 1;
-            char *abs_filename = (char *)malloc(abs_filename_size);
-            snprintf(abs_filename, abs_filename_size, "%s%s",
-                     dev->recording.path, filename);
-
-            size_t video_len = (size_t)
-                round(json_object_get_number(frame, "video_len"));
-
-            FILE *video_file = fopen(abs_filename, "r");
-            if (video_file) {
-                if (!dev->video_buf_back) {
-                    dev->video_buf_back =
-                        mem_pool_acquire_buffer(dev->video_buf_pool, "recording video");
-                }
-
-                if (fread(dev->video_buf_back->base.data, 1, video_len,
-                          video_file) == video_len) {
-                    dev->video_buf_back->base.len = video_len;
-                } else {
-                    fprintf(stderr, "Error reading video file '%s'\n",
-                            filename);
-                }
-
-                if (fclose(video_file) != 0) {
-                    fprintf(stderr, "Error closing video file '%s'\n",
-                            filename);
+                /* If we're skipping frames that's likely due to the size of
+                 * video buffers we're loading.
+                 *
+                 * If depth has been requested then we prioritize the most
+                 * recent frame with depth considering that depth is a hard
+                 * requirement for tracking and there will be fewer depth
+                 * frames than video frames typically so we would likely keep
+                 * skipping over them unable to do any tracking.
+                 */
+                if (dev->frame_request_buffers_mask & GM_REQUEST_FRAME_DEPTH &&
+                    json_object_get_string(frame, "depth_file"))
+                {
+                    last_depth = i;
                 }
             }
-            free(abs_filename);
+
+            /* might end up skipping to end of recording */
+            if (i == n_frames) {
+                dev->recording.frame = n_frames - 1;
+                continue;
+            }
+
+            /* jump back again if we did see a frame with depth */
+            if (last_depth > 0 && last_depth != i) {
+                dev->recording.frame = last_depth;
+                frame = json_array_get_object(frames, last_depth);
+                frame_timestamp = (uint64_t)
+                    json_object_get_number(frame, "timestamp");
+                recording_progress = frame_timestamp - frame0_timestamp;
+            } else
+                dev->recording.frame = i;
         }
 
-        // Retrieve rotation
+        /* Throttle playback according to the timestamps in the recorded frames */
+        while (recording_progress > real_progress) {
+            uint64_t delay_us = (recording_progress - real_progress) / 1000;
+            usleep(delay_us);
+            time = get_time();
+            real_progress = time - start;
+        }
+
+        struct gm_buffer *depth_buffer = read_frame_buffer(dev,
+                                                           frame,
+                                                           "depth_file",
+                                                           "depth_len",
+                                                           dev->depth_buf_pool);
+        struct gm_buffer *video_buffer = read_frame_buffer(dev,
+                                                           frame,
+                                                           "video_file",
+                                                           "video_len",
+                                                           dev->video_buf_pool);
+
         enum gm_rotation rotation = (enum gm_rotation)
             json_object_get_number(frame, "camera_rotation");
 
-        // Wait until the appropriate time has elapsed before notifying the
-        // frame
-        uint64_t frame_time = (uint64_t)
-            json_object_get_number(frame, "timestamp");
-        uint64_t current_time = frame_time;
-        uint64_t time = get_time();
-        if (dev->recording.frame > 0) {
-            JSON_Object *last_frame =
-                json_array_get_object(frames, dev->recording.frame  - 1);
+        pthread_mutex_lock(&dev->swap_buffers_lock);
 
-            // Safe-guard against for frame times going backwards
-            uint64_t last_frame_time =
-                (uint64_t)json_object_get_number(last_frame, "timestamp");
-            uint64_t frame_duration = frame_time > last_frame_time ?
-                frame_time - last_frame_time : 1000000000/30;
+        dev->camera_rotation = rotation;
+        dev->frame_time = frame_timestamp;
 
-            do {
-                time = get_time();
-                uint64_t duration = time - dev->recording.last_frame_time;
-
-                // Safe-guard against get_time going backwards
-                if (dev->running && time >= dev->recording.last_frame_time &&
-                    duration < frame_duration) {
-                    useconds_t wait = ((frame_duration - duration) / 1000) / 2;
-                    if (wait == 0) break;
-                    usleep(wait);
-                } else {
-                    break;
-                }
-            } while (true);
-
-            current_time = last_frame_time +
-              (time - dev->recording.last_frame_time);
-        }
-        dev->recording.last_frame_time = time;
-
-        // Swap buffers
-        if (dev->depth_buf_back || dev->video_buf_back) {
-            pthread_mutex_lock(&dev->swap_buffers_lock);
-            dev->frame_time = frame_time;
-            dev->camera_rotation = rotation;
-            if (dev->depth_buf_back &&
-                dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH) {
-                if (dev->depth_buf_ready)
-                    gm_buffer_unref(&dev->depth_buf_ready->base);
-                dev->depth_buf_ready = dev->depth_buf_back;
-                dev->depth_buf_back = NULL;
-                dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
-            }
-
-            if (dev->video_buf_back &&
-                dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO) {
-                if (dev->video_buf_ready)
-                    gm_buffer_unref(&dev->video_buf_ready->base);
-                dev->video_buf_ready = dev->video_buf_back;
-                dev->video_buf_back = NULL;
-                dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
-            }
-            pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-            gm_device_request_frame(dev, dev->frame_request_requirements);
+        if (depth_buffer &&
+            dev->frame_request_buffers_mask & GM_REQUEST_FRAME_DEPTH)
+        {
+            struct gm_device_buffer *old = dev->depth_buf_ready;
+            dev->depth_buf_ready = (struct gm_device_buffer *)gm_buffer_ref(depth_buffer);
+            dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+            if (old)
+                gm_buffer_unref(&old->base);
         }
 
-        // Skip frames if we spent too long on this one
-        dev->recording.last_frame = dev->recording.frame;
-        do {
-            ++dev->recording.frame;
-            if (dev->recording.frame >= (int32_t)json_array_get_count(frames)) {
-                dev->recording.last_frame = -1;
-                dev->recording.frame = 0;
-                break;
-            }
-        } while ((uint64_t)json_object_get_number(
-            json_array_get_object(frames, dev->recording.frame),
-            "timestamp") <= current_time);
+        if (video_buffer &&
+            dev->frame_request_buffers_mask & GM_REQUEST_FRAME_VIDEO)
+        {
+            struct gm_device_buffer *old = dev->video_buf_ready;
+            dev->video_buf_ready = (struct gm_device_buffer *)gm_buffer_ref(video_buffer);
+            dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+            if (old)
+                gm_buffer_unref(&old->base);
+        }
+
+        pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+        if (depth_buffer)
+            gm_buffer_unref(depth_buffer);
+        if (video_buffer)
+            gm_buffer_unref(video_buffer);
+
+        pthread_mutex_lock(&dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
     }
 
     return NULL;
@@ -1194,7 +1220,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
 
     gm_debug(dev->log, "tango_point_cloud_cb");
 
-    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_DEPTH)) {
+    if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_DEPTH)) {
         gm_debug(dev->log, "> tango_point_cloud_cb: depth not needed");
         return;
     }
@@ -1223,7 +1249,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = depth_buf_back;
     dev->frame_time = (uint64_t)(point_cloud->timestamp * 1e9);
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_DEPTH;
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
     gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);
 
     if (old)
@@ -1231,7 +1257,9 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    gm_device_request_frame(dev, dev->frame_request_requirements);
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 // This function does nothing. TangoService_connectOnTextureAvailable
@@ -1273,7 +1301,7 @@ tango_frame_available_cb(void *context,
 
     gm_debug(dev->log, "tango_frame_available_cb");
 
-    if (!(dev->frame_request_requirements & GM_REQUEST_FRAME_VIDEO)) {
+    if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_VIDEO)) {
         gm_debug(dev->log, "> tango_frame_available_cb: VIDEO not required");
         return;
     }
@@ -1302,7 +1330,7 @@ tango_frame_available_cb(void *context,
     struct gm_device_buffer *old = dev->video_buf_ready;
     dev->video_buf_ready = video_buf_back;
     dev->frame_time = (uint64_t)(buffer->timestamp * 1e9);
-    dev->frame_ready_requirements |= GM_REQUEST_FRAME_VIDEO;
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
 
     gm_debug(dev->log, "tango_frame_available_cb video ready = %p", dev->video_buf_ready);
 
@@ -1311,7 +1339,9 @@ tango_frame_available_cb(void *context,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    gm_device_request_frame(dev, dev->frame_request_requirements);
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -2155,19 +2185,16 @@ gm_device_get_depth_to_video_extrinsics(struct gm_device *dev)
 }
 
 void
-gm_device_request_frame(struct gm_device *dev, uint64_t requirements)
+gm_device_request_frame(struct gm_device *dev, uint64_t buffers_mask)
 {
-    if (!requirements) {
+    if (!buffers_mask) {
         return;
     }
 
-    pthread_mutex_lock(&dev->request_requirements_lock);
-    dev->frame_request_requirements |= requirements;
-    if (dev->frame_request_requirements & dev->frame_ready_requirements)
-    {
-        notify_frame_locked(dev);
-    }
-    pthread_mutex_unlock(&dev->request_requirements_lock);
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    dev->frame_request_buffers_mask |= buffers_mask;
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 #if 0
@@ -2208,10 +2235,10 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     dev->last_frame = &frame->base;
 
-    gm_debug(dev->log, "latest frame = %p, requirements = %" PRIx64,
-             frame, dev->frame_ready_requirements);
+    gm_debug(dev->log, "latest frame = %p, buffers_mask = %" PRIx64,
+             frame, dev->frame_ready_buffers_mask);
 
-    if (dev->frame_ready_requirements & GM_REQUEST_FRAME_DEPTH) {
+    if (dev->frame_ready_buffers_mask & GM_REQUEST_FRAME_DEPTH) {
         frame->base.depth = &dev->depth_buf_ready->base;
         dev->depth_buf_ready = NULL;
         frame->base.depth_format = dev->depth_format;
@@ -2219,7 +2246,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
                   "Depth ready flag set but buffer missing");
         gm_debug(dev->log, "> depth = %p", frame->base.depth);
     }
-    if (dev->frame_ready_requirements & GM_REQUEST_FRAME_VIDEO) {
+    if (dev->frame_ready_buffers_mask & GM_REQUEST_FRAME_VIDEO) {
         frame->base.video = &dev->video_buf_ready->base;
         dev->video_buf_ready = NULL;
         frame->base.video_format = dev->video_format;
@@ -2231,7 +2258,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
     frame->base.timestamp = dev->frame_time;
     frame->base.camera_rotation = (enum gm_rotation)dev->camera_rotation;
 
-    dev->frame_ready_requirements = 0;
+    dev->frame_ready_buffers_mask = 0;
 
     /* Get a ref() for the caller */
     gm_frame_ref(&frame->base);

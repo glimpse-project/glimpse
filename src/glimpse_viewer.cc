@@ -157,11 +157,11 @@ typedef struct _Data
     float camera_rot_yx[2];
     JSON_Value *joint_map;
 
-    /* When we request gm_device for a frame we set requirements for what the
-     * frame should include. We track the requirements so we avoid sending
-     * subsequent frame requests that would downgrade the requirements
+    /* When we request gm_device for a frame we set a buffers_mask for what the
+     * frame should include. We track the buffers_mask so we avoid sending
+     * subsequent frame requests that would downgrade the buffers_mask
      */
-    uint64_t pending_frame_requirements;
+    uint64_t pending_frame_buffers_mask;
 
     /* Set when gm_device sends a _FRAME_READY device event */
     bool device_frame_ready;
@@ -1114,16 +1114,16 @@ draw_ui(Data *data)
 }
 
 /* If we've already requested gm_device for a frame then this won't submit
- * a request that downgrades the requirements
+ * a request that downgrades the buffers_mask
  */
 static void
-request_device_frame(Data *data, uint64_t requirements)
+request_device_frame(Data *data, uint64_t buffers_mask)
 {
-    uint64_t new_requirements = data->pending_frame_requirements | requirements;
+    uint64_t new_buffers_mask = data->pending_frame_buffers_mask | buffers_mask;
 
-    if (data->pending_frame_requirements != new_requirements) {
-        gm_device_request_frame(data->active_device, new_requirements);
-        data->pending_frame_requirements = new_requirements;
+    if (data->pending_frame_buffers_mask != new_buffers_mask) {
+        gm_device_request_frame(data->active_device, new_buffers_mask);
+        data->pending_frame_buffers_mask = new_buffers_mask;
     }
 }
 
@@ -1151,7 +1151,7 @@ handle_device_frame_updates(Data *data)
             }
             gm_frame_ref(device_frame);
             data->last_depth_frame = device_frame;
-            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
+            data->pending_frame_buffers_mask &= ~GM_REQUEST_FRAME_DEPTH;
         }
 
         if (device_frame->video) {
@@ -1160,7 +1160,7 @@ handle_device_frame_updates(Data *data)
             }
             gm_frame_ref(device_frame);
             data->last_video_frame = device_frame;
-            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
+            data->pending_frame_buffers_mask &= ~GM_REQUEST_FRAME_VIDEO;
         }
 
         if (data->recording) {
@@ -1212,7 +1212,7 @@ handle_device_frame_updates(Data *data)
          * Similarly, if we're recording, request depth frames so that we can
          * record at a rate that exceeds the tracking rate.
          *
-         * Note: the requirements may be upgraded to ask for _DEPTH data
+         * Note: the buffers_mask may be upgraded to ask for _DEPTH data
          * after the next iteration of skeltal tracking completes.
          */
         request_device_frame(data, data->recording ?
@@ -1471,8 +1471,8 @@ handle_device_ready(Data *data, struct gm_device *dev)
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(dev));*/
 
-    uint64_t old_reqs = data->pending_frame_requirements;
-    data->pending_frame_requirements = 0;
+    uint64_t old_reqs = data->pending_frame_buffers_mask;
+    data->pending_frame_buffers_mask = 0;
     gm_device_start(dev);
     gm_context_enable(data->ctx);
     if (old_reqs) {
@@ -1494,8 +1494,8 @@ handle_device_event(Data *data, struct gm_device_event *event)
         handle_device_ready(data, event->device);
         break;
     case GM_DEV_EVENT_FRAME_READY:
-        if (event->frame_ready.met_requirements &
-            data->pending_frame_requirements) {
+        if (event->frame_ready.buffers_mask & data->pending_frame_buffers_mask)
+        {
             data->device_frame_ready = true;
         }
         break;

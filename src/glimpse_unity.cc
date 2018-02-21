@@ -90,11 +90,11 @@ struct glimpse_data
 
     bool device_ready;
 
-    /* When we request gm_device for a frame we set requirements for what the
-     * frame should include. We track the requirements so we avoid sending
-     * subsequent frame requests that would downgrade the requirements
+    /* When we request gm_device for a frame we set a buffers_mask for what the
+     * frame should include. We track the buffers_mask so we avoid sending
+     * subsequent frame requests that would downgrade the buffers_mask
      */
-    uint64_t pending_frame_requirements;
+    uint64_t pending_frame_buffers_mask;
 
     /* Set when gm_device sends a _FRAME_READY device event */
     bool device_frame_ready;
@@ -302,16 +302,16 @@ on_graphics_device_event_cb(UnityGfxDeviceEventType type)
 }
 
 /* If we've already requested gm_device for a frame then this won't submit
- * a request that downgrades the requirements
+ * a request that downgrades the buffers_mask
  */
 static void
-request_device_frame(struct glimpse_data *data, uint64_t requirements)
+request_device_frame(struct glimpse_data *data, uint64_t buffers_mask)
 {
-    uint64_t new_requirements = data->pending_frame_requirements | requirements;
+    uint64_t new_buffers_mask = data->pending_frame_buffers_mask | buffers_mask;
 
-    if (data->pending_frame_requirements != new_requirements) {
-        gm_device_request_frame(data->device, new_requirements);
-        data->pending_frame_requirements = new_requirements;
+    if (data->pending_frame_buffers_mask != new_buffers_mask) {
+        gm_device_request_frame(data->device, new_buffers_mask);
+        data->pending_frame_buffers_mask = new_buffers_mask;
     }
 }
 
@@ -344,7 +344,7 @@ handle_device_frame_updates(struct glimpse_data *data)
             }
             gm_frame_ref(device_frame);
             data->last_depth_frame = device_frame;
-            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_DEPTH;
+            data->pending_frame_buffers_mask &= ~GM_REQUEST_FRAME_DEPTH;
             gm_frame_add_breadcrumb(device_frame, "unity: latest depth frame");
         }
 
@@ -355,7 +355,7 @@ handle_device_frame_updates(struct glimpse_data *data)
             }
             gm_frame_ref(device_frame);
             data->last_video_frame = device_frame;
-            data->pending_frame_requirements &= ~GM_REQUEST_FRAME_VIDEO;
+            data->pending_frame_buffers_mask &= ~GM_REQUEST_FRAME_VIDEO;
             gm_frame_add_breadcrumb(device_frame, "unity: latest video frame");
             //upload = true;
         }
@@ -417,7 +417,7 @@ handle_device_frame_updates(struct glimpse_data *data)
          * at the native capture rate, even though we might not be tracking
          * at that rate.
          *
-         * Note: the requirements may be upgraded to ask for _DEPTH data
+         * Note: the buffers_mask may be upgraded to ask for _DEPTH data
          * after the next iteration of skeltal tracking completes.
          */
         request_device_frame(data, GM_REQUEST_FRAME_VIDEO);
@@ -497,13 +497,12 @@ handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
         gm_debug(data->log, "GM_DEV_EVENT_FRAME_READY\n");
 
         /* It's always possible that we will see an event for a frame
-         * that was ready before we upgraded the requirements for what
+         * that was ready before we upgraded the buffers_mask for what
          * we need, so we skip notifications for frames we can't use.
          */
-        if (event->frame_ready.met_requirements &
-            data->pending_frame_requirements)
+        if (event->frame_ready.buffers_mask & data->pending_frame_buffers_mask)
         {
-            data->pending_frame_requirements = 0;
+            data->pending_frame_buffers_mask = -1;
             data->device_frame_ready = true;
         }
         break;

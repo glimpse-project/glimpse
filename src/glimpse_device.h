@@ -46,7 +46,7 @@ struct gm_device_event
 
     union {
         struct {
-            uint64_t met_requirements;
+            uint64_t buffers_mask;
         } frame_ready;
         struct {
             struct gm_ui_property *prop;
@@ -126,7 +126,7 @@ void gm_device_stop(struct gm_device *dev);
 void gm_device_close(struct gm_device *dev);
 
 void
-gm_device_request_frame(struct gm_device *dev, uint64_t requirements);
+gm_device_request_frame(struct gm_device *dev, uint64_t buffers_mask);
 
 struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev);
