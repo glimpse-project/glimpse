@@ -59,7 +59,9 @@
 #include <pcl/common/angles.h>
 #include <pcl/features/integral_image_normal.h>
 #include <pcl/features/linear_least_squares_normal.h>
+#include <pcl/features/normal_3d.h>
 #include <pcl/segmentation/comparator.h>
+#include <pcl/segmentation/euclidean_plane_coefficient_comparator.h>
 #include <pcl/segmentation/organized_multi_plane_segmentation.h>
 #include <pcl/segmentation/organized_connected_component_segmentation.h>
 
@@ -384,7 +386,6 @@ struct gm_context
     struct joint_info *joint_stats;
     int n_joints;
 
-    int min_neighbours;
     int gap_dist;
     int cloud_res;
     float min_depth;
@@ -395,8 +396,8 @@ struct gm_context
     int min_inliers;
     float angular_threshold;
     float distance_threshold;
+    float refinement_distance_threshold;
     float max_curvature;
-    int refinement_steps;
     float cluster_tolerance;
 
     bool joint_refinement;
@@ -1469,16 +1470,32 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // COVARIANCE_MATRIX, AVERAGE_3D_GRADIENT, AVERAGE_DEPTH_CHANGE
     ne.setNormalEstimationMethod (ne.AVERAGE_3D_GRADIENT);
     ne.setMaxDepthChangeFactor(ctx->normal_depth_change);
-    ne.setNormalSmoothingSize(ctx->normal_smooth);
+    ne.setNormalSmoothingSize(ctx->normal_smooth * 10);
     //ne.setRectSize(lores_cloud->width, lores_cloud->height);
     ne.setInputCloud(lores_cloud);
     ne.compute(*tracking->normals);
-#else
+#elif 1
     pcl::LinearLeastSquaresNormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
     ne.setNormalSmoothingSize(ctx->normal_smooth);
     ne.setMaxDepthChangeFactor(ctx->normal_depth_change);
+    ne.setKSearch(0);
+    ne.setRadiusSearch(ctx->normal_depth_change);
     ne.setDepthDependentSmoothing(false);
     ne.setInputCloud(lores_cloud);
+    ne.compute(*tracking->normals);
+#else
+    pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
+    ne.setInputCloud(lores_cloud);
+
+#if 0
+    pcl::search::KdTree<pcl::PointXYZ>::Ptr
+      tree(new pcl::search::KdTree<pcl::PointXYZ>);
+    tree->setSortedResults(false);
+    tree->setInputCloud(lores_cloud);
+    ne.setSearchMethod(tree);
+#endif
+
+    ne.setRadiusSearch(ctx->normal_depth_change);
     ne.compute(*tracking->normals);
 #endif
 
@@ -1500,6 +1517,24 @@ gm_context_track_skeleton(struct gm_context *ctx,
     seg.setInputCloud(lores_cloud);
     seg.setInputNormals(tracking->normals);
 
+#if 1
+    pcl::EuclideanPlaneCoefficientComparator<pcl::PointXYZ, pcl::Normal>::Ptr
+        plane_comparator(
+            new pcl::EuclideanPlaneCoefficientComparator<pcl::PointXYZ,
+                                                         pcl::Normal>);
+    seg.setComparator(plane_comparator);
+#endif
+
+#if 1
+    pcl::PlaneRefinementComparator<pcl::PointXYZ, pcl::Normal, pcl::Label>::Ptr
+        refinement_comparator(
+            new pcl::PlaneRefinementComparator<pcl::PointXYZ, pcl::Normal,
+                                               pcl::Label>);
+    seg.setRefinementComparator(refinement_comparator);
+    refinement_comparator->
+        setDistanceThreshold(ctx->refinement_distance_threshold, true);
+#endif
+
     std::vector<pcl::ModelCoefficients> plane_coeffs;
     std::vector<pcl::PointIndices> plane_indices;
     std::vector<Eigen::Vector4f, Eigen::aligned_allocator<Eigen::Vector4f>>
@@ -1511,11 +1546,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
     std::vector<pcl::PointIndices> plane_label_indices;
     seg.segment(plane_coeffs, plane_indices, plane_centroids,
                 plane_covariances, *tracking->normal_labels, plane_label_indices);
-
-    for (int i = 0; i < ctx->refinement_steps; ++i) {
-        seg.refine(plane_coeffs, plane_indices, plane_centroids,
-                   plane_covariances, tracking->normal_labels, plane_label_indices);
-    }
+    seg.refine(plane_coeffs, plane_indices, plane_centroids,
+               plane_covariances, tracking->normal_labels, plane_label_indices);
 
 #if 0
     // Expand the found planes to encompass any connected points that lie near
@@ -2109,26 +2141,75 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                 continue;
             }
 
-            float neighbours[4];
-            int n_neighbours = 0;
-
-            // Use a diamond pattern to check for surrounding pixels
-            for (int oy = -std::min(y, ctx->gap_dist);
-                 oy <= std::min((rot_height - 1) - y, ctx->gap_dist); ++oy) {
-                int n = ctx->gap_dist - abs(oy);
-                int noff1 = off + (oy * rot_width) - n;
-                int noff2 = off + (oy * rot_width) + n;
-                if (x - n >= 0 && std::isnormal(depth_copy[noff1])) {
-                    neighbours[n_neighbours++] = depth_copy[noff1];
+            // Check to see if gaps can be filled by surrounding pixels on
+            // either the horizontal or vertical axis
+            int left = 0, right = 0, up = 0, down = 0;
+            for (int i = 1;
+                 i <= ctx->gap_dist && !(left && right) && !(up && down); ++i) {
+                if (!left && (x - i) >= 0 && std::isnormal(depth_copy[off-i])) {
+                    left = i;
                 }
-                if (noff2 != noff1 && x + n < rot_width &&
-                    std::isnormal(depth_copy[noff2])) {
-                    neighbours[n_neighbours++] = depth_copy[noff2];
+                if (!right && (x + i) < rot_width &&
+                    std::isnormal(depth_copy[off+i])) {
+                    right = i;
+                }
+                if (!up && (y - i) >= 0 &&
+                    std::isnormal(depth_copy[off - (i * rot_width)])) {
+                    up = i;
+                }
+                if (!down && (y + i) < rot_height &&
+                    std::isnormal(depth_copy[off + (i * rot_width)])) {
+                    down = i;
                 }
             }
 
-            if (n_neighbours >= ctx->min_neighbours) {
-                blanks.push_back({off, neighbours[random() % n_neighbours]});
+            bool hvalid = false;
+            if (left && right) {
+                float lval = depth_copy[off-left];
+                float rval = depth_copy[off+right];
+                float distance = fabsf(rval - lval);
+                if (distance < ctx->cluster_tolerance * (left + right)) {
+                    hvalid = true;
+                }
+            }
+            bool vvalid = false;
+            if (up && down) {
+                int pix_dist = up + down;
+                float uval = depth_copy[off-(up * rot_width)];
+                float dval = depth_copy[off+(down * rot_width)];
+                float distance = fabsf(dval - uval);
+                if (distance < ctx->cluster_tolerance * pix_dist) {
+                    if (pix_dist < left + right || !(left && right)) {
+                        vvalid = true;
+                        hvalid = false;
+                    }
+                }
+            }
+
+            if (hvalid || vvalid) {
+                // Note, this interpolation isn't correct because it doesn't
+                // take depth into account. This has a more extreme effect
+                // at oblique angles, but hopefully we won't be filling in
+                // too many pixels so it shouldn't matter too much.
+                if (hvalid) {
+                    int pix_dist = left + right;
+                    float lval = depth_copy[off-left];
+                    float rval = depth_copy[off+right];
+                    for (int o = -left + 1, i = 0; o < right; ++o, ++i) {
+                        float new_depth = ((lval * ((pix_dist - 1) - o)) +
+                                (rval * o)) / (float)(pix_dist - 1);
+                        blanks.push_back({off + o, new_depth});
+                    }
+                } else {
+                    int pix_dist = up + down;
+                    float uval = depth_copy[off-(up * rot_width)];
+                    float dval = depth_copy[off+(down * rot_width)];
+                    for (int o = -up + 1, i = 0; o < down; ++o, ++i) {
+                        float new_depth = ((uval * ((pix_dist - 1) - o)) +
+                                (dval * o)) / (float)(pix_dist - 1);
+                        blanks.push_back({off + (o * rot_width), new_depth});
+                    }
+                }
             }
         }
 
@@ -2938,7 +3019,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
-    ctx->gap_dist = 3;
+    ctx->gap_dist = 2;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "gap_dist";
@@ -2948,17 +3029,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.ptr = &ctx->gap_dist;
     prop.int_state.min = 0;
     prop.int_state.max = 5;
-    ctx->properties.push_back(prop);
-
-    ctx->min_neighbours = 4;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "min_neighbours";
-    prop.desc = "The minimum number of neighbouring pixels when filling gaps";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->min_neighbours;
-    prop.int_state.min = 1;
-    prop.int_state.max = 20;
     ctx->properties.push_back(prop);
 
     ctx->cloud_res = 1;
@@ -3013,7 +3083,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->normal_depth_change;
     prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.1f;
+    prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
     ctx->normal_smooth = 3.0f;
@@ -3034,8 +3104,8 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.desc = "Minimum number of inliers when doing plane segmentation";
     prop.type = GM_PROPERTY_INT;
     prop.int_state.ptr = &ctx->min_inliers;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
+    prop.int_state.min = 5;
+    prop.int_state.max = 200;
     ctx->properties.push_back(prop);
 
     ctx->angular_threshold = 10.f;
@@ -3057,7 +3127,18 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->distance_threshold;
     prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.1f;
+    prop.float_state.max = 0.5f;
+    ctx->properties.push_back(prop);
+
+    ctx->refinement_distance_threshold = 0.15f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "refinement_distance_threshold";
+    prop.desc = "Distance threshold for multi-plane segmentation refinement";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->refinement_distance_threshold;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
     ctx->max_curvature = 0.001f;
@@ -3069,17 +3150,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->max_curvature;
     prop.float_state.min = 0.0005f;
     prop.float_state.max = 0.03f;
-    ctx->properties.push_back(prop);
-
-    ctx->refinement_steps = 1;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "refinement_steps";
-    prop.desc = "Number of refinement iterations to run for plane segmentation";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->refinement_steps;
-    prop.int_state.min = 0;
-    prop.int_state.max = 10;
     ctx->properties.push_back(prop);
 
     ctx->cluster_tolerance = 0.03f;

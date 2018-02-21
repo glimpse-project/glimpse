@@ -1,0 +1,22 @@
+{
+    "gap_dist": 2,
+    "cloud_res": 1,
+    "min_depth": 0.27600002288818359,
+    "max_depth": 3.8070001602172852,
+    "seg_res": 1,
+    "normal_depth_change": 0.079000003635883331,
+    "normal_smooth": 2.0440001487731934,
+    "min_inliers": 15,
+    "angular_threshold": 17.217000961303711,
+    "distance_threshold": 0.061000004410743713,
+    "refinement_distance_threshold": 0.051000002771615982,
+    "max_curvature": 0.010000000707805157,
+    "cluster_tolerance": 0.10000000149011612,
+    "joint_refinement": true,
+    "joint_max_predictions": 4,
+    "min_confidence": 300,
+    "joint_move_threshold": 1.5,
+    "joint_max_travel": 3,
+    "joint_scale_threshold": 2.5,
+    "debug_label": "most likely"
+}
