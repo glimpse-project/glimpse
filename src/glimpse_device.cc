@@ -616,6 +616,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_camera_intrinsics.cy = 242.73913761751615;
     dev->depth_camera_intrinsics.fx = 594.21434211923247;
     dev->depth_camera_intrinsics.fy = 591.04053696870778;
+    dev->depth_camera_intrinsics.distortion_model = GM_DISTORTION_NONE;
     dev->depth_format = GM_FORMAT_Z_U16_MM;
 
     /* We're going to use Freenect's registered depth mode, which transforms
@@ -853,6 +854,10 @@ static void
 read_json_intrinsics(JSON_Object *json_intrinsics,
                      struct gm_intrinsics *intrinsics)
 {
+    /* E.g. ensures a default distortion model in case it wasn't
+     * included in json... */
+    memset(intrinsics, 0, sizeof(*intrinsics));
+
     intrinsics->width = (uint32_t)round(
         json_object_get_number(json_intrinsics, "width"));
     intrinsics->height = (uint32_t)round(
@@ -861,6 +866,18 @@ read_json_intrinsics(JSON_Object *json_intrinsics,
     intrinsics->fy = json_object_get_number(json_intrinsics, "fy");
     intrinsics->cx = json_object_get_number(json_intrinsics, "cx");
     intrinsics->cy = json_object_get_number(json_intrinsics, "cy");
+
+    intrinsics->distortion_model = (enum gm_distortion_model)
+        json_object_get_number(json_intrinsics, "distortion_model");
+    JSON_Array *coeffs =
+        json_object_get_array(json_intrinsics, "distortion_coefficients");
+    if (coeffs) {
+        int n_coeffs = std::min(json_array_get_count(coeffs),
+                                ARRAY_LEN(intrinsics->distortion));
+        for (int i = 0; i < n_coeffs; i++) {
+            intrinsics->distortion[i] = json_array_get_number(coeffs, i);
+        }
+    }
 }
 
 static bool
@@ -1523,6 +1540,39 @@ print_basis_and_rotated_intrinsics(struct gm_device *dev,
              intrinsics->cx,
              intrinsics->cy);
 
+    switch (intrinsics->calibration_type) {
+    case TANGO_CALIBRATION_UNKNOWN:
+        gm_debug(dev->log, "%s: distortion 'unknown'", name);
+        break;
+    case TANGO_CALIBRATION_EQUIDISTANT:
+        gm_debug(dev->log, "%s: distortion 'fov-model', w=%f",
+                 name, intrinsics->distortion[0]);
+        break;
+    case TANGO_CALIBRATION_POLYNOMIAL_2_PARAMETERS:
+        gm_debug(dev->log, "%s: distortion 'brown2', k1=%f, k2=%f",
+                 name,
+                 intrinsics->distortion[0],
+                 intrinsics->distortion[1]);
+        break;
+    case TANGO_CALIBRATION_POLYNOMIAL_3_PARAMETERS:
+        gm_debug(dev->log, "%s: distortion 'brown3', k1=%f, k2=%f, k3=%f",
+                 name,
+                 intrinsics->distortion[0],
+                 intrinsics->distortion[1],
+                 intrinsics->distortion[2]);
+
+        break;
+    case TANGO_CALIBRATION_POLYNOMIAL_5_PARAMETERS:
+        gm_debug(dev->log, "%s: distortion 'brown5', k1=%f, k2=%f, p1=%f, p2=%f, k3=%f",
+                 name,
+                 intrinsics->distortion[0],
+                 intrinsics->distortion[1],
+                 intrinsics->distortion[2],
+                 intrinsics->distortion[3],
+                 intrinsics->distortion[4]);
+        break;
+    }
+
     /* We print the rotated intrinsics just so we can double check they are
      * consistent with our gm_context_rotate_intrinsics() implementation
      */
@@ -1549,6 +1599,45 @@ print_basis_and_rotated_intrinsics(struct gm_device *dev,
         }
     }
 #undef DEGREES
+}
+
+static void
+init_intrinsics_from_tango(struct gm_intrinsics *intrinsics,
+                           TangoCameraIntrinsics *tango_intrinsics)
+{
+    intrinsics->width = tango_intrinsics->width;
+    intrinsics->height = tango_intrinsics->height;
+    intrinsics->fx = tango_intrinsics->fx;
+    intrinsics->fy = tango_intrinsics->fy;
+    intrinsics->cx = tango_intrinsics->cx;
+    intrinsics->cy = tango_intrinsics->cy;
+
+    int n_params = 0;
+
+    switch (tango_intrinsics->calibration_type) {
+    case TANGO_CALIBRATION_UNKNOWN:
+        intrinsics->distortion_model = GM_DISTORTION_NONE;
+        break;
+    case TANGO_CALIBRATION_EQUIDISTANT:
+        intrinsics->distortion_model = GM_DISTORTION_FOV_MODEL;
+        n_params = 1;
+        break;
+    case TANGO_CALIBRATION_POLYNOMIAL_2_PARAMETERS:
+        intrinsics->distortion_model = GM_DISTORTION_BROWN_K1_K2;
+        n_params = 2;
+        break;
+    case TANGO_CALIBRATION_POLYNOMIAL_3_PARAMETERS:
+        intrinsics->distortion_model = GM_DISTORTION_BROWN_K1_K2_K3;
+        n_params = 3;
+        break;
+    case TANGO_CALIBRATION_POLYNOMIAL_5_PARAMETERS:
+        intrinsics->distortion_model = GM_DISTORTION_BROWN_K1_K2_P1_P2_K3;
+        n_params = 5;
+        break;
+    }
+
+    for (int i = 0; i < n_params; i++)
+        intrinsics->distortion[i] = tango_intrinsics->distortion[i];
 }
 
 static bool
@@ -1589,12 +1678,8 @@ tango_connect(struct gm_device *dev, char **err)
         return false;
     }
 
-    dev->video_camera_intrinsics.width = color_camera_intrinsics.width;
-    dev->video_camera_intrinsics.height = color_camera_intrinsics.height;
-    dev->video_camera_intrinsics.fx = color_camera_intrinsics.fx;
-    dev->video_camera_intrinsics.fy = color_camera_intrinsics.fy;
-    dev->video_camera_intrinsics.cx = color_camera_intrinsics.cx;
-    dev->video_camera_intrinsics.cy = color_camera_intrinsics.cy;
+    init_intrinsics_from_tango(&dev->video_camera_intrinsics,
+                               &color_camera_intrinsics);
 
     print_basis_and_rotated_intrinsics(dev, "ColorCamera",
                                        TANGO_CAMERA_COLOR,
@@ -1608,12 +1693,8 @@ tango_connect(struct gm_device *dev, char **err)
         return false;
     }
 
-    dev->depth_camera_intrinsics.width = depth_camera_intrinsics.width;
-    dev->depth_camera_intrinsics.height = depth_camera_intrinsics.height;
-    dev->depth_camera_intrinsics.fx = depth_camera_intrinsics.fx;
-    dev->depth_camera_intrinsics.fy = depth_camera_intrinsics.fy;
-    dev->depth_camera_intrinsics.cx = depth_camera_intrinsics.cx;
-    dev->depth_camera_intrinsics.cy = depth_camera_intrinsics.cy;
+    init_intrinsics_from_tango(&dev->depth_camera_intrinsics,
+                               &depth_camera_intrinsics);
 
     print_basis_and_rotated_intrinsics(dev, "DepthCamera",
                                        TANGO_CAMERA_DEPTH,
