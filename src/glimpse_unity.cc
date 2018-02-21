@@ -978,6 +978,7 @@ gm_unity_init(void)
     struct glimpse_data *data = new glimpse_data();
 
     plugin_data = data;
+    terminating = false;
 
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
