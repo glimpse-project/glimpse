@@ -33,6 +33,8 @@
 #include <stdlib.h>
 #include <stdarg.h>
 
+#include "xalloc.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
