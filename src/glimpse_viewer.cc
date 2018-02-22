@@ -2410,7 +2410,7 @@ main(int argc, char **argv)
     Data *data = new Data();
 
 #ifdef __ANDROID__
-#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
+#define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
     setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
     setenv("GLIMPSE_RECORDING_PATH", ANDROID_ASSETS_ROOT "/ViewerRecording",
            true);

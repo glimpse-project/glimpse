@@ -1018,7 +1018,7 @@ gm_unity_init(char *config_json)
     // of packages built via Unity can be as quick as possible by reducing
     // the size of .apk we have to repeatedly upload.
     //
-#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
+#define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
     setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
     data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
