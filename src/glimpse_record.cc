@@ -64,6 +64,38 @@ gm_record_get_json_intrinsics(const struct gm_intrinsics *intrinsics)
     json_object_set_number(json_object(json_intrinsics), "fy", intrinsics->fy);
     json_object_set_number(json_object(json_intrinsics), "cx", intrinsics->cx);
     json_object_set_number(json_object(json_intrinsics), "cy", intrinsics->cy);
+    json_object_set_number(json_object(json_intrinsics),
+                           "distortion_model",
+                           intrinsics->distortion_model);
+    int n_params = 0;
+    switch (intrinsics->distortion_model) {
+    case GM_DISTORTION_NONE:
+        break;
+    case GM_DISTORTION_FOV_MODEL:
+        n_params = 1;
+        break;
+    case GM_DISTORTION_BROWN_K1_K2:
+        n_params = 2;
+        break;
+    case GM_DISTORTION_BROWN_K1_K2_K3:
+        n_params = 3;
+        break;
+    case GM_DISTORTION_BROWN_K1_K2_P1_P2_K3:
+        n_params = 5;
+        break;
+    }
+
+    if (n_params) {
+        JSON_Value *params_val = json_value_init_array();
+        for (int i = 0; i < n_params; i++) {
+            json_array_append_number(json_array(params_val),
+                                     intrinsics->distortion[i]);
+        }
+        json_object_set_value(json_object(json_intrinsics),
+                              "distortion_coefficients",
+                              params_val);
+    }
+
     return json_intrinsics;
 }
 
