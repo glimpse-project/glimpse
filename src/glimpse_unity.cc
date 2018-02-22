@@ -22,10 +22,13 @@
  * SOFTWARE.
  */
 
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <dlfcn.h>
+#include <unistd.h>
 
 #include <IUnityInterface.h>
 #include <IUnityGraphics.h>
@@ -45,6 +48,7 @@
 #include "glimpse_device.h"
 #include "glimpse_context.h"
 #include "glimpse_gl.h"
+#include "glimpse_assets.h"
 
 #undef GM_LOG_CONTEXT
 
@@ -82,9 +86,12 @@ struct event
 
 struct glimpse_data
 {
-    FILE *log_fp;
+    JSON_Value *config_val;
+    JSON_Object *config;
 
+    FILE *log_fp;
     struct gm_logger *log;
+
     struct gm_context *ctx;
     struct gm_device *device;
 
@@ -482,6 +489,23 @@ handle_device_ready(struct glimpse_data *data)
     gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(data->device));*/
+
+    const char *config_name = json_object_get_string(data->config, "deviceConfig");
+    if (config_name && strlen(config_name)) {
+        char *open_err = NULL;
+        struct gm_asset *config_asset =
+            gm_asset_open(data->log,
+                          config_name,
+                          GM_ASSET_MODE_BUFFER, &open_err);
+        if (config_asset) {
+            const char *buf = (const char *)gm_asset_get_buffer(config_asset);
+            gm_config_load(data->log, buf, gm_device_get_ui_properties(data->device));
+            gm_asset_close(config_asset);
+        } else {
+            gm_warn(data->log, "Failed to open %s: %s", config_name, open_err);
+            free(open_err);
+        }
+    }
 
     data->device_ready = true;
 }
@@ -975,9 +999,12 @@ on_device_event_cb(struct gm_device_event *device_event,
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_init(void)
+gm_unity_init(char *config_json)
 {
     struct glimpse_data *data = new glimpse_data();
+
+    data->config_val = json_parse_string(config_json);
+    data->config = json_object(data->config_val);
 
     plugin_data = data;
     terminating = false;
@@ -985,7 +1012,22 @@ gm_unity_init(void)
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
-    gm_debug(data->log, "GLIMPSE: Init\n");
+#ifdef __ANDROID__
+    // During development on Android we are manually uploading recording and
+    // training models to /sdcard on test devices so that build+upload cycles
+    // of packages built via Unity can be as quick as possible by reducing
+    // the size of .apk we have to repeatedly upload.
+    //
+#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
+    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
+    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
+    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
+#else
+    data->log_fp = fopen("glimpse.log", "w");
+#endif
+
+    gm_debug(data->log, "Init");
+    gm_debug(data->log, "Config:\n%s", config_json);
 
 #ifdef __ANDROID__
     gm_assert(data->log, android_jvm_singleton != NULL,
@@ -1008,20 +1050,6 @@ gm_unity_init(void)
         break;
     }
 
-#ifdef __ANDROID__
-    // During development on Android we are manually uploading recording and
-    // training models to /sdcard on test devices so that build+upload cycles
-    // of packages built via Unity can be as quick as possible by reducing
-    // the size of .apk we have to repeatedly upload.
-    //
-#define ANDROID_ASSETS_ROOT "/sdcard/GlimpseUnity"
-    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
-    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
-    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
-#else
-    data->log_fp = fopen("glimpse.log", "w");
-#endif
-
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
@@ -1030,17 +1058,52 @@ gm_unity_init(void)
     data->ctx = gm_context_new(data->log, NULL);
     gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
 
+    const char *config_name = json_object_get_string(data->config, "contextConfig");
+    if (config_name && strlen(config_name)) {
+        char *open_err = NULL;
+        struct gm_asset *config_asset =
+            gm_asset_open(data->log,
+                          config_name,
+                          GM_ASSET_MODE_BUFFER, &open_err);
+        if (config_asset) {
+            const char *buf = (const char *)gm_asset_get_buffer(config_asset);
+            gm_config_load(data->log, buf, gm_context_get_ui_properties(data->ctx));
+            gm_asset_close(config_asset);
+        } else {
+            gm_warn(data->log, "Failed to open %s: %s", config_name, open_err);
+            free(open_err);
+        }
+    }
+
     struct gm_device_config config = {};
-    const char *recording_path = getenv("GLIMPSE_RECORDING_PATH");
-    if (recording_path) {
-        config.type = GM_DEVICE_RECORDING;
-        config.recording.path = recording_path;
-    } else {
+
+    const char *recording_path = json_object_get_string(data->config, "recordingPath");
+    if (recording_path == NULL || strlen(recording_path) == 0)
+        recording_path = getenv("GLIMPSE_RECORDING_PATH");
+
+    struct stat sb;
+
+    int device_choice = json_object_get_number(data->config, "device");
+    switch (device_choice) {
+    case 0: // Auto
 #ifdef USE_TANGO
         config.type = GM_DEVICE_TANGO;
 #else
-        config.type = GM_DEVICE_KINECT;
+        if (recording_path && stat(recording_path, &sb) == 0) {
+            config.type = GM_DEVICE_RECORDING;
+            config.recording.path = recording_path;
+        } else {
+            config.type = GM_DEVICE_KINECT;
+        }
 #endif
+        break;
+    case 1:
+        config.type = GM_DEVICE_KINECT;
+        break;
+    case 2:
+        config.type = GM_DEVICE_RECORDING;
+        config.recording.path = recording_path;
+        break;
     }
 
     data->device = gm_device_open(data->log, &config, NULL);
@@ -1218,6 +1281,8 @@ gm_unity_terminate(void)
     gm_logger_destroy(data->log);
     fclose(data->log_fp);
     unity_log_function = NULL;
+
+    json_value_free(plugin_data->config_val);
 
     delete plugin_data;
     plugin_data = NULL;
