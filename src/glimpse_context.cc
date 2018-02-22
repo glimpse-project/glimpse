@@ -1021,20 +1021,25 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
                              uint64_t timestamp, float *prediction)
 {
     // Use Catmull-rom interpolation to determine what the next joint position
-    // might be.
+    // might be. We assume tracking history is stored in timestamp-order.
     // TODO: We assume that joint positions come at regular intervals,
     // which may not be true... Figure out something else for this.
 
     if (ctx->n_tracking < 4)
         return false;
 
-    glm::vec3 p[4];
-    for (int i = 0; i < 4; i++) {
-        struct gm_tracking_impl *tracking = ctx->tracking_history[i];
+    glm::vec3 p[4] = {};
+    for (int i = 0; i <= ctx->n_tracking - 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            struct gm_tracking_impl *tracking = ctx->tracking_history[i + j];
+            p[j].x = tracking->joints_processed[joint*3];
+            p[j].y = tracking->joints_processed[joint*3+1];
+            p[j].z = tracking->joints_processed[joint*3+2];
+        }
 
-        p[i].x = tracking->joints_processed[joint*3];
-        p[i].y = tracking->joints_processed[joint*3+1];
-        p[i].z = tracking->joints_processed[joint*3+2];
+        if (ctx->tracking_history[i + 1]->frame->timestamp < timestamp) {
+            break;
+        }
     }
 
     float t = (timestamp - ctx->tracking_history[0]->frame->timestamp) /
@@ -3063,7 +3068,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->max_curvature;
     prop.float_state.min = 0.0005f;
-    prop.float_state.max = 0.01f;
+    prop.float_state.max = 0.03f;
     ctx->properties.push_back(prop);
 
     ctx->refinement_steps = 1;
@@ -3085,7 +3090,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->cluster_tolerance;
     prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.1f;
+    prop.float_state.max = 0.2f;
     ctx->properties.push_back(prop);
 
     ctx->joint_refinement = true;
@@ -3594,13 +3599,11 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
 
 float *
 gm_context_predict_joint_positions(struct gm_context *ctx,
-                                   struct gm_tracking *_tracking,
                                    uint64_t timestamp,
                                    int *n_joints)
 {
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    float *predictions = (float*)malloc(ctx->n_joints * 3 * sizeof(float));
+    float *predictions = (float*)calloc(ctx->n_joints * 3, sizeof(float));
+    if (n_joints) *n_joints = ctx->n_joints;
 
     /* We don't control what thread this API is used from so we need to ensure
      * the history that the prediction is based on will remain consistent while
@@ -3609,14 +3612,29 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
      */
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
 
-    for (int j = 0; j < ctx->n_joints; ++j) {
-        memcpy(&predictions[j*3], &tracking->joints_processed[j*3],
-               3 * sizeof(float));
-        predict_from_previous_frames(ctx, j, timestamp,
-                                     &predictions[j*3]);
-    }
+    if (ctx->n_tracking) {
+        int closest_frame = 0;
+        uint64_t closest_diff = UINT64_MAX;
+        for (int i = 0; i < ctx->n_tracking; ++i) {
+            uint64_t *t1 = &ctx->tracking_history[i]->frame->timestamp;
+            uint64_t diff = (*t1 > timestamp) ?
+                (*t1 - timestamp) : (timestamp - *t1);
+            if (diff < closest_diff) {
+                closest_diff = diff;
+                closest_frame = i;
+            } else {
+                break;
+            }
+        }
 
-    if (n_joints) *n_joints = ctx->n_joints;
+        memcpy(predictions,
+               ctx->tracking_history[closest_frame]->joints_processed,
+               ctx->n_joints * 3 * sizeof(float));
+
+        for (int j = 0; j < ctx->n_joints; ++j) {
+            predict_from_previous_frames(ctx, j, timestamp, &predictions[j*3]);
+        }
+    }
 
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 

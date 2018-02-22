@@ -334,7 +334,6 @@ gm_context_get_latest_tracking(struct gm_context *ctx);
 
 float *
 gm_context_predict_joint_positions(struct gm_context *ctx,
-                                   struct gm_tracking *tracking,
                                    uint64_t timestamp,
                                    int *n_joints);
 

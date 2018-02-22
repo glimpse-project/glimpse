@@ -821,8 +821,7 @@ update_tracking_buffers(Data *data)
      */
     data->n_joints = 0;
     float *joints = gm_context_predict_joint_positions(
-        data->ctx, data->latest_tracking, data->last_video_frame->timestamp,
-        &data->n_joints);
+        data->ctx, data->last_video_frame->timestamp, &data->n_joints);
 
     // TODO: At some point, the API needs to return a list of joints with ids,
     //       possibly with confidences, so in the situation that a joint isn't
