@@ -2355,16 +2355,16 @@ detector_thread_cb(void *data)
 {
     struct gm_context *ctx = (struct gm_context *)data;
 
-    LOGE("DetectorRun");
+    gm_debug(ctx->log, "Started Glimpse tracking thread");
 
     uint64_t start = get_time();
     ctx->detector = dlib::get_frontal_face_detector();
     uint64_t end = get_time();
     uint64_t duration = end - start;
 
-    LOGE("Initialized Dlib frontal face detector: %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+    gm_debug(ctx->log, "Initialized Dlib frontal face detector: %.3f%s",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
 
     //LOGI("Dropped all but the first (front-facing HOG) from the DLib face detector");
     //ctx->detector.w.resize(1);
@@ -2384,13 +2384,13 @@ detector_thread_cb(void *data)
         try {
             dlib::deserialize(ctx->face_feature_detector, stream_in);
         } catch (dlib::serialization_error &e) {
-            LOGI("Failed to deserialize shape predictor: %s", e.info.c_str());
+            gm_warn(ctx->log, "Failed to deserialize shape predictor: %s", e.info.c_str());
         }
 
-        LOGI("Mapped shape predictor asset %p, len = %d", buf, (int)len);
+        gm_debug(ctx->log, "Mapped shape predictor asset %p, len = %d", buf, (int)len);
         gm_asset_close(predictor_asset);
     } else {
-        LOGE("Failed to open shape predictor asset: %s", err);
+        gm_warn(ctx->log, "Failed to open shape predictor asset: %s", err);
         free(err);
     }
 
@@ -2414,8 +2414,8 @@ detector_thread_cb(void *data)
         }
 
         start = get_time();
-        LOGI("Starting tracking iteration (%" PRIu64 ")\n",
-             frame->timestamp);
+        gm_debug(ctx->log, "Starting tracking iteration (%" PRIu64 ")\n",
+                 frame->timestamp);
 
         struct gm_tracking_impl *tracking =
             mem_pool_acquire_tracking(ctx->tracking_pool);
@@ -2448,7 +2448,7 @@ detector_thread_cb(void *data)
          * when we are notified of a new frame.
          */
 #ifdef DOWNSAMPLE_ON_GPU
-        LOGI("Waiting for new scaled frame for face detection");
+        gm_debug(ctx->log, "Waiting for new scaled frame for face detection");
         pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
         ctx->need_new_scaled_frame = true;
         while (ctx->need_new_scaled_frame && !ctx->stopping) {
@@ -2477,9 +2477,9 @@ detector_thread_cb(void *data)
 
         end = get_time();
         duration = end - start;
-        LOGI("Finished skeletal tracking (%.3f%s)",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
+        gm_debug(ctx->log, "Finished skeletal tracking (%.3f%s)",
+                 get_duration_ns_print_scale(duration),
+                 get_duration_ns_print_scale_suffix(duration));
 
         pthread_mutex_lock(&ctx->tracking_swap_mutex);
 
@@ -2534,7 +2534,7 @@ detector_thread_cb(void *data)
 
         notify_tracking(ctx);
 
-        LOGI("Requesting new frame for skeletal tracking");
+        gm_debug(ctx->log, "Requesting new frame for skeletal tracking");
         /* We throttle frame acquisition according to our tracking rate... */
         request_frame(ctx);
     }
