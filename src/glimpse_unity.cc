@@ -738,9 +738,12 @@ render_ar_video_background(struct glimpse_data *data)
         switch (video_format) {
         case GM_FORMAT_LUMINANCE_U8:
             gm_debug(data->log, "uploading U8 %dx%d", video_width, video_height);
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RED,
                          video_width, video_height,
-                         0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+                         0, GL_RED, GL_UNSIGNED_BYTE, video_front);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
             break;
 
         case GM_FORMAT_RGB_U8:
