@@ -589,6 +589,7 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
 {
     if (freenect_init(&dev->kinect.fctx, NULL) < 0) {
         gm_throw(dev->log, err, "Failed to init libfreenect\n");
+        dev->kinect.fctx = NULL;
         return false;
     }
 
@@ -603,12 +604,14 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     if (!freenect_num_devices(dev->kinect.fctx)) {
         gm_throw(dev->log, err, "Failed to find a Kinect device\n");
         freenect_shutdown(dev->kinect.fctx);
+        dev->kinect.fctx = NULL;
         return false;
     }
 
     if (freenect_open_device(dev->kinect.fctx, &dev->kinect.fdev, 0) < 0) {
         gm_throw(dev->log, err, "Could not open Kinect device\n");
         freenect_shutdown(dev->kinect.fctx);
+        dev->kinect.fctx = NULL;
         return false;
     }
 
@@ -776,8 +779,10 @@ kinect_close(struct gm_device *dev)
 {
     /* XXX: can assume the device has been stopped */
 
-    freenect_close_device(dev->kinect.fdev);
-    freenect_shutdown(dev->kinect.fctx);
+    if (dev->kinect.fdev)
+        freenect_close_device(dev->kinect.fdev);
+    if (dev->kinect.fctx)
+        freenect_shutdown(dev->kinect.fctx);
 }
 
 static void *

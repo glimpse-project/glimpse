@@ -998,6 +998,87 @@ on_device_event_cb(struct gm_device_event *device_event,
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_terminate(void)
+{
+    struct glimpse_data *data = plugin_data;
+
+    gm_debug(data->log, "GLIMPSE: Terminate\n");
+
+    pthread_mutex_lock(&life_cycle_lock);
+    terminating = true;
+    pthread_mutex_unlock(&life_cycle_lock);
+
+    /* Destroying the context' tracking pool will assert that all tracking
+     * resources have been released first...
+     */
+    if (data->latest_tracking)
+        gm_tracking_unref(data->latest_tracking);
+
+    /* NB: It's our responsibility to be sure that there can be no asynchonous
+     * calls into the gm_context api before we start to destroy it!
+     *
+     * We stop the device first because device callbacks result in calls
+     * through to the gm_context api.
+     *
+     * We don't destroy the device first because destroying the context will
+     * release device resources (which need to be release before the device
+     * can be cleanly closed).
+     */
+    if (data->device)
+        gm_device_stop(data->device);
+
+    for (unsigned i = 0; i < data->events_back->size(); i++) {
+        struct event event = (*data->events_back)[i];
+
+        switch (event.type) {
+        case EVENT_DEVICE:
+            gm_device_event_free(event.device_event);
+            break;
+        case EVENT_CONTEXT:
+            gm_context_event_free(event.context_event);
+            break;
+        }
+    }
+
+    if (data->ctx)
+        gm_context_destroy(data->ctx);
+
+
+    /* locking redundant here, but help serve as a reminder that
+     * this state should only be touched with this lock held...
+     */
+    pthread_mutex_lock(&data->swap_frames_lock);
+
+    if (data->visible_frame) {
+        gm_frame_unref(data->visible_frame);
+        data->visible_frame = NULL;
+    }
+    if (data->last_depth_frame) {
+        gm_frame_unref(data->last_depth_frame);
+        data->last_depth_frame = NULL;
+    }
+    if (data->last_video_frame) {
+        gm_frame_unref(data->last_video_frame);
+        data->last_video_frame = NULL;
+    }
+
+    pthread_mutex_unlock(&data->swap_frames_lock);
+
+    if (data->device)
+        gm_device_close(data->device);
+
+    gm_debug(data->log, "Destroying logger");
+    gm_logger_destroy(data->log);
+    fclose(data->log_fp);
+    unity_log_function = NULL;
+
+    json_value_free(plugin_data->config_val);
+
+    delete plugin_data;
+    plugin_data = NULL;
+}
+
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_init(char *config_json)
 {
@@ -1050,12 +1131,23 @@ gm_unity_init(char *config_json)
         break;
     }
 
+    const char *assets_path = json_object_get_string(data->config, "assetsPath");
+    if (assets_path && strlen(assets_path) != 0) {
+        setenv("GLIMPSE_ASSETS_ROOT", assets_path, true);
+    }
+
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
     pthread_mutex_init(&data->swap_frames_lock, NULL);
 
-    data->ctx = gm_context_new(data->log, NULL);
+    char *ctx_err = NULL;
+    data->ctx = gm_context_new(data->log, &ctx_err);
+    if (!data->ctx) {
+        gm_error(data->log, "Failed to create Glimpse tracking context: %s", ctx_err);
+        gm_unity_terminate();
+        return 0;
+    }
     gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
 
     const char *config_name = json_object_get_string(data->config, "contextConfig");
@@ -1077,11 +1169,24 @@ gm_unity_init(char *config_json)
 
     struct gm_device_config config = {};
 
-    const char *recording_path = json_object_get_string(data->config, "recordingPath");
-    if (recording_path == NULL || strlen(recording_path) == 0)
-        recording_path = getenv("GLIMPSE_RECORDING_PATH");
+    const char *recordings_path = json_object_get_string(data->config, "recordingsPath");
+    if (recordings_path == NULL || strlen(recordings_path) == 0)
+        recordings_path = getenv("GLIMPSE_RECORDING_PATH");
+    if (!recordings_path)
+        recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
+    if (!recordings_path)
+        recordings_path = "glimpse_viewer_recording";
+
+    const char *recording_name = json_object_get_string(data->config, "recordingName");
+
+    char full_recording_path[512];
+    snprintf(full_recording_path, sizeof(full_recording_path),
+             "%s/%s", recordings_path, recording_name);
 
     struct stat sb;
+    bool have_recording = false;
+    if (stat(full_recording_path, &sb) == 0)
+        have_recording = true;
 
     int device_choice = json_object_get_number(data->config, "device");
     switch (device_choice) {
@@ -1089,9 +1194,9 @@ gm_unity_init(char *config_json)
 #ifdef USE_TANGO
         config.type = GM_DEVICE_TANGO;
 #else
-        if (recording_path && stat(recording_path, &sb) == 0) {
+        if (have_recording) {
             config.type = GM_DEVICE_RECORDING;
-            config.recording.path = recording_path;
+            config.recording.path = full_recording_path;
         } else {
             config.type = GM_DEVICE_KINECT;
         }
@@ -1102,17 +1207,29 @@ gm_unity_init(char *config_json)
         break;
     case 2:
         config.type = GM_DEVICE_RECORDING;
-        config.recording.path = recording_path;
+        config.recording.path = full_recording_path;
         break;
     }
 
-    data->device = gm_device_open(data->log, &config, NULL);
+    char *dev_err = NULL;
+    data->device = gm_device_open(data->log, &config, &dev_err);
+    if (!data->device) {
+        gm_error(data->log, "Failed to open device: %s", dev_err);
+        gm_unity_terminate();
+        return 0;
+    }
     gm_device_set_event_callback(data->device, on_device_event_cb, plugin_data);
 #ifdef __ANDROID__
     gm_device_attach_jvm(data->device, android_jvm_singleton);
 #endif
 
-    gm_device_commit_config(data->device, NULL);
+    if (!gm_device_commit_config(data->device, &dev_err)) {
+        gm_error(data->log, "Failed to commit device configuration: %s", dev_err);
+        gm_device_close(data->device);
+        data->device = NULL;
+        gm_unity_terminate();
+        return 0;
+    }
 
     return (intptr_t )data;
 }
@@ -1208,84 +1325,6 @@ gm_unity_stop(void)
     gm_debug(data->log, "GLIMPSE: Stop\n");
     gm_context_disable(data->ctx);
     //gm_device_stop(data->device);
-}
-
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_terminate(void)
-{
-    struct glimpse_data *data = plugin_data;
-
-    gm_debug(data->log, "GLIMPSE: Terminate\n");
-
-    pthread_mutex_lock(&life_cycle_lock);
-    terminating = true;
-    pthread_mutex_unlock(&life_cycle_lock);
-
-    /* Destroying the context' tracking pool will assert that all tracking
-     * resources have been released first...
-     */
-    if (data->latest_tracking)
-        gm_tracking_unref(data->latest_tracking);
-
-    /* NB: It's our responsibility to be sure that there can be no asynchonous
-     * calls into the gm_context api before we start to destroy it!
-     *
-     * We stop the device first because device callbacks result in calls
-     * through to the gm_context api.
-     *
-     * We don't destroy the device first because destroying the context will
-     * release device resources (which need to be release before the device
-     * can be cleanly closed).
-     */
-    gm_device_stop(data->device);
-
-    for (unsigned i = 0; i < data->events_back->size(); i++) {
-        struct event event = (*data->events_back)[i];
-
-        switch (event.type) {
-        case EVENT_DEVICE:
-            gm_device_event_free(event.device_event);
-            break;
-        case EVENT_CONTEXT:
-            gm_context_event_free(event.context_event);
-            break;
-        }
-    }
-
-    gm_context_destroy(data->ctx);
-
-
-    /* locking redundant here, but help serve as a reminder that
-     * this state should only be touched with this lock held...
-     */
-    pthread_mutex_lock(&data->swap_frames_lock);
-
-    if (data->visible_frame) {
-        gm_frame_unref(data->visible_frame);
-        data->visible_frame = NULL;
-    }
-    if (data->last_depth_frame) {
-        gm_frame_unref(data->last_depth_frame);
-        data->last_depth_frame = NULL;
-    }
-    if (data->last_video_frame) {
-        gm_frame_unref(data->last_video_frame);
-        data->last_video_frame = NULL;
-    }
-
-    pthread_mutex_unlock(&data->swap_frames_lock);
-
-    gm_device_close(data->device);
-
-    gm_debug(data->log, "Destroying logger");
-    gm_logger_destroy(data->log);
-    fclose(data->log_fp);
-    unity_log_function = NULL;
-
-    json_value_free(plugin_data->config_val);
-
-    delete plugin_data;
-    plugin_data = NULL;
 }
 
 extern "C" void	UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API

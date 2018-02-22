@@ -2710,16 +2710,20 @@ gm_context_stop_tracking(struct gm_context *ctx)
     pthread_cond_signal(&ctx->scaled_frame_available_cond);
     pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 
-    void *tracking_retval = NULL;
-    int ret = pthread_join(ctx->detect_thread, &tracking_retval);
-    if (ret < 0) {
-        gm_error(ctx->log, "Failed waiting for tracking thread to complete: %s",
-                 strerror(ret));
-    }
+    if (ctx->detect_thread) {
+        void *tracking_retval = NULL;
+        int ret = pthread_join(ctx->detect_thread, &tracking_retval);
+        if (ret < 0) {
+            gm_error(ctx->log, "Failed waiting for tracking thread to complete: %s",
+                     strerror(ret));
+        } else {
+            ctx->detect_thread = 0;
+        }
 
-    if (tracking_retval != 0) {
-        gm_error(ctx->log, "Tracking thread exited with value = %d",
-                 (int)(intptr_t)tracking_retval);
+        if (tracking_retval != 0) {
+            gm_error(ctx->log, "Tracking thread exited with value = %d",
+                     (int)(intptr_t)tracking_retval);
+        }
     }
 }
 
@@ -2792,9 +2796,11 @@ gm_context_destroy(struct gm_context *ctx)
         free_tree(ctx->decision_trees[i]);
     xfree(ctx->decision_trees);
 
-    free_jip(ctx->joint_params);
+    if (ctx->joint_params)
+        free_jip(ctx->joint_params);
 
-    json_value_free(ctx->joint_map);
+    if (ctx->joint_map)
+        json_value_free(ctx->joint_map);
 
     if (ctx->joint_stats) {
         for (int i = 0; i < ctx->n_joints; i++) {
