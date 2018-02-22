@@ -38,6 +38,9 @@ gm_config_load(struct gm_logger *log, const char *json_buf,
         for (int p = 0; p < props->n_properties; ++p) {
             struct gm_ui_property *prop = &props->properties[p];
 
+            if (prop->read_only)
+                continue;
+
             if (strcmp(name, prop->name) != 0)
                 continue;
 
@@ -83,6 +86,9 @@ gm_config_save(struct gm_logger *log, struct gm_ui_properties *props)
 
     for (int p = 0; p < props->n_properties; ++p) {
         struct gm_ui_property *prop = &props->properties[p];
+
+        if (prop->read_only)
+            continue;
 
         switch (prop->type) {
         case GM_PROPERTY_INT:
