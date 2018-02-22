@@ -189,6 +189,8 @@ typedef struct _Data
     bool overwrite_recording;
     struct gm_recording *recording;
     struct gm_device *recording_device;
+    std::vector<char *> recordings;
+    int selected_playback_recording;
 
     struct gm_device *playback_device;
 
@@ -316,6 +318,78 @@ intrinsics_to_project_matrix(const struct gm_intrinsics *intrinsics,
                       scalex * width / 2.0f - offsetx,
                       scaley * height / 2.0f - offsety,
                       scaley * -height / 2.0f - offsety, near, far);
+}
+
+static bool
+index_recordings_recursive(Data *data,
+                           const char *recordings_path, const char *rel_path,
+                           std::vector<char *> &files,
+                           char **err)
+{
+    struct dirent *entry;
+    struct stat st;
+    DIR *dir;
+    bool ret = true;
+
+    char full_path[512];
+    xsnprintf(full_path, sizeof(full_path), "%s/%s", recordings_path, rel_path);
+    if (!(dir = opendir(full_path))) {
+        gm_throw(data->log, err, "Failed to open directory %s\n", full_path);
+        return false;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char cur_full_path[512];
+        char next_rel_path[512];
+
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+
+        xsnprintf(cur_full_path, sizeof(cur_full_path), "%s/%s/%s",
+                  recordings_path, rel_path, entry->d_name);
+        xsnprintf(next_rel_path, sizeof(next_rel_path), "%s/%s",
+                  rel_path, entry->d_name);
+
+        stat(cur_full_path, &st);
+        if (S_ISDIR(st.st_mode)) {
+            if (!index_recordings_recursive(data, recordings_path,
+                                            next_rel_path, files, err))
+            {
+                ret = false;
+                break;
+            }
+        } else if (strlen(rel_path) &&
+                   strcmp(entry->d_name, "glimpse_recording.json") == 0) {
+            files.push_back(strdup(rel_path));
+        }
+    }
+
+    closedir(dir);
+
+    return ret;
+}
+
+static void
+index_recordings(Data *data)
+{
+    data->recordings.clear();
+
+    const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
+    if (!recordings_path)
+        recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
+    if (!recordings_path)
+        recordings_path = "glimpse_viewer_recording";
+
+    char *index_err = NULL;
+    index_recordings_recursive(data,
+                               recordings_path,
+                               "", // relative path
+                               data->recordings,
+                               &index_err);
+    if (index_err) {
+        gm_error(data->log, "Failed to index recordings: %s", index_err);
+        free(index_err);
+    }
 }
 
 static void
@@ -530,7 +604,7 @@ static void
 draw_playback_controls(Data *data, const ImVec4 &bounds)
 {
     ImGui::Begin("Playback controls", NULL,
-                 ImGuiWindowFlags_NoTitleBar|
+                 //ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize|
                  ImGuiWindowFlags_ShowBorders|
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
@@ -550,12 +624,26 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
         if (data->recording) {
             gm_recording_close(data->recording);
             data->recording = NULL;
+            index_recordings(data);
         } else if (!data->playback_device) {
-            const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
-            data->recording = gm_recording_init(data->log, data->recording_device,
-                                                record_path ? record_path :
-                                                "glimpse_viewer_recording",
-                                                data->overwrite_recording);
+            const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
+            if (!recordings_path)
+                recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
+            if (!recordings_path)
+                recordings_path = "glimpse_viewer_recording";
+
+            const char *rel_path = NULL;
+            bool overwrite = false;
+            if (data->overwrite_recording && data->recordings.size()) {
+                rel_path = data->recordings.at(data->selected_playback_recording);
+                overwrite = true;
+            }
+
+            data->recording = gm_recording_init(data->log,
+                                                data->recording_device,
+                                                recordings_path,
+                                                rel_path,
+                                                overwrite);
         }
     }
     ImGui::SameLine();
@@ -567,7 +655,7 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
             // Wake up the recording device again
             handle_device_ready(data, data->recording_device);
-        } else {
+        } else if (data->recordings.size()) {
             gm_device_stop(data->recording_device);
 
             unref_device_frames(data);
@@ -582,20 +670,45 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
             struct gm_device_config config = {};
             config.type = GM_DEVICE_RECORDING;
-            const char *record_path = getenv("GLIMPSE_RECORDING_PATH");
-            config.recording.path =
-                record_path ? record_path : "glimpse_viewer_recording";
 
-            data->playback_device = gm_device_open(data->log, &config, NULL);
-            gm_device_set_event_callback(data->playback_device,
-                                         on_device_event_cb, data);
-            data->active_device = data->playback_device;
+            const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
+            if (!recordings_path)
+                recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
+            if (!recordings_path)
+                recordings_path = "glimpse_viewer_recording";
 
-            gm_device_commit_config(data->playback_device, NULL);
+            const char *rel_path = data->recordings.at(data->selected_playback_recording);
+            char full_path[1024];
+            xsnprintf(full_path, sizeof(full_path), "%s/%s", recordings_path, rel_path);
+            config.recording.path = full_path;
+
+            char *open_err = NULL;
+            data->playback_device = gm_device_open(data->log, &config, &open_err);
+
+            if (data->playback_device) {
+                gm_device_set_event_callback(data->playback_device,
+                                             on_device_event_cb, data);
+                data->active_device = data->playback_device;
+
+                gm_device_commit_config(data->playback_device, NULL);
+            } else {
+                gm_error(data->log, "Failed to start recording playback: %s",
+                         open_err);
+                free(open_err);
+                // Wake up the recording device again
+                handle_device_ready(data, data->recording_device);
+            }
         }
     }
 
     ImGui::Spacing();
+
+    if (data->recordings.size()) {
+        ImGui::Combo("Recording Path",
+                     &data->selected_playback_recording,
+                     data->recordings.data(),
+                     data->recordings.size());
+    }
 
     ImGui::SetWindowSize(ImVec2(0, 0), ImGuiCond_Always);
 
@@ -2322,6 +2435,8 @@ main(int argc, char **argv)
     data->events_back = new std::vector<struct event>();
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);
     data->overwrite_recording = true;
+
+    index_recordings(data);
 
 #ifdef __ANDROID__
     // Quick hack to make scrollbars a bit more usable on small devices

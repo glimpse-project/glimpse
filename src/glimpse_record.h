@@ -32,10 +32,12 @@
 
 struct gm_recording;
 
-struct gm_recording *gm_recording_init(struct gm_logger *log,
-                                       struct gm_device *device,
-                                       const char *path,
-                                       bool overwrite);
+struct gm_recording *
+gm_recording_init(struct gm_logger *log,
+                  struct gm_device *device,
+                  const char *recordings_path,
+                  const char *rel_path,
+                  bool overwrite);
 
 void gm_recording_save_frame(struct gm_recording *recording,
                              struct gm_frame *frame);

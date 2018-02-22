@@ -29,6 +29,7 @@
 #include <dirent.h>
 #include <string.h>
 #include <alloca.h>
+#include <time.h>
 #include <list>
 
 #include "glimpse_record.h"
@@ -126,41 +127,59 @@ gm_record_write_bin(struct gm_logger *log, const char *path,
 }
 
 struct gm_recording *
-gm_recording_init(struct gm_logger *log, struct gm_device *device,
-                  const char *path, bool overwrite)
+gm_recording_init(struct gm_logger *log,
+                  struct gm_device *device,
+                  const char *recordings_path,
+                  const char *rel_path,
+                  bool overwrite)
 {
-    // Create the directory structure for the recording
-    // If the directory exists, append a number
-    int ret;
-    int path_suffix = 0;
-    size_t path_len = strlen(path);
-    char *path_copy = (char *)malloc(strlen(path) + 5);
-    strncpy(path_copy, path, path_len + 1);
-    do {
-        ret = mkdir(path_copy, 0777);
-        if (ret < 0) {
-            if (errno == EEXIST && path_suffix < 9999) {
-                if (overwrite) {
-                    break;
-                }
+    char full_path[512];
 
-                ++path_suffix;
-                snprintf(path_copy + path_len, 5, "%04d", path_suffix);
-            } else {
-                gm_error(log, "Unable to create directory '%s': %s",
-                         path, strerror(errno));
-                return nullptr;
-            }
+    int ret = mkdir(recordings_path, 0777);
+    if (ret < 0 && errno != EEXIST) {
+        gm_error(log, "Failed to ensure top-level directory exists for recordings");
+        return NULL;
+    }
+
+    if (overwrite) {
+        if (snprintf(full_path, sizeof(full_path), "%s/%s",
+                     recordings_path, rel_path) >= (int)sizeof(full_path))
+        {
+            gm_error(log, "Unable to format recording path");
+            return NULL;
         }
-    } while (ret != 0);
-    path = path_copy;
-    path_len = strlen(path);
+    } else {
+        time_t unix_time = time(NULL);
+        struct tm cur_time = *localtime(&unix_time);
+        asctime(&cur_time);
+
+        if (snprintf(full_path, sizeof(full_path), "%s/%d-%d-%d-%d-%d-%d",
+                     recordings_path,
+                     (int)cur_time.tm_year + 1900,
+                     (int)cur_time.tm_mon,
+                     (int)cur_time.tm_mday,
+                     (int)cur_time.tm_hour,
+                     (int)cur_time.tm_min,
+                     (int)cur_time.tm_sec) >= (int)sizeof(full_path))
+        {
+            gm_error(log, "Unable to format recording path");
+            return NULL;
+        }
+
+        ret = mkdir(full_path, 0777);
+        if (ret < 0) {
+            gm_error(log, "Failed to create directory for recording");
+            return NULL;
+        }
+    }
+
+    int full_path_len = strlen(full_path);
 
     // Create depth images directory
     const char *depth_path_suffix = "/depth";
-    size_t depth_path_len = path_len + strlen(depth_path_suffix);
+    size_t depth_path_len = full_path_len + strlen(depth_path_suffix);
     char *depth_path = (char *)alloca(depth_path_len + 1);
-    snprintf(depth_path, depth_path_len + 1, "%s%s", path, depth_path_suffix);
+    snprintf(depth_path, depth_path_len + 1, "%s%s", full_path, depth_path_suffix);
 
     ret = mkdir(depth_path, 0777);
     if (ret < 0 && errno != EEXIST) {
@@ -171,9 +190,9 @@ gm_recording_init(struct gm_logger *log, struct gm_device *device,
 
     // Create video images directory
     const char *video_path_suffix = "/video";
-    size_t video_path_len = path_len + strlen(video_path_suffix);
+    size_t video_path_len = full_path_len + strlen(video_path_suffix);
     char *video_path = (char *)alloca(video_path_len + 1);
-    snprintf(video_path, video_path_len+1, "%s%s", path, video_path_suffix);
+    snprintf(video_path, video_path_len+1, "%s%s", full_path, video_path_suffix);
 
     ret = mkdir(video_path, 0777);
     if (ret < 0 && errno != EEXIST) {
@@ -182,10 +201,12 @@ gm_recording_init(struct gm_logger *log, struct gm_device *device,
         return nullptr;
     }
 
-    // Delete any existing files in the depth/video images directory to avoid
-    // accumulating untracked files
-    delete_files(log, depth_path, DEPTH_SUFFIX);
-    delete_files(log, video_path, VIDEO_SUFFIX);
+    if (overwrite) {
+        // Delete any existing files in the depth/video images directory to avoid
+        // accumulating untracked files
+        delete_files(log, depth_path, DEPTH_SUFFIX);
+        delete_files(log, video_path, VIDEO_SUFFIX);
+    }
 
     // Create JSON metadata structure
     JSON_Value *json = json_value_init_object();
@@ -245,7 +266,7 @@ gm_recording_init(struct gm_logger *log, struct gm_device *device,
     r->frames = frames;
     r->depth_format = depth_format;
     r->video_format = video_format;
-    r->path = path_copy;
+    r->path = strdup(full_path);
 
     return r;
 }
