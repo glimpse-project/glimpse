@@ -324,6 +324,11 @@ draw_properties(struct gm_ui_properties *props)
     for (int i = 0; i < props->n_properties; i++) {
         struct gm_ui_property *prop = &props->properties[i];
 
+        if (prop->read_only) {
+            ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        }
+
         switch (prop->type) {
         case GM_PROPERTY_INT:
             {
@@ -389,6 +394,11 @@ draw_properties(struct gm_ui_properties *props)
                                  prop->vec3_state.ptr[2]);
             } // else TODO
             break;
+        }
+
+        if (prop->read_only) {
+            ImGui::PopStyleVar();
+            ImGui::PopItemFlag();
         }
     }
 }
