@@ -2052,6 +2052,7 @@ gm_device_open(struct gm_logger *log,
 
     switch (config->type) {
     case GM_DEVICE_KINECT:
+        gm_debug(log, "Opening Kinect device");
 #ifdef USE_FREENECT
         status = kinect_open(dev, config, err);
 #else
@@ -2059,9 +2060,11 @@ gm_device_open(struct gm_logger *log,
 #endif
         break;
     case GM_DEVICE_RECORDING:
+        gm_debug(log, "Opening Glimpse Viewer recording playback device");
         status = recording_open(dev, config, err);
         break;
     case GM_DEVICE_TANGO:
+        gm_debug(log, "Opening Tango device");
 #ifdef USE_TANGO
         status = tango_open(dev, config, err);
 #else
