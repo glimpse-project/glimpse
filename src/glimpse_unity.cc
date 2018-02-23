@@ -526,7 +526,6 @@ handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
          */
         if (event->frame_ready.buffers_mask & data->pending_frame_buffers_mask)
         {
-            data->pending_frame_buffers_mask = -1;
             data->device_frame_ready = true;
         }
         break;
