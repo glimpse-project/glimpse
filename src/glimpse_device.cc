@@ -2200,20 +2200,24 @@ print_buf_info_cb(struct gm_mem_pool *pool,
 void
 gm_device_close(struct gm_device *dev)
 {
+    gm_debug(dev->log, "gm_device_close");
     if (dev->running)
         gm_device_stop(dev);
 
     switch (dev->type) {
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
+        gm_debug(dev->log, "kinect_close");
         kinect_close(dev);
 #endif
         break;
     case GM_DEVICE_RECORDING:
+        gm_debug(dev->log, "recording_close");
         recording_close(dev);
         break;
     case GM_DEVICE_TANGO:
 #ifdef USE_TANGO
+        gm_debug(dev->log, "tango_close");
         tango_close(dev);
 #endif
         break;
@@ -2302,6 +2306,8 @@ gm_device_start(struct gm_device *dev)
 void
 gm_device_stop(struct gm_device *dev)
 {
+    gm_debug(dev->log, "gm_device_stop");
+
     if (!dev->running) {
         return;
     }
@@ -2309,14 +2315,17 @@ gm_device_stop(struct gm_device *dev)
     switch (dev->type) {
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
+        gm_debug(dev->log, "kinect_stop");
         kinect_stop(dev);
 #endif
         break;
     case GM_DEVICE_RECORDING:
+        gm_debug(dev->log, "recording_stop");
         recording_stop(dev);
         break;
     case GM_DEVICE_TANGO:
 #ifdef USE_TANGO
+        gm_debug(dev->log, "tango_stop");
         tango_stop(dev);
 #endif
         break;
