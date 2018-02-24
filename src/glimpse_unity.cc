@@ -163,10 +163,6 @@ static void (*unity_log_function)(int level,
                                   const char *context,
                                   const char *msg);
 
-static GLuint video_texture;
-static int video_texture_width;
-static int video_texture_height;
-
 static float unity_current_time;
 static IUnityInterfaces *unity_interfaces;
 static IUnityGraphics *unity_graphics;
@@ -283,14 +279,6 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_set_time(float time)
 {
     unity_current_time = time;
-}
-
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_set_video_texture(void *handle_as_ptr, int width, int height)
-{
-    video_texture = *(GLuint *)handle_as_ptr;
-    video_texture_width = width;
-    video_texture_height = height;
 }
 
 static void UNITY_INTERFACE_API
@@ -1237,8 +1225,11 @@ extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    gm_debug(data->log, "GLIMPSE: Get Latest Tracking");
-    return (intptr_t)gm_context_get_latest_tracking(data->ctx);
+    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
+
+    gm_debug(data->log, "Get Latest Tracking %p", tracking);
+
+    return (intptr_t)tracking;
 }
 
 extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1249,7 +1240,7 @@ gm_unity_tracking_get_joint_positions(intptr_t plugin_handle,
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
     int n_joints;
 
-    gm_debug(data->log, "GLIMPSE: Tracking: Get Label Probabilities");
+    gm_debug(data->log, "Tracking: Get Label Probabilities");
 
     const float *joints =
         gm_tracking_get_joint_positions(tracking, &n_joints);
@@ -1264,7 +1255,7 @@ gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
-    gm_debug(data->log, "GLIMPSE: Tracking Unref %p (ref = %d)",
+    gm_debug(data->log, "Tracking Unref %p (ref = %d)",
              tracking,
              tracking->ref);
     gm_tracking_unref(tracking);
