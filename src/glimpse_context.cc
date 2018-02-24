@@ -208,6 +208,13 @@ struct joint_info
     struct joint_dist *dist;
 };
 
+struct trail_crumb
+{
+    char tag[32];
+    int n_frames;
+    void *backtrace_frame_pointers[10];
+};
+
 struct gm_tracking_impl
 {
     struct gm_tracking base;
@@ -258,6 +265,12 @@ struct gm_tracking_impl
     uint8_t *face_detect_buf;
     size_t face_detect_buf_width;
     size_t face_detect_buf_height;
+
+    /* Lets us debug when we've failed to release frame resources when
+     * we come to destroy our resource pools
+     */
+    pthread_mutex_t trail_lock;
+    std::vector<struct trail_crumb> trail;
 };
 
 struct gm_context
@@ -2577,7 +2590,29 @@ tracking_state_recycle(struct gm_tracking *self)
     gm_frame_unref(tracking->frame);
     tracking->frame = NULL;
 
+    tracking->trail.clear();
+
     mem_pool_recycle_resource(pool, tracking);
+}
+
+static void
+tracking_add_breadcrumb(struct gm_tracking *self, const char *tag)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+    struct trail_crumb crumb;
+
+    gm_assert(tracking->ctx->log, tracking->base.ref >= 0,
+              "Use of frame after free");
+
+    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
+
+    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
+                                  1, // skip top stack frame
+                                  10);
+
+    pthread_mutex_lock(&tracking->trail_lock);
+    tracking->trail.push_back(crumb);
+    pthread_mutex_unlock(&tracking->trail_lock);
 }
 
 static void *
@@ -2590,6 +2625,7 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     tracking->base.api = &tracking->vtable;
 
     tracking->vtable.free = tracking_state_recycle;
+    tracking->vtable.add_breadcrumb = tracking_add_breadcrumb;
 
     tracking->pool = pool;
     tracking->ctx = ctx;
@@ -2644,6 +2680,50 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 }
 
 static void
+print_trail_for(struct gm_logger *log, void *object, std::vector<struct trail_crumb> *trail)
+{
+    gm_debug(log, "Trail for %p:", object);
+
+    for (unsigned i = 0; i < trail->size(); i++) {
+        struct trail_crumb crumb = trail->at(i);
+        if (crumb.n_frames) {
+            struct gm_backtrace backtrace = {
+                crumb.n_frames,
+                (const void **)crumb.backtrace_frame_pointers
+            };
+            int line_len = 100;
+            char *formatted = (char *)alloca(crumb.n_frames * line_len);
+
+            gm_debug(log, "%d) tag = %s", i, crumb.tag);
+            gm_logger_get_backtrace_strings(log, &backtrace,
+                                            line_len, (char *)formatted);
+            for (int i = 0; i < crumb.n_frames; i++) {
+                char *line = formatted + line_len * i;
+                gm_debug(log, "   #%i %s", i, line);
+            }
+        }
+    }
+}
+
+static void
+print_tracking_info_cb(struct gm_mem_pool *pool,
+                       void *resource,
+                       void *user_data)
+{
+    struct gm_context *ctx = (struct gm_context *)user_data;
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)resource;
+
+    gm_assert(ctx->log, tracking != NULL, "Spurious NULL tracking resource");
+    gm_error(ctx->log, "Unreleased tracking object %p, ref count = %d, paper trail len = %d",
+             tracking,
+             tracking->base.ref,
+             (int)tracking->trail.size());
+
+    if (tracking->trail.size())
+        print_trail_for(ctx->log, tracking, &tracking->trail);
+}
+
+static void
 gm_context_clear_tracking(struct gm_context *ctx)
 {
     if (ctx->latest_tracking) {
@@ -2655,6 +2735,10 @@ gm_context_clear_tracking(struct gm_context *ctx)
         ctx->tracking_history[i] = NULL;
     }
     ctx->n_tracking = 0;
+
+    mem_pool_foreach(ctx->tracking_pool,
+                     print_tracking_info_cb,
+                     ctx);
     mem_pool_free_resources(ctx->tracking_pool);
 }
 
@@ -2776,6 +2860,9 @@ gm_context_destroy(struct gm_context *ctx)
      * the pools which will in-turn destroy the resources...
      */
     gm_context_clear_tracking(ctx);
+    mem_pool_foreach(ctx->tracking_pool,
+                     print_tracking_info_cb,
+                     ctx);
     mem_pool_free(ctx->tracking_pool);
 
     /* Only taking the mutex for the sake of a debug assertion within

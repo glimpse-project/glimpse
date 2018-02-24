@@ -193,6 +193,8 @@ gm_frame_unref(struct gm_frame *frame)
 struct gm_tracking_vtable
 {
     void (*free)(struct gm_tracking *self);
+    void (*add_breadcrumb)(struct gm_tracking *self,
+                           const char *name);
 };
 
 struct gm_tracking
