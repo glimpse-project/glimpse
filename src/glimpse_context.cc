@@ -217,11 +217,17 @@ struct trail_crumb
 
 struct skeleton {
     std::vector<Joint> joints;
+    InferredJoints *result;
     float confidence;
     float distance;
 
-    skeleton(int n_joints) :
-      joints(n_joints),
+    skeleton() :
+      result(NULL),
+      distance(FLT_MAX) {}
+
+    skeleton(InferredJoints *_result) :
+      joints(_result->n_joints),
+      result(_result),
       confidence(0.f),
       distance(0.f) {}
 };
@@ -1105,34 +1111,39 @@ compare_skeletons(const struct skeleton &skel1, const struct skeleton &skel2)
 static void
 build_skeleton(struct gm_context *ctx,
                struct skeleton &skeleton,
-               InferredJoints *result,
                int joint_no = 0,
                int last_joint_no = -1)
 {
     // Add the highest confidence joint to the skeleton and track the sum
     // confidence and deviation from the expected joint distances.
-    if (result->joints[joint_no] && joint_no != last_joint_no) {
-        Joint *joint = (Joint *)result->joints[joint_no]->data;
+    if (joint_no != last_joint_no) {
+        if (skeleton.result->joints[joint_no]) {
+            Joint *joint = (Joint *)skeleton.result->joints[joint_no]->data;
 
-        if (last_joint_no != -1 &&
-            skeleton.joints[last_joint_no].confidence > 0) {
-            // Get the distance info for the bone between joint_no and
-            // last_joint_no and see if this bone falls outside of the
-            // expected distance between joints.
-            Joint &last_joint = skeleton.joints[last_joint_no];
-            const struct joint_dist &joint_dist =
-                ctx->joint_stats[last_joint_no].dist[joint_no];
+            if (last_joint_no != -1 &&
+                skeleton.joints[last_joint_no].confidence > 0) {
+                // Get the distance info for the bone between joint_no and
+                // last_joint_no and see if this bone falls outside of the
+                // expected distance between joints.
+                Joint &last_joint = skeleton.joints[last_joint_no];
+                const struct joint_dist &joint_dist =
+                    ctx->joint_stats[last_joint_no].dist[joint_no];
 
-            float dist = distance_between(&joint->x, &last_joint.x);
-            if (dist < joint_dist.min) {
-                skeleton.distance += joint_dist.min - dist;
-            } else if (dist > joint_dist.max) {
-                skeleton.distance += dist - joint_dist.max;
+                float dist = distance_between(&joint->x, &last_joint.x);
+                if (dist < joint_dist.min) {
+                    skeleton.distance += powf(joint_dist.min - dist, 2.f);
+                } else if (dist > joint_dist.max) {
+                    skeleton.distance += powf(dist - joint_dist.max, 2.f);
+                }
             }
-        }
 
-        skeleton.confidence += joint->confidence;
-        skeleton.joints[joint_no] = *joint;
+            skeleton.confidence += joint->confidence;
+            skeleton.joints[joint_no] = *joint;
+        } else {
+            // We don't want skeletons with missing joints to rank higher than
+            // full skeletons, so add some large amount to the distance
+            skeleton.distance += 10.f;
+        }
     }
 
     // Follow the connections for this joint to build up a whole skeleton
@@ -1140,56 +1151,60 @@ build_skeleton(struct gm_context *ctx,
         if (ctx->joint_stats[joint_no].connections[i] == last_joint_no) {
             continue;
         }
-        build_skeleton(ctx, skeleton, result,
-                       ctx->joint_stats[joint_no].connections[i],
-                       joint_no);
+        build_skeleton(ctx, skeleton,
+                       ctx->joint_stats[joint_no].connections[i], joint_no);
     }
 }
 
 static void
-process_raw_joint_predictions(struct gm_context *ctx,
-                              struct gm_tracking_impl *tracking,
-                              InferredJoints *result)
+refine_skeleton(struct gm_context *ctx,
+                struct skeleton &skeleton)
 {
-    assert(result->n_joints == ctx->n_joints);
-
-    struct skeleton skeleton(ctx->n_joints);
-    build_skeleton(ctx, skeleton, result);
+    if (!ctx->joint_stats || !ctx->joint_refinement) {
+        return;
+    }
 
     gm_debug(ctx->log, "Prime skeleton confidence: %f, distance: %f",
              skeleton.confidence, skeleton.distance);
 
-    // Try to see if there are better joint combinations based on statistics
-    // of distances between joints.
-    if (ctx->joint_stats && ctx->joint_refinement) {
-        // For each joint, we look at the score of the skeleton using each
-        // joint cluster and if it scores higher than the most confident
-        // joint, we replace that joint and continue.
-        bool is_refined = false;
-        for (int j = 0; j < ctx->n_joints; ++j) {
-            if (!result->joints[j] || !result->joints[j]->next) {
-                continue;
-            }
-
-            for (LList *l = result->joints[j]->next; l; l = l->next) {
-                struct skeleton candidate_skeleton(ctx->n_joints);
-                Joint *joint = (Joint *)l->data;
-                candidate_skeleton.joints[j] = *joint;
-                candidate_skeleton.confidence += joint->confidence;
-                build_skeleton(ctx, candidate_skeleton, result, j, j);
-
-                if (compare_skeletons(candidate_skeleton, skeleton)) {
-                    std::swap(skeleton, candidate_skeleton);
-                    is_refined = true;
-                }
-            }
+    // For each joint, we look at the score of the skeleton using each
+    // joint cluster and if it scores higher than the most confident
+    // joint, we replace that joint and continue.
+    bool is_refined = false;
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        if (!skeleton.result->joints[j] || !skeleton.result->joints[j]->next) {
+            continue;
         }
 
-        if (is_refined) {
-            gm_debug(ctx->log, "Refined skeleton confidence: %f, distance: %f",
-                     skeleton.confidence, skeleton.distance);
+        for (LList *l = skeleton.result->joints[j]->next; l; l = l->next) {
+            struct skeleton candidate_skeleton(skeleton.result);
+            Joint *joint = (Joint *)l->data;
+            candidate_skeleton.joints[j] = *joint;
+            candidate_skeleton.confidence += joint->confidence;
+            build_skeleton(ctx, candidate_skeleton, j, j);
+
+            if (compare_skeletons(candidate_skeleton, skeleton)) {
+                std::swap(skeleton, candidate_skeleton);
+                is_refined = true;
+            }
         }
     }
+
+    if (is_refined) {
+        gm_debug(ctx->log, "Refined skeleton confidence: %f, distance: %f",
+                 skeleton.confidence, skeleton.distance);
+    }
+}
+
+static void
+process_joint_inference(struct gm_context *ctx,
+                        struct gm_tracking_impl *tracking,
+                        struct skeleton &skeleton)
+{
+    assert(skeleton.result->n_joints == ctx->n_joints);
+
+    gm_debug(ctx->log, "Processing skeleton with confidence: %f, distance: %f",
+             skeleton.confidence, skeleton.distance);
 
     float confidence[ctx->n_joints];
     for (int j = 0; j < ctx->n_joints; j++) {
@@ -1689,9 +1704,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
         Eigen::Vector4f min, max;
         pcl::getMinMax3D(*lores_cloud, *point_it, min, max);
         Eigen::Vector4f diff = max - min;
-        if (diff[0] < 0.1f || diff[0] > 2.0f ||
+        // TODO: Make these limits configurable
+        if (diff[0] < 0.15f || diff[0] > 2.0f ||
             diff[1] < 0.8f || diff[1] > 2.45f ||
-            diff[2] < 0.05f || diff[2] > 1.0f) {
+            diff[2] < 0.05f || diff[2] > 1.5f) {
             continue;
         }
         LOGI("Cluster with %d points, (%.2fx%.2fx%.2f)\n",
@@ -1843,12 +1859,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
                                tracking->training_camera_intrinsics.fy));
-    float best_confidence = 0.f;
     float *weights = (float*)
         xmalloc(width * height * ctx->n_joints * sizeof(float));
     float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
                                          sizeof(float));
-    InferredJoints *result = nullptr;
+    struct skeleton skeleton;
     for (std::vector<float*>::iterator it = depth_images.begin();
          it != depth_images.end(); ++it) {
         start = get_time();
@@ -1881,24 +1896,22 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         end = get_time();
         duration = end - start;
-        LOGI("Inferring joints took %.3f%s\n",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
 
-        float confidence = 0.f;
-        for (int j = 0; j < candidate->n_joints; ++j) {
-            if (!candidate->joints[j]) {
-                continue;
+        struct skeleton candidate_skeleton(candidate);
+        build_skeleton(ctx, candidate_skeleton);
+        refine_skeleton(ctx, candidate_skeleton);
+
+        LOGI("Inferring joints and refinement took %.3f%s "
+             "(confidence: %f, distance: %f)\n",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration),
+             candidate_skeleton.confidence, candidate_skeleton.distance);
+
+        if (compare_skeletons(candidate_skeleton, skeleton)) {
+            if (skeleton.result) {
+                free_joints(skeleton.result);
             }
-            Joint *best_joint = (Joint *)candidate->joints[j]->data;
-            confidence += best_joint->confidence;
-        }
-        if (confidence > best_confidence) {
-            if (result) {
-                free_joints(result);
-            }
-            result = candidate;
-            best_confidence = confidence;
+            std::swap(skeleton, candidate_skeleton);
             std::swap(tracking->label_probs, label_probs);
         } else {
             free_joints(candidate);
@@ -1907,18 +1920,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
     xfree(label_probs);
     xfree(weights);
 
-    if (result) {
-        start = get_time();
+    start = get_time();
 
-        process_raw_joint_predictions(ctx, tracking, result);
-        free_joints(result);
+    // TODO: We just take the most confident skeleton above, but we should
+    //       probably establish some thresholds and spit out multiple skeletons.
+    process_joint_inference(ctx, tracking, skeleton);
+    free_joints(skeleton.result);
 
-        end = get_time();
-        duration = end - start;
-        LOGI("Joint processing took %.3f%s\n",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
-    }
+    end = get_time();
+    duration = end - start;
+    LOGI("Joint processing took %.3f%s\n",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 
     return true;
 }
