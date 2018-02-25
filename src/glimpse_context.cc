@@ -215,6 +215,17 @@ struct trail_crumb
     void *backtrace_frame_pointers[10];
 };
 
+struct skeleton {
+    std::vector<Joint> joints;
+    float confidence;
+    float distance;
+
+    skeleton(int n_joints) :
+      joints(n_joints),
+      confidence(0.f),
+      distance(0.f) {}
+};
+
 struct gm_tracking_impl
 {
     struct gm_tracking base;
@@ -1083,6 +1094,58 @@ distance_between(float *point1, float *point2)
                  powf(point1[2] - point2[2], 2.f));
 }
 
+static bool
+compare_skeletons(const struct skeleton &skel1, const struct skeleton &skel2)
+{
+    return (skel1.distance < skel2.distance) ||
+           (skel1.distance == skel2.distance &&
+            skel1.confidence > skel2.confidence);
+}
+
+static void
+build_skeleton(struct gm_context *ctx,
+               struct skeleton &skeleton,
+               InferredJoints *result,
+               int joint_no = 0,
+               int last_joint_no = -1)
+{
+    // Add the highest confidence joint to the skeleton and track the sum
+    // confidence and deviation from the expected joint distances.
+    if (result->joints[joint_no] && joint_no != last_joint_no) {
+        Joint *joint = (Joint *)result->joints[joint_no]->data;
+
+        if (last_joint_no != -1 &&
+            skeleton.joints[last_joint_no].confidence > 0) {
+            // Get the distance info for the bone between joint_no and
+            // last_joint_no and see if this bone falls outside of the
+            // expected distance between joints.
+            Joint &last_joint = skeleton.joints[last_joint_no];
+            const struct joint_dist &joint_dist =
+                ctx->joint_stats[last_joint_no].dist[joint_no];
+
+            float dist = distance_between(&joint->x, &last_joint.x);
+            if (dist < joint_dist.min) {
+                skeleton.distance += joint_dist.min - dist;
+            } else if (dist > joint_dist.max) {
+                skeleton.distance += dist - joint_dist.max;
+            }
+        }
+
+        skeleton.confidence += joint->confidence;
+        skeleton.joints[joint_no] = *joint;
+    }
+
+    // Follow the connections for this joint to build up a whole skeleton
+    for (int i = 0; i < ctx->joint_stats[joint_no].n_connections; ++i) {
+        if (ctx->joint_stats[joint_no].connections[i] == last_joint_no) {
+            continue;
+        }
+        build_skeleton(ctx, skeleton, result,
+                       ctx->joint_stats[joint_no].connections[i],
+                       joint_no);
+    }
+}
+
 static void
 process_raw_joint_predictions(struct gm_context *ctx,
                               struct gm_tracking_impl *tracking,
@@ -1090,95 +1153,50 @@ process_raw_joint_predictions(struct gm_context *ctx,
 {
     assert(result->n_joints == ctx->n_joints);
 
-    float confidence[ctx->n_joints];
-    LList *joint_ptrs[ctx->n_joints];
-    for (int j = 0; j < ctx->n_joints; j++) {
-        if (result->joints[j]) {
-            Joint *joint = (Joint *)result->joints[j]->data;
-            tracking->joints[j*3] = joint->x;
-            tracking->joints[j*3+1] = joint->y;
-            tracking->joints[j*3+2] = joint->z;
-            tracking->joints_predicted[j] = false;
-            confidence[j] = joint->confidence;
-            joint_ptrs[j] = result->joints[j];
+    struct skeleton skeleton(ctx->n_joints);
+    build_skeleton(ctx, skeleton, result);
+
+    gm_debug(ctx->log, "Prime skeleton confidence: %f, distance: %f",
+             skeleton.confidence, skeleton.distance);
+
+    // Try to see if there are better joint combinations based on statistics
+    // of distances between joints.
+    if (ctx->joint_stats && ctx->joint_refinement) {
+        // For each joint, we look at the score of the skeleton using each
+        // joint cluster and if it scores higher than the most confident
+        // joint, we replace that joint and continue.
+        bool is_refined = false;
+        for (int j = 0; j < ctx->n_joints; ++j) {
+            if (!result->joints[j] || !result->joints[j]->next) {
+                continue;
+            }
+
+            for (LList *l = result->joints[j]->next; l; l = l->next) {
+                struct skeleton candidate_skeleton(ctx->n_joints);
+                Joint *joint = (Joint *)l->data;
+                candidate_skeleton.joints[j] = *joint;
+                candidate_skeleton.confidence += joint->confidence;
+                build_skeleton(ctx, candidate_skeleton, result, j, j);
+
+                if (compare_skeletons(candidate_skeleton, skeleton)) {
+                    std::swap(skeleton, candidate_skeleton);
+                    is_refined = true;
+                }
+            }
+        }
+
+        if (is_refined) {
+            gm_debug(ctx->log, "Refined skeleton confidence: %f, distance: %f",
+                     skeleton.confidence, skeleton.distance);
         }
     }
 
-    // Try to see if there are better joint predictions based on statistics
-    // of distances between joints.
-    if (ctx->joint_stats && ctx->joint_refinement) {
-        // XXX: Maybe put a limit on the number of passes this does(?)
-        //      It's pretty inexpensive though.
-        bool changed;
-        do {
-            changed = false;
-            for (int j = 0; j < ctx->n_joints; j++) {
-                // If we have < 2 joint candidates, skip over this joint.
-                if (!result->joints[j] || !result->joints[j]->next) {
-                    continue;
-                }
-
-                // Find out the last joint position and pick the nearest
-                // position to that.
-                /*float *old_joint = nullptr;
-                if (ctx->n_tracking) {
-                    old_joint = &ctx->tracking_history[0]->
-                        joints_processed[j*3];
-                }*/
-
-                LList *best_joint = NULL;
-                float best_dist = FLT_MAX;
-                int best_error = INT_MAX;
-                /*float best_dist_from_prev = old_joint ?
-                    distance_between(old_joint, &tracking->joints[j*3]) : 0.f;*/
-
-                for (LList *l = result->joints[j]; l; l = l->next) {
-                    Joint *joint = (Joint *)l->data;
-                    float dist_acc = 0;
-                    int error = 0;
-                    for (int k = 0; k < ctx->joint_stats[j].n_connections;
-                         k++) {
-                        int c = ctx->joint_stats[j].connections[k];
-                        struct joint_dist *joint_dist =
-                            &ctx->joint_stats[j].dist[c];
-                        float dist = distance_between(&tracking->joints[c*3],
-                                                      &joint->x);
-                        dist = fabsf(dist - joint_dist->mean);
-                        dist_acc += dist;
-                        if (dist < joint_dist->min ||
-                            dist > joint_dist->max) {
-                            ++error;
-                        }
-                    }
-                    /*float dist_from_prev = old_joint ? distance_between(
-                        old_joint, &((Joint *)l->data)->x) : 0.f;*/
-                    if (error < best_error && dist_acc <= best_dist/* &&
-                        dist_from_prev <= best_dist_from_prev*/) {
-                        best_dist = dist_acc;
-                        /*best_dist_from_prev = dist_from_prev;*/
-                        best_error = error;
-                        best_joint = l;
-                    }
-                }
-
-                if (best_joint && joint_ptrs[j] != best_joint) {
-                    // Null out the original data so we don't end up with
-                    // situations where we oscillate between two choices
-                    Joint *joint = (Joint *)joint_ptrs[j]->data;
-                    joint->x = 0.f;
-                    joint->y = 0.f;
-                    joint->z = HUGE_DEPTH * 2;
-
-                    joint_ptrs[j] = best_joint;
-                    joint = (Joint *)best_joint->data;
-                    tracking->joints[j*3] = joint->x;
-                    tracking->joints[j*3+1] = joint->y;
-                    tracking->joints[j*3+2] = joint->z;
-                    confidence[j] = joint->confidence;
-                    changed = true;
-                }
-            }
-        } while (changed);
+    float confidence[ctx->n_joints];
+    for (int j = 0; j < ctx->n_joints; j++) {
+        tracking->joints[j*3] = skeleton.joints[j].x;
+        tracking->joints[j*3+1] = skeleton.joints[j].y;
+        tracking->joints[j*3+2] = skeleton.joints[j].z;
+        confidence[j] = skeleton.joints[j].confidence;
     }
 
     for (int j = 0; j < ctx->n_joints; j++) {
