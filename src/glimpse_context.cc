@@ -3816,6 +3816,22 @@ gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
     return tracking->label_probs;
 }
 
+uint64_t
+gm_tracking_get_timestamp(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->frame->timestamp;
+}
+
+bool
+gm_tracking_has_joints(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->success;
+}
+
 /* Note this may be called via any arbitrary thread
  */
 bool

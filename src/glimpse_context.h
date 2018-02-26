@@ -360,6 +360,12 @@ const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,
                                 int *n_joints);
 
+uint64_t
+gm_tracking_get_timestamp(struct gm_tracking *tracking);
+
+bool
+gm_tracking_has_joints(struct gm_tracking *tracking);
+
 /* Creates an RGB visualisation of the label map. */
 void
 gm_tracking_create_rgb_label_map(struct gm_tracking *tracking,
