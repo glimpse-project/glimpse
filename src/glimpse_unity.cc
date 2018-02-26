@@ -1240,16 +1240,20 @@ gm_unity_tracking_get_joint_positions(intptr_t plugin_handle,
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+    uint64_t timestamp = gm_tracking_get_timestamp(tracking);
     int n_joints;
 
     gm_debug(data->log, "Tracking: Get Label Probabilities");
 
+    /* Even if we just pass in the timestamp associated with the tracking
+     * we at least get zeroed joints when we lose tracking instead
+     * of invalid data
+     */
     const float *joints =
-        gm_tracking_get_joint_positions(tracking, &n_joints);
+        gm_context_predict_joint_positions(data->ctx, timestamp, &n_joints);
 
     return joints;
 }
-
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
