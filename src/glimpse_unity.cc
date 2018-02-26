@@ -1120,6 +1120,8 @@ gm_unity_init(char *config_json)
 
     const char *assets_path = json_object_get_string(data->config, "assetsPath");
     if (assets_path && strlen(assets_path) != 0) {
+        gm_debug(data->log, "Setting GLIMPSE_ASSETS_ROOT from GlimpseRuntime Config: %s",
+                 assets_path);
         setenv("GLIMPSE_ASSETS_ROOT", assets_path, true);
     }
 
