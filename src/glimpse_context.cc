@@ -420,6 +420,7 @@ struct gm_context
     bool depth_gap_fill;
     bool apply_depth_distortion;
     int gap_dist;
+    float gap_tolerance;
     int cloud_res;
     float min_depth;
     float max_depth;
@@ -2279,7 +2280,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                     float lval = depth_copy[off-left];
                     float rval = depth_copy[off+right];
                     float distance = fabsf(rval - lval);
-                    if (distance < ctx->cluster_tolerance * (left + right)) {
+                    if (distance < ctx->gap_tolerance * (left + right)) {
                         hvalid = true;
                     }
                 }
@@ -2289,7 +2290,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                     float uval = depth_copy[off-(up * rot_width)];
                     float dval = depth_copy[off+(down * rot_width)];
                     float distance = fabsf(dval - uval);
-                    if (distance < ctx->cluster_tolerance * pix_dist) {
+                    if (distance < ctx->gap_tolerance * pix_dist) {
                         if (pix_dist < left + right || !(left && right)) {
                             vvalid = true;
                             hvalid = false;
@@ -3221,6 +3222,17 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.ptr = &ctx->gap_dist;
     prop.int_state.min = 0;
     prop.int_state.max = 5;
+    ctx->properties.push_back(prop);
+
+    ctx->gap_tolerance = 0.05f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "gap_tolerance";
+    prop.desc = "Distance threshold when interpolating between gaps";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->gap_tolerance;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.2f;
     ctx->properties.push_back(prop);
 
     ctx->depth_gap_fill = true;
