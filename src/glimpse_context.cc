@@ -1063,7 +1063,8 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
         return false;
 
     glm::vec3 p[4] = {};
-    for (int i = 0; i <= ctx->n_tracking - 4; ++i) {
+    int i;
+    for (i = 0; i <= ctx->n_tracking - 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             struct gm_tracking_impl *tracking = ctx->tracking_history[i + j];
             p[j].x = tracking->joints_processed[joint*3];
@@ -1076,9 +1077,9 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
         }
     }
 
-    float t = (timestamp - ctx->tracking_history[0]->frame->timestamp) /
-        (ctx->tracking_history[0]->frame->timestamp -
-         ctx->tracking_history[3]->frame->timestamp);
+    float t = (timestamp - ctx->tracking_history[i]->frame->timestamp) /
+        (float)(ctx->tracking_history[i]->frame->timestamp -
+         ctx->tracking_history[i + 3]->frame->timestamp);
     glm::vec3 q = 0.5f *
         ((2.f * p[1]) +
          (-p[0] + p[2]) * t +
