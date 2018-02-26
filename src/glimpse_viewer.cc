@@ -448,6 +448,16 @@ draw_properties(struct gm_ui_properties *props)
                     gm_prop_set_bool(prop, current_val);
             }
             break;
+        case GM_PROPERTY_SWITCH:
+            {
+                if (i && props->properties[i-1].type == GM_PROPERTY_SWITCH) {
+                    ImGui::SameLine();
+                }
+                if (ImGui::Button(prop->name)) {
+                    gm_prop_set_switch(prop);
+                }
+            }
+            break;
         case GM_PROPERTY_FLOAT:
             {
                 float current_val = gm_prop_get_float(prop), save_val = current_val;
@@ -611,15 +621,6 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
     ImGui::Spacing();
 
-#if 0
-    // TODO: Playback controls
-    ImGui::Button("<");
-    ImGui::SameLine();
-    ImGui::Button("||");
-    ImGui::SameLine();
-    ImGui::Button(">");
-    ImGui::SameLine();
-#endif
     if (ImGui::Button(data->recording ? "Stop" : "Record")) {
         if (data->recording) {
             gm_recording_close(data->recording);
@@ -2433,7 +2434,6 @@ main(int argc, char **argv)
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);
-    data->overwrite_recording = true;
 
     index_recordings(data);
 

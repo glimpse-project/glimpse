@@ -141,6 +141,9 @@ struct gm_device
             bool loop;
             int max_frame;
 
+            /* Used to break out of pause for skipping frames back and forth */
+            bool ignore_loop;
+
             /* State in case playback is paused: */
             enum gm_rotation last_camera_rotation;
             struct gm_buffer *last_depth_buf;
@@ -902,6 +905,56 @@ read_json_intrinsics(JSON_Object *json_intrinsics,
     }
 }
 
+static void
+recording_playpause(struct gm_ui_property *prop)
+{
+    struct gm_device *dev = (struct gm_device *)prop->object;
+
+    if (!dev->running) {
+        return;
+    }
+
+    if (dev->recording.loop) {
+        dev->recording.max_frame = dev->recording.frame;
+        dev->recording.loop = false;
+    } else if (dev->recording.max_frame >= dev->recording.frame) {
+        dev->recording.max_frame = -1;
+        dev->recording.loop = true;
+    }
+}
+
+static void
+recording_step_back(struct gm_ui_property *prop)
+{
+    struct gm_device *dev = (struct gm_device *)prop->object;
+
+    if (!dev->running || dev->recording.frame < 1) {
+        return;
+    }
+
+    --dev->recording.frame;
+    dev->recording.max_frame = dev->recording.frame;
+    if (dev->recording.frame) {
+        --dev->recording.frame;
+    }
+    dev->recording.loop = false;
+    dev->recording.ignore_loop = true;
+}
+
+static void
+recording_step_forward(struct gm_ui_property *prop)
+{
+    struct gm_device *dev = (struct gm_device *)prop->object;
+
+    if (!dev->running) {
+        return;
+    }
+
+    dev->recording.max_frame = dev->recording.frame + 1;
+    dev->recording.loop = false;
+    dev->recording.ignore_loop = true;
+}
+
 static bool
 recording_open(struct gm_device *dev,
                struct gm_device_config *config, char **err)
@@ -985,6 +1038,30 @@ recording_open(struct gm_device *dev,
     prop.int_state.ptr = &dev->recording.max_frame;
     prop.int_state.min = -1;
     prop.int_state.max = n_recorded_frames - 1;
+    dev->properties.push_back(prop);
+
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "<<";
+    prop.desc = "Step back a frame";
+    prop.type = GM_PROPERTY_SWITCH;
+    prop.switch_state.set = recording_step_back;
+    dev->properties.push_back(prop);
+
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "||>";
+    prop.desc = "Toggle playing state";
+    prop.type = GM_PROPERTY_SWITCH;
+    prop.switch_state.set = recording_playpause;
+    dev->properties.push_back(prop);
+
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = ">>";
+    prop.desc = "Step forward a frame";
+    prop.type = GM_PROPERTY_SWITCH;
+    prop.switch_state.set = recording_step_forward;
     dev->properties.push_back(prop);
 
     return true;
@@ -1154,9 +1231,6 @@ recording_io_thread_cb(void *userdata)
     uint64_t loop_prev_frame_timestamp = frame0_timestamp;
 
     while (dev->running) {
-        uint64_t time = get_time();
-        uint64_t real_progress = time - loop_start;
-
         int n_frames = dev->recording.max_frame >= 0 ?
             std::min(dev->recording.max_frame + 1, n_recorded_frames) :
             n_recorded_frames;
@@ -1164,7 +1238,8 @@ recording_io_thread_cb(void *userdata)
         if (dev->recording.frame >= (n_frames - 1)) {
 
             /* Enter paused state if looping has been disabled... */
-            while (dev->running && dev->recording.loop == false) {
+            while (dev->running && dev->recording.loop == false &&
+                   dev->recording.ignore_loop == false) {
                 struct gm_buffer *depth_buffer = NULL;
                 struct gm_buffer *video_buffer = NULL;
 
@@ -1187,6 +1262,7 @@ recording_io_thread_cb(void *userdata)
                 }
 
                 monotonic_clock += 16000000;
+                loop_start += 16000000;
 
                 swap_recorded_frame(dev,
                                     monotonic_clock,
@@ -1202,15 +1278,28 @@ recording_io_thread_cb(void *userdata)
                 usleep(16000);
             }
 
-            dev->recording.frame = 0;
-
-            /* Note: the subtraction makes it look like the loop closure from
-             * end to re-start takes some time.
-             */
-            loop_prev_frame_timestamp = frame0_timestamp - 16000000;
-            loop_start = get_time();
+            /* Recalculate n_frames as it may have changed during the loop */
+            n_frames = dev->recording.max_frame >= 0 ?
+                std::min(dev->recording.max_frame + 1, n_recorded_frames) :
+                n_recorded_frames;
+            if (dev->recording.frame >= n_frames - 1) {
+                /* Note: the subtraction makes it look like the loop closure
+                 * from end to re-start takes some time.
+                 */
+                loop_start = get_time();
+                loop_prev_frame_timestamp = frame0_timestamp - 16000000;
+                dev->recording.frame = 0;
+            }
         } else
             dev->recording.frame++;
+
+        /* This is only used to break out of the while loop above when loop
+         * is set to false. It's safe to reset it after that loop.
+         */
+        dev->recording.ignore_loop = false;
+
+        uint64_t time = get_time();
+        uint64_t real_progress = time - loop_start;
 
         JSON_Object *frame = json_array_get_object(frames, dev->recording.frame);
         uint64_t frame_timestamp = (uint64_t)
@@ -1250,7 +1339,7 @@ recording_io_thread_cb(void *userdata)
 
             if (i >= n_frames) {
                 /* If we've skipped to the end of the recording at least keep
-                 * the last frame without immdiately looping so we don't have
+                 * the last frame without immediately looping so we don't have
                  * more than one place to handle looping and don't have to
                  * consider a special case that can continue; before hitting
                  * the swap_buffers below.

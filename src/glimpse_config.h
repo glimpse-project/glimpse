@@ -40,6 +40,7 @@ enum gm_property_type {
     GM_PROPERTY_INT,
     GM_PROPERTY_ENUM,
     GM_PROPERTY_BOOL,
+    GM_PROPERTY_SWITCH,
     GM_PROPERTY_FLOAT,
     GM_PROPERTY_FLOAT_VEC3,
 };
@@ -75,6 +76,10 @@ struct gm_ui_property {
             bool (*get)(struct gm_ui_property *prop);
             void (*set)(struct gm_ui_property *prop, bool val);
         } bool_state;
+        struct {
+            bool *ptr;
+            void (*set)(struct gm_ui_property *prop);
+        } switch_state;
         struct {
             float *ptr;
             float min;
@@ -134,6 +139,14 @@ inline void gm_prop_set_vec3(struct gm_ui_property *prop, float *vec3)
         prop->vec3_state.set(prop, vec3);
     else
         memcpy(prop->vec3_state.ptr, vec3, sizeof(float) * 3);
+}
+
+inline void gm_prop_set_switch(struct gm_ui_property *prop)
+{
+    if (prop->switch_state.set)
+        prop->switch_state.set(prop);
+    else
+        *(prop->switch_state.ptr) = true;
 }
 
 inline void gm_prop_set_enum_by_name(struct gm_ui_property *prop, const char *name)

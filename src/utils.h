@@ -61,9 +61,9 @@ sample_uv(FloatT* depth_image, uint32_t width, uint32_t height,
   vector(int, 4) mask = (uv_pixel >= 0.f && uv_pixel < extents);
 
   float upixel = (mask[0] && mask[1]) ?
-    depth_image[(((uint32_t)uv_pixel[1] * width) + (uint32_t)uv_pixel[0])] : INFINITY;
+    depth_image[(((uint32_t)uv_pixel[1] * width) + (uint32_t)uv_pixel[0])] : 1000.f;
   float vpixel = (mask[2] && mask[3]) ?
-    depth_image[(((uint32_t)uv_pixel[3] * width) + (uint32_t)uv_pixel[2])] : INFINITY;
+    depth_image[(((uint32_t)uv_pixel[3] * width) + (uint32_t)uv_pixel[2])] : 1000.f;
 
   return upixel - vpixel;
 #else
