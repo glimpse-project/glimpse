@@ -1168,21 +1168,24 @@ draw_ui(Data *data)
     }
 
     // Draw sub-views on the axis with the most space
+    float depth_aspect = data->depth_rgb_height ?
+        data->depth_rgb_width / (float)data->depth_rgb_height : 1.f;
     int view = skip_controls ? 1 : 0;
     int n_views = ARRAY_LEN(views) - (skip_controls ? 1 : 0);
     for (int s = 0; s <= (n_views - 1) / MAX_VIEWS; ++s) {
         int subview_width, subview_height;
-        if (win_size.x > win_size.y) {
+        float win_aspect = win_size.x / (float)win_size.y;
+        if (win_aspect > depth_aspect) {
             subview_height = win_size.y / MAX_VIEWS;
             subview_width = data->depth_rgb_height ?
-                subview_height * (data->video_rgb_width /
-                                  (float)data->video_rgb_height) :
+                subview_height * (data->depth_rgb_width /
+                                  (float)data->depth_rgb_height) :
                 subview_height;
         } else {
             subview_width = win_size.x / MAX_VIEWS;
             subview_height = data->depth_rgb_width ?
-                subview_width * (data->video_rgb_height /
-                                 (float)data->video_rgb_width) :
+                subview_width * (data->depth_rgb_height /
+                                 (float)data->depth_rgb_width) :
                 subview_width;
         }
         for (int i = 0; i < MAX_VIEWS; ++i, ++view) {
@@ -1194,7 +1197,7 @@ draw_ui(Data *data)
             }
 
             int x, y;
-            if (win_size.x > win_size.y) {
+            if (win_aspect > depth_aspect) {
                 x = origin.x + win_size.x - subview_width;
                 y = origin.y + (subview_height * i);
             } else {
@@ -1208,7 +1211,7 @@ draw_ui(Data *data)
             }
         }
 
-        if (win_size.x > win_size.y) {
+        if (win_aspect > depth_aspect) {
             win_size.x -= subview_width;
         } else {
             win_size.y -= subview_height;
