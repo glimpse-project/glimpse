@@ -310,6 +310,16 @@ request_device_frame(struct glimpse_data *data, uint64_t buffers_mask)
     }
 }
 
+/* FIXME: query time via the _context api */
+static uint64_t
+get_time(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 static void
 handle_device_frame_updates(struct glimpse_data *data)
 {
@@ -325,6 +335,16 @@ handle_device_frame_updates(struct glimpse_data *data)
         struct gm_frame *device_frame = gm_device_get_latest_frame(data->device);
 
         assert(device_frame);
+
+        /* XXX: This is a hack so that we can be sure we always know that the
+         * frame timestamps are in the CLOCK_MONOTONIC time base so we can
+         * support a gm_unity_get_time() api. We want this because we know that
+         * Tango can only support capturing depth at 5fps and we want to be
+         * able to query interpolated joint positions, which in turn means
+         * we need to choose a standard clock domain for requesting our
+         * predicted tracking state.
+         */
+        device_frame->timestamp = get_time();
 
         /* XXX: we have to consider that the rendering is in another thread
          * and we don't want to unref (and potentially free) the last frame
