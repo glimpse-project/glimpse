@@ -3558,6 +3558,13 @@ gm_tracking_get_joint_positions(struct gm_tracking *_tracking,
     return tracking->joints_processed;
 }
 
+bool
+gm_tracking_has_skeleton(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->success;
+}
+
 const struct gm_skeleton *
 gm_tracking_get_skeleton(struct gm_tracking *_tracking)
 {

@@ -379,6 +379,9 @@ const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,
                                 int *n_joints);
 
+bool
+gm_tracking_has_skeleton(struct gm_tracking *tracking);
+
 const struct gm_skeleton *
 gm_tracking_get_skeleton(struct gm_tracking *tracking);
 

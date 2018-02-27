@@ -1268,6 +1268,33 @@ gm_unity_tracking_get_joint_positions(intptr_t plugin_handle,
     return joints;
 }
 
+extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
+                               intptr_t tracking_handle)
+{
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+
+    return gm_tracking_has_skeleton(tracking);
+}
+
+extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_get_timestamp(intptr_t plugin_handle,
+                                intptr_t tracking_handle)
+{
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+
+    return gm_tracking_get_timestamp(tracking);
+}
+
+extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_time(intptr_t plugin_handle)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 {
