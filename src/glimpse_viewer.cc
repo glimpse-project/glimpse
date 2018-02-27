@@ -231,6 +231,8 @@ static uint32_t joint_palette[] = {
     0xFF3333FF, // foot_r.head
 };
 
+char *glimpse_recordings_path;
+
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_normals_rgb_tex;
@@ -374,15 +376,9 @@ index_recordings(Data *data)
 {
     data->recordings.clear();
 
-    const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
-    if (!recordings_path)
-        recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
-    if (!recordings_path)
-        recordings_path = "glimpse_viewer_recording";
-
     char *index_err = NULL;
     index_recordings_recursive(data,
-                               recordings_path,
+                               glimpse_recordings_path,
                                "", // relative path
                                data->recordings,
                                &index_err);
@@ -550,9 +546,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     if (ImGui::Button("Save config")) {
         char *json = gm_config_save(data->log, props);
-        const char *assets_root = getenv("GLIMPSE_ASSETS_ROOT");
-        if (!assets_root)
-            assets_root = ".";
+        const char *assets_root = gm_get_assets_root();
         char filename[512];
 
         if (snprintf(filename, sizeof(filename), "%s/%s",
@@ -627,12 +621,6 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
             data->recording = NULL;
             index_recordings(data);
         } else if (!data->playback_device) {
-            const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
-            if (!recordings_path)
-                recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
-            if (!recordings_path)
-                recordings_path = "glimpse_viewer_recording";
-
             const char *rel_path = NULL;
             bool overwrite = false;
             if (data->overwrite_recording && data->recordings.size()) {
@@ -642,7 +630,7 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
             data->recording = gm_recording_init(data->log,
                                                 data->recording_device,
-                                                recordings_path,
+                                                glimpse_recordings_path,
                                                 rel_path,
                                                 overwrite);
         }
@@ -672,15 +660,10 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
             struct gm_device_config config = {};
             config.type = GM_DEVICE_RECORDING;
 
-            const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
-            if (!recordings_path)
-                recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
-            if (!recordings_path)
-                recordings_path = "glimpse_viewer_recording";
-
             const char *rel_path = data->recordings.at(data->selected_playback_recording);
             char full_path[1024];
-            xsnprintf(full_path, sizeof(full_path), "%s/%s", recordings_path, rel_path);
+            xsnprintf(full_path, sizeof(full_path), "%s/%s",
+                      glimpse_recordings_path, rel_path);
             config.recording.path = full_path;
 
             char *open_err = NULL;
@@ -2426,6 +2409,15 @@ main(int argc, char **argv)
 
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
+
+    gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
+
+    const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
+    if (!recordings_path)
+        recordings_path = gm_get_assets_root();
+    if (!recordings_path)
+        recordings_path = "glimpse_viewer_recording";
+    glimpse_recordings_path = strdup(recordings_path);
 
 #ifdef USE_GLFW
     init_winsys_glfw(data);

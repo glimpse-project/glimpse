@@ -48,6 +48,16 @@ struct gm_asset;
 extern "C" {
 #endif
 
+/* To avoid assuming the path is specified by the GLIMPSE_ASSETS_ROOT
+ * environment variable then middleware should set the path with
+ * this api before opening assets
+ */
+void
+gm_set_assets_root(struct gm_logger *log, const char *root);
+
+const char *
+gm_get_assets_root(void);
+
 #ifdef USE_ANDROID_ASSET_MANAGER_API
 #include <android/asset_manager.h>
 void

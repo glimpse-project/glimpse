@@ -1167,9 +1167,9 @@ gm_unity_init(char *config_json)
 
     const char *assets_path = json_object_get_string(data->config, "assetsPath");
     if (assets_path && strlen(assets_path) != 0) {
-        gm_debug(data->log, "Setting GLIMPSE_ASSETS_ROOT from GlimpseRuntime Config: %s",
-                 assets_path);
-        setenv("GLIMPSE_ASSETS_ROOT", assets_path, true);
+        gm_set_assets_root(data->log, getenv(assets_path));
+    } else {
+        gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
     }
 
     data->events_front = new std::vector<struct event>();
@@ -1209,7 +1209,7 @@ gm_unity_init(char *config_json)
     if (recordings_path == NULL || strlen(recordings_path) == 0)
         recordings_path = getenv("GLIMPSE_RECORDING_PATH");
     if (!recordings_path)
-        recordings_path = getenv("GLIMPSE_ASSETS_ROOT");
+        recordings_path = gm_get_assets_root();
     if (!recordings_path)
         recordings_path = "glimpse_viewer_recording";
 

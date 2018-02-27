@@ -35,6 +35,7 @@
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
+#include <assert.h>
 
 #include "xalloc.h"
 #include "glimpse_log.h"
@@ -58,6 +59,32 @@ struct gm_asset
     bool mapped;
 #endif
 };
+
+static char *glimpse_assets_root;
+
+void
+gm_set_assets_root(struct gm_logger *log, const char *root)
+{
+    if (glimpse_assets_root)
+        free(glimpse_assets_root);
+    if (root && strlen(root) > 0)
+        glimpse_assets_root = strdup(root);
+    else
+        glimpse_assets_root = strdup(".");
+    gm_debug(log, "Set Assets Root to \"%s\"", glimpse_assets_root);
+}
+
+const char *
+gm_get_assets_root(void)
+{
+    /* An empty assets root will break assumptions made while deriving the
+     * path for glimpse assets and we don't want to let things inadvertantly
+     * create paths relative to the root of the filesystem
+     */
+    assert(glimpse_assets_root && strlen(glimpse_assets_root) > 0);
+
+    return glimpse_assets_root;
+}
 
 #ifdef USE_ANDROID_ASSET_MANAGER_API
 static AAssetManager *asset_manager;
@@ -122,7 +149,7 @@ gm_asset_open(struct gm_logger *log,
     static const char *root = NULL;
 
     if (!root)
-        root = getenv("GLIMPSE_ASSETS_ROOT");
+        root = glimpse_assets_root;
     if (!root)
         root = "./";
 
