@@ -269,6 +269,8 @@ typedef struct {
     uint32_t rgba;
 } GlimpsePointXYZRGBA;
 
+struct gm_skeleton;
+
 #ifdef __cplusplus
 extern "C" {
 #endif

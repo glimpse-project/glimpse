@@ -215,19 +215,16 @@ struct trail_crumb
     void *backtrace_frame_pointers[10];
 };
 
-struct skeleton {
+struct gm_skeleton {
     std::vector<Joint> joints;
-    InferredJoints *result;
     float confidence;
     float distance;
 
-    skeleton() :
-      result(NULL),
-      distance(FLT_MAX) {}
-
-    skeleton(InferredJoints *_result) :
-      joints(_result->n_joints),
-      result(_result),
+    gm_skeleton() :
+      confidence(0.f),
+      distance(0.f) {}
+    gm_skeleton(int n_joints) :
+      joints(n_joints),
       confidence(0.f),
       distance(0.f) {}
 };
@@ -275,9 +272,10 @@ struct gm_tracking_impl
     bool success;
 
     // Inferred joint positions
-    float *joints;
+    struct gm_skeleton skeleton;
+
+    // Legacy interface
     float *joints_processed;
-    bool *joints_predicted;
 
     uint8_t *face_detect_buf;
     size_t face_detect_buf_width;
@@ -1053,7 +1051,7 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
 
 static bool
 predict_from_previous_frames(struct gm_context *ctx, int joint,
-                             uint64_t timestamp, float *prediction)
+                             uint64_t timestamp, Joint &prediction)
 {
     // Use Catmull-rom interpolation to determine what the next joint position
     // might be. We assume tracking history is stored in timestamp-order.
@@ -1068,9 +1066,9 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
     for (i = 0; i <= ctx->n_tracking - 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             struct gm_tracking_impl *tracking = ctx->tracking_history[i + j];
-            p[j].x = tracking->joints_processed[joint*3];
-            p[j].y = tracking->joints_processed[joint*3+1];
-            p[j].z = tracking->joints_processed[joint*3+2];
+            p[j].x = tracking->skeleton.joints[joint].x;
+            p[j].y = tracking->skeleton.joints[joint].y;
+            p[j].z = tracking->skeleton.joints[joint].z;
         }
 
         if (ctx->tracking_history[i + 1]->frame->timestamp < timestamp) {
@@ -1087,23 +1085,23 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
          (2.f*p[0] - 5.f*p[1] + 4.f*p[2] - p[3]) * powf(t, 2.f) +
          (-p[0] + 3.f * p[1] - 3.f * p[2] + p[3]) * powf(t, 3.f));
 
-    prediction[0] = q.x;
-    prediction[1] = q.y;
-    prediction[2] = q.z;
+    prediction.x = q.x;
+    prediction.y = q.y;
+    prediction.z = q.z;
 
     return true;
 }
 
 static inline float
-distance_between(float *point1, float *point2)
+distance_between(Joint &point1, Joint &point2)
 {
-    return sqrtf(powf(point1[0] - point2[0], 2.f) +
-                 powf(point1[1] - point2[1], 2.f) +
-                 powf(point1[2] - point2[2], 2.f));
+    return sqrtf(powf(point1.x - point2.x, 2.f) +
+                 powf(point1.y - point2.y, 2.f) +
+                 powf(point1.z - point2.z, 2.f));
 }
 
 static bool
-compare_skeletons(const struct skeleton &skel1, const struct skeleton &skel2)
+compare_skeletons(const struct gm_skeleton &skel1, const struct gm_skeleton &skel2)
 {
     return (skel1.distance < skel2.distance) ||
            (skel1.distance == skel2.distance &&
@@ -1112,15 +1110,16 @@ compare_skeletons(const struct skeleton &skel1, const struct skeleton &skel2)
 
 static void
 build_skeleton(struct gm_context *ctx,
-               struct skeleton &skeleton,
+               InferredJoints *result,
+               struct gm_skeleton &skeleton,
                int joint_no = 0,
                int last_joint_no = -1)
 {
     // Add the highest confidence joint to the skeleton and track the sum
     // confidence and deviation from the expected joint distances.
     if (joint_no != last_joint_no) {
-        if (skeleton.result->joints[joint_no]) {
-            Joint *joint = (Joint *)skeleton.result->joints[joint_no]->data;
+        if (result->joints[joint_no]) {
+            Joint *joint = (Joint *)result->joints[joint_no]->data;
 
             if (last_joint_no != -1 &&
                 skeleton.joints[last_joint_no].confidence > 0) {
@@ -1131,7 +1130,7 @@ build_skeleton(struct gm_context *ctx,
                 const struct joint_dist &joint_dist =
                     ctx->joint_stats[last_joint_no].dist[joint_no];
 
-                float dist = distance_between(&joint->x, &last_joint.x);
+                float dist = distance_between(*joint, last_joint);
                 if (dist < joint_dist.min) {
                     skeleton.distance += powf(joint_dist.min - dist, 2.f);
                 } else if (dist > joint_dist.max) {
@@ -1153,14 +1152,15 @@ build_skeleton(struct gm_context *ctx,
         if (ctx->joint_stats[joint_no].connections[i] == last_joint_no) {
             continue;
         }
-        build_skeleton(ctx, skeleton,
+        build_skeleton(ctx, result, skeleton,
                        ctx->joint_stats[joint_no].connections[i], joint_no);
     }
 }
 
 static void
 refine_skeleton(struct gm_context *ctx,
-                struct skeleton &skeleton)
+                InferredJoints *result,
+                struct gm_skeleton &skeleton)
 {
     if (!ctx->joint_stats || !ctx->joint_refinement) {
         return;
@@ -1174,16 +1174,16 @@ refine_skeleton(struct gm_context *ctx,
     // joint, we replace that joint and continue.
     bool is_refined = false;
     for (int j = 0; j < ctx->n_joints; ++j) {
-        if (!skeleton.result->joints[j] || !skeleton.result->joints[j]->next) {
+        if (!result->joints[j] || !result->joints[j]->next) {
             continue;
         }
 
-        for (LList *l = skeleton.result->joints[j]->next; l; l = l->next) {
-            struct skeleton candidate_skeleton(skeleton.result);
+        for (LList *l = result->joints[j]->next; l; l = l->next) {
+            struct gm_skeleton candidate_skeleton(result->n_joints);
             Joint *joint = (Joint *)l->data;
             candidate_skeleton.joints[j] = *joint;
             candidate_skeleton.confidence += joint->confidence;
-            build_skeleton(ctx, candidate_skeleton, j, j);
+            build_skeleton(ctx, result, candidate_skeleton, j, j);
 
             if (compare_skeletons(candidate_skeleton, skeleton)) {
                 std::swap(skeleton, candidate_skeleton);
@@ -1200,29 +1200,17 @@ refine_skeleton(struct gm_context *ctx,
 
 static void
 process_joint_inference(struct gm_context *ctx,
-                        struct gm_tracking_impl *tracking,
-                        struct skeleton &skeleton)
+                        struct gm_tracking_impl *tracking)
 {
-    assert(skeleton.result->n_joints == ctx->n_joints);
-
     gm_debug(ctx->log, "Processing skeleton with confidence: %f, distance: %f",
-             skeleton.confidence, skeleton.distance);
-
-    float confidence[ctx->n_joints];
-    for (int j = 0; j < ctx->n_joints; j++) {
-        tracking->joints[j*3] = skeleton.joints[j].x;
-        tracking->joints[j*3+1] = skeleton.joints[j].y;
-        tracking->joints[j*3+2] = skeleton.joints[j].z;
-        confidence[j] = skeleton.joints[j].confidence;
-    }
+             tracking->skeleton.confidence, tracking->skeleton.distance);
 
     for (int j = 0; j < ctx->n_joints; j++) {
         int idx = j * 3;
 
-        tracking->joints_processed[idx] = tracking->joints[idx];
-        tracking->joints_processed[idx+1] = tracking->joints[idx+1];
-        tracking->joints_processed[idx+2] = tracking->joints[idx+2];
-        tracking->joints_predicted[j] = false;
+        tracking->joints_processed[idx] = tracking->skeleton.joints[j].x;
+        tracking->joints_processed[idx+1] = tracking->skeleton.joints[j].y;
+        tracking->joints_processed[idx+2] = tracking->skeleton.joints[j].z;
 
         // Find the index of the last 2 unpredicted frames
         int np = 0;
@@ -1230,7 +1218,8 @@ process_joint_inference(struct gm_context *ctx,
         for (int i = 0;
              i < std::min(ctx->n_tracking,
                           ctx->joint_max_predictions) && np < 2; ++i) {
-            if (ctx->tracking_history[i]->joints_predicted[j]) {
+            if (ctx->tracking_history[i]->skeleton.
+                joints[j].confidence <= 0.f) {
                 continue;
             }
 
@@ -1243,9 +1232,9 @@ process_joint_inference(struct gm_context *ctx,
         if (np < 2) {
             LOGI("Joint %s position: %.2f, %.2f, %.2f",
                  joint_name(j),
-                 tracking->joints[idx],
-                 tracking->joints[idx+1],
-                 tracking->joints[idx+2]);
+                 tracking->skeleton.joints[j].x,
+                 tracking->skeleton.joints[j].y,
+                 tracking->skeleton.joints[j].z);
             continue;
         }
 
@@ -1253,64 +1242,66 @@ process_joint_inference(struct gm_context *ctx,
             ((tracking->frame->timestamp -
               ctx->tracking_history[prev[0]]->frame->timestamp) / 1e9);
         float distance = distance_between(
-            &tracking->joints[idx],
-            &ctx->tracking_history[prev[0]]->joints_processed[idx]) / time;
+            tracking->skeleton.joints[j],
+            ctx->tracking_history[prev[0]]->skeleton.joints[j]) / time;
 
         float prev_time = (float)
             ((ctx->tracking_history[prev[0]]->frame->timestamp -
               ctx->tracking_history[prev[1]]->frame->timestamp) / 1e9);
         float prev_dist = distance_between(
-            &ctx->tracking_history[prev[0]]->joints_processed[idx],
-            &ctx->tracking_history[prev[1]]->joints_processed[idx]) / prev_time;
+            ctx->tracking_history[prev[0]]->skeleton.joints[j],
+            ctx->tracking_history[prev[1]]->skeleton.joints[j]) / prev_time;
 
-        if (confidence[j] < ctx->min_confidence &&
+        if (tracking->skeleton.joints[j].confidence < ctx->min_confidence &&
             distance > ctx->joint_move_threshold &&
             (distance > ctx->joint_max_travel ||
              distance > (prev_dist * ctx->joint_scale_threshold))) {
-            float prediction[3];
+            Joint prediction = {};
             if (!predict_from_previous_frames(
                     ctx, j, tracking->frame->timestamp,
                     prediction)) {
-                tracking->joints_predicted[j] = false;
                 LOGI("Prediction for joint %s failed", joint_name(j));
                 continue;
             }
 
             // Try not to replace a result with a worse prediction
             float new_distance = distance_between(prediction,
-                &ctx->tracking_history[prev[0]]->joints_processed[idx]);
+                ctx->tracking_history[prev[0]]->skeleton.joints[j]);
 
             if (new_distance < distance) {
                 LOGI("Joint %s replaced (%.2f, %.2f, %.2f)->(%.2f, %.2f, %.2f) "
                      "(%.2f, %.2fx, c: %.2f)",
                      joint_name(j),
-                     tracking->joints[idx],
-                     tracking->joints[idx+1],
-                     tracking->joints[idx+2],
-                     prediction[0], prediction[1], prediction[2],
-                     distance, distance / prev_dist, confidence[j]);
-                tracking->joints_processed[idx] = prediction[0];
-                tracking->joints_processed[idx+1] = prediction[1];
-                tracking->joints_processed[idx+2] = prediction[2];
-                tracking->joints_predicted[j] = true;
+                     tracking->skeleton.joints[j].x,
+                     tracking->skeleton.joints[j].y,
+                     tracking->skeleton.joints[j].z,
+                     prediction.x, prediction.y, prediction.z,
+                     distance, distance / prev_dist,
+                     tracking->skeleton.joints[j].confidence);
+                tracking->skeleton.joints[j] = prediction;
+                tracking->skeleton.joints[j].confidence = 0.f;
+                tracking->joints_processed[idx] = prediction.x;
+                tracking->joints_processed[idx+1] = prediction.y;
+                tracking->joints_processed[idx+2] = prediction.z;
             } else {
                 LOGI("Joint %s remains (%.2f, %.2f, %.2f)<-(%.2f, %.2f, %.2f) "
                      "(%.2f, %.2fx, c: %.2f)",
                      joint_name(j),
-                     tracking->joints[idx],
-                     tracking->joints[idx+1],
-                     tracking->joints[idx+2],
-                     prediction[0], prediction[1], prediction[2],
-                     distance, distance / prev_dist, confidence[j]);
+                     tracking->skeleton.joints[j].x,
+                     tracking->skeleton.joints[j].y,
+                     tracking->skeleton.joints[j].z,
+                     prediction.x, prediction.y, prediction.z,
+                     distance, distance / prev_dist,
+                     tracking->skeleton.joints[j].confidence);
             }
         } else {
             LOGI("Joint %s position: %.2f, %.2f, %.2f (%.2f, %.2fx, c: %.2f)",
                  joint_name(j),
-                 tracking->joints[idx],
-                 tracking->joints[idx+1],
-                 tracking->joints[idx+2],
+                 tracking->skeleton.joints[j].x,
+                 tracking->skeleton.joints[j].y,
+                 tracking->skeleton.joints[j].z,
                  distance, distance / prev_dist,
-                 confidence[j]);
+                 tracking->skeleton.joints[j].confidence);
         }
     }
 }
@@ -1865,7 +1856,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         xmalloc(width * height * ctx->n_joints * sizeof(float));
     float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
                                          sizeof(float));
-    struct skeleton skeleton;
+    tracking->skeleton.distance = FLT_MAX;
     for (std::vector<float*>::iterator it = depth_images.begin();
          it != depth_images.end(); ++it) {
         start = get_time();
@@ -1896,12 +1887,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
                                      vfov, ctx->joint_params->joint_params);
         xfree(depth_img);
 
+        assert(candidate->n_joints == ctx->n_joints);
+
         end = get_time();
         duration = end - start;
 
-        struct skeleton candidate_skeleton(candidate);
-        build_skeleton(ctx, candidate_skeleton);
-        refine_skeleton(ctx, candidate_skeleton);
+        struct gm_skeleton candidate_skeleton(ctx->n_joints);
+        build_skeleton(ctx, candidate, candidate_skeleton);
+        refine_skeleton(ctx, candidate, candidate_skeleton);
+
+        free_joints(candidate);
 
         LOGI("Inferring joints and refinement took %.3f%s "
              "(confidence: %f, distance: %f)\n",
@@ -1909,25 +1904,23 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration),
              candidate_skeleton.confidence, candidate_skeleton.distance);
 
-        if (compare_skeletons(candidate_skeleton, skeleton)) {
-            if (skeleton.result) {
-                free_joints(skeleton.result);
-            }
-            std::swap(skeleton, candidate_skeleton);
+        if (compare_skeletons(candidate_skeleton, tracking->skeleton)) {
+            std::swap(tracking->skeleton, candidate_skeleton);
             std::swap(tracking->label_probs, label_probs);
-        } else {
-            free_joints(candidate);
         }
     }
     xfree(label_probs);
     xfree(weights);
 
+    if (tracking->skeleton.confidence <= 0.f) {
+        return false;
+    }
+
     start = get_time();
 
     // TODO: We just take the most confident skeleton above, but we should
     //       probably establish some thresholds and spit out multiple skeletons.
-    process_joint_inference(ctx, tracking, skeleton);
-    free_joints(skeleton.result);
+    process_joint_inference(ctx, tracking);
 
     end = get_time();
     duration = end - start;
@@ -2596,9 +2589,7 @@ tracking_state_free(struct gm_mem_pool *pool,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
 
     free(tracking->label_probs);
-    free(tracking->joints);
     free(tracking->joints_processed);
-    free(tracking->joints_predicted);
 
     free(tracking->depth);
 
@@ -2673,13 +2664,9 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
                                              labels_height *
                                              ctx->n_labels, sizeof(float));
 
-    tracking->joints = (float *)xcalloc(ctx->n_joints, 3 * sizeof(float));
+    tracking->skeleton.joints.resize(ctx->n_joints);
     tracking->joints_processed = (float *)
       xcalloc(ctx->n_joints, 3 * sizeof(float));
-    tracking->joints_predicted = (bool *)xmalloc(ctx->n_joints * sizeof(bool));
-    for (int i = 0; i < ctx->n_joints; i++) {
-        tracking->joints_predicted[i] = true;
-    }
 
     int depth_width = ctx->basis_depth_camera_intrinsics.width;
     int depth_height = ctx->basis_depth_camera_intrinsics.height;
@@ -3940,7 +3927,11 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
                ctx->n_joints * 3 * sizeof(float));
 
         for (int j = 0; j < ctx->n_joints; ++j) {
-            predict_from_previous_frames(ctx, j, timestamp, &predictions[j*3]);
+            Joint prediction;
+            predict_from_previous_frames(ctx, j, timestamp, prediction);
+            predictions[j*3] = prediction.x;
+            predictions[j*3+1] = prediction.y;
+            predictions[j*3+2] = prediction.z;
         }
     }
 
