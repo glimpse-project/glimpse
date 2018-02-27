@@ -2200,6 +2200,12 @@ gm_device_open(struct gm_logger *log,
     return dev;
 }
 
+enum gm_device_type
+gm_device_get_type(struct gm_device *dev)
+{
+    return dev->type;
+}
+
 bool
 gm_device_commit_config(struct gm_device *dev, char **err)
 {

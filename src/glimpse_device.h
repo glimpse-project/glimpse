@@ -82,6 +82,9 @@ gm_device_open(struct gm_logger *log,
                struct gm_device_config *config,
                char **err);
 
+enum gm_device_type
+gm_device_get_type(struct gm_device *dev);
+
 void
 gm_device_set_event_callback(struct gm_device *dev,
                              void (*event_callback)(struct gm_device_event *event,
