@@ -269,6 +269,14 @@ typedef struct {
     uint32_t rgba;
 } GlimpsePointXYZRGBA;
 
+struct gm_joint {
+    float x;
+    float y;
+    float z;
+    float confidence;
+    bool predicted;
+};
+
 struct gm_skeleton;
 
 #ifdef __cplusplus
@@ -336,10 +344,18 @@ gm_context_render_thread_hook(struct gm_context *ctx);
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
 
+/* Deprecated */
 float *
 gm_context_predict_joint_positions(struct gm_context *ctx,
                                    uint64_t timestamp,
                                    int *n_joints);
+
+struct gm_skeleton *
+gm_context_predict_skeleton(struct gm_context *ctx,
+                            uint64_t timestamp);
+
+void
+gm_skeleton_free(struct gm_skeleton *skeleton);
 
 const gm_intrinsics *
 gm_tracking_get_video_camera_intrinsics(struct gm_tracking *tracking);
@@ -358,15 +374,16 @@ gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
 const float *
 gm_tracking_get_depth(struct gm_tracking *tracking);
 
+/* Deprecated */
 const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,
                                 int *n_joints);
 
+const struct gm_skeleton *
+gm_tracking_get_skeleton(struct gm_tracking *tracking);
+
 uint64_t
 gm_tracking_get_timestamp(struct gm_tracking *tracking);
-
-bool
-gm_tracking_has_joints(struct gm_tracking *tracking);
 
 /* Creates an RGB visualisation of the label map. */
 void
@@ -409,6 +426,22 @@ gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *tracking,
                                           int *width,
                                           int *height,
                                           uint8_t **output);
+
+int
+gm_skeleton_get_n_joints(const struct gm_skeleton *skeleton);
+
+/* Gets the cumulative confidence of the joint values in the skeleton */
+float
+gm_skeleton_get_confidence(const struct gm_skeleton *skeleton);
+
+/* Gets the sum of the square of the difference between min/max bone lengths
+ * and actual bone lengths from the inferred skeleton.
+ */
+float
+gm_skeleton_get_distance(const struct gm_skeleton *skeleton);
+
+const struct gm_joint *
+gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint);
 
 #ifdef __cplusplus
 }
