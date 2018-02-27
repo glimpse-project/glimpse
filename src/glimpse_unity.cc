@@ -1135,6 +1135,8 @@ gm_unity_init(char *config_json)
     //
 #define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
     setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
+    setenv("GLIMPSE_RECORDING_PATH", ANDROID_ASSETS_ROOT "/ViewerRecording",
+           true);
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
     data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
 #else
@@ -1172,6 +1174,29 @@ gm_unity_init(char *config_json)
         gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
     }
 
+    const char *recordings_path = json_object_get_string(data->config, "recordingsPath");
+    if (recordings_path == NULL || strlen(recordings_path) == 0)
+        recordings_path = getenv("GLIMPSE_RECORDING_PATH");
+    if (!recordings_path)
+        recordings_path = gm_get_assets_root();
+    if (!recordings_path)
+        recordings_path = "glimpse_viewer_recording";
+    gm_debug(data->log, "Recording Path set to: %s", recordings_path);
+
+    bool have_recording = false;
+    char full_recording_path[512];
+    const char *recording_name = json_object_get_string(data->config, "recordingName");
+    if (recording_name && strlen(recording_name) > 0) {
+        gm_debug(data->log, "Recording Name: %s", recording_name);
+
+        snprintf(full_recording_path, sizeof(full_recording_path),
+                 "%s/%s", recordings_path, recording_name);
+
+        struct stat sb;
+        if (stat(full_recording_path, &sb) == 0)
+            have_recording = true;
+    }
+
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
@@ -1204,25 +1229,6 @@ gm_unity_init(char *config_json)
     }
 
     struct gm_device_config config = {};
-
-    const char *recordings_path = json_object_get_string(data->config, "recordingsPath");
-    if (recordings_path == NULL || strlen(recordings_path) == 0)
-        recordings_path = getenv("GLIMPSE_RECORDING_PATH");
-    if (!recordings_path)
-        recordings_path = gm_get_assets_root();
-    if (!recordings_path)
-        recordings_path = "glimpse_viewer_recording";
-
-    const char *recording_name = json_object_get_string(data->config, "recordingName");
-
-    char full_recording_path[512];
-    snprintf(full_recording_path, sizeof(full_recording_path),
-             "%s/%s", recordings_path, recording_name);
-
-    struct stat sb;
-    bool have_recording = false;
-    if (stat(full_recording_path, &sb) == 0)
-        have_recording = true;
 
     int device_choice = json_object_get_number(data->config, "device");
     switch (device_choice) {
