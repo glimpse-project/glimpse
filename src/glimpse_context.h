@@ -279,6 +279,31 @@ struct gm_joint {
 
 struct gm_skeleton;
 
+struct gm_prediction_vtable {
+    void (*free)(struct gm_prediction *self);
+    void (*add_breadcrumb)(struct gm_prediction *self,
+                           const char *name);
+};
+
+struct gm_prediction {
+    int ref;
+    struct gm_prediction_vtable *api;
+};
+
+inline struct gm_prediction *
+gm_prediction_ref(struct gm_prediction *prediction)
+{
+    prediction->ref++;
+    return prediction;
+}
+
+inline void
+gm_prediction_unref(struct gm_prediction *prediction)
+{
+    if (__builtin_expect(--(prediction->ref) < 1, 0))
+        prediction->api->free(prediction);
+}
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -344,15 +369,12 @@ gm_context_render_thread_hook(struct gm_context *ctx);
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
 
-/* Deprecated */
-float *
-gm_context_predict_joint_positions(struct gm_context *ctx,
-                                   uint64_t timestamp,
-                                   int *n_joints);
+struct gm_prediction *
+gm_context_get_prediction(struct gm_context *ctx,
+                          uint64_t timestamp);
 
-struct gm_skeleton *
-gm_context_predict_skeleton(struct gm_context *ctx,
-                            uint64_t timestamp);
+const struct gm_skeleton *
+gm_prediction_get_skeleton(struct gm_prediction *_prediction);
 
 void
 gm_skeleton_free(struct gm_skeleton *skeleton);

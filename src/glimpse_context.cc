@@ -229,6 +229,25 @@ struct gm_skeleton {
       distance(0.f) {}
 };
 
+struct gm_prediction_impl
+{
+    struct gm_prediction base;
+    struct gm_prediction_vtable vtable;
+    struct gm_mem_pool *pool;
+
+    struct gm_context *ctx;
+
+    uint64_t timestamp;
+
+    struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
+    int n_tracking;
+
+    struct gm_skeleton skeleton;
+
+    pthread_mutex_t trail_lock;
+    std::vector<struct trail_crumb> trail;
+};
+
 struct gm_tracking_impl
 {
     struct gm_tracking base;
@@ -407,6 +426,8 @@ struct gm_context
     struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
     struct gm_tracking_impl *latest_tracking;
     int n_tracking;
+
+    struct gm_mem_pool *prediction_pool;
 
     int n_labels;
 
@@ -1050,7 +1071,8 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
 }
 
 static bool
-predict_from_previous_frames(struct gm_context *ctx, int joint,
+predict_from_previous_frames(struct gm_tracking_impl **tracking_history,
+                             int tracking_history_size, int joint,
                              uint64_t timestamp, float *prediction)
 {
     // Use Catmull-rom interpolation to determine what the next joint position
@@ -1058,27 +1080,27 @@ predict_from_previous_frames(struct gm_context *ctx, int joint,
     // TODO: We assume that joint positions come at regular intervals,
     // which may not be true... Figure out something else for this.
 
-    if (ctx->n_tracking < 4)
+    if (tracking_history_size < 4)
         return false;
 
     glm::vec3 p[4] = {};
     int i;
-    for (i = 0; i <= ctx->n_tracking - 4; ++i) {
+    for (i = 0; i <= tracking_history_size - 4; ++i) {
         for (int j = 0; j < 4; ++j) {
-            struct gm_tracking_impl *tracking = ctx->tracking_history[i + j];
+            struct gm_tracking_impl *tracking = tracking_history[i + j];
             p[j].x = tracking->skeleton.joints[joint].x;
             p[j].y = tracking->skeleton.joints[joint].y;
             p[j].z = tracking->skeleton.joints[joint].z;
         }
 
-        if (ctx->tracking_history[i + 1]->frame->timestamp < timestamp) {
+        if (tracking_history[i + 1]->frame->timestamp < timestamp) {
             break;
         }
     }
 
-    float t = (timestamp - ctx->tracking_history[i]->frame->timestamp) /
-        (float)(ctx->tracking_history[i]->frame->timestamp -
-         ctx->tracking_history[i + 3]->frame->timestamp);
+    float t = (timestamp - tracking_history[i]->frame->timestamp) /
+        (float)(tracking_history[i]->frame->timestamp -
+         tracking_history[i + 3]->frame->timestamp);
     glm::vec3 q = 0.5f *
         ((2.f * p[1]) +
          (-p[0] + p[2]) * t +
@@ -1101,7 +1123,8 @@ distance_between(float *point1, float *point2)
 }
 
 static bool
-compare_skeletons(const struct gm_skeleton &skel1, const struct gm_skeleton &skel2)
+compare_skeletons(const struct gm_skeleton &skel1,
+                  const struct gm_skeleton &skel2)
 {
     return (skel1.distance < skel2.distance) ||
            (skel1.distance == skel2.distance &&
@@ -1265,7 +1288,8 @@ process_joint_inference(struct gm_context *ctx,
              distance > (prev_dist * ctx->joint_scale_threshold))) {
             float prediction[3];
             if (!predict_from_previous_frames(
-                    ctx, j, tracking->frame->timestamp,
+                    ctx->tracking_history, ctx->n_tracking,
+                    j, tracking->frame->timestamp,
                     prediction)) {
                 LOGI("Prediction for joint %s failed", joint_name(j));
                 continue;
@@ -2355,6 +2379,15 @@ mem_pool_acquire_tracking(struct gm_mem_pool *pool)
     return tracking;
 }
 
+static struct gm_prediction_impl *
+mem_pool_acquire_prediction(struct gm_mem_pool *pool)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)
+        mem_pool_acquire_resource(pool);
+    prediction->base.ref = 1;
+    return prediction;
+}
+
 void
 gm_context_rotate_intrinsics(struct gm_context *ctx,
                              const struct gm_intrinsics *intrinsics_in,
@@ -2709,6 +2742,80 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 }
 
 static void
+prediction_free(struct gm_mem_pool *pool,
+                void *self,
+                void *user_data)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
+
+    for (int i = 0; i < prediction->n_tracking; ++i) {
+        gm_tracking_unref((struct gm_tracking *)
+                          prediction->tracking_history[i]);
+    }
+
+    delete prediction;
+}
+
+static void
+prediction_recycle(struct gm_prediction *self)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
+    struct gm_mem_pool *pool = prediction->pool;
+
+    gm_assert(prediction->ctx->log, prediction->base.ref == 0,
+              "Unbalanced prediction unref");
+
+    for (int i = 0; i < prediction->n_tracking; ++i) {
+        gm_tracking_unref((struct gm_tracking *)
+                          prediction->tracking_history[i]);
+    }
+    prediction->n_tracking = 0;
+
+    prediction->trail.clear();
+
+    mem_pool_recycle_resource(pool, prediction);
+}
+
+static void
+prediction_add_breadcrumb(struct gm_prediction *self, const char *tag)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
+    struct trail_crumb crumb;
+
+    gm_assert(prediction->ctx->log, prediction->base.ref >= 0,
+              "Use of frame after free");
+
+    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
+
+    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
+                                  1, // skip top stack frame
+                                  10);
+
+    pthread_mutex_lock(&prediction->trail_lock);
+    prediction->trail.push_back(crumb);
+    pthread_mutex_unlock(&prediction->trail_lock);
+}
+
+static void *
+prediction_alloc(struct gm_mem_pool *pool, void *user_data)
+{
+    struct gm_context *ctx = (struct gm_context *)user_data;
+    struct gm_prediction_impl *prediction = new gm_prediction_impl();
+
+    prediction->base.ref = 1;
+    prediction->base.api = &prediction->vtable;
+
+    prediction->vtable.free = prediction_recycle;
+    prediction->vtable.add_breadcrumb = prediction_add_breadcrumb;
+
+    prediction->pool = pool;
+
+    prediction->ctx = ctx;
+
+    return (void *)prediction;
+}
+
+static void
 print_trail_for(struct gm_logger *log, void *object, std::vector<struct trail_crumb> *trail)
 {
     gm_debug(log, "Trail for %p:", object);
@@ -2769,6 +2876,7 @@ gm_context_clear_tracking(struct gm_context *ctx)
                      print_tracking_info_cb,
                      ctx);
     mem_pool_free_resources(ctx->tracking_pool);
+    mem_pool_free_resources(ctx->prediction_pool);
 }
 
 static int
@@ -2885,6 +2993,11 @@ gm_context_destroy(struct gm_context *ctx)
 
     gm_context_stop_tracking(ctx);
 
+    /* Free the prediction pool. The user must have made sure to unref any
+     * predictions before destroying the context.
+     */
+    mem_pool_free(ctx->prediction_pool);
+
     /* Make sure all resourced are returned to their pools before destroying
      * the pools which will in-turn destroy the resources...
      */
@@ -2948,6 +3061,13 @@ gm_context_new(struct gm_logger *logger, char **err)
                                         tracking_state_alloc,
                                         tracking_state_free,
                                         ctx); // user data
+
+    ctx->prediction_pool = mem_pool_alloc(logger,
+                                          "prediction",
+                                          INT_MAX,
+                                          prediction_alloc,
+                                          prediction_free,
+                                          ctx);
 
     /* Load the decision trees immediately so we know how many labels we're
      * dealing with asap.
@@ -3932,12 +4052,13 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
 }
 
 static int
-get_closest_tracking_frame(struct gm_context *ctx, uint64_t timestamp)
+get_closest_tracking_frame(struct gm_tracking_impl **tracking_history,
+                           int n_tracking, uint64_t timestamp)
 {
     int closest_frame = 0;
     uint64_t closest_diff = UINT64_MAX;
-    for (int i = 0; i < ctx->n_tracking; ++i) {
-        uint64_t *t1 = &ctx->tracking_history[i]->frame->timestamp;
+    for (int i = 0; i < n_tracking; ++i) {
+        uint64_t *t1 = &tracking_history[i]->frame->timestamp;
         uint64_t diff = (*t1 > timestamp) ?
             (*t1 - timestamp) : (timestamp - *t1);
         if (diff < closest_diff) {
@@ -3966,13 +4087,16 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
 
     if (ctx->n_tracking) {
-        int closest_frame = get_closest_tracking_frame(ctx, timestamp);
+        int closest_frame =
+            get_closest_tracking_frame(ctx->tracking_history, ctx->n_tracking,
+                                       timestamp);
         memcpy(predictions,
                ctx->tracking_history[closest_frame]->joints_processed,
                ctx->n_joints * 3 * sizeof(float));
 
         for (int j = 0; j < ctx->n_joints; ++j) {
-            predict_from_previous_frames(ctx, j, timestamp, &predictions[j*3]);
+            predict_from_previous_frames(ctx->tracking_history, ctx->n_tracking,
+                                         j, timestamp, &predictions[j*3]);
         }
     }
 
@@ -3981,36 +4105,53 @@ gm_context_predict_joint_positions(struct gm_context *ctx,
     return predictions;
 }
 
-struct gm_skeleton *
-gm_context_predict_skeleton(struct gm_context *ctx, uint64_t timestamp)
+struct gm_prediction *
+gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 {
     if (!ctx->n_tracking) {
         return NULL;
     }
 
-    struct gm_skeleton *skeleton = new struct gm_skeleton(ctx->n_joints);
+    struct gm_prediction_impl *prediction =
+        mem_pool_acquire_prediction(ctx->prediction_pool);
 
+    prediction->timestamp = timestamp;
+
+    // Copy the current tracking history from the context
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
 
-    int closest_frame = get_closest_tracking_frame(ctx, timestamp);
-    *skeleton = ctx->tracking_history[closest_frame]->skeleton;
-
-    for (int j = 0; j < ctx->n_joints; ++j) {
-        if (predict_from_previous_frames(ctx, j, timestamp,
-                                         &skeleton->joints[j].x)) {
-            skeleton->joints[j].predicted = true;
-        }
+    for (int i = 0; i < ctx->n_tracking; ++i) {
+        prediction->tracking_history[i] = ctx->tracking_history[i];
+        gm_tracking_ref(&prediction->tracking_history[i]->base);
     }
+    prediction->n_tracking = ctx->n_tracking;
 
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
-    return skeleton;
+    // Pre-fill the skeleton with the closest frame
+    int closest_frame =
+        get_closest_tracking_frame(prediction->tracking_history,
+                                   prediction->n_tracking, timestamp);
+    prediction->skeleton =
+        prediction->tracking_history[closest_frame]->skeleton;
+
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        if (predict_from_previous_frames(prediction->tracking_history,
+                                         prediction->n_tracking, j, timestamp,
+                                         &prediction->skeleton.joints[j].x)) {
+            prediction->skeleton.joints[j].predicted = true;
+        }
+    }
+
+    return &prediction->base;
 }
 
-void
-gm_skeleton_free(struct gm_skeleton *skeleton)
+const struct gm_skeleton *
+gm_prediction_get_skeleton(struct gm_prediction *_prediction)
 {
-    delete skeleton;
+    struct gm_prediction_impl *prediction =
+        (struct gm_prediction_impl *)_prediction;
+    return &prediction->skeleton;
 }
 
 void

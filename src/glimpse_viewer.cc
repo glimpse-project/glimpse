@@ -803,11 +803,12 @@ update_tracking_buffers(Data *data)
     /*
      * Update labelled point cloud
      */
-    struct gm_skeleton *skeleton =
-        gm_context_predict_skeleton(data->ctx, data->last_video_frame->timestamp);
-    if (!skeleton) {
+    struct gm_prediction *prediction =
+        gm_context_get_prediction(data->ctx, data->last_video_frame->timestamp);
+    if (!prediction) {
         return;
     }
+    const struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
 
     // TODO: Take confidence into account to decide whether or not to show
     //       a particular joint position.
@@ -860,7 +861,7 @@ update_tracking_buffers(Data *data)
     // Clean-up
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    gm_skeleton_free(skeleton);
+    gm_prediction_unref(prediction);
 }
 
 static void
