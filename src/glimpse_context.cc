@@ -3611,7 +3611,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 5000.f;
     ctx->properties.push_back(prop);
 
-    ctx->skeleton_max_distance = 0.05f;
+    ctx->skeleton_max_distance = 0.2f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "skeleton_max_distance";
