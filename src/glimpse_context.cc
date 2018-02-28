@@ -3611,7 +3611,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 5000.f;
     ctx->properties.push_back(prop);
 
-    ctx->skeleton_max_distance = 0.2f;
+    ctx->skeleton_max_distance = 0.05f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "skeleton_max_distance";
@@ -4175,14 +4175,6 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
     }
 
     return &prediction->base;
-}
-
-uint64_t
-gm_prediction_get_timestamp(struct gm_prediction *_prediction)
-{
-    struct gm_prediction_impl *prediction =
-        (struct gm_prediction_impl *)_prediction;
-    return prediction->timestamp;
 }
 
 const struct gm_skeleton *
