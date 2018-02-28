@@ -455,10 +455,14 @@ struct gm_context
 
     bool joint_refinement;
     int joint_max_predictions;
+    float joint_max_prediction_delta;
     float min_confidence;
     float joint_move_threshold;
     float joint_max_travel;
     float joint_scale_threshold;
+
+    float skeleton_min_confidence;
+    float skeleton_max_distance;
 
     int n_depth_color_stops;
     float depth_color_stops_range;
@@ -1072,8 +1076,8 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
 
 static bool
 predict_from_previous_frames(struct gm_tracking_impl **tracking_history,
-                             int tracking_history_size, int joint,
-                             uint64_t timestamp, float *prediction)
+                             int tracking_history_size, uint64_t max_delta,
+                             int joint, uint64_t timestamp, float *prediction)
 {
     // Use Catmull-rom interpolation to determine what the next joint position
     // might be. We assume tracking history is stored in timestamp-order.
@@ -1091,6 +1095,15 @@ predict_from_previous_frames(struct gm_tracking_impl **tracking_history,
             p[j].x = tracking->skeleton.joints[joint].x;
             p[j].y = tracking->skeleton.joints[joint].y;
             p[j].z = tracking->skeleton.joints[joint].z;
+
+            if (j) {
+                struct gm_tracking_impl *last_tracking =
+                    tracking_history[i + j - 1];
+                if (last_tracking->frame->timestamp -
+                    tracking->frame->timestamp > max_delta) {
+                    return false;
+                }
+            }
         }
 
         if (tracking_history[i + 1]->frame->timestamp < timestamp) {
@@ -1166,6 +1179,7 @@ build_skeleton(struct gm_context *ctx,
             skeleton.joints[joint_no].y = joint->y;
             skeleton.joints[joint_no].z = joint->z;
             skeleton.joints[joint_no].confidence = joint->confidence;
+            skeleton.joints[joint_no].predicted = false;
         } else {
             // We don't want skeletons with missing joints to rank higher than
             // full skeletons, so add some large amount to the distance
@@ -1211,6 +1225,7 @@ refine_skeleton(struct gm_context *ctx,
             candidate_skeleton.joints[j].y = joint->y;
             candidate_skeleton.joints[j].z = joint->z;
             candidate_skeleton.joints[j].confidence = joint->confidence;
+            candidate_skeleton.joints[j].predicted = false;
             candidate_skeleton.confidence += joint->confidence;
             build_skeleton(ctx, result, candidate_skeleton, j, j);
 
@@ -1244,22 +1259,22 @@ process_joint_inference(struct gm_context *ctx,
         // Find the index of the last 2 unpredicted frames
         int np = 0;
         int prev[2];
+        int prev_frames = 0;
         for (int i = 0;
-             i < std::min(ctx->n_tracking,
-                          ctx->joint_max_predictions) && np < 2; ++i) {
-            if (ctx->tracking_history[i]->skeleton.
-                joints[j].confidence <= 0.f ||
-                ctx->tracking_history[i]->skeleton.joints[j].predicted) {
+             i < ctx->n_tracking && prev_frames < 2 &&
+             np < ctx->joint_max_predictions; ++i) {
+            if (ctx->tracking_history[i]->skeleton.joints[j].predicted) {
+                ++np;
                 continue;
             }
 
-            prev[np++] = i;
+            prev[prev_frames++] = i;
         }
 
-        // If we couldn't find 2 contiguous unpredicted frames in the tracking
-        // history, give up on prediction and wait for the buffer to fill with
-        // unpredicted values
-        if (np < 2) {
+        // If we couldn't find 2 unpredicted frames in the tracking history,
+        // give up on prediction and wait for the buffer to fill with new,
+        // unpredicted values.
+        if (prev_frames < 2) {
             LOGI("Joint %s position: %.2f, %.2f, %.2f",
                  joint_name(j),
                  tracking->skeleton.joints[j].x,
@@ -1289,6 +1304,7 @@ process_joint_inference(struct gm_context *ctx,
             float prediction[3];
             if (!predict_from_previous_frames(
                     ctx->tracking_history, ctx->n_tracking,
+                    (uint64_t)(ctx->joint_max_prediction_delta * 2000000.0),
                     j, tracking->frame->timestamp,
                     prediction)) {
                 LOGI("Prediction for joint %s failed", joint_name(j));
@@ -1945,7 +1961,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
     xfree(label_probs);
     xfree(weights);
 
-    if (tracking->skeleton.confidence <= 0.f) {
+    if (tracking->skeleton.confidence < ctx->skeleton_min_confidence ||
+        tracking->skeleton.distance > ctx->skeleton_max_distance) {
         return false;
     }
 
@@ -2567,6 +2584,19 @@ detector_thread_cb(void *data)
         if (tracked) {
             tracking->success = true;
 
+            // Clear the tracking history if we've gone back in time
+            if (ctx->n_tracking && tracking->frame->timestamp <
+                ctx->tracking_history[0]->frame->timestamp) {
+                gm_warn(ctx->log,
+                        "Tracking has gone back in time, clearing history");
+
+                for (int i = 0; i < ctx->n_tracking; ++i) {
+                    gm_tracking_unref(&ctx->tracking_history[i]->base);
+                    ctx->tracking_history[i] = NULL;
+                }
+                ctx->n_tracking = 0;
+            }
+
             for (int i = TRACK_FRAMES - 1; i > 0; i--)
                 std::swap(ctx->tracking_history[i], ctx->tracking_history[i - 1]);
             if (ctx->tracking_history[0]) {
@@ -2575,7 +2605,8 @@ detector_thread_cb(void *data)
                          ctx->tracking_history[0]->base.ref);
                 gm_tracking_unref(&ctx->tracking_history[0]->base);
             }
-            ctx->tracking_history[0] = tracking;
+            ctx->tracking_history[0] = (struct gm_tracking_impl *)
+                gm_tracking_ref(&tracking->base);
 
             gm_debug(ctx->log, "adding %p to tracking history fifo (ref = %d)\n",
                      ctx->tracking_history[0],
@@ -2590,26 +2621,15 @@ detector_thread_cb(void *data)
                          ctx->tracking_history[i],
                          ctx->tracking_history[i]->base.ref);
             }
-
-            if (ctx->latest_tracking)
-                gm_tracking_unref(&ctx->latest_tracking->base);
-            ctx->latest_tracking =
-                (struct gm_tracking_impl *)gm_tracking_ref(&tracking->base);
-        } else {
-            /* Clear the tracking history once we fail to detect a person */
-            for (int i = 0; i < ctx->n_tracking; i++) {
-                gm_debug(ctx->log, "clearing %p out of tracking history fifo (ref = %d)\n",
-                         ctx->tracking_history[i],
-                         ctx->tracking_history[i]->base.ref);
-                gm_tracking_unref(&ctx->tracking_history[i]->base);
-                ctx->tracking_history[i] = NULL;
-            }
-            ctx->n_tracking = 0;
-
-            if (ctx->latest_tracking)
-                gm_tracking_unref(&ctx->latest_tracking->base);
-            ctx->latest_tracking = tracking;
         }
+
+        /* Hold onto the latest tracking regardless of whether it was
+         * successful so that a user can still access the all the information
+         * related to tracking.
+         */
+        if (ctx->latest_tracking)
+            gm_tracking_unref(&ctx->latest_tracking->base);
+        ctx->latest_tracking = tracking;
 
         pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
@@ -3522,6 +3542,17 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.max = TRACK_FRAMES - 1;
     ctx->properties.push_back(prop);
 
+    ctx->joint_max_prediction_delta = 200.f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "joint_max_prediction_delta";
+    prop.desc = "Maximum time to predict from a tracking frame (in ms)";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->joint_max_prediction_delta;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1000.f;
+    ctx->properties.push_back(prop);
+
     ctx->min_confidence = 300.f;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -3567,6 +3598,29 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->joint_scale_threshold;
     prop.float_state.min = 1.5f;
     prop.float_state.max = 20.f;
+    ctx->properties.push_back(prop);
+
+    ctx->skeleton_min_confidence = 1000.f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "skeleton_min_skeleton";
+    prop.desc = "Minimum cumulative joint confidence of a skeleton";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->skeleton_min_confidence;
+    prop.float_state.min = 50.f;
+    prop.float_state.max = 5000.f;
+    ctx->properties.push_back(prop);
+
+    ctx->skeleton_max_distance = 0.05f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "skeleton_max_distance";
+    prop.desc = "Maximum cumulative square distance from min/max testing "
+                "bone lengths";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->skeleton_max_distance;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
@@ -4071,54 +4125,20 @@ get_closest_tracking_frame(struct gm_tracking_impl **tracking_history,
     return closest_frame;
 }
 
-float *
-gm_context_predict_joint_positions(struct gm_context *ctx,
-                                   uint64_t timestamp,
-                                   int *n_joints)
-{
-    float *predictions = (float*)calloc(ctx->n_joints * 3, sizeof(float));
-    if (n_joints) *n_joints = ctx->n_joints;
-
-    /* We don't control what thread this API is used from so we need to ensure
-     * the history that the prediction is based on will remain consistent while
-     * predicting each joint. The tracking thread takes this lock before before
-     * updating the history...
-     */
-    pthread_mutex_lock(&ctx->tracking_swap_mutex);
-
-    if (ctx->n_tracking) {
-        int closest_frame =
-            get_closest_tracking_frame(ctx->tracking_history, ctx->n_tracking,
-                                       timestamp);
-        memcpy(predictions,
-               ctx->tracking_history[closest_frame]->joints_processed,
-               ctx->n_joints * 3 * sizeof(float));
-
-        for (int j = 0; j < ctx->n_joints; ++j) {
-            predict_from_previous_frames(ctx->tracking_history, ctx->n_tracking,
-                                         j, timestamp, &predictions[j*3]);
-        }
-    }
-
-    pthread_mutex_unlock(&ctx->tracking_swap_mutex);
-
-    return predictions;
-}
-
 struct gm_prediction *
 gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 {
-    if (!ctx->n_tracking) {
-        return NULL;
-    }
-
     struct gm_prediction_impl *prediction =
         mem_pool_acquire_prediction(ctx->prediction_pool);
 
-    prediction->timestamp = timestamp;
-
     // Copy the current tracking history from the context
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
+
+    if (!ctx->n_tracking) {
+        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+        gm_prediction_unref(&prediction->base);
+        return NULL;
+    }
 
     for (int i = 0; i < ctx->n_tracking; ++i) {
         prediction->tracking_history[i] = ctx->tracking_history[i];
@@ -4127,6 +4147,16 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
     prediction->n_tracking = ctx->n_tracking;
 
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+
+    // Validate the timestamp
+    uint64_t max_delta = (uint64_t)
+        (ctx->joint_max_prediction_delta * 1000000.0);
+    timestamp =
+        std::max(ctx->tracking_history[ctx->n_tracking - 1]->frame->
+                 timestamp - max_delta,
+                 std::min(ctx->tracking_history[0]->frame->timestamp +
+                          max_delta, timestamp));
+    prediction->timestamp = timestamp;
 
     // Pre-fill the skeleton with the closest frame
     int closest_frame =
@@ -4137,7 +4167,8 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 
     for (int j = 0; j < ctx->n_joints; ++j) {
         if (predict_from_previous_frames(prediction->tracking_history,
-                                         prediction->n_tracking, j, timestamp,
+                                         prediction->n_tracking, max_delta * 2,
+                                         j, timestamp,
                                          &prediction->skeleton.joints[j].x)) {
             prediction->skeleton.joints[j].predicted = true;
         }
