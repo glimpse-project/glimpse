@@ -1169,7 +1169,7 @@ gm_unity_init(char *config_json)
 
     const char *assets_path = json_object_get_string(data->config, "assetsPath");
     if (assets_path && strlen(assets_path) != 0) {
-        gm_set_assets_root(data->log, getenv(assets_path));
+        gm_set_assets_root(data->log, assets_path);
     } else {
         gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
     }
@@ -1278,46 +1278,46 @@ gm_unity_init(char *config_json)
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
+gm_unity_context_get_prediction(intptr_t plugin_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
 
-    gm_debug(data->log, "Get Latest Tracking %p", tracking);
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    uint64_t timestamp =
+        ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
 
-    return (intptr_t)tracking;
+    struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
+                                                                 timestamp);
+
+    gm_debug(data->log, "Get prediction %p at %" PRIu64, prediction, timestamp);
+
+    return (intptr_t)prediction;
 }
 
 extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_get_joint_positions(intptr_t plugin_handle,
-                                      intptr_t tracking_handle)
+gm_unity_prediction_get_joint(intptr_t plugin_handle,
+                              intptr_t prediction_handle,
+                              int joint)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+    struct gm_prediction *prediction =
+        (struct gm_prediction *)prediction_handle;
 
-    gm_debug(data->log, "Tracking: Get Label Probabilities");
+    gm_debug(data->log, "Prediction: Get Joint %d position", joint);
 
-    const float *joints = gm_tracking_get_joint_positions(tracking, NULL);
-
-    return joints;
-}
-
-extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
-                               intptr_t tracking_handle)
-{
-    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
-
-    return gm_tracking_has_skeleton(tracking);
+    const gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
+    return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
 }
 
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_get_timestamp(intptr_t plugin_handle,
-                                intptr_t tracking_handle)
+gm_unity_prediction_get_timestamp(intptr_t plugin_handle,
+                                  intptr_t prediction_handle)
 {
-    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+    struct gm_prediction *prediction =
+        (struct gm_prediction *)prediction_handle;
 
-    return gm_tracking_get_timestamp(tracking);
+    return gm_prediction_get_timestamp(prediction);
 }
 
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1330,15 +1330,16 @@ gm_unity_get_time(intptr_t plugin_handle)
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
+gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+    struct gm_prediction *prediction =
+        (struct gm_prediction *)prediction_handle;
 
-    gm_debug(data->log, "Tracking Unref %p (ref = %d)",
-             tracking,
-             tracking->ref);
-    gm_tracking_unref(tracking);
+    gm_debug(data->log, "Prediction Unref %p (ref = %d)",
+             prediction,
+             prediction->ref);
+    gm_prediction_unref(prediction);
 }
 
 static glm::mat4
