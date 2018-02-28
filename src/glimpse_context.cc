@@ -4177,6 +4177,14 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
     return &prediction->base;
 }
 
+uint64_t
+gm_prediction_get_timestamp(struct gm_prediction *_prediction)
+{
+    struct gm_prediction_impl *prediction =
+        (struct gm_prediction_impl *)_prediction;
+    return prediction->timestamp;
+}
+
 const struct gm_skeleton *
 gm_prediction_get_skeleton(struct gm_prediction *_prediction)
 {
