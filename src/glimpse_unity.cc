@@ -1169,7 +1169,7 @@ gm_unity_init(char *config_json)
 
     const char *assets_path = json_object_get_string(data->config, "assetsPath");
     if (assets_path && strlen(assets_path) != 0) {
-        gm_set_assets_root(data->log, getenv(assets_path));
+        gm_set_assets_root(data->log, assets_path);
     } else {
         gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
     }
