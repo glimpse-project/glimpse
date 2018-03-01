@@ -1320,15 +1320,6 @@ gm_unity_tracking_get_timestamp(intptr_t plugin_handle,
     return gm_tracking_get_timestamp(tracking);
 }
 
-extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_get_time(intptr_t plugin_handle)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 {
@@ -1339,6 +1330,65 @@ gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
              tracking,
              tracking->ref);
     gm_tracking_unref(tracking);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_prediction(intptr_t plugin_handle, uint64_t timestamp)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
+                                                                 timestamp);
+
+    gm_debug(data->log, "Get Prediction(%" PRIu64 ") %p",
+             timestamp, prediction);
+
+    return (intptr_t)prediction;
+}
+
+extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prediction_get_joint(intptr_t plugin_handle,
+                              intptr_t prediction_handle,
+                              int joint)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_prediction *prediction =
+        (struct gm_prediction *)prediction_handle;
+
+    gm_debug(data->log, "Prediction: Get Joint %d position", joint);
+
+    const gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
+    return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
+}
+
+extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prediction_get_timestamp(intptr_t plugin_handle,
+                                  intptr_t prediction_handle)
+{
+    struct gm_prediction *prediction =
+        (struct gm_prediction *)prediction_handle;
+
+    return gm_prediction_get_timestamp(prediction);
+}
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_prediction *prediction = (struct gm_prediction *)prediction_handle;
+
+    gm_debug(data->log, "Prediction Unref %p (ref = %d)",
+             prediction,
+             prediction->ref);
+    gm_prediction_unref(prediction);
+}
+
+extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_time(intptr_t plugin_handle)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 static glm::mat4
