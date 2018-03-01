@@ -145,13 +145,17 @@ struct glimpse_data
 
     bool registered_gl_debug_callback;
 
-    GLuint yuv_frame_video_program;
     GLuint video_program;
 
     GLuint attrib_quad_bo;
 
-    GLuint attrib_quad_pos;
-    GLuint attrib_quad_tex_coords;
+    /* Even though glEnable/DisableVertexAttribArray take unsigned integers,
+     * these are signed because GL's glGetAttribLocation api returns attribute
+     * locations as signed values where -1 means the attribute isn't
+     * active. ...!?
+     */
+    GLint attrib_quad_pos;
+    GLint attrib_quad_tex_coords;
 
     GLuint uniform_tex_sampler;
 };
@@ -734,7 +738,6 @@ render_ar_video_background(struct glimpse_data *data)
 {
     gm_assert(data->log, !!data->ctx, "render_ar_video_background, NULL ctx");
 
-
     if (data->device_type != GM_DEVICE_TANGO) {
         /* Upload latest video frame if it's changed...
         */
@@ -758,27 +761,21 @@ render_ar_video_background(struct glimpse_data *data)
 
             pthread_mutex_unlock(&data->swap_frames_lock);
 
-            /*
-             * Update video from camera
-             */
-            glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
-
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-            /* NB: gles2 only allows npot textures with clamp to edge
-             * coordinate wrapping
-             */
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-            void *video_front = new_frame->video->data;
-            enum gm_format video_format = new_frame->video_format;
-
             if (data->gl_vid_tex == 0) {
                 glGenTextures(1, &data->gl_vid_tex);
                 glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
             }
+
+            glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+            void *video_front = new_frame->video->data;
+            enum gm_format video_format = new_frame->video_format;
 
             switch (video_format) {
             case GM_FORMAT_LUMINANCE_U8:
@@ -838,19 +835,19 @@ render_ar_video_background(struct glimpse_data *data)
             glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
             glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
         }
+        if (data->last_video_frame) {
+#ifdef USE_TANGO
+            if (TangoService_updateTextureExternalOes(
+                    TANGO_CAMERA_COLOR, data->gl_vid_tex,
+                    NULL /* ignore timestamp */) != TANGO_SUCCESS)
+            {
+                gm_warn(data->log, "Failed to get a color image.");
+            }
+#endif
+        }
     }
 
     if (data->gl_vid_tex != 0 && data->last_video_frame != NULL) {
-
-#ifdef USE_TANGO
-        if (data->device_type == GM_DEVICE_TANGO &&
-            TangoService_updateTextureExternalOes(
-                TANGO_CAMERA_COLOR, data->gl_vid_tex,
-                NULL /* ignore timestamp */) != TANGO_SUCCESS)
-        {
-            gm_warn(data->log, "Failed to get a color image.");
-        }
-#endif
 
         enum gm_rotation rotation = data->last_video_frame->camera_rotation;
 
