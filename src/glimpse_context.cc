@@ -1092,9 +1092,9 @@ predict_from_previous_frames(struct gm_tracking_impl **tracking_history,
     for (i = 0; i <= tracking_history_size - 4; ++i) {
         for (int j = 0; j < 4; ++j) {
             struct gm_tracking_impl *tracking = tracking_history[i + j];
-            p[j].x = tracking->skeleton.joints[joint].x;
-            p[j].y = tracking->skeleton.joints[joint].y;
-            p[j].z = tracking->skeleton.joints[joint].z;
+            p[3-j].x = tracking->skeleton.joints[joint].x;
+            p[3-j].y = tracking->skeleton.joints[joint].y;
+            p[3-j].z = tracking->skeleton.joints[joint].z;
 
             if (j) {
                 struct gm_tracking_impl *last_tracking =
@@ -1111,9 +1111,10 @@ predict_from_previous_frames(struct gm_tracking_impl **tracking_history,
         }
     }
 
-    float t = (timestamp - tracking_history[i]->frame->timestamp) /
-        (float)(tracking_history[i]->frame->timestamp -
-         tracking_history[i + 3]->frame->timestamp);
+    uint64_t time1 = tracking_history[i + 3]->frame->timestamp;
+    uint64_t time2 = tracking_history[i]->frame->timestamp;
+    float t = (timestamp - time1) / (float)(time2 - time1);
+
     glm::vec3 q = 0.5f *
         ((2.f * p[1]) +
          (-p[0] + p[2]) * t +
