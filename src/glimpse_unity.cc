@@ -1385,10 +1385,7 @@ gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_time(intptr_t plugin_handle)
 {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    return get_time();
 }
 
 static glm::mat4
