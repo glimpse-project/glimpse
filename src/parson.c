@@ -778,7 +778,7 @@ static JSON_Value * parse_number_value(const char **string) {
     char *end;
     double number = 0;
     errno = 0;
-    /* Create a "C" locale to force strtod to use '.' as separator */
+    /* Create a "C" locale to force strtod to use '.' as decimal separator */
     locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
 	  if (c_locale == (locale_t)0) {
         return NULL;
