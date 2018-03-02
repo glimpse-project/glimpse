@@ -1,6 +1,7 @@
 /*
  Parson ( http://kgabis.github.com/parson/ )
  Copyright (c) 2012 - 2017 Krzysztof Gabis
+ Modified work Copyright (c) 2018 Glimp IP Ltd
 
  Permission is hereby granted, free of charge, to any person obtaining a copy
  of this software and associated documentation files (the "Software"), to deal
@@ -34,6 +35,7 @@
 #include <ctype.h>
 #include <math.h>
 #include <errno.h>
+#include <locale.h>
 
 /* Apparently sscanf is not implemented in some "standard" libraries, so don't use it, if you
  * don't have to. */
@@ -776,7 +778,15 @@ static JSON_Value * parse_number_value(const char **string) {
     char *end;
     double number = 0;
     errno = 0;
+    /* Create a "C" locale to force strtod to use '.' as separator */
+    locale_t c_locale = newlocale(LC_NUMERIC_MASK, "C", (locale_t)0);
+	  if (c_locale == (locale_t)0) {
+        return NULL;
+    }
+    locale_t old_locale = uselocale(c_locale);
     number = strtod(*string, &end);
+    uselocale(old_locale);
+    freelocale(c_locale);
     if (errno || !is_decimal(*string, end - *string)) {
         return NULL;
     }
