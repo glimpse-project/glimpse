@@ -29,11 +29,11 @@
 #include "xalloc.h"
 #include "glimpse_log.h"
 
-unsigned int
-gm_gl_load_shader(struct gm_logger *log,
-                  int type,
-                  const char *source,
-                  char **err)
+static unsigned int
+load_shader(struct gm_logger *log,
+            int type,
+            const char *source,
+            char **err)
 {
     GLuint shader = glCreateShader(type);
     if (!shader)
@@ -69,11 +69,11 @@ gm_gl_create_program(struct gm_logger *log,
                      const char *fragment_source,
                      char **err)
 {
-    GLuint vertex_shader = gm_gl_load_shader(log, GL_VERTEX_SHADER, vertex_source, err);
+    GLuint vertex_shader = load_shader(log, GL_VERTEX_SHADER, vertex_source, err);
     if (!vertex_shader)
         return 0;
 
-    GLuint fragment_shader = gm_gl_load_shader(log, GL_FRAGMENT_SHADER, fragment_source, err);
+    GLuint fragment_shader = load_shader(log, GL_FRAGMENT_SHADER, fragment_source, err);
     if (!fragment_shader) {
         glDeleteShader(vertex_shader);
         return 0;
@@ -107,6 +107,9 @@ gm_gl_create_program(struct gm_logger *log,
         glDeleteProgram(program);
         program = 0;
     }
+
+    glDeleteShader(vertex_shader);
+    glDeleteShader(fragment_shader);
 
     return program;
 }

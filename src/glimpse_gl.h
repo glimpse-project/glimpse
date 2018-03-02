@@ -31,17 +31,10 @@ extern "C" {
 #endif
 
 unsigned int
-gm_gl_load_shader(struct gm_logger *log,
-                  int type,
-                  const char *source,
-                  char **err);
-
-unsigned int
 gm_gl_create_program(struct gm_logger *log,
                      const char *vertex_source,
                      const char *fragment_source,
                      char **err);
-
 
 #ifdef __cplusplus
 }
