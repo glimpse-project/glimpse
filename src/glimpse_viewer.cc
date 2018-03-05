@@ -63,6 +63,13 @@
 #    include <imgui_impl_glfw_gles3.h>
 #endif
 
+#define GLSL_SHADER_VERSION "#version 300 es\n"
+
+#ifdef USE_TANGO
+#include <tango_client_api.h>
+#include <tango_support_api.h>
+#endif
+
 #include <profiler.h>
 
 #include "parson.h"
@@ -115,6 +122,9 @@ typedef struct _Data
     bool initialized;
     bool gl_initialized;
 
+    /* Some GL state is re-initialized each time we switch devices */
+    bool device_gl_initialized;
+
     struct gm_context *ctx;
 
 #ifdef USE_GLFW
@@ -124,6 +134,17 @@ typedef struct _Data
 #endif
     int win_width;
     int win_height;
+
+    /* Normally this is 'false' and we show lots of intermediate debug buffers
+     * but e.g. if running on Android with Tango then we try to more closely
+     * represent a 'real' augmented reality app with fullscreen video plus a
+     * skeleton overlay so we can better judge the base-line performance we
+     * can expect to achieve for these kinds of applications.
+     * (uploading all of the debug textures can significantly impact the
+     * runtime performance, e.g. taking > 100ms each time we get a tracking
+     * update)
+     */
+    bool realtime_ar_mode;
 
     /* The size of the depth buffer visualisation texture */
     int depth_rgb_width;
@@ -208,6 +229,21 @@ typedef struct _Data
     JSON_Value *joints_recording_val;
     JSON_Array *joints_recording;
     int requested_recording_len;
+
+    GLuint video_program;
+    GLuint video_quad_attrib_bo;
+
+    /* Even though glEnable/DisableVertexAttribArray take unsigned integers,
+     * these are signed because GL's glGetAttribLocation api returns attribute
+     * locations as signed values where -1 means the attribute isn't
+     * active. ...!?
+     */
+    GLint video_quad_attrib_pos;
+    GLint video_quad_attrib_tex_coords;
+
+    GLuint video_tex_sampler;
+    GLuint gl_vid_tex;
+
 } Data;
 
 #ifdef __ANDROID__
@@ -238,8 +274,6 @@ static GLuint gl_depth_rgb_tex;
 static GLuint gl_normals_rgb_tex;
 static GLuint gl_nclusters_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
-static GLuint gl_rgb_tex;
-static GLuint gl_vid_tex;
 
 static GLuint gl_db_program;
 static GLuint gl_db_attr_depth;
@@ -278,8 +312,11 @@ static bool permissions_check_passed;
 
 static void viewer_init(Data *data);
 
-static void init_viewer_opengl(Data *data);
 static void init_basic_opengl(Data *data);
+static void init_viewer_opengl(Data *data);
+static void init_device_opengl(Data *data);
+static void deinit_device_opengl(Data *data);
+
 static void handle_device_ready(Data *data, struct gm_device *dev);
 static void on_device_event_cb(struct gm_device_event *device_event,
                                void *user_data);
@@ -520,6 +557,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
     ImGui::Spacing();
 
+    ImGui::Checkbox("Real-time AR Mode", &data->realtime_ar_mode);
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
 
     ImGui::Spacing();
@@ -602,6 +640,7 @@ viewer_close_playback_device(Data *data)
     data->playback_device = nullptr;
 
     data->active_device = data->recording_device;
+    deinit_device_opengl(data);
 }
 
 static void
@@ -673,6 +712,7 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
                 gm_device_set_event_callback(data->playback_device,
                                              on_device_event_cb, data);
                 data->active_device = data->playback_device;
+                deinit_device_opengl(data);
 
                 gm_device_commit_config(data->playback_device, NULL);
             } else {
@@ -793,33 +833,41 @@ draw_visualisation(Data *data, int x, int y, int width, int height,
     return focused;
 }
 
-static void
-update_tracking_buffers(Data *data)
+static bool
+update_skeleton_wireframe_gl_bos(Data *data,
+                                 uint64_t timestamp,
+                                 int *n_joints_ret,
+                                 int *n_bones_ret)
 {
+    int n_bones = data->n_bones;
+    int n_joints;
+
+    *n_joints_ret = 0;
+    *n_bones_ret = 0;
+
     if (!data->latest_tracking) {
-        return;
+        return false;
     }
 
     /*
      * Update labelled point cloud
      */
     struct gm_prediction *prediction =
-        gm_context_get_prediction(data->ctx, data->last_video_frame->timestamp);
+        gm_context_get_prediction(data->ctx, timestamp);
     if (!prediction) {
-        return;
+        return false;
     }
     const struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
 
     // TODO: Take confidence into account to decide whether or not to show
     //       a particular joint position.
-    data->n_joints = gm_skeleton_get_n_joints(skeleton);
+    n_joints = gm_skeleton_get_n_joints(skeleton);
 
-    assert((size_t)data->n_joints ==
-           json_array_get_count(json_array(data->joint_map)));
+    assert(n_joints == data->n_joints);
 
     // Reformat and copy over joint data
-    GlimpsePointXYZRGBA colored_joints[data->n_joints];
-    for (int i = 0; i < data->n_joints; i++) {
+    GlimpsePointXYZRGBA colored_joints[n_joints];
+    for (int i = 0; i < n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
         colored_joints[i].x = joint->x;
         colored_joints[i].y = joint->y;
@@ -828,7 +876,7 @@ update_tracking_buffers(Data *data)
     }
     glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(GlimpsePointXYZRGBA) * data->n_joints,
+                 sizeof(GlimpsePointXYZRGBA) * n_joints,
                  colored_joints, GL_DYNAMIC_DRAW);
 
     // Reformat and copy over bone data
@@ -841,7 +889,7 @@ update_tracking_buffers(Data *data)
             json_object_get_array(joint, "connections");
         for (size_t c = 0; c < json_array_get_count(connections); c++) {
             const char *joint_name = json_array_get_string(connections, c);
-            for (int j = 0; j < data->n_joints; j++) {
+            for (int j = 0; j < n_joints; j++) {
                 JSON_Object *joint2 = json_array_get_object(
                     json_array(data->joint_map), j);
                 if (strcmp(joint_name,
@@ -855,13 +903,73 @@ update_tracking_buffers(Data *data)
     }
     glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(GlimpsePointXYZRGBA) * data->n_bones * 2,
+                 sizeof(GlimpsePointXYZRGBA) * n_bones * 2,
                  colored_bones, GL_DYNAMIC_DRAW);
 
     // Clean-up
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
     gm_prediction_unref(prediction);
+
+    *n_joints_ret = n_joints;
+    *n_bones_ret = n_bones;
+
+    return true;
+}
+
+static void
+draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
+                        float pt_size,
+                        int n_joints,
+                        int n_bones)
+{
+    glUseProgram(gl_cloud_program);
+
+    // Set projection transform
+    glUniformMatrix4fv(gl_cloud_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+
+    // Enable vertex arrays for drawing joints/bones
+    glEnableVertexAttribArray(gl_cloud_attr_pos);
+    glEnableVertexAttribArray(gl_cloud_attr_col);
+
+    // Have bones appear over everything, but depth test them against each
+    // other.
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    // Bind bones buffer-object
+    glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
+
+    glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
+                          GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
+    glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                          GL_TRUE, sizeof(GlimpsePointXYZRGBA),
+                          (void *)offsetof(GlimpsePointXYZRGBA, rgba));
+
+    // Draw bone lines
+    glDrawArrays(GL_LINES, 0, n_bones * 2);
+
+    // Have joint points appear over everything, but depth test them
+    // against each other.
+    glClear(GL_DEPTH_BUFFER_BIT);
+
+    // Set point size for joints
+    glUniform1f(gl_cloud_uni_size, pt_size * 3.f);
+
+    // Bind joints buffer-object
+    glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
+
+    glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
+                          GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
+    glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                          GL_TRUE, sizeof(GlimpsePointXYZRGBA),
+                          (void *)offsetof(GlimpsePointXYZRGBA, rgba));
+
+    // Draw joint points
+    glDrawArrays(GL_POINTS, 0, n_joints);
+
+    // Clean-up
+    glDisableVertexAttribArray(gl_cloud_attr_pos);
+    glDisableVertexAttribArray(gl_cloud_attr_col);
 }
 
 static void
@@ -962,57 +1070,15 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
 
     glDisableVertexAttribArray(gl_db_attr_depth);
 
-    update_tracking_buffers(data);
-
-    // Redraw joints/bones to texture
-    if (data->n_joints) {
-        glUseProgram(gl_cloud_program);
-
-        // Set projection transform
-        glUniformMatrix4fv(gl_cloud_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-
-        // Enable vertex arrays for drawing joints/bones
-        glEnableVertexAttribArray(gl_cloud_attr_pos);
-        glEnableVertexAttribArray(gl_cloud_attr_col);
-
-        // Have bones appear over everything, but depth test them against each
-        // other.
-        glClear(GL_DEPTH_BUFFER_BIT);
-
-        // Bind bones buffer-object
-        glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
-
-        glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
-                              GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
-        glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                              GL_TRUE, sizeof(GlimpsePointXYZRGBA),
-                              (void *)offsetof(GlimpsePointXYZRGBA, rgba));
-
-        // Draw bone lines
-        glDrawArrays(GL_LINES, 0, data->n_bones * 2);
-
-        // Have joint points appear over everything, but depth test them
-        // against each other.
-        glClear(GL_DEPTH_BUFFER_BIT);
-
-        // Set point size for joints
-        glUniform1f(gl_cloud_uni_size, pt_size * 3.f);
-
-        // Bind joints buffer-object
-        glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
-
-        glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
-                              GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
-        glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                              GL_TRUE, sizeof(GlimpsePointXYZRGBA),
-                              (void *)offsetof(GlimpsePointXYZRGBA, rgba));
-
-        // Draw joint points
-        glDrawArrays(GL_POINTS, 0, data->n_joints);
-
-        // Clean-up
-        glDisableVertexAttribArray(gl_cloud_attr_pos);
-        glDisableVertexAttribArray(gl_cloud_attr_col);
+    int n_joints = 0;
+    int n_bones = 0;
+    if (update_skeleton_wireframe_gl_bos(data,
+                                         gm_tracking_get_timestamp(data->latest_tracking),
+                                         &n_joints,
+                                         &n_bones))
+    {
+        // Redraw joints/bones to texture
+        draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
     }
 
     // Clean-up
@@ -1074,7 +1140,7 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
 
         return draw_visualisation(data, x, y, width, height,
                                   video_width, video_height,
-                                  views[view], gl_vid_tex,
+                                  views[view], data->gl_vid_tex,
                                   data->last_video_frame->camera_rotation);
     }
     case 2:
@@ -1151,60 +1217,93 @@ draw_ui(Data *data)
         skip_controls = true;
     }
 
-    // Draw sub-views on the axis with the most space
-    float depth_aspect = data->depth_rgb_height ?
-        data->depth_rgb_width / (float)data->depth_rgb_height : 1.f;
-    int view = skip_controls ? 1 : 0;
-    int n_views = ARRAY_LEN(views) - (skip_controls ? 1 : 0);
-    for (int s = 0; s <= (n_views - 1) / MAX_VIEWS; ++s) {
-        int subview_width, subview_height;
-        float win_aspect = win_size.x / (float)win_size.y;
-        if (win_aspect > depth_aspect) {
-            subview_height = win_size.y / MAX_VIEWS;
-            subview_width = data->depth_rgb_height ?
-                subview_height * (data->depth_rgb_width /
-                                  (float)data->depth_rgb_height) :
-                subview_height;
-        } else {
-            subview_width = win_size.x / MAX_VIEWS;
-            subview_height = data->depth_rgb_width ?
-                subview_width * (data->depth_rgb_height /
-                                 (float)data->depth_rgb_width) :
-                subview_width;
-        }
-        for (int i = 0; i < MAX_VIEWS; ++i, ++view) {
-            if (view == current_view) {
-                ++view;
-            }
-            if (view >= (int)ARRAY_LEN(views)) {
-                break;
-            }
+    if (data->realtime_ar_mode) {
+        // Draw a view-picker at the top
+        ImGui::SetNextWindowPos(origin);
+        ImGui::SetNextWindowSizeConstraints(ImVec2(win_size.x, 0),
+                                            ImVec2(win_size.x, win_size.y));
+        ImGui::Begin("View picker", NULL,
+                     ImGuiWindowFlags_NoTitleBar|
+                     ImGuiWindowFlags_NoResize|
+                     ImGuiWindowFlags_NoMove|
+                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+        /* XXX: assuming that "Controls" and "Video Buffer" are the first two
+         * entries, we only want to expose these two options in
+         * realtime_ar_mode, while we aren't uploading any other debug textures
+         */
+        ImGui::Combo("View", &main_view, views, 2);
 
-            int x, y;
+        int x = origin.x;
+        int y = ImGui::GetWindowHeight() + origin.y;
+        ImVec2 main_area_size = ImVec2(win_size.x,
+                                       win_size.y - ImGui::GetWindowHeight());
+
+        ImGui::End();
+
+        /* We only need to consider drawing the controls while in this mode
+         * since we don't use imgui to render the video background while in
+         * real-time mode
+         */
+        if (current_view == 0 && skip_controls == false) {
+            draw_view(data, current_view, uiScale, x, y,
+                      main_area_size.x, main_area_size.y, false);
+        }
+    } else {
+        // Draw sub-views on the axis with the most space
+        float depth_aspect = data->depth_rgb_height ?
+            data->depth_rgb_width / (float)data->depth_rgb_height : 1.f;
+        int view = skip_controls ? 1 : 0;
+        int n_views = ARRAY_LEN(views) - (skip_controls ? 1 : 0);
+        for (int s = 0; s <= (n_views - 1) / MAX_VIEWS; ++s) {
+            int subview_width, subview_height;
+            float win_aspect = win_size.x / (float)win_size.y;
             if (win_aspect > depth_aspect) {
-                x = origin.x + win_size.x - subview_width;
-                y = origin.y + (subview_height * i);
+                subview_height = win_size.y / MAX_VIEWS;
+                subview_width = data->depth_rgb_height ?
+                    subview_height * (data->depth_rgb_width /
+                                      (float)data->depth_rgb_height) :
+                    subview_height;
             } else {
-                y = origin.y + (win_size.y - subview_height);
-                x = origin.x + (subview_width * i);
+                subview_width = win_size.x / MAX_VIEWS;
+                subview_height = data->depth_rgb_width ?
+                    subview_width * (data->depth_rgb_height /
+                                     (float)data->depth_rgb_width) :
+                    subview_width;
+            }
+            for (int i = 0; i < MAX_VIEWS; ++i, ++view) {
+                if (view == current_view) {
+                    ++view;
+                }
+                if (view >= (int)ARRAY_LEN(views)) {
+                    break;
+                }
+
+                int x, y;
+                if (win_aspect > depth_aspect) {
+                    x = origin.x + win_size.x - subview_width;
+                    y = origin.y + (subview_height * i);
+                } else {
+                    y = origin.y + (win_size.y - subview_height);
+                    x = origin.x + (subview_width * i);
+                }
+
+                if (draw_view(data, view, uiScale, x, y,
+                              subview_width, subview_height, view == 0)) {
+                    main_view = view;
+                }
             }
 
-            if (draw_view(data, view, uiScale, x, y,
-                          subview_width, subview_height, view == 0)) {
-                main_view = view;
+            if (win_aspect > depth_aspect) {
+                win_size.x -= subview_width;
+            } else {
+                win_size.y -= subview_height;
             }
         }
 
-        if (win_aspect > depth_aspect) {
-            win_size.x -= subview_width;
-        } else {
-            win_size.y -= subview_height;
-        }
+        // Draw the main view in the remaining space in the center
+        draw_view(data, current_view, uiScale, origin.x, origin.y,
+                  win_size.x, win_size.y, false);
     }
-
-    // Draw the main view in the remaining space in the center
-    draw_view(data, current_view, uiScale, origin.x, origin.y,
-              win_size.x, win_size.y, false);
 
     ImGui::PopStyleVar();
 
@@ -1220,6 +1319,153 @@ draw_ui(Data *data)
     if (main_view != current_view &&
         (main_view == cloud_view || current_view == cloud_view)) {
         cloud_tex_valid = false;
+    }
+}
+
+static void
+draw_ar_video(Data *data)
+{
+    if (!data->device_gl_initialized || data->last_video_frame == NULL)
+        return;
+
+    gm_assert(data->log, !!data->ctx, "draw_ar_video, NULL ctx");
+
+    enum gm_rotation rotation = data->last_video_frame->camera_rotation;
+    const struct gm_intrinsics *video_intrinsics =
+        gm_device_get_video_intrinsics(data->active_device);
+    int video_width = video_intrinsics->width;
+    int video_height = video_intrinsics->height;
+
+    int aspect_width = video_width;
+    int aspect_height = video_height;
+
+    struct {
+        float x, y, s, t;
+    } xyst_verts[4] = {
+        { -1,  1, 0, 0, }, //  0 -- 1
+        {  1,  1, 1, 0, }, //  | \  |
+        {  1, -1, 1, 1  }, //  |  \ |
+        { -1, -1, 0, 1, }, //  3 -- 2
+    };
+    int n_verts = ARRAY_LEN(xyst_verts);
+
+    gm_debug(data->log, "rendering background with camera rotation of %d degrees",
+             ((int)rotation) * 90);
+
+    switch (rotation) {
+    case GM_ROTATION_0:
+        break;
+    case GM_ROTATION_90:
+        xyst_verts[0].s = 1; xyst_verts[0].t = 0;
+        xyst_verts[1].s = 1; xyst_verts[1].t = 1;
+        xyst_verts[2].s = 0; xyst_verts[2].t = 1;
+        xyst_verts[3].s = 0; xyst_verts[3].t = 0;
+        std::swap(aspect_width, aspect_height);
+        break;
+    case GM_ROTATION_180:
+        xyst_verts[0].s = 1; xyst_verts[0].t = 1;
+        xyst_verts[1].s = 0; xyst_verts[1].t = 1;
+        xyst_verts[2].s = 0; xyst_verts[2].t = 0;
+        xyst_verts[3].s = 1; xyst_verts[3].t = 0;
+        break;
+    case GM_ROTATION_270:
+        xyst_verts[0].s = 0; xyst_verts[0].t = 1;
+        xyst_verts[1].s = 0; xyst_verts[1].t = 0;
+        xyst_verts[2].s = 1; xyst_verts[2].t = 0;
+        xyst_verts[3].s = 1; xyst_verts[3].t = 1;
+        std::swap(aspect_width, aspect_height);
+        break;
+    }
+
+    float display_aspect = data->win_width / (float)data->win_height;
+    float video_aspect = aspect_width / (float)aspect_height;
+    float aspect_x_scale = 1;
+    float aspect_y_scale = 1;
+    if (video_aspect > display_aspect) {
+        // fit by scaling down y-axis of video
+        float fit_height = (float)data->win_width / video_aspect;
+        aspect_y_scale = fit_height / (float)data->win_height;
+    } else {
+        // fit by scaling x-axis of video
+        float fit_width = video_aspect * data->win_height;
+        aspect_x_scale = fit_width / (float)data->win_width;
+    }
+
+    gm_debug(data->log, "UVs: %f,%f %f,%f %f,%f, %f,%f",
+             xyst_verts[0].s,
+             xyst_verts[0].t,
+             xyst_verts[1].s,
+             xyst_verts[1].t,
+             xyst_verts[2].s,
+             xyst_verts[2].t,
+             xyst_verts[3].s,
+             xyst_verts[3].t);
+
+    /* trivial enough to just do the transform on the cpu... */
+    for (int i = 0; i < n_verts; i++) {
+        xyst_verts[i].x *= aspect_x_scale;
+        xyst_verts[i].y *= aspect_y_scale;
+    }
+
+    /* XXX: we could just cache buffers for each rotation */
+    glBindBuffer(GL_ARRAY_BUFFER, data->video_quad_attrib_bo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * n_verts,
+                 xyst_verts, GL_STATIC_DRAW);
+
+    glUseProgram(data->video_program);
+    glBindBuffer(GL_ARRAY_BUFFER, data->video_quad_attrib_bo);
+
+    glEnableVertexAttribArray(data->video_quad_attrib_pos);
+    glVertexAttribPointer(data->video_quad_attrib_pos,
+                          2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)0);
+
+    if (data->video_quad_attrib_tex_coords != -1) {
+        glEnableVertexAttribArray(data->video_quad_attrib_tex_coords);
+        glVertexAttribPointer(data->video_quad_attrib_tex_coords,
+                              2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)8);
+    }
+
+    enum gm_device_type device_type = gm_device_get_type(data->active_device);
+    GLenum target = GL_TEXTURE_2D;
+    if (device_type == GM_DEVICE_TANGO)
+        target = GL_TEXTURE_EXTERNAL_OES;
+    glBindTexture(target, data->gl_vid_tex);
+
+    glDepthMask(GL_FALSE);
+    glDisable(GL_DEPTH_TEST);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, n_verts);
+    gm_debug(data->log, "draw_video");
+    glDepthMask(GL_TRUE);
+
+    glBindTexture(target, 0);
+
+    glDisableVertexAttribArray(data->video_quad_attrib_pos);
+    if (data->video_quad_attrib_tex_coords != -1)
+        glDisableVertexAttribArray(data->video_quad_attrib_tex_coords);
+
+    glUseProgram(0);
+
+    if (data->latest_tracking) {
+        struct gm_intrinsics rotated_intrinsics;
+
+        gm_context_rotate_intrinsics(data->ctx,
+                                     video_intrinsics,
+                                     &rotated_intrinsics,
+                                     rotation);
+
+        float pt_size = ((float)data->win_width / 240.0f) * aspect_x_scale;
+        glm::mat4 proj = intrinsics_to_project_matrix(&rotated_intrinsics, 0.01f, 10);
+        glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, -aspect_y_scale, -1.0));
+
+        int n_joints = 0;
+        int n_bones = 0;
+        if (update_skeleton_wireframe_gl_bos(data,
+                                             data->last_video_frame->timestamp,
+                                             &n_joints,
+                                             &n_bones))
+        {
+            draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
+        }
     }
 }
 
@@ -1241,7 +1487,7 @@ static void
 handle_device_frame_updates(Data *data)
 {
     ProfileScopedSection(UpdatingDeviceFrame);
-    bool upload = false;
+    bool upload_video_texture = false;
 
     if (!data->device_frame_ready)
         return;
@@ -1253,7 +1499,6 @@ handle_device_frame_updates(Data *data)
         if (!device_frame) {
             return;
         }
-        upload = true;
 
         if (device_frame->depth) {
             if (data->last_depth_frame) {
@@ -1271,6 +1516,7 @@ handle_device_frame_updates(Data *data)
             gm_frame_ref(device_frame);
             data->last_video_frame = device_frame;
             data->pending_frame_buffers_mask &= ~GM_REQUEST_FRAME_VIDEO;
+            upload_video_texture = true;
         }
 
         if (data->recording) {
@@ -1330,7 +1576,12 @@ handle_device_frame_updates(Data *data)
                              GM_REQUEST_FRAME_VIDEO);
     }
 
-    if (upload && data->last_video_frame) {
+    enum gm_device_type device_type = gm_device_get_type(data->active_device);
+
+    if (upload_video_texture &&
+        data->device_gl_initialized &&
+        device_type != GM_DEVICE_TANGO)
+    {
         const struct gm_intrinsics *video_intrinsics =
             gm_device_get_video_intrinsics(data->active_device);
         int video_width = video_intrinsics->width;
@@ -1341,14 +1592,9 @@ handle_device_frame_updates(Data *data)
         /*
          * Update video from camera
          */
-        glBindTexture(GL_TEXTURE_2D, gl_vid_tex);
+        glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        /* NB: gles2 only allows npot textures with clamp to edge
-         * coordinate wrapping
-         */
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         void *video_front = data->last_video_frame->video->data;
         enum gm_format video_format = data->last_video_frame->video_format;
@@ -1381,12 +1627,29 @@ handle_device_frame_updates(Data *data)
             gm_assert(data->log, 0, "Unexpected format for video buffer");
             break;
         }
+    } else if (data->device_gl_initialized &&
+               device_type == GM_DEVICE_TANGO)
+    {
+#ifdef USE_TANGO
+        if (TangoService_updateTextureExternalOes(
+                TANGO_CAMERA_COLOR, data->gl_vid_tex,
+                NULL /* ignore timestamp */) != TANGO_SUCCESS)
+        {
+            gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
+        }
+#endif
     }
 }
 
 static void
 upload_tracking_textures(Data *data)
 {
+    /* The tracking textures are all for debug purposes and we want to skip
+     * the overhead of uploading them while in realtime_ar_mode
+     */
+    if (data->realtime_ar_mode)
+        return;
+
     ProfileScopedSection(UploadTrackingBufs);
 
     /*
@@ -1566,9 +1829,8 @@ handle_device_ready(Data *data, struct gm_device *dev)
     gm_debug(data->log, "%s device ready\n",
             dev == data->playback_device ? "Playback" : "Default");
 
-    if (!data->gl_initialized) {
-        init_viewer_opengl(data);
-    }
+    init_viewer_opengl(data);
+    init_device_opengl(data);
 
     struct gm_intrinsics *depth_intrinsics =
         gm_device_get_depth_intrinsics(dev);
@@ -1734,6 +1996,8 @@ frame_cb(GLFMDisplay* display, double frameTime)
 
             glViewport(0, 0, data->win_width, data->win_height);
             glClear(GL_COLOR_BUFFER_BIT);
+            if (data->realtime_ar_mode)
+                draw_ar_video(data);
             ImGui_ImplGlfmGLES3_NewFrame(display, frameTime);
             draw_ui(data);
         }
@@ -1771,6 +2035,8 @@ event_loop(Data *data)
 
             glViewport(0, 0, data->win_width, data->win_height);
             glClear(GL_COLOR_BUFFER_BIT);
+            if (data->realtime_ar_mode)
+                draw_ar_video(data);
             ImGui_ImplGlfwGLES3_NewFrame();
             draw_ui(data);
         }
@@ -1908,6 +2174,9 @@ init_basic_opengl(Data *data)
 static void
 init_viewer_opengl(Data *data)
 {
+    if (data->gl_initialized)
+        return;
+
     static const char *vertShaderCloud =
         "#version 300 es\n"
         "precision mediump float;\n"
@@ -2018,8 +2287,8 @@ init_viewer_opengl(Data *data)
     gl_db_uni_video_size = glGetUniformLocation(gl_db_program, "video_size");
     glGenBuffers(1, &gl_db_depth_bo);
 
-    GLuint uniform_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
-    glUniform1i(uniform_tex_sampler, 0);
+    GLuint video_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
+    glUniform1i(video_tex_sampler, 0);
 
     glUseProgram(0);
 
@@ -2043,16 +2312,6 @@ init_viewer_opengl(Data *data)
     // Generate texture objects
     glGenTextures(1, &gl_depth_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    glGenTextures(1, &gl_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    glGenTextures(1, &gl_vid_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_vid_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
@@ -2088,7 +2347,112 @@ init_viewer_opengl(Data *data)
     glGenFramebuffers(1, &gl_cloud_fbo);
     glGenRenderbuffers(1, &gl_cloud_depth_bo);
 
+    glGenBuffers(1, &data->video_quad_attrib_bo);
+
     data->gl_initialized = true;
+}
+
+static void
+init_device_opengl(Data *data)
+{
+    if (data->device_gl_initialized)
+        return;
+
+    gm_assert(data->log, data->video_program == 0,
+              "Spurious GL video_program while device_gl_initialized == false");
+
+    const char *vert_shader =
+        GLSL_SHADER_VERSION
+        "precision mediump float;\n"
+        "precision mediump int;\n"
+        "in vec2 pos;\n"
+        "in vec2 tex_coords_in;\n"
+        "out vec2 tex_coords;\n"
+        "void main() {\n"
+        "  gl_Position = vec4(pos.x, pos.y, 0.0, 1.0);\n"
+        "  tex_coords = tex_coords_in;\n"
+        "}\n";
+    const char *frag_shader =
+        GLSL_SHADER_VERSION
+        "precision highp float;\n"
+        "precision highp int;\n"
+        "uniform sampler2D tex_sampler;\n"
+        "in vec2 tex_coords;\n"
+        "out lowp vec4 frag_color;\n"
+        "void main() {\n"
+        "  frag_color = texture(tex_sampler, tex_coords);\n"
+        "}\n";
+    const char *external_tex_frag_shader =
+        GLSL_SHADER_VERSION
+        "#extension GL_OES_EGL_image_external_essl3 : require\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+        "uniform samplerExternalOES tex_sampler;\n"
+        "in vec2 tex_coords;\n"
+        "out lowp vec4 frag_color;\n"
+        "void main() {\n"
+        "  frag_color = texture(tex_sampler, tex_coords);\n"
+        "}\n";
+
+    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
+        data->video_program = gm_gl_create_program(data->log,
+                                                   vert_shader,
+                                                   external_tex_frag_shader,
+                                                   NULL);
+    } else {
+        data->video_program = gm_gl_create_program(data->log,
+                                                   vert_shader,
+                                                   frag_shader,
+                                                   NULL);
+    }
+
+    data->video_quad_attrib_pos =
+        glGetAttribLocation(data->video_program, "pos");
+    data->video_quad_attrib_tex_coords =
+        glGetAttribLocation(data->video_program, "tex_coords_in");
+
+    data->video_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
+
+    glUseProgram(data->video_program);
+    glUniform1i(data->video_tex_sampler, 0);
+    glUseProgram(0);
+
+    glGenTextures(1, &data->gl_vid_tex);
+    GLenum target = GL_TEXTURE_2D;
+    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
+        target = GL_TEXTURE_EXTERNAL_OES;
+    }
+
+    glBindTexture(target, data->gl_vid_tex);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    data->device_gl_initialized = true;
+}
+
+static void
+deinit_device_opengl(Data *data)
+{
+    if (!data->device_gl_initialized)
+        return;
+
+    if (data->video_program) {
+        glDeleteProgram(data->video_program);
+        data->video_program = 0;
+
+        data->video_quad_attrib_pos = 0;
+        data->video_quad_attrib_tex_coords = 0;
+        data->video_tex_sampler = 0;
+    }
+
+    if (data->gl_vid_tex) {
+        glDeleteTextures(1, &data->gl_vid_tex);
+        data->gl_vid_tex = 0;
+    }
+
+    data->device_gl_initialized = false;
 }
 
 static void
@@ -2350,6 +2714,7 @@ viewer_init(Data *data)
         data->n_bones += json_array_get_count(
             json_object_get_array(joint, "connections"));
     }
+    data->n_joints = json_array_get_count(json_array(data->joint_map));
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
@@ -2383,6 +2748,11 @@ viewer_init(Data *data)
 #endif
     gm_device_commit_config(data->recording_device, NULL);
 
+    if (config.type == GM_DEVICE_TANGO) {
+        data->realtime_ar_mode = true;
+    } else {
+        data->realtime_ar_mode = false;
+    }
     data->initialized = true;
 }
 
