@@ -1,3 +1,3 @@
 #!/bin/sh
 
-sudo docker build -t rib1/glimpse-travis .
+sudo docker build -t glimpseproject/glimpse-travis .

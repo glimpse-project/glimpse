@@ -94,7 +94,6 @@ jobs:
           env: _="Android Debug Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e ANDROID_BUILD=1
             -e BUILD_ONLY=1
             -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=debug"
             final-travis-ci-image ./travis/travis-ci-build.sh
@@ -102,7 +101,6 @@ jobs:
           env: _="Android Release Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e ANDROID_BUILD=1
             -e BUILD_ONLY=1
             -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=release"
             final-travis-ci-image ./travis/travis-ci-build.sh
@@ -114,4 +112,4 @@ cache:
 
 before_install:
     - docker pull rib1/glimpse-travis
-    - ./travis/travis-ci-prep-docker-image.sh rib1/glimpse-travis final-travis-ci-image
+    - ./travis/travis-ci-prep-docker-image.sh glimpseproject/glimpse-travis final-travis-ci-image
