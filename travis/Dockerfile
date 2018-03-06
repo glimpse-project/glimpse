@@ -30,7 +30,8 @@ RUN apt-get update -y && apt-get install -y --no-install-recommends --no-install
     libfreenect-dev \
     libglfw3-dev \
     libglm-dev \
-    libpcl-dev && \
+    libpcl-dev \
+    openjdk-8-jdk && \
     apt-get clean
 
 # Workaround multiple bugs in Ubuntu's libpcl-dev package :(
