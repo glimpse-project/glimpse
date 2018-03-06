@@ -111,5 +111,5 @@ cache:
         - rendered-training-data
 
 before_install:
-    - docker pull rib1/glimpse-travis
+    - docker pull glimpseproject/glimpse-travis
     - ./travis/travis-ci-prep-docker-image.sh glimpseproject/glimpse-travis final-travis-ci-image
