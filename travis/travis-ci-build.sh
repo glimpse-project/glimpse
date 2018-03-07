@@ -41,4 +41,4 @@ set -e
 
 ninja
 
-deactivate
+#deactivate
