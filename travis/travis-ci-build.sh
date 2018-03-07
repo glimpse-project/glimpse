@@ -7,13 +7,18 @@ python3 --version
 pip3 --version
 ninja --version
 
-sudo pip3 install virtualenv
+# Avoid virtualenv since Meson fails with:
+# ERROR: Multiple producers for Ninja target
+# ../glimpse-py3-env/bin/python3". Please rename your targets.
 
-virtualenv glimpse-py3-env
-source glimpse-py3-env/bin/activate
+#sudo pip3 install virtualenv
+#
+#virtualenv glimpse-py3-env
+#source glimpse-py3-env/bin/activate
 
 python --version
-pip install git+https://github.com/glimpse-project/meson
+pip3 install git+https://github.com/glimpse-project/meson
+export PATH=$HOME/.local/bin:$PATH
 
 export CC=clang-5.0 CXX=clang++-5.0
 
