@@ -50,16 +50,6 @@ RUN echo "Downloading android-ndk" >&2 && \
     ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --force --install-dir ${ANDROID_TOOLCHAIN} --arch arm --api 24 --stl libc++ && \
     rm ${ANDROID_NDK_FILENAME}
 
-# Installing Android SDK compat libraries
-RUN dpkg --add-architecture i386
-RUN apt-get update -qq
-RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-install-suggests \
-    libc6:i386 \
-    libstdc++6:i386 \
-    libgcc1:i386 \
-    libncurses5:i386 \
-    libz1:i386
-
 # Installs Android SDK
 ENV ANDROID_SDK_VERSION 3859397
 ENV ANDROID_SDK_FILENAME sdk-tools-linux-${ANDROID_SDK_VERSION}.zip
