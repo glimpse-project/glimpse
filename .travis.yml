@@ -48,14 +48,12 @@ jobs:
           env: _="Quick Debug Build (distro provided dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e BUILD_ONLY=1
             -e CONFIG_OPTS="--buildtype=debug -Duse_system_libs=true"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: quick checks
           env: _="Quick Release Build (distro provided dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e BUILD_ONLY=1
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
             -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
@@ -94,14 +92,12 @@ jobs:
           env: _="Android Debug Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e BUILD_ONLY=1
             -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=debug"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
           env: _="Android Release Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e BUILD_ONLY=1
             -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=release"
             final-travis-ci-image ./travis/travis-ci-build.sh
 
