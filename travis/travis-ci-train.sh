@@ -14,13 +14,8 @@ python3 --version
 pip3 --version
 ninja --version
 
-sudo pip3 install virtualenv
-
-virtualenv glimpse-py3-env
-source glimpse-py3-env/bin/activate
-
-python --version
-pip install meson
+pip3 install meson
+export PATH=$HOME/.local/bin:$PATH
 
 # Actually we rely on the cached, rendered, training images so we don't
 # currently need the training data repo here....
@@ -67,5 +62,3 @@ image-pre-processor rendered-training-data/generated/test-render \
 indexer.py rendered-training-data/pre-processed/test-render
 
 train_rdt rendered-training-data/pre-processed/test-render full full.rdt -d 3 -p 1000 -t 25 -c 1000
-
-deactivate

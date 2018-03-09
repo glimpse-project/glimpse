@@ -11,13 +11,8 @@ python3 --version
 pip3 --version
 ninja --version
 
-sudo pip3 install virtualenv
-
-virtualenv glimpse-py3-env
-source glimpse-py3-env/bin/activate
-
-python --version
-pip install meson
+pip3 install meson
+export PATH=$HOME/.local/bin:$PATH
 
 # Even though it's an out-of-date version we install Blender via apt-get
 # as an easy way of installing dependencies
@@ -30,7 +25,7 @@ fi
 export PATH=$PWD/blender-2.79-linux-glibc219-x86_64:$PATH
 blender --version
 
-pip install numpy
+pip3 install numpy
 git clone --depth=1 https://github.com/glimpse-project/glimpse-training-data
 pushd glimpse-training-data
     ./unpack.sh
@@ -57,5 +52,3 @@ glimpse-cli.py \
     glimpse-training-data
 
 find rendered-training-data
-
-deactivate
