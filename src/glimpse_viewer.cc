@@ -34,6 +34,7 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <libgen.h>
 
 #include <math.h>
 
@@ -146,6 +147,14 @@ typedef struct _Data
      */
     bool realtime_ar_mode;
 
+    /* In realtime mode, we use predicted joint positions so that the
+     * presented skeleton keeps up with the video. This allows us to add a
+     * synthetic delay to the timestamp we request in this mode, which adds
+     * some lag, but improves the quality of the positions as it doesn't need
+     * to extrapolate so far into the future.
+     */
+    int prediction_delay;
+
     /* The size of the depth buffer visualisation texture */
     int depth_rgb_width;
     int depth_rgb_height;
@@ -211,6 +220,7 @@ typedef struct _Data
     struct gm_recording *recording;
     struct gm_device *recording_device;
     std::vector<char *> recordings;
+    std::vector<char *> recording_names;
     int selected_playback_recording;
 
     struct gm_device *playback_device;
@@ -363,7 +373,7 @@ static bool
 index_recordings_recursive(Data *data,
                            const char *recordings_path, const char *rel_path,
                            std::vector<char *> &files,
-                           char **err)
+                           std::vector<char *> &names, char **err)
 {
     struct dirent *entry;
     struct stat st;
@@ -392,7 +402,7 @@ index_recordings_recursive(Data *data,
         stat(cur_full_path, &st);
         if (S_ISDIR(st.st_mode)) {
             if (!index_recordings_recursive(data, recordings_path,
-                                            next_rel_path, files, err))
+                                            next_rel_path, files, names, err))
             {
                 ret = false;
                 break;
@@ -400,6 +410,8 @@ index_recordings_recursive(Data *data,
         } else if (strlen(rel_path) &&
                    strcmp(entry->d_name, "glimpse_recording.json") == 0) {
             files.push_back(strdup(rel_path));
+            char *record_dir = basename(dirname(cur_full_path));
+            names.push_back(strdup(record_dir));
         }
     }
 
@@ -412,12 +424,14 @@ static void
 index_recordings(Data *data)
 {
     data->recordings.clear();
+    data->recording_names.clear();
 
     char *index_err = NULL;
     index_recordings_recursive(data,
                                glimpse_recordings_path,
                                "", // relative path
                                data->recordings,
+                               data->recording_names,
                                &index_err);
     if (index_err) {
         gm_error(data->log, "Failed to index recordings: %s", index_err);
@@ -559,6 +573,8 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     ImGui::Checkbox("Real-time AR Mode", &data->realtime_ar_mode);
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
+    ImGui::SliderInt("Prediction delay", &data->prediction_delay,
+                     0, 1000000000);
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -727,11 +743,11 @@ draw_playback_controls(Data *data, const ImVec4 &bounds)
 
     ImGui::Spacing();
 
-    if (data->recordings.size()) {
+    if (data->recording_names.size()) {
         ImGui::Combo("Recording Path",
                      &data->selected_playback_recording,
-                     data->recordings.data(),
-                     data->recordings.size());
+                     data->recording_names.data(),
+                     data->recording_names.size());
     }
 
     ImGui::SetWindowSize(ImVec2(0, 0), ImGuiCond_Always);
@@ -1460,7 +1476,8 @@ draw_ar_video(Data *data)
         int n_joints = 0;
         int n_bones = 0;
         if (update_skeleton_wireframe_gl_bos(data,
-                                             data->last_video_frame->timestamp,
+                                             data->last_video_frame->timestamp -
+                                             data->prediction_delay,
                                              &n_joints,
                                              &n_bones))
         {
