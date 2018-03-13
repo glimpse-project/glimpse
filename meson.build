@@ -3,6 +3,9 @@ project('glimpse', ['c', 'cpp', 'java'],
         default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
 use_system_libs = get_option('use_system_libs')
+if meson.is_cross_build()
+    use_system_libs = false
+endif
 
 compiler = meson.get_compiler('c')
 python3 = import('python3').find_python()
@@ -35,6 +38,13 @@ if compiler.get_define('__ANDROID__') != ''
 else
     platform_android = false
 endif
+
+if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
+    platform_ios = true
+else
+    platform_ios = false
+endif
+
 
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
@@ -113,7 +123,6 @@ endif
 client_api_defines += [ '-DUSE_FREENECT' ]
 
 glfw_dep = dependency('glfw3', required: false)
-epoxy_dep = dependency('epoxy', fallback: [ 'libepoxy', 'libepoxy_dep' ])
 snappy_dep = dependency('snappy', required: false)
 
 imgui_src = [
@@ -147,11 +156,15 @@ client_api_src = [
 client_api_deps = [
     glm_dep,
     libpng_dep,
-    epoxy_dep,
     dlib_dep,
     pcl_deps,
     freenect_dep,
 ]
+
+#if platform_ios == false
+    epoxy_dep = dependency('epoxy', fallback: [ 'libepoxy', 'libepoxy_dep' ])
+    client_api_deps += epoxy_dep
+#endif
 
 if uw_dep.found()
     client_api_deps += uw_dep
@@ -236,18 +249,16 @@ if unity_enabled
 endif
 
 need_glimpse_native_jar = false
-if compiler.get_define('__ANDROID__') != ''
+if platform_android == true
     glfm_sp = subproject('glfm')
     glfm_dep = glfm_sp.get_variable('glfm_dep')
-    glfm_defines = [ '-DGLFM_INCLUDE_ES3' ]
-    client_api_defines += '-DUSE_GLFM'
+
+    viewer_deps = client_api_deps + glfm_dep
+    viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
 
     if tango_enabled
-        viewer_deps = client_api_deps + [ tango_deps, glfm_dep ]
-        viewer_defines = client_api_defines + glfm_defines + [ '-DUSE_TANGO=1' ]
-    else
-        viewer_deps = client_api_deps + [ glfm_dep ]
-        viewer_defines = client_api_defines + glfm_defines
+        viewer_deps += tango_deps
+        viewer_defines += [ '-DUSE_TANGO=1' ]
     endif
 
     use_asset_manager = get_option('use_asset_manager')
@@ -268,6 +279,30 @@ if compiler.get_define('__ANDROID__') != ''
 endif
 
 subdir('src/java')
+
+if platform_ios == true
+    glfm_sp = subproject('glfm')
+    glfm_dep = glfm_sp.get_variable('glfm_dep')
+
+    viewer_deps = client_api_deps + [ glfm_dep ]
+    viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
+
+    imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
+
+    executable('glimpse_viewer',
+               [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
+               include_directories: inc,
+               dependencies: viewer_deps,
+               c_args: viewer_defines,
+               cpp_args: viewer_defines,
+               link_args: [
+                    '-framework', 'Foundation',
+                    '-framework', 'OpenGLES',
+                    '-framework', 'CoreGraphics',
+                    '-framework', 'QuartzCore',
+                    '-framework', 'UIKit'
+              ])
+endif
 
 if not meson.is_cross_build()
 
@@ -377,14 +412,14 @@ if snappy_dep.found()
 endif
 
 if glfw_dep.found() and epoxy_dep.found()
-    client_api_defines += '-DUSE_GLFW'
+    viewer_defines = client_api_defines + '-DUSE_GLFW'
     imgui_src += 'src/imgui/imgui_impl_glfw_gles3.cpp'
     executable('glimpse_viewer',
                [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
                include_directories: inc,
                dependencies: client_api_deps + [ glfw_dep ],
-               c_args: client_api_defines,
-               cpp_args: client_api_defines)
+               c_args: viewer_defines,
+               cpp_args: viewer_defines)
 endif
 
 endif # is_cross_build
