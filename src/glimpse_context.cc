@@ -2910,9 +2910,11 @@ gm_context_start_tracking(struct gm_context *ctx, char **err)
                              detector_thread_cb,
                              ctx);
 
+#ifdef __linux__
     if (ret == 0) {
         pthread_setname_np(ctx->detect_thread, "Glimpse Track");
     }
+#endif
 
     return ret;
 }
