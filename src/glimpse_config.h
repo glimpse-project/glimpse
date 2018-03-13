@@ -24,6 +24,7 @@
 
 #pragma once
 
+#include <pthread.h>
 #include <stdbool.h>
 #include <string.h>
 #include "glimpse_log.h"

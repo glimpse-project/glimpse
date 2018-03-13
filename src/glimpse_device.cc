@@ -28,6 +28,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <inttypes.h>
+#include <pthread.h>
 
 #include <vector>
 
@@ -851,7 +852,9 @@ kinect_start(struct gm_device *dev)
                    NULL, //attributes
                    kinect_io_thread_cb,
                    dev); //data
+#ifdef __linux__
     pthread_setname_np(dev->kinect.io_thread, "Kinect IO");
+#endif
 }
 
 static void
@@ -1456,7 +1459,9 @@ recording_start(struct gm_device *dev)
                    NULL,
                    recording_io_thread_cb,
                    dev);
+#ifdef __linux__
     pthread_setname_np(dev->recording.io_thread, "Recording IO");
+#endif
 }
 
 static void
