@@ -1,0 +1,24 @@
+[binaries]
+name = 'arm-apple-darwin11'
+c = 'arm-apple-darwin11-clang'
+objc = 'arm-apple-darwin11-clang'
+cpp = 'arm-apple-darwin11-clang++'
+ar = 'arm-apple-darwin11-ar'
+ld = 'arm-apple-darwin11-ld'
+strip = 'arm-apple-darwin11-strip'
+
+[host_machine]
+system = 'darwin'
+cpu_family = 'arm'
+cpu = 'arm64'
+endian = 'little'
+
+[properties]
+
+objc_args = [ '-ObjC', '-fobjc-arc', '-fmodules', '-gmodules' ]
+c_args = [ '-fmodules', '-gmodules' ]
+cpp_args = [ '-fmodules', '-gmodules' ]
+
+# As a hacky workaround for not being able to query the binaries
+# we need to specify the strip tool again for our install script
+_strip_binary = 'arm-apple-darwin11-strip'
