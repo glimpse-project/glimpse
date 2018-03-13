@@ -79,18 +79,32 @@ xasprintf(char **strp, const char *fmt, ...)
 {
     va_list ap;
 
-    va_start(ap, fmt);
-
     if (!strp) {
+        va_start(ap, fmt);
         vfprintf(stderr, fmt, ap);
+        va_end(ap);
         fprintf(stderr, "\n");
         exit(1);
     } else {
+#ifdef __linux__
+        va_start(ap, fmt);
         if (vasprintf(strp, fmt, ap) < 0)
             exit(1);
+        va_end(ap);
+#else
+        va_start(ap, fmt);
+        int len = vsnprintf(NULL, 0, fmt, ap);
+        if (len < 0)
+            exit(1);
+        va_end(ap);
+        va_start(ap, fmt);
+        char *str = xmalloc(len + 1);
+        vsnprintf(str, len + 1, fmt, ap);
+        va_end(ap);
+        *strp = str;
+#endif
     }
 
-    va_end(ap);
 }
 
 
