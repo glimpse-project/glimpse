@@ -12,8 +12,8 @@
 #include "imgui_impl_glfm_gles3.h"
 
 #include <epoxy/gl.h>
-#include <epoxy/egl.h>
 
+#define GLFM_INCLUDE_NONE
 #include "glfm.h"
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))

@@ -44,7 +44,6 @@
 #include <vector>
 
 #include <epoxy/gl.h>
-#include <epoxy/egl.h>
 
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -56,6 +55,10 @@
 #ifdef __ANDROID__
 #    include <android/log.h>
 #    include <jni.h>
+#endif
+
+#ifdef USE_GLFM
+#    define GLFM_INCLUDE_NONE
 #    include <glfm.h>
 #    include <imgui_impl_glfm_gles3.h>
 #else
