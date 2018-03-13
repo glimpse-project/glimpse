@@ -13,6 +13,7 @@ tree?.json
 /src/.deps
 /src/depth2labels
 /src/exr-to-pfm
+/src/glimpse_viewer_recording
 /src/image-pre-processor
 /src/libglimpse.so
 /src/pack-training-data

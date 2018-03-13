@@ -2441,6 +2441,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
         float cy = ctx->basis_depth_camera_intrinsics.cy;
 
         float k1, k2, k3;
+        k1 = k2 = k3 = 0.f;
 
         /* XXX: we only support applying the brown's model... */
         bool apply_distortion = ctx->apply_depth_distortion;
@@ -2473,8 +2474,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
 
         for (int off = 0; off < num_points; off++) {
             float *xyzc = ((float *)buffer->data) + 4 * off;
-            float ru, ru2, ru3, ru4, ru5, ru6, ru7;
-            float rd;
+            float rd, ru;
 
             // Reproject this point into training camera space
             glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
@@ -2482,13 +2482,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
             int x;
             if (apply_distortion) {
                 ru = sqrtf((point_t.x*point_t.x + point_t.y*point_t.y) /
-                                 (point_t.z*point_t.z));
-                ru2 = ru*ru;
-                ru3 = ru2*ru;
-                ru4 = ru3*ru;
-                ru5 = ru4*ru;
-                ru6 = ru5*ru;
-                ru7 = ru6*ru;
+                           (point_t.z*point_t.z));
 
                 // Google documented their POLY_3 distortion model should
                 // be evaluated as:
@@ -2499,7 +2493,18 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                 // model then it looks like there's some inconsistency with
                 // the ru exponents used. Wikipedia uses:
                 //   k1 * ru^2 + k2 * ru^4 + k3 * ru^6
+#if 0
+                float ru2 = ru*ru;
+                float ru3 = ru2*ru;
+                float ru5 = ru3*ru2;
+                float ru7 = ru5*ru2;
                 rd = ru + k1 * ru3 + k2 * ru5 + k3 * ru7;
+#else
+                float ru2 = ru*ru;
+                float ru4 = ru2*ru2;
+                float ru6 = ru2*ru4;
+                rd = ru + k1 * ru2 + k2 * ru4 + k3 * ru6;
+#endif
 
                 x = (int)(point_t.x / point_t.z * fx * rd / ru + cx);
             } else

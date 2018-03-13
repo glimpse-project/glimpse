@@ -1,6 +1,6 @@
 {
     "gap_dist": 1,
-    "gap_tolerance": 0.035,
+    "gap_tolerance": 0.02,
     "depth_gap_fill": true,
     "apply_depth_distortion": true,
     "cloud_res": 1,
