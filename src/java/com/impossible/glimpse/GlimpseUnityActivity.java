@@ -105,7 +105,9 @@ public class GlimpseUnityActivity extends UnityPlayerActivity
             bindTangoService(this, mTangoServiceConnection);
         }
 
-        mOrientationListener.enable();
+        if (mOrientationListener.canDetectOrientation()) {
+            mOrientationListener.enable();
+        }
     }
 
     @Override
