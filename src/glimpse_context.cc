@@ -4194,6 +4194,10 @@ gm_tracking_create_rgb_normals(struct gm_tracking *_tracking,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     //struct gm_context *ctx = tracking->ctx;
 
+    if (!tracking->normals) {
+        return;
+    }
+
     *width = (int)tracking->normals->width;
     *height = (int)tracking->normals->height;
 
@@ -4226,6 +4230,10 @@ gm_tracking_create_rgb_normal_clusters(struct gm_tracking *_tracking,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     //struct gm_context *ctx = tracking->ctx;
 
+    if (!tracking->normal_labels) {
+        return;
+    }
+
     *width = (int)tracking->normal_labels->width;
     *height = (int)tracking->normal_labels->height;
 
@@ -4251,6 +4259,10 @@ gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     //struct gm_context *ctx = tracking->ctx;
+
+    if (!tracking->cluster_labels) {
+        return;
+    }
 
     *width = (int)tracking->cluster_labels->width;
     *height = (int)tracking->cluster_labels->height;

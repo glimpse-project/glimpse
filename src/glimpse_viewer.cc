@@ -1677,24 +1677,27 @@ upload_tracking_textures(Data *data)
     /*
      * Update the RGB visualization of the depth buffer
      */
-    glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    /* NB: gles2 only allows npot textures with clamp to edge
-     * coordinate wrapping
-     */
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     uint8_t *depth_rgb = NULL;
     gm_tracking_create_rgb_depth(data->latest_tracking,
                                  &data->depth_rgb_width,
                                  &data->depth_rgb_height,
                                  &depth_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->depth_rgb_width, data->depth_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
-    free(depth_rgb);
+
+    if (depth_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
+
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        /* NB: gles2 only allows npot textures with clamp to edge
+         * coordinate wrapping
+         */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                     data->depth_rgb_width, data->depth_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
+        free(depth_rgb);
+    }
 
     /* Update depth buffer and colour buffer */
     const float *depth = gm_tracking_get_depth(data->latest_tracking);
@@ -1704,90 +1707,104 @@ upload_tracking_textures(Data *data)
                  depth, GL_DYNAMIC_DRAW);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     uint8_t *video_rgb = NULL;
     gm_tracking_create_rgb_video(data->latest_tracking,
                                  &data->video_rgb_width,
                                  &data->video_rgb_height,
                                  &video_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->video_rgb_width, data->video_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, video_rgb);
-    free(video_rgb);
+
+    if (video_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                     data->video_rgb_width, data->video_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, video_rgb);
+        free(video_rgb);
+    }
 
     /* Update normals buffer */
-    glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     uint8_t *normals_rgb = NULL;
     gm_tracking_create_rgb_normals(data->latest_tracking,
                                    &data->normals_rgb_width,
                                    &data->normals_rgb_height,
                                    &normals_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->normals_rgb_width, data->normals_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, normals_rgb);
-    free(normals_rgb);
+
+    if (normals_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                     data->normals_rgb_width, data->normals_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, normals_rgb);
+        free(normals_rgb);
+    }
 
     /* Update normal clusters buffer */
-    glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     uint8_t *nclusters_rgb = NULL;
     gm_tracking_create_rgb_normal_clusters(data->latest_tracking,
                                            &data->nclusters_rgb_width,
                                            &data->nclusters_rgb_height,
                                            &nclusters_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->nclusters_rgb_width, data->nclusters_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, nclusters_rgb);
-    free(nclusters_rgb);
+    if (nclusters_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                     data->nclusters_rgb_width, data->nclusters_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, nclusters_rgb);
+        free(nclusters_rgb);
+    }
 
     /* Update candidate clusters buffer */
-    glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     uint8_t *cclusters_rgb = NULL;
     gm_tracking_create_rgb_candidate_clusters(data->latest_tracking,
                                               &data->cclusters_rgb_width,
                                               &data->cclusters_rgb_height,
                                               &cclusters_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->cclusters_rgb_width, data->cclusters_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, cclusters_rgb);
-    free(cclusters_rgb);
+
+    if (cclusters_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                     data->cclusters_rgb_width, data->cclusters_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, cclusters_rgb);
+        free(cclusters_rgb);
+    }
 
     /*
      * Update inferred label map
      */
-    glBindTexture(GL_TEXTURE_2D, gl_labels_tex);
-
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    /* NB: gles2 only allows npot textures with clamp to edge
-     * coordinate wrapping
-     */
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     uint8_t *labels_rgb = NULL;
     gm_tracking_create_rgb_label_map(data->latest_tracking,
                                      &data->labels_rgb_width,
                                      &data->labels_rgb_height,
                                      &labels_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->labels_rgb_width, data->labels_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
-    free(labels_rgb);
+
+    if (labels_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_labels_tex);
+
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        /* NB: gles2 only allows npot textures with clamp to edge
+         * coordinate wrapping
+         */
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                     data->labels_rgb_width, data->labels_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
+        free(labels_rgb);
+    }
 }
 
 static void
