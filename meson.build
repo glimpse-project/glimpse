@@ -253,7 +253,7 @@ if platform_android == true
     glfm_sp = subproject('glfm')
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
-    viewer_deps = client_api_deps + glfm_dep
+    viewer_deps = client_api_deps + [ glfm_dep ]
     viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
 
     if tango_enabled
@@ -295,6 +295,32 @@ if platform_ios == true
                dependencies: viewer_deps,
                c_args: viewer_defines,
                cpp_args: viewer_defines,
+               link_args: [
+                    '-framework', 'Foundation',
+                    '-framework', 'OpenGLES',
+                    '-framework', 'CoreGraphics',
+                    '-framework', 'QuartzCore',
+                    '-framework', 'UIKit'
+              ])
+endif
+
+if platform_ios == true
+    glfm_sp = subproject('glfm')
+    glfm_dep = glfm_sp.get_variable('glfm_dep')
+
+    imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
+
+    executable('Test',
+               [
+                    'src/ios_hello.cc',
+                    'src/glimpse_log.c',
+                    'src/glimpse_assets.c',
+                    'src/xalloc.c',
+               ] + imgui_src,
+               include_directories: inc,
+               dependencies: [ glfm_dep, epoxy_dep ],
+               c_args: [],
+               cpp_args: [],
                link_args: [
                     '-framework', 'Foundation',
                     '-framework', 'OpenGLES',
