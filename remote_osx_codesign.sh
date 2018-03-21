@@ -11,7 +11,7 @@ OSX_USER=new
 HOST=${OSX_USER}@${OSX_IP}
 
 rm -fr Payload
-cp ../build-ios-debug/Test PayloadUnsigned/Test.app/
+cp ../build-ios-debug/glimpse_viewer PayloadUnsigned/Test.app/Test
 cp -av PayloadUnsigned Payload
 rm GlimpseTest.zip
 echo "packing zip"

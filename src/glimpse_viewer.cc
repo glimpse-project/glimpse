@@ -2520,6 +2520,9 @@ logger_cb(struct gm_logger *logger,
                     fprintf(data->log_fp, "> %s\n", line);
                 }
             }
+
+            fflush(data->log_fp);
+            fflush(stdout);
         }
 
         free(msg);
@@ -2773,6 +2776,9 @@ main(int argc, char **argv)
 #endif
 {
     Data *data = new Data();
+#ifdef __APPLE__
+    char *documents_dir = ios_util_get_documents_path();
+#endif
 
 #ifdef __ANDROID__
 #define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
@@ -2782,12 +2788,9 @@ main(int argc, char **argv)
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
     data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
 #elif defined(__APPLE__)
-    char *documents_dir = ios_util_get_documents_path();
     char log_filename[PATH_MAX];
     snprintf(log_filename, sizeof(log_filename), "%s/glimpse.log", documents_dir);
     data->log_fp = fopen(log_filename, "w");
-    free(documents_dir);
-    documents_dir = NULL;
 #else
     data->log_fp = stderr;
 #endif
@@ -2795,11 +2798,14 @@ main(int argc, char **argv)
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
+    gm_debug(data->log, "Glimpse Viewer");
+
 #ifdef __APPLE__
-    char *resources_dir = ios_util_get_resources_path();
-    gm_set_assets_root(data->log, resources_dir);
-    free(resources_dir);
-    resources_dir = NULL;
+    gm_set_assets_root(data->log, documents_dir);
+    char tmp_recordings_path[PATH_MAX];
+    snprintf(tmp_recordings_path, sizeof(tmp_recordings_path), "%s/ViewerRecording",
+             documents_dir);
+    setenv("GLIMPSE_RECORDING_PATH", tmp_recordings_path, true);
 #else
     gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
 #endif
