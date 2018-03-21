@@ -290,7 +290,7 @@ if platform_ios == true
     imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
 
     executable('glimpse_viewer',
-               [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
+               [ 'src/glimpse_viewer.cc', 'src/ios_utils.m' ] + client_api_src + imgui_src,
                include_directories: inc,
                dependencies: viewer_deps,
                c_args: viewer_defines,
