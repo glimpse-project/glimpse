@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <epoxy/gl.h>
 
@@ -18,6 +19,8 @@
 
 #include "glimpse_log.h"
 #include "glimpse_assets.h"
+
+#include "ios_utils.h"
 
 typedef struct {
     GLuint program;
@@ -135,6 +138,9 @@ void glfmMain(GLFMDisplay *display) {
     gm_set_assets_root(data.log, getenv("GLIMPSE_ASSETS_ROOT"));
 
     gm_debug(data.log, "Glimpse Log Message");
+
+    char *documents_path = ios_util_get_documents_path();
+    gm_debug(data.log, "documents path = %s", documents_path);
 
     printf("glfmMain XXX\n");
     glfmSetDisplayConfig(display,
