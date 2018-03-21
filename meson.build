@@ -312,6 +312,7 @@ if platform_ios == true
 
     executable('Test',
                [
+                    'src/ios_utils.m',
                     'src/ios_hello.cc',
                     'src/glimpse_log.c',
                     'src/glimpse_assets.c',
