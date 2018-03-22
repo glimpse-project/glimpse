@@ -2159,7 +2159,7 @@ init_basic_opengl(Data *data)
 {
     glClearColor(0.0, 0.0, 0.0, 1.0);
     glClearStencil(0);
-
+#if 0
     glDebugMessageControl(GL_DONT_CARE, /* source */
                           GL_DONT_CARE, /* type */
                           GL_DONT_CARE, /* severity */
@@ -2176,6 +2176,7 @@ init_basic_opengl(Data *data)
 
     glEnable(GL_DEBUG_OUTPUT);
     glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
+#endif
 }
 
 static void
@@ -2256,22 +2257,13 @@ init_viewer_opengl(Data *data)
         "precision mediump float;\n"
         "precision mediump int;\n\n"
 
-        "uniform sampler2D texture;\n\n"
+        "uniform sampler2D tex;\n\n"
 
         "in vec2 v_tex_coord;\n"
         "layout(location = 0) out vec4 color;\n\n"
 
         "void main() {\n"
-
-        /* XXX: Mesa bug? glsl es 300 should support texture() but this isn't
-         * working with Mesa (and it's not complaining about the
-         * "#version 300 es")
-         */
-#ifdef __ANDROID__
-        "  color = texture(texture, v_tex_coord.st);\n"
-#else
-        "  color = texture2D(texture, v_tex_coord.st);\n"
-#endif
+        "  color = texture(tex, v_tex_coord.st);\n"
         "}\n";
 
 
@@ -2778,6 +2770,7 @@ main(int argc, char **argv)
     Data *data = new Data();
 #ifdef __APPLE__
     char *documents_dir = ios_util_get_documents_path();
+    permissions_check_passed = true;
 #endif
 
 #ifdef __ANDROID__
@@ -2788,9 +2781,11 @@ main(int argc, char **argv)
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
     data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
 #elif defined(__APPLE__)
-    char log_filename[PATH_MAX];
-    snprintf(log_filename, sizeof(log_filename), "%s/glimpse.log", documents_dir);
-    data->log_fp = fopen(log_filename, "w");
+    char full_filename[PATH_MAX];
+    snprintf(full_filename, sizeof(full_filename), "%s/glimpse.log", documents_dir);
+    data->log_fp = fopen(full_filename, "w");
+    snprintf(full_filename, sizeof(full_filename), "%s/FakeRecording", documents_dir);
+    setenv("FAKENECT_PATH", full_filename, true);
 #else
     data->log_fp = stderr;
 #endif
@@ -2830,7 +2825,7 @@ main(int argc, char **argv)
 
     index_recordings(data);
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__APPLE__)
     // Quick hack to make scrollbars a bit more usable on small devices
     ImGui::GetStyle().ScrollbarSize *= 2;
 #endif

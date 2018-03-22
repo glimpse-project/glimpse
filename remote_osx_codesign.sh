@@ -2,15 +2,17 @@
 
 set -x
 
-OSX_IP=192.168.1.169
-OSX_USER=new
+#OSX_IP=192.168.1.169
+#OSX_USER=new
 
+OSX_IP=192.168.1.127
 #OSX_IP=192.168.0.10
-#OSX_USER=bob
+OSX_USER=bob
 
 HOST=${OSX_USER}@${OSX_IP}
 
 rm -fr Payload
+#cp ../build-ios-debug/Test PayloadUnsigned/Test.app/Test
 cp ../build-ios-debug/glimpse_viewer PayloadUnsigned/Test.app/Test
 cp -av PayloadUnsigned Payload
 rm GlimpseTest.zip

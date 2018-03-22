@@ -149,7 +149,7 @@ void glfmMain(GLFMDisplay *display) {
 
     printf("glfmMain XXX\n");
     glfmSetDisplayConfig(display,
-                         GLFMRenderingAPIOpenGLES2,
+                         GLFMRenderingAPIOpenGLES3,
                          GLFMColorFormatRGBA8888,
                          GLFMDepthFormatNone,
                          GLFMStencilFormatNone,
@@ -284,6 +284,8 @@ static void onFrame(GLFMDisplay *display, double frameTime) {
     // Draw background
     glClearColor(1.0f, 1.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+
+    printf("onFrame\n");
 
     // Draw triangle
     if (app->program == 0) {
