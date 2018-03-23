@@ -59,6 +59,7 @@ enum gm_device_type {
     GM_DEVICE_KINECT,
     GM_DEVICE_RECORDING,
     GM_DEVICE_TANGO,
+    GM_DEVICE_AVF,
 };
 
 struct gm_device_config {

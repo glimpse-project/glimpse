@@ -46,6 +46,10 @@
 #include <tango_support_api.h>
 #endif
 
+#ifdef USE_AVF
+#include "ios_utils.h"
+#endif
+
 #include "parson.h"
 #include "half.hpp"
 #include "xalloc.h"
@@ -173,6 +177,12 @@ struct gm_device
             enum gm_rotation display_rotation;
             enum gm_rotation display_to_camera_rotation;
         } tango;
+#endif
+
+#ifdef USE_AVF
+        struct {
+            struct ios_av_session *session;
+        } avf;
 #endif
     };
 
@@ -439,6 +449,7 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     switch (dev->type) {
     case GM_DEVICE_TANGO:
     case GM_DEVICE_KINECT:
+    case GM_DEVICE_AVF:
         /* Allocated large enough for RGB data */
         buf->base.len = video_width * video_height * 3;
         break;
@@ -483,6 +494,10 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     switch (dev->type) {
     case GM_DEVICE_TANGO:
         /* Allocated large enough for _XYZC_F32_M data */
+        buf->base.len = depth_width * depth_height * 16;
+        break;
+    case GM_DEVICE_AVF:
+        /* Allocated large enough for any data */
         buf->base.len = depth_width * depth_height * 16;
         break;
     case GM_DEVICE_RECORDING:
@@ -2111,6 +2126,54 @@ tango_stop(struct gm_device *dev)
 }
 #endif // USE_TANGO
 
+#ifdef USE_AVF
+static bool
+avf_open(struct gm_device *dev, struct gm_device_config *config, char **err)
+{
+    gm_debug(dev->log, "AVFrameworks Device Open");
+
+    /* We wait until _configure() time before doing much because we want to
+     * allow the device to be configured with an event callback first
+     * so we will be able to notify that the device is ready if the Tango
+     * service has already been bound.
+     */
+
+    dev->avf.session = ios_util_av_session_new(dev->log);
+
+    return true;
+}
+
+static void
+avf_close(struct gm_device *dev)
+{
+    gm_debug(dev->log, "AVFrameworks Device Close");
+}
+
+static bool
+avf_configure(struct gm_device *dev, char **err)
+{
+    dev->configured = true;
+
+    gm_debug(dev->log, "AVFoundation Device Configure");
+
+    notify_device_ready(dev);
+
+    return true;
+}
+
+static void
+avf_start(struct gm_device *dev)
+{
+    dev->running = true;
+}
+
+static void
+avf_stop(struct gm_device *dev)
+{
+    dev->running = false;
+}
+#endif // USE_AVF
+
 struct gm_device *
 gm_device_open(struct gm_logger *log,
                struct gm_device_config *config,
@@ -2163,6 +2226,14 @@ gm_device_open(struct gm_logger *log,
         status = tango_open(dev, config, err);
 #else
         gm_assert(log, 0, "Tango support not enabled");
+#endif
+        break;
+    case GM_DEVICE_AVF:
+        gm_debug(log, "Opening AVFoundation device");
+#ifdef USE_AVF
+        status = avf_open(dev, config, err);
+#else
+        gm_assert(log, 0, "AVFoundation support not enabled");
 #endif
         break;
     }
@@ -2220,6 +2291,11 @@ gm_device_commit_config(struct gm_device *dev, char **err)
     case GM_DEVICE_TANGO:
 #ifdef USE_TANGO
         status = tango_configure(dev, err);
+#endif
+        break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        status = avf_configure(dev, err);
 #endif
         break;
     default:
@@ -2321,6 +2397,13 @@ gm_device_close(struct gm_device *dev)
         tango_close(dev);
 #endif
         break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        gm_debug(dev->log, "avf_close");
+        avf_close(dev);
+#endif
+        break;
+
     }
 
     /* Make sure to release current back/ready buffers to their
@@ -2400,6 +2483,11 @@ gm_device_start(struct gm_device *dev)
         tango_start(dev);
 #endif
         break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        avf_start(dev);
+#endif
+        break;
     }
 }
 
@@ -2427,6 +2515,12 @@ gm_device_stop(struct gm_device *dev)
 #ifdef USE_TANGO
         gm_debug(dev->log, "tango_stop");
         tango_stop(dev);
+#endif
+        break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        gm_debug(dev->log, "avf_stop");
+        avf_stop(dev);
 #endif
         break;
     }
