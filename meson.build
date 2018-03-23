@@ -300,7 +300,8 @@ if platform_ios == true
                     '-framework', 'OpenGLES',
                     '-framework', 'CoreGraphics',
                     '-framework', 'QuartzCore',
-                    '-framework', 'UIKit'
+                    '-framework', 'UIKit',
+                    '-framework', 'AVFoundation',
               ])
 endif
 
