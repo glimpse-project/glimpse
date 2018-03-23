@@ -1,4 +1,4 @@
-project('glimpse', ['c', 'cpp', 'java'],
+project('glimpse', ['c', 'cpp'],
         license: 'MIT',
         default_options: ['c_std=gnu11', 'cpp_std=c++14'])
 
@@ -11,6 +11,8 @@ compiler = meson.get_compiler('c')
 python3 = import('python3').find_python()
 
 if compiler.get_define('__ANDROID__') != ''
+    add_languages('java')
+
     android_sdk_home = get_option('android_sdk')
     if android_sdk_home == ''
         android_sdk_home = run_command(python3, '-c',
@@ -40,6 +42,7 @@ else
 endif
 
 if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
+    add_languages('objc')
     platform_ios = true
 else
     platform_ios = false
