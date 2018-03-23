@@ -312,9 +312,29 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
     }
 
     JSON_Value *frame_meta = json_value_init_object();
+
+    // Write out frame timestamp
     json_object_set_number(json_object(frame_meta), "timestamp",
                            (double)frame->timestamp);
 
+    // Write out frame pose data
+    JSON_Value *pose = json_value_init_object();
+    JSON_Value *orientation = json_value_init_array();
+    for (int i = 0; i < 4; ++i) {
+        json_array_append_number(json_array(orientation),
+                                 (double)frame->pose.orientation[i]);
+    }
+    JSON_Value *translation = json_value_init_array();
+    for (int i = 0; i < 3; ++i) {
+        json_array_append_number(json_array(translation),
+                                 (double)frame->pose.translation[i]);
+    }
+    json_object_set_value(json_object(pose), "orientation", orientation);
+    json_object_set_value(json_object(pose), "translation", translation);
+
+    json_object_set_value(json_object(frame_meta), "pose", pose);
+
+    // Write out depth/video frames
     size_t path_len = strlen(r->path);
 
     if (frame->depth) {

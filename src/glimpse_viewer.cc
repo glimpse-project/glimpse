@@ -110,6 +110,13 @@ struct event
     };
 };
 
+typedef struct {
+    float x;
+    float y;
+    float z;
+    uint32_t rgba;
+} XYZRGBA;
+
 typedef struct _Data
 {
     struct gm_logger *log;
@@ -882,7 +889,7 @@ update_skeleton_wireframe_gl_bos(Data *data,
     assert(n_joints == data->n_joints);
 
     // Reformat and copy over joint data
-    GlimpsePointXYZRGBA colored_joints[n_joints];
+    XYZRGBA colored_joints[n_joints];
     for (int i = 0; i < n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
         colored_joints[i].x = joint->x;
@@ -892,12 +899,12 @@ update_skeleton_wireframe_gl_bos(Data *data,
     }
     glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(GlimpsePointXYZRGBA) * n_joints,
+                 sizeof(XYZRGBA) * n_joints,
                  colored_joints, GL_DYNAMIC_DRAW);
 
     // Reformat and copy over bone data
     // TODO: Don't parse this JSON structure here
-    GlimpsePointXYZRGBA colored_bones[data->n_bones * 2];
+    XYZRGBA colored_bones[data->n_bones * 2];
     for (int i = 0, b = 0; i < data->n_joints; i++) {
         JSON_Object *joint =
             json_array_get_object(json_array(data->joint_map), i);
@@ -919,7 +926,7 @@ update_skeleton_wireframe_gl_bos(Data *data,
     }
     glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(GlimpsePointXYZRGBA) * n_bones * 2,
+                 sizeof(XYZRGBA) * n_bones * 2,
                  colored_bones, GL_DYNAMIC_DRAW);
 
     // Clean-up
@@ -956,10 +963,10 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
     glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
 
     glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
-                          GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
+                          GL_FALSE, sizeof(XYZRGBA), nullptr);
     glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                          GL_TRUE, sizeof(GlimpsePointXYZRGBA),
-                          (void *)offsetof(GlimpsePointXYZRGBA, rgba));
+                          GL_TRUE, sizeof(XYZRGBA),
+                          (void *)offsetof(XYZRGBA, rgba));
 
     // Draw bone lines
     glDrawArrays(GL_LINES, 0, n_bones * 2);
@@ -975,10 +982,10 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
     glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
 
     glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
-                          GL_FALSE, sizeof(GlimpsePointXYZRGBA), nullptr);
+                          GL_FALSE, sizeof(XYZRGBA), nullptr);
     glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                          GL_TRUE, sizeof(GlimpsePointXYZRGBA),
-                          (void *)offsetof(GlimpsePointXYZRGBA, rgba));
+                          GL_TRUE, sizeof(XYZRGBA),
+                          (void *)offsetof(XYZRGBA, rgba));
 
     // Draw joint points
     glDrawArrays(GL_POINTS, 0, n_joints);
@@ -1551,9 +1558,7 @@ handle_device_frame_updates(Data *data)
         if (data->last_depth_frame != data->last_video_frame) {
             struct gm_frame *full_frame =
                 gm_device_combine_frames(data->active_device,
-                                         std::max(
-                                             data->last_video_frame->timestamp,
-                                             data->last_depth_frame->timestamp),
+                                         data->last_depth_frame,
                                          data->last_depth_frame,
                                          data->last_video_frame);
 

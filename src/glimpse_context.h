@@ -64,6 +64,11 @@ struct gm_event
     };
 };
 
+struct gm_pose {
+    float orientation[4];
+    float translation[3];
+};
+
 /* A reference to a single data buffer
  *
  * Used to reference count buffers attached to frames where we want to abstract
@@ -159,6 +164,7 @@ struct gm_frame
      * want a stable ABI.
      */
     uint64_t timestamp;
+    struct gm_pose pose;
     enum gm_rotation camera_rotation;
 
     enum gm_format depth_format;
@@ -261,13 +267,6 @@ struct gm_extrinsics {
 };
 
 struct gm_context;
-
-typedef struct {
-    float x;
-    float y;
-    float z;
-    uint32_t rgba;
-} GlimpsePointXYZRGBA;
 
 struct gm_joint {
     float x;

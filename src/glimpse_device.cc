@@ -43,6 +43,7 @@
 #ifdef USE_TANGO
 #include <tango_client_api.h>
 #include <tango_support_api.h>
+#include <glm/gtx/quaternion.hpp>
 #endif
 
 #include "parson.h"
@@ -213,6 +214,7 @@ struct gm_device
     struct gm_device_buffer *depth_buf_back;
 
     uint64_t frame_time;
+    struct gm_pose frame_pose;
 
     struct gm_mem_pool *frame_pool;
     struct gm_frame *last_frame;
@@ -1150,6 +1152,7 @@ copy_device_buffer(struct gm_device *dev,
 static void
 swap_recorded_frame(struct gm_device *dev,
                     uint64_t timestamp,
+                    struct gm_pose &pose,
                     enum gm_rotation camera_rotation,
                     struct gm_buffer *depth_buffer,
                     struct gm_buffer *video_buffer)
@@ -1160,6 +1163,7 @@ swap_recorded_frame(struct gm_device *dev,
         dev->camera_rotation = camera_rotation;
 
         dev->frame_time = timestamp;
+        dev->frame_pose = pose;
 
         if (depth_buffer) {
             if (dev->recording.last_depth_buf)
@@ -1208,6 +1212,21 @@ recording_io_thread_cb(void *userdata)
 
     uint64_t frame0_timestamp = (uint64_t)
             json_object_get_number(frame0, "timestamp");
+
+    struct gm_pose pose;
+    JSON_Object *json_pose = json_object_get_object(frame0, "pose");
+    if (json_pose) {
+        JSON_Array *orientation = json_object_get_array(json_pose,
+                                                        "orientation");
+        for (int i = 0; i < 4; ++i) {
+            pose.orientation[i] = (float)json_array_get_number(orientation, i);
+        }
+        JSON_Array *translation = json_object_get_array(json_pose,
+                                                        "translation");
+        for (int i = 0; i < 3; ++i) {
+            pose.translation[i] = (float)json_array_get_number(translation, i);
+        }
+    }
 
     /* Even though the recording loops and the playback can be paused
      * we still guarantee a monotonic increasing clock for each frame.
@@ -1266,6 +1285,7 @@ recording_io_thread_cb(void *userdata)
 
                 swap_recorded_frame(dev,
                                     monotonic_clock,
+                                    pose,
                                     dev->recording.last_camera_rotation,
                                     depth_buffer,
                                     video_buffer);
@@ -1305,6 +1325,22 @@ recording_io_thread_cb(void *userdata)
         uint64_t frame_timestamp = (uint64_t)
             json_object_get_number(frame, "timestamp");
         uint64_t recording_progress = frame_timestamp - frame0_timestamp;
+
+        json_pose = json_object_get_object(frame, "pose");
+        if (json_pose) {
+            JSON_Array *orientation = json_object_get_array(json_pose,
+                                                            "orientation");
+            for (int i = 0; i < 4; ++i) {
+                pose.orientation[i] = (float)
+                    json_array_get_number(orientation, i);
+            }
+            JSON_Array *translation = json_object_get_array(json_pose,
+                                                            "translation");
+            for (int i = 0; i < 3; ++i) {
+                pose.translation[i] = (float)
+                    json_array_get_number(translation, i);
+            }
+        }
 
         /* XXX: Skip frames if we're > 33ms behind */
         if (recording_progress < (real_progress - 33333333)) {
@@ -1391,6 +1427,7 @@ recording_io_thread_cb(void *userdata)
 
         swap_recorded_frame(dev,
                             monotonic_clock,
+                            pose,
                             rotation,
                             depth_buffer,
                             video_buffer);
@@ -1487,6 +1524,13 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         return;
     }
 
+    TangoPoseData pose;
+    TangoErrorType error = TangoService_getPoseAtTime(
+        point_cloud->timestamp,
+        { TANGO_COORDINATE_FRAME_START_OF_SERVICE,
+          TANGO_COORDINATE_FRAME_DEVICE },
+        &pose);
+
     struct gm_device_buffer *depth_buf_back =
         mem_pool_acquire_buffer(dev->depth_buf_pool, "tango depth");
 
@@ -1505,6 +1549,35 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = depth_buf_back;
     dev->frame_time = (uint64_t)(point_cloud->timestamp * 1e9);
+    if (error == TANGO_SUCCESS) {
+        dev->frame_pose = {
+            { (float)-pose.orientation[0],
+              (float)pose.orientation[1],
+              (float)pose.orientation[2],
+              (float)pose.orientation[3] },
+            { (float)-pose.translation[0],
+              (float)-pose.translation[1],
+              (float)-pose.translation[2] }
+        };
+
+        // We need to flip the angle due to our different axis representation.
+        // That's why we negate the x component of the angle above (which is
+        // the simple case for portrait orientation).
+        if (dev->camera_rotation == GM_ROTATION_0 ||
+            dev->camera_rotation == GM_ROTATION_180) {
+            glm::quat orientation =
+                glm::angleAxis((float)(M_PI), glm::vec3(0, 0, 1)) *
+                glm::angleAxis((float)(M_PI/2), glm::vec3(1, 0, 0)) *
+                glm::quat(dev->frame_pose.orientation[3],
+                          -dev->frame_pose.orientation[0],
+                          dev->frame_pose.orientation[1],
+                          dev->frame_pose.orientation[2]);
+            dev->frame_pose.orientation[0] = orientation.x;
+            dev->frame_pose.orientation[1] = orientation.y;
+            dev->frame_pose.orientation[2] = orientation.z;
+            dev->frame_pose.orientation[3] = orientation.w;
+        }
+    }
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
     gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);
 
@@ -2530,6 +2603,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
     }
 
     frame->base.timestamp = dev->frame_time;
+    frame->base.pose = dev->frame_pose;
     frame->base.camera_rotation = (enum gm_rotation)dev->camera_rotation;
 
     dev->frame_ready_buffers_mask = 0;
@@ -2552,16 +2626,17 @@ gm_device_get_latest_frame(struct gm_device *dev)
  * mismatching rotations?
  */
 struct gm_frame *
-gm_device_combine_frames(struct gm_device *dev, uint64_t timestamp,
+gm_device_combine_frames(struct gm_device *dev, struct gm_frame *master,
                          struct gm_frame *depth, struct gm_frame *video)
 {
     struct gm_device_frame *frame = mem_pool_acquire_frame(dev->frame_pool, "combined frame");
     gm_assert(dev->log, depth->depth != NULL,
-              "Spurios request to combine frame with depth frame having no depth buffer");
+              "Spurious request to combine frame with depth frame having no depth buffer");
     gm_assert(dev->log, video->video != NULL,
-              "Spurios request to combine frame with video frame having no video buffer");
+              "Spurious request to combine frame with video frame having no video buffer");
 
-    frame->base.timestamp = timestamp;
+    frame->base.timestamp = master->timestamp;
+    frame->base.pose = master->pose;
 
     frame->base.depth = gm_buffer_ref(depth->depth);
     frame->base.depth_format = depth->depth_format;

@@ -135,7 +135,7 @@ struct gm_frame *
 gm_device_get_latest_frame(struct gm_device *dev);
 
 struct gm_frame *
-gm_device_combine_frames(struct gm_device *dev, uint64_t timestamp,
+gm_device_combine_frames(struct gm_device *dev, struct gm_frame *master,
                          struct gm_frame *depth, struct gm_frame *video);
 
 #ifdef __ANDROID__

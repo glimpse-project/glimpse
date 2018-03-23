@@ -393,7 +393,7 @@ handle_device_frame_updates(struct glimpse_data *data)
         if (data->last_depth_frame != data->last_video_frame) {
             struct gm_frame *full_frame =
                 gm_device_combine_frames(data->device,
-                                         data->last_depth_frame->timestamp,
+                                         data->last_depth_frame,
                                          data->last_depth_frame,
                                          data->last_video_frame);
 
