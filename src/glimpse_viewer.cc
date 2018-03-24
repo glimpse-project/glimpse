@@ -1032,8 +1032,9 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
                                   GL_RENDERBUFFER, gl_cloud_depth_bo);
 
-        glFramebufferTexture(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                             gl_cloud_tex, 0);
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D,
+                               gl_cloud_tex, 0);
 
         GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
         glDrawBuffers(1, drawBuffers);
