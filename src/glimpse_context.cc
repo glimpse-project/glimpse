@@ -1926,25 +1926,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
     const float cx = tracking->depth_camera_intrinsics.cx;
     const float cy = tracking->depth_camera_intrinsics.cy;
 
-    foreach_xy_off(hires_cloud->width, hires_cloud->height) {
-        int doff = (y * ctx->cloud_res) *
-                   tracking->depth_camera_intrinsics.width +
-                   (x * ctx->cloud_res);
-        float depth = tracking->depth[doff];
-        if (std::isnormal(depth) &&
-            depth >= ctx->min_depth &&
-            depth < ctx->max_depth) {
-            float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
-            float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
-
-            hires_cloud->points[off].x = dx;
-            hires_cloud->points[off].y = dy;
-            hires_cloud->points[off].z = depth;
-            ++n_points;
-        } else {
-            hires_cloud->points[off] = invalid_pt;
-        }
-    }
 
 #if 0
     // Debugging - reproject previous frames to test reprojection works
@@ -1990,6 +1971,31 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 #endif
+    foreach_xy_off(hires_cloud->width, hires_cloud->height) {
+        int doff = (y * ctx->cloud_res) *
+                   tracking->depth_camera_intrinsics.width +
+                   (x * ctx->cloud_res);
+        float depth = tracking->depth[doff];
+
+        if (!std::isnormal(depth)) {
+            hires_cloud->points[off] = invalid_pt;
+            continue;
+        }
+
+        if (depth < ctx->min_depth) {
+            depth = ctx->min_depth;
+        } else if (depth > ctx->max_depth) {
+            depth = ctx->max_depth;
+        }
+
+        float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
+        float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
+
+        hires_cloud->points[off].x = dx;
+        hires_cloud->points[off].y = dy;
+        hires_cloud->points[off].z = depth;
+        ++n_points;
+    }
 
     // Person detection can happen in a sparser cloud made from a downscaled
     // version of the depth buffer. This is significantly cheaper than using a
