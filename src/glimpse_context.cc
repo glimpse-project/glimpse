@@ -300,9 +300,6 @@ struct gm_tracking_impl
     // Estimated normals for the depth buffer
     pcl::PointCloud<pcl::Normal>::Ptr normals;
 
-    // Labels based on similar normals
-    pcl::PointCloud<pcl::Label>::Ptr normal_labels;
-
     // Labels based on clustering after plane removal
     pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
 
@@ -463,13 +460,10 @@ struct gm_context
     float min_depth;
     float max_depth;
     int seg_res;
+    bool bg_extraction;
     float normal_depth_change;
     float normal_smooth;
-    int min_inliers;
     float angular_threshold;
-    float distance_threshold;
-    float refinement_distance_threshold;
-    float max_curvature;
     float cluster_tolerance;
 
     bool joint_refinement;
@@ -1587,61 +1581,6 @@ sanitise_skeleton(struct gm_context *ctx,
     }
 }
 
-template<typename PointT>
-class PlaneComparator: public pcl::Comparator<PointT>
-{
-  public:
-    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
-    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
-        PointCloudConstPtr;
-
-    typedef boost::shared_ptr<PlaneComparator<PointT>> Ptr;
-    typedef boost::shared_ptr<const PlaneComparator<PointT>> ConstPtr;
-
-    using pcl::Comparator<PointT>::input_;
-
-    PlaneComparator()
-      : coeffs_(0.f, 1.f, 0.f, 1.f),
-        distance_threshold_(0.03f) {
-    }
-
-    virtual
-    ~PlaneComparator() {
-    }
-
-    inline void
-    setPlaneCoefficients(Eigen::Vector4f &coeffs) {
-        coeffs_ = coeffs;
-    }
-
-    inline Eigen::Vector4f &
-    getPlaneCoefficients() {
-        return coeffs_;
-    }
-
-    inline void
-    setDistanceThreshold(float distance_threshold) {
-        distance_threshold_ = distance_threshold;
-    }
-
-    inline float
-    getDistanceThreshold() const {
-        return distance_threshold_;
-    }
-
-    virtual bool
-    compare (int idx1, int idx2) const {
-        Eigen::Vector4f e_pt(input_->points[idx1].x,
-                             input_->points[idx1].y,
-                             input_->points[idx1].z, 1.f);
-        return coeffs_.dot(e_pt) < distance_threshold_;
-    }
-
-  protected:
-    Eigen::Vector4f coeffs_;
-    float distance_threshold_;
-};
-
 template<typename PointT, typename PointNT>
 class DepthComparator: public pcl::Comparator<PointT>
 {
@@ -1828,117 +1767,35 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    // Segment clouds into planes
-    start = get_time();
+    if (ctx->bg_extraction) {
+        // Remove points that aren't facing the camera
+        start = get_time();
 
-    pcl::OrganizedMultiPlaneSegmentation<pcl::PointXYZ, pcl::Normal, pcl::Label>
-        seg;
-    seg.setMinInliers((unsigned)ctx->min_inliers);
-    seg.setAngularThreshold(pcl::deg2rad(ctx->angular_threshold));
-    seg.setDistanceThreshold(ctx->distance_threshold);
-    seg.setMaximumCurvature(ctx->max_curvature);
-    seg.setInputCloud(lores_cloud);
-    seg.setInputNormals(tracking->normals);
+        int points_removed = 0;
+        glm::vec3 axis = glm::normalize(glm::vec3(0, 0, -1));
+        foreach_xy_off(lores_cloud->width, lores_cloud->height) {
+            if (std::isnan(lores_cloud->points[off].z)) {
+                continue;
+            }
 
-#if 1
-    pcl::EuclideanPlaneCoefficientComparator<pcl::PointXYZ, pcl::Normal>::Ptr
-        plane_comparator(
-            new pcl::EuclideanPlaneCoefficientComparator<pcl::PointXYZ,
-                                                         pcl::Normal>);
-    seg.setComparator(plane_comparator);
-#endif
+            pcl::Normal &pt = tracking->normals->points[off];
+            float angle = glm::degrees(acosf(glm::dot(
+                glm::vec3(pt.normal_x, pt.normal_y, pt.normal_z), axis)));
+            while (angle > 180.f) angle -= 360.f;
 
-#if 1
-    pcl::PlaneRefinementComparator<pcl::PointXYZ, pcl::Normal, pcl::Label>::Ptr
-        refinement_comparator(
-            new pcl::PlaneRefinementComparator<pcl::PointXYZ, pcl::Normal,
-                                               pcl::Label>);
-    seg.setRefinementComparator(refinement_comparator);
-    refinement_comparator->
-        setDistanceThreshold(ctx->refinement_distance_threshold, true);
-#endif
-
-    std::vector<pcl::ModelCoefficients> plane_coeffs;
-    std::vector<pcl::PointIndices> plane_indices;
-    std::vector<Eigen::Vector4f, Eigen::aligned_allocator<Eigen::Vector4f>>
-        plane_centroids;
-    std::vector<Eigen::Matrix3f, Eigen::aligned_allocator<Eigen::Matrix3f>>
-        plane_covariances;
-    tracking->normal_labels =
-        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
-    std::vector<pcl::PointIndices> plane_label_indices;
-    seg.segment(plane_coeffs, plane_indices, plane_centroids,
-                plane_covariances, *tracking->normal_labels, plane_label_indices);
-    seg.refine(plane_coeffs, plane_indices, plane_centroids,
-               plane_covariances, tracking->normal_labels, plane_label_indices);
-
-#if 0
-    // Expand the found planes to encompass any connected points that lie near
-    // the same plane.
-    PlaneComparator<pcl::PointXYZ>::Ptr plane_check(
-        new PlaneComparator<pcl::PointXYZ>);
-    plane_check->setInputCloud(lores_cloud);
-    plane_check->setDistanceThreshold(ctx->cluster_tolerance);
-
-    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZ, pcl::Label>
-        plane_expander(plane_check);
-    plane_expander.setInputCloud(lores_cloud);
-
-    pcl::PointCloud<pcl::Label> expander_labels;
-    std::vector<pcl::PointIndices> expander_label_indices;
-    for (unsigned i = 0; i < plane_coeffs.size(); ++i) {
-        std::vector<float> &values = plane_coeffs[i].values;
-        Eigen::Vector4f &centroid = plane_centroids[i];
-        Eigen::Vector4f plane(values[0], values[1], values[2], values[3]);
-
-        plane_check->setPlaneCoefficients(plane);
-        expander_labels.points.clear();
-        expander_label_indices.clear();
-        plane_expander.segment(expander_labels, expander_label_indices);
-
-        if (expander_label_indices.empty()) {
-            continue;
-        }
-
-        // Find the plane cluster that lies nearest the cluster detected via
-        // connected normals
-        float distance = FLT_MAX;
-        pcl::PointIndices &closest_plane_indices = expander_label_indices[0];
-        for (std::vector<pcl::PointIndices>::iterator it =
-             expander_label_indices.begin();
-             it != expander_label_indices.end(); ++it) {
-            Eigen::Vector4f candidate_centroid;
-            pcl::compute3DCentroid(*lores_cloud, *it, candidate_centroid);
-            float candidate_distance = (candidate_centroid - centroid).norm();
-            if (candidate_distance < distance) {
-                distance = candidate_distance;
-                closest_plane_indices = *it;
+            if (fabsf(angle) > ctx->angular_threshold) {
+                lores_cloud->points[off] = invalid_pt;
+                ++points_removed;
             }
         }
 
-        // Discard plane cluster
-        for (unsigned p = 0; p < closest_plane_indices.indices.size(); ++p) {
-            int idx = closest_plane_indices.indices[p];
-            lores_cloud->points[idx] = invalid_pt;
-        }
+        end = get_time();
+        duration = end - start;
+        LOGI("Non camera-facing point removal (%d points) took %.3f%s\n",
+             points_removed,
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
     }
-#else
-    // Remove the points that make up the planes we found above
-    for (std::vector<pcl::PointIndices>::iterator it = plane_indices.begin();
-         it != plane_indices.end(); ++it) {
-        pcl::PointIndices &indices = *it;
-        for (unsigned i = 0; i < indices.indices.size(); ++i) {
-            lores_cloud->points[indices.indices[i]] = invalid_pt;
-        }
-    }
-#endif
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Plane removal (%d planes) took %.3f%s\n",
-         (int)plane_indices.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
 
     start = get_time();
 
@@ -3681,6 +3538,15 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.max = 4;
     ctx->properties.push_back(prop);
 
+    ctx->bg_extraction = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "bg_extraction";
+    prop.desc = "Whether to attempt some background extraction";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->bg_extraction;
+    ctx->properties.push_back(prop);
+
     ctx->normal_depth_change = 0.03f;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -3703,62 +3569,18 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->min_inliers = 50;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "min_inliers";
-    prop.desc = "Minimum number of inliers when doing plane segmentation";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->min_inliers;
-    prop.int_state.min = 5;
-    prop.int_state.max = 200;
-    ctx->properties.push_back(prop);
-
-    ctx->angular_threshold = 10.f;
+    ctx->angular_threshold = 45.f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "angular_threshold";
     prop.desc = "Angular threshold for multi-plane segmentation";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->angular_threshold;
-    prop.float_state.min = 0.1f;
-    prop.float_state.max = 45.f;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 90.f;
     ctx->properties.push_back(prop);
 
-    ctx->distance_threshold = 0.03f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "distance_threshold";
-    prop.desc = "Distance threshold for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->distance_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->refinement_distance_threshold = 0.15f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "refinement_distance_threshold";
-    prop.desc = "Distance threshold for multi-plane segmentation refinement";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->refinement_distance_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->max_curvature = 0.001f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "max_curvature";
-    prop.desc = "Maximum curvature of a plane for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->max_curvature;
-    prop.float_state.min = 0.0005f;
-    prop.float_state.max = 0.03f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_tolerance = 0.03f;
+    ctx->cluster_tolerance = 0.12f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "cluster_tolerance";
@@ -3766,7 +3588,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->cluster_tolerance;
     prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.2f;
+    prop.float_state.max = 0.3f;
     ctx->properties.push_back(prop);
 
     ctx->joint_refinement = true;
@@ -4215,32 +4037,6 @@ gm_tracking_create_rgb_normals(struct gm_tracking *_tracking,
             (*output)[off * 3 + 1] = g;
             (*output)[off * 3 + 2] = b;
         }
-    }
-}
-
-void
-gm_tracking_create_rgb_normal_clusters(struct gm_tracking *_tracking,
-                                       int *width, int *height,
-                                       uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
-
-    *width = (int)tracking->normal_labels->width;
-    *height = (int)tracking->normal_labels->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        int label = tracking->normal_labels->points[off].label;
-        png_color *color =
-            &default_palette[label % ARRAY_LEN(default_palette)];
-        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 30.f;
-        (*output)[off * 3] = (uint8_t)(color->red * shade);
-        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
-        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
     }
 }
 

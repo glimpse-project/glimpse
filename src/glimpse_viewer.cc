@@ -174,10 +174,6 @@ typedef struct _Data
     int normals_rgb_width;
     int normals_rgb_height;
 
-    /* The size of the normal clusters visualisation texture */
-    int nclusters_rgb_width;
-    int nclusters_rgb_height;
-
     /* The size of the candidate clusters visualisation texture */
     int cclusters_rgb_width;
     int cclusters_rgb_height;
@@ -289,7 +285,6 @@ char *glimpse_recordings_path;
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_normals_rgb_tex;
-static GLuint gl_nclusters_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
 
 static GLuint gl_db_program;
@@ -316,7 +311,7 @@ static GLuint gl_cloud_tex;
 
 static const char *views[] = {
     "Controls", "Video Buffer", "Depth Buffer",
-    "Normals", "Normal clusters", "Candidate clusters", "Labels", "Cloud" };
+    "Normals", "Candidate clusters", "Labels", "Cloud" };
 
 static bool cloud_tex_valid = false;
 
@@ -1180,23 +1175,17 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
                                   GM_ROTATION_0);
     case 4:
         return draw_visualisation(data, x, y, width, height,
-                                  data->nclusters_rgb_width,
-                                  data->nclusters_rgb_height,
-                                  views[view], gl_nclusters_rgb_tex,
-                                  GM_ROTATION_0);
-    case 5:
-        return draw_visualisation(data, x, y, width, height,
                                   data->cclusters_rgb_width,
                                   data->cclusters_rgb_height,
                                   views[view], gl_cclusters_rgb_tex,
                                   GM_ROTATION_0);
-    case 6:
+    case 5:
         return draw_visualisation(data, x, y, width, height,
                                   data->labels_rgb_width,
                                   data->labels_rgb_height,
                                   views[view], gl_labels_tex,
                                   GM_ROTATION_0);
-    case 7:
+    case 6:
         if (!data->latest_tracking) {
             return false;
         }
@@ -1734,22 +1723,6 @@ upload_tracking_textures(Data *data)
                  data->normals_rgb_width, data->normals_rgb_height,
                  0, GL_RGB, GL_UNSIGNED_BYTE, normals_rgb);
     free(normals_rgb);
-
-    /* Update normal clusters buffer */
-    glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
-    glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    uint8_t *nclusters_rgb = NULL;
-    gm_tracking_create_rgb_normal_clusters(data->latest_tracking,
-                                           &data->nclusters_rgb_width,
-                                           &data->nclusters_rgb_height,
-                                           &nclusters_rgb);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                 data->nclusters_rgb_width, data->nclusters_rgb_height,
-                 0, GL_RGB, GL_UNSIGNED_BYTE, nclusters_rgb);
-    free(nclusters_rgb);
 
     /* Update candidate clusters buffer */
     glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
@@ -2339,11 +2312,6 @@ init_viewer_opengl(Data *data)
 
     glGenTextures(1, &gl_normals_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    glGenTextures(1, &gl_nclusters_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
