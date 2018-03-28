@@ -65,6 +65,7 @@ struct gm_event
 };
 
 struct gm_pose {
+    bool valid;
     float orientation[4];
     float translation[3];
 };
