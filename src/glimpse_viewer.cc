@@ -1740,7 +1740,7 @@ upload_tracking_textures(Data *data)
 
     /* Update normals buffer */
     uint8_t *normals_rgb = NULL;
-    gm_tracking_create_rgb_normals(data->latest_tracking,
+    gm_tracking_create_rgb_depth_classification(data->latest_tracking,
                                    &data->normals_rgb_width,
                                    &data->normals_rgb_height,
                                    &normals_rgb);

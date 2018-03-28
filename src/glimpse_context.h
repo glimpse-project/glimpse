@@ -444,6 +444,13 @@ gm_tracking_create_rgb_video(struct gm_tracking *tracking,
                              int *height,
                              uint8_t **output);
 
+/* Creates an RGB visualisation of the depth pixel classification. */
+void
+gm_tracking_create_rgb_depth_classification(struct gm_tracking *tracking,
+                                            int *width,
+                                            int *height,
+                                            uint8_t **output);
+
 /* Creates an RGB visualisation of the estimated normals of the depth buffer. */
 void
 gm_tracking_create_rgb_normals(struct gm_tracking *tracking,
