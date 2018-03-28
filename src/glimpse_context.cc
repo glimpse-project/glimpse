@@ -1926,20 +1926,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
     const float cx = tracking->depth_camera_intrinsics.cx;
     const float cy = tracking->depth_camera_intrinsics.cy;
 
-
 #if 0
-    // Debugging - reproject previous frames to test reprojection works
-    glm::mat4 start_to_new = pose_to_matrix(tracking->frame->pose);
-
-    for (int i = 0; i < ctx->n_tracking; ++i) {
-        struct gm_tracking_impl *old_tracking = ctx->tracking_history[i];
+    if (ctx->latest_tracking) {
+        // Initialise the cloud with a reprojection of the last frame
+        // TODO: If the background is very far from the sensor, we'll
+        //       have moving foreground objects erroneously leave trails. In
+        //       this case, we should probably check the colour and see if
+        //       its changed significantly to not fill in that value(?)
+        glm::mat4 start_to_new = pose_to_matrix(tracking->frame->pose);
         glm::mat4 old_to_start =
-            glm::inverse(pose_to_matrix(old_tracking->frame->pose));
+            glm::inverse(pose_to_matrix(ctx->latest_tracking->frame->pose));
 
-        foreach_xy_off(old_tracking->depth_classification->width,
-                       old_tracking->depth_classification->height) {
+        foreach_xy_off(ctx->latest_tracking->depth_classification->width,
+                       ctx->latest_tracking->depth_classification->height) {
             pcl::PointXYZL &point =
-                old_tracking->depth_classification->points[off];
+                ctx->latest_tracking->depth_classification->points[off];
             if (!std::isnormal(point.z)) {
                 continue;
             }
@@ -1962,15 +1963,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             int noff = (ny * hires_cloud->width) + nx;
-            if (std::isnan(hires_cloud->points[noff].z) ||
-                pt.z < hires_cloud->points[noff].z) {
-                hires_cloud->points[noff].x = pt.x;
-                hires_cloud->points[noff].y = pt.y;
-                hires_cloud->points[noff].z = pt.z;
-            }
+            hires_cloud->points[noff].x = pt.x;
+            hires_cloud->points[noff].y = pt.y;
+            hires_cloud->points[noff].z = pt.z;
+        }
+    } else
+#endif
+    {
+        // There's no tracking history, so initialise the cloud with invalid
+        // values
+        foreach_xy_off(hires_cloud->width, hires_cloud->height) {
+            hires_cloud->points[off] = invalid_pt;
         }
     }
-#endif
+
     foreach_xy_off(hires_cloud->width, hires_cloud->height) {
         int doff = (y * ctx->cloud_res) *
                    tracking->depth_camera_intrinsics.width +
@@ -1978,7 +1984,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
         float depth = tracking->depth[doff];
 
         if (!std::isnormal(depth)) {
-            hires_cloud->points[off] = invalid_pt;
             continue;
         }
 
