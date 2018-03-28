@@ -94,7 +94,7 @@
 #define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
 
 #define TOOLBAR_WIDTH 300
-#define MAX_VIEWS 4
+#define MAX_VIEWS 5
 
 #define xsnprintf(dest, n, fmt, ...) do { \
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
@@ -177,13 +177,9 @@ typedef struct _Data
     int video_rgb_width;
     int video_rgb_height;
 
-    /* The size of the normals visualisation texture */
-    int normals_rgb_width;
-    int normals_rgb_height;
-
-    /* The size of the normal clusters visualisation texture */
-    int nclusters_rgb_width;
-    int nclusters_rgb_height;
+    /* The size of the depth classification buffer visualisation texture */
+    int classify_rgb_width;
+    int classify_rgb_height;
 
     /* The size of the candidate clusters visualisation texture */
     int cclusters_rgb_width;
@@ -295,8 +291,7 @@ char *glimpse_recordings_path;
 
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
-static GLuint gl_normals_rgb_tex;
-static GLuint gl_nclusters_rgb_tex;
+static GLuint gl_classify_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
 
 static GLuint gl_db_program;
@@ -323,7 +318,7 @@ static GLuint gl_cloud_tex;
 
 static const char *views[] = {
     "Controls", "Video Buffer", "Depth Buffer",
-    "Normals", "Normal clusters", "Candidate clusters", "Labels", "Cloud" };
+    "Depth classification", "Candidate clusters", "Labels", "Cloud" };
 
 static bool cloud_tex_valid = false;
 
@@ -1184,29 +1179,23 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
                                   GM_ROTATION_0);
     case 3:
         return draw_visualisation(data, x, y, width, height,
-                                  data->normals_rgb_width,
-                                  data->normals_rgb_height,
-                                  views[view], gl_normals_rgb_tex,
+                                  data->classify_rgb_width,
+                                  data->classify_rgb_height,
+                                  views[view], gl_classify_rgb_tex,
                                   GM_ROTATION_0);
     case 4:
-        return draw_visualisation(data, x, y, width, height,
-                                  data->nclusters_rgb_width,
-                                  data->nclusters_rgb_height,
-                                  views[view], gl_nclusters_rgb_tex,
-                                  GM_ROTATION_0);
-    case 5:
         return draw_visualisation(data, x, y, width, height,
                                   data->cclusters_rgb_width,
                                   data->cclusters_rgb_height,
                                   views[view], gl_cclusters_rgb_tex,
                                   GM_ROTATION_0);
-    case 6:
+    case 5:
         return draw_visualisation(data, x, y, width, height,
                                   data->labels_rgb_width,
                                   data->labels_rgb_height,
                                   views[view], gl_labels_tex,
                                   GM_ROTATION_0);
-    case 7:
+    case 6:
         if (!data->latest_tracking) {
             return false;
         }
@@ -1738,41 +1727,23 @@ upload_tracking_textures(Data *data)
         free(video_rgb);
     }
 
-    /* Update normals buffer */
-    uint8_t *normals_rgb = NULL;
-    gm_tracking_create_rgb_normals(data->latest_tracking,
-                                   &data->normals_rgb_width,
-                                   &data->normals_rgb_height,
-                                   &normals_rgb);
+    /* Update depth classification buffer */
+    uint8_t *classify_rgb = NULL;
+    gm_tracking_create_rgb_depth_classification(data->latest_tracking,
+                                                &data->classify_rgb_width,
+                                                &data->classify_rgb_height,
+                                                &classify_rgb);
 
-    if (normals_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
+    if (classify_rgb) {
+        glBindTexture(GL_TEXTURE_2D, gl_classify_rgb_tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
 
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->normals_rgb_width, data->normals_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, normals_rgb);
-        free(normals_rgb);
-    }
-
-    /* Update normal clusters buffer */
-    uint8_t *nclusters_rgb = NULL;
-    gm_tracking_create_rgb_normal_clusters(data->latest_tracking,
-                                           &data->nclusters_rgb_width,
-                                           &data->nclusters_rgb_height,
-                                           &nclusters_rgb);
-    if (nclusters_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->nclusters_rgb_width, data->nclusters_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, nclusters_rgb);
-        free(nclusters_rgb);
+                     data->classify_rgb_width, data->classify_rgb_height,
+                     0, GL_RGB, GL_UNSIGNED_BYTE, classify_rgb);
+        free(classify_rgb);
     }
 
     /* Update candidate clusters buffer */
@@ -2358,13 +2329,8 @@ init_viewer_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glGenTextures(1, &gl_normals_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_normals_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    glGenTextures(1, &gl_nclusters_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_nclusters_rgb_tex);
+    glGenTextures(1, &gl_classify_rgb_tex);
+    glBindTexture(GL_TEXTURE_2D, gl_classify_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 

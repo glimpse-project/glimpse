@@ -73,6 +73,7 @@
 #include <setjmp.h>
 
 #include "half.hpp"
+#include "random.hpp"
 
 #include "xalloc.h"
 #include "wrapper_image.h"
@@ -155,7 +156,7 @@
 
 using half_float::half;
 using namespace pcl::common;
-
+using Random = effolkronium::random_thread_local;
 
 #define DOWNSAMPLE_1_2
 //#define DOWNSAMPLE_1_4
@@ -193,6 +194,30 @@ struct color_stop
 {
     float val;
     struct color color;
+};
+
+// Depth pixel codewords for segmentation
+struct seg_codeword
+{
+    float m;         // The mean value
+    int n;           // The number of depth values in this codeword
+    uint64_t ts;     // The frame timestamp this codeword was created on
+    uint64_t tl;     // The last frame timestamp this codeword was used
+    int nc;          // The number of times depth values consecutively fell
+                     // into this codeword
+};
+
+// Depth pixel classification for segmentation
+enum seg_class
+{
+    BG,       // Background
+    FL,       // Flat
+    FLK,      // Flickering
+    FL_FLK,   // Flickering and flat
+    TB,       // The bag (uninteresting foreground object)
+    FG,       // Foreground
+    CAN,      // Tracking candidate that didn't track
+    TRK,      // Tracking
 };
 
 struct joint_dist
@@ -303,11 +328,8 @@ struct gm_tracking_impl
     // Label probability tables
     float *label_probs;
 
-    // Estimated normals for the depth buffer
-    pcl::PointCloud<pcl::Normal>::Ptr normals;
-
-    // Labels based on similar normals
-    pcl::PointCloud<pcl::Label>::Ptr normal_labels;
+    // Labels based on depth value classification
+    pcl::PointCloud<pcl::PointXYZL>::Ptr depth_classification;
 
     // Labels based on clustering after plane removal
     pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
@@ -360,6 +382,10 @@ struct gm_context
      */
     struct gm_extrinsics basis_depth_to_video_extrinsics;
     bool basis_extrinsics_set;
+
+    struct gm_pose depth_pose;
+    glm::mat4 start_to_depth_pose;
+    std::vector<std::list<struct seg_codeword>> depth_seg;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -472,19 +498,23 @@ struct gm_context
     bool depth_gap_fill;
     bool apply_depth_distortion;
     int gap_dist;
-    float gap_tolerance;
+
     int cloud_res;
     float min_depth;
     float max_depth;
     int seg_res;
-    float normal_depth_change;
-    float normal_smooth;
-    int min_inliers;
-    float angular_threshold;
-    float distance_threshold;
-    float refinement_distance_threshold;
-    float max_curvature;
+
+    float floor_threshold;
     float cluster_tolerance;
+
+    float seg_tb;
+    float seg_tf;
+    int seg_N;
+    int seg_b;
+    int seg_gamma;
+    int seg_alpha;
+    float seg_psi;
+    float seg_timeout;
 
     bool joint_refinement;
     int max_joint_predictions;
@@ -1656,6 +1686,54 @@ class PlaneComparator: public pcl::Comparator<PointT>
     float distance_threshold_;
 };
 
+template<typename PointT>
+class LabelComparator: public pcl::Comparator<PointT>
+{
+  public:
+    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
+    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
+        PointCloudConstPtr;
+
+    typedef boost::shared_ptr<LabelComparator<PointT>> Ptr;
+    typedef boost::shared_ptr<const LabelComparator<PointT>> ConstPtr;
+
+    using pcl::Comparator<PointT>::input_;
+
+    LabelComparator()
+      : depth_threshold_(0.03f) {
+    }
+
+    virtual
+    ~LabelComparator() {
+    }
+
+    inline void
+    setDepthThreshold(float depth_threshold) {
+        depth_threshold_ = depth_threshold;
+    }
+
+    inline float
+    getDepthThreshold() const {
+        return depth_threshold_;
+    }
+
+    virtual bool
+    compare (int idx1, int idx2) const {
+        if ((input_->points[idx1].label == FLK ||
+             input_->points[idx1].label == FG) &&
+            (input_->points[idx2].label == FLK ||
+             input_->points[idx2].label == FG)) {
+            return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
+                depth_threshold_;
+        }
+
+        return false;
+    }
+
+  protected:
+    float depth_threshold_;
+};
+
 template<typename PointT, typename PointNT>
 class DepthComparator: public pcl::Comparator<PointT>
 {
@@ -1713,6 +1791,117 @@ class DepthComparator: public pcl::Comparator<PointT>
     float depth_threshold_;
 };
 
+static void
+update_depth_codebook(struct gm_context *ctx,
+                      struct gm_tracking_impl *tracking,
+                      std::vector<std::pair<int, float>> &reproj_map)
+{
+    uint64_t start = get_time();
+
+    int n_codewords = 0;
+    foreach_xy_off(tracking->depth_classification->width,
+                   tracking->depth_classification->height) {
+        int depth_off = reproj_map[off].first;
+        if (depth_off < 0) {
+            continue;
+        }
+
+        float depth = tracking->depth_classification->points[depth_off].z;
+        if (std::isnan(depth)) {
+            depth = HUGE_DEPTH;
+        }
+
+        // Look to see if this pixel falls into an existing codeword
+        struct seg_codeword *codeword = NULL;
+        std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        std::list<struct seg_codeword>::iterator it;
+        for (it = codewords.begin(); it != codewords.end(); ++it) {
+            struct seg_codeword &candidate = *it;
+
+            if (fabsf(depth - candidate.m) < ctx->seg_tb) {
+                codeword = &candidate;
+                break;
+            }
+        }
+
+        // Don't update pixels that we're tracking
+        if (tracking->depth_classification->points[depth_off].label == TRK) {
+            if (codeword) {
+                codewords.erase(it);
+            }
+            continue;
+        }
+
+        const uint64_t t = tracking->frame->timestamp;
+
+        // Create a new codeword if one didn't fit
+        if (!codeword) {
+            codewords.push_front({ 0, 0, t, t, 0 });
+            codeword = &codewords.front();
+        }
+
+        // Update the codeword info
+        // Update the mean depth
+        float n = (float)std::min(ctx->seg_N, codeword->n);
+        codeword->m = ((n * codeword->m) + depth) / (n + 1.f);
+
+        // Increment number of depth values
+        ++codeword->n;
+
+        // Increment consecutive number of depth values if its happened in
+        // consecutive frames
+        if (!ctx->n_tracking ||
+            codeword->tl != ctx->tracking_history[0]->frame->timestamp) {
+            ++codeword->nc;
+        }
+
+        // Track the latest timestamp to touch this codeword
+        codeword->tl = t;
+
+        // Keep track of the amount of codewords we have
+        n_codewords += (int)codewords.size();
+    }
+
+    uint64_t end = get_time();
+    uint64_t duration = end - start;
+    LOGI("Codeword update (%.2f codewords/pix) took (%.3f%s)\n",
+         n_codewords / (float)(tracking->depth_classification->width *
+                               tracking->depth_classification->height),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
+}
+
+static glm::mat4
+pose_to_matrix(struct gm_pose &pose)
+{
+    glm::quat rot_start_to_dev(
+        pose.orientation[3],
+        pose.orientation[0],
+        pose.orientation[1],
+        pose.orientation[2]);
+
+    glm::vec3 mov_start_to_dev(
+        pose.translation[0],
+        pose.translation[1],
+        pose.translation[2]);
+
+    return glm::translate(glm::mat4(1.f), mov_start_to_dev) *
+           glm::mat4_cast(rot_start_to_dev);
+}
+
+static inline bool
+gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
+                 int x1, int y1, int x2, int y2,
+                 float tolerance)
+{
+    float d1 = cloud->points[y1 * cloud->width + x1].z;
+    float d2 = cloud->points[y2 * cloud->width + x2].z;
+    if (std::isnan(d1) || std::isnan(d2)) {
+        return false;
+    }
+    return fabsf(d1 - d2) <= tolerance;
+}
+
 static bool
 gm_context_track_skeleton(struct gm_context *ctx,
                           struct gm_tracking_impl *tracking)
@@ -1742,27 +1931,82 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     int n_points = 0;
 
-    float inv_fx = 1.0f / tracking->depth_camera_intrinsics.fx;
-    float inv_fy = -1.0f / tracking->depth_camera_intrinsics.fy;
-    float cx = tracking->depth_camera_intrinsics.cx;
-    float cy = tracking->depth_camera_intrinsics.cy;
+    const float fx = tracking->depth_camera_intrinsics.fx;
+    const float fy = tracking->depth_camera_intrinsics.fy;
+    const float inv_fx = 1.0f / tracking->depth_camera_intrinsics.fx;
+    const float inv_fy = 1.0f / tracking->depth_camera_intrinsics.fy;
+    const float cx = tracking->depth_camera_intrinsics.cx;
+    const float cy = tracking->depth_camera_intrinsics.cy;
 
-    foreach_xy_off(hires_cloud->width, hires_cloud->height) {
-        int doff = (y * ctx->cloud_res) * tracking->depth_camera_intrinsics.width +
-                   (x * ctx->cloud_res);
-        float depth = tracking->depth[doff];
-        if (std::isnormal(depth) &&
-            depth >= ctx->min_depth &&
-            depth < ctx->max_depth) {
-            float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
-            float dy = -((y * ctx->cloud_res) - cy) * depth * inv_fy;
-            hires_cloud->points[off].x = dx;
-            hires_cloud->points[off].y = dy;
-            hires_cloud->points[off].z = depth;
-            ++n_points;
-        } else {
+#if 0
+    if (ctx->latest_tracking) {
+        // Initialise the cloud with a reprojection of the last frame
+        // TODO: If the background is very far from the sensor, we'll
+        //       have moving foreground objects erroneously leave trails. In
+        //       this case, we should probably check the colour and see if
+        //       its changed significantly to not fill in that value(?)
+        glm::mat4 start_to_new = pose_to_matrix(tracking->frame->pose);
+        glm::mat4 old_to_start =
+            glm::inverse(pose_to_matrix(ctx->latest_tracking->frame->pose));
+
+        foreach_xy_off(ctx->latest_tracking->depth_classification->width,
+                       ctx->latest_tracking->depth_classification->height) {
+            pcl::PointXYZL &point =
+                ctx->latest_tracking->depth_classification->points[off];
+            if (!std::isnormal(point.z)) {
+                continue;
+            }
+
+            glm::vec4 pt(point.x, point.y, point.z, 1);
+            pt = start_to_new * (old_to_start * pt);
+
+            if (pt.z < ctx->min_depth || pt.z >= ctx->max_depth) {
+                continue;
+            }
+
+            int nx = (int)roundf((pt.x * fx / pt.z) + cx);
+            if (nx < 0 || nx >= (int)hires_cloud->width) {
+                continue;
+            }
+
+            int ny = (int)roundf((pt.y * fy / pt.z) + cy);
+            if (ny < 0 || ny >= (int)hires_cloud->height) {
+                continue;
+            }
+
+            int noff = (ny * hires_cloud->width) + nx;
+            hires_cloud->points[noff].x = pt.x;
+            hires_cloud->points[noff].y = pt.y;
+            hires_cloud->points[noff].z = pt.z;
+        }
+    } else
+#endif
+    {
+        // There's no tracking history, so initialise the cloud with invalid
+        // values
+        foreach_xy_off(hires_cloud->width, hires_cloud->height) {
             hires_cloud->points[off] = invalid_pt;
         }
+    }
+
+    foreach_xy_off(hires_cloud->width, hires_cloud->height) {
+        int doff = (y * ctx->cloud_res) *
+                   tracking->depth_camera_intrinsics.width +
+                   (x * ctx->cloud_res);
+        float depth = tracking->depth[doff];
+
+        if (!std::isnormal(depth) ||
+            depth < ctx->min_depth || depth > ctx->max_depth) {
+            continue;
+        }
+
+        float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
+        float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
+
+        hires_cloud->points[off].x = dx;
+        hires_cloud->points[off].y = dy;
+        hires_cloud->points[off].z = depth;
+        ++n_points;
     }
 
     // Person detection can happen in a sparser cloud made from a downscaled
@@ -1770,26 +2014,28 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
     int n_lores_points;
-    pcl::PointCloud<pcl::PointXYZ>::Ptr lores_cloud;
-    if (ctx->seg_res > 1) {
-        lores_cloud = boost::shared_ptr<pcl::PointCloud<pcl::PointXYZ>>(
-              new pcl::PointCloud<pcl::PointXYZ>);
-        lores_cloud->width = hires_cloud->width / ctx->seg_res;
-        lores_cloud->height = hires_cloud->height / ctx->seg_res;
-        lores_cloud->points.resize(lores_cloud->width * lores_cloud->height);
-        lores_cloud->is_dense = false;
+    tracking->depth_classification = pcl::PointCloud<pcl::PointXYZL>::Ptr(
+        new pcl::PointCloud<pcl::PointXYZL>);
+    tracking->depth_classification->width = hires_cloud->width / ctx->seg_res;
+    tracking->depth_classification->height = hires_cloud->height / ctx->seg_res;
+    unsigned depth_class_size = tracking->depth_classification->width *
+                                tracking->depth_classification->height;
+    tracking->depth_classification->points.resize(depth_class_size);
+    tracking->depth_classification->is_dense = false;
 
-        n_lores_points = 0;
-        foreach_xy_off(lores_cloud->width, lores_cloud->height) {
-            int hoff = (y * ctx->seg_res) * hires_cloud->width + (x * ctx->seg_res);
-            lores_cloud->points[off] = hires_cloud->points[hoff];
-            if (!std::isnan(lores_cloud->points[off].z)) {
-                ++n_lores_points;
-            }
+    n_lores_points = 0;
+    foreach_xy_off(tracking->depth_classification->width,
+                   tracking->depth_classification->height) {
+        int hoff = (y * ctx->seg_res) * hires_cloud->width + (x * ctx->seg_res);
+        tracking->depth_classification->points[off].x =
+            hires_cloud->points[hoff].x;
+        tracking->depth_classification->points[off].y =
+            hires_cloud->points[hoff].y;
+        tracking->depth_classification->points[off].z =
+            hires_cloud->points[hoff].z;
+        if (!std::isnan(tracking->depth_classification->points[off].z)) {
+            ++n_lores_points;
         }
-    } else {
-        lores_cloud = hires_cloud;
-        n_lores_points = n_points;
     }
 
     end = get_time();
@@ -1799,181 +2045,354 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
-    // Remove dense planes above a certain size
+    // Classify depth pixels
     start = get_time();
 
-    // Estimate normals of depth cloud
-    tracking->normals = pcl::PointCloud<pcl::Normal>::Ptr(
-        new pcl::PointCloud<pcl::Normal>);
-    pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
-#if 0
-    pcl::IntegralImageNormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
-    // COVARIANCE_MATRIX, AVERAGE_3D_GRADIENT, AVERAGE_DEPTH_CHANGE
-    ne.setNormalEstimationMethod (ne.AVERAGE_3D_GRADIENT);
-    ne.setMaxDepthChangeFactor(ctx->normal_depth_change);
-    ne.setNormalSmoothingSize(ctx->normal_smooth * 10);
-    //ne.setRectSize(lores_cloud->width, lores_cloud->height);
-    ne.setInputCloud(lores_cloud);
-    ne.compute(*tracking->normals);
-#elif 1
-    pcl::LinearLeastSquaresNormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
-    ne.setNormalSmoothingSize(ctx->normal_smooth);
-    ne.setMaxDepthChangeFactor(ctx->normal_depth_change);
-    ne.setKSearch(0);
-    ne.setRadiusSearch(ctx->normal_depth_change);
-    ne.setDepthDependentSmoothing(false);
-    ne.setInputCloud(lores_cloud);
-    ne.compute(*tracking->normals);
-#else
-    pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> ne;
-    ne.setInputCloud(lores_cloud);
+    bool transform = false;
+    glm::mat4 new_to_start;
+    if (ctx->depth_seg.size() != depth_class_size ||
+        (!ctx->depth_pose.valid && tracking->frame->pose.valid)) {
+        ctx->depth_seg.clear();
+        ctx->depth_seg.resize(depth_class_size);
+        ctx->depth_pose = tracking->frame->pose;
+        if (tracking->frame->pose.valid) {
+            new_to_start = pose_to_matrix(ctx->depth_pose);
+            ctx->start_to_depth_pose = glm::inverse(new_to_start);
+        }
+        gm_debug(ctx->log, "XXX: Resetting pose");
+    } else if (tracking->frame->pose.valid) {
+        // Check if the angle or distance between the current frame and the
+        // reference frame exceeds a certain threshold, and in that case, reset
+        // motion tracking.
+        float angle = glm::degrees(glm::angle(
+            glm::normalize(glm::quat(ctx->depth_pose.orientation[3],
+                                     ctx->depth_pose.orientation[0],
+                                     ctx->depth_pose.orientation[1],
+                                     ctx->depth_pose.orientation[2])) *
+            glm::inverse(glm::normalize(glm::quat(
+                tracking->frame->pose.orientation[3],
+                tracking->frame->pose.orientation[0],
+                tracking->frame->pose.orientation[1],
+                tracking->frame->pose.orientation[2])))));
+        while (angle > 180.f) angle -= 360.f;
 
-#if 0
-    pcl::search::KdTree<pcl::PointXYZ>::Ptr
-      tree(new pcl::search::KdTree<pcl::PointXYZ>);
-    tree->setSortedResults(false);
-    tree->setInputCloud(lores_cloud);
-    ne.setSearchMethod(tree);
-#endif
+        float distance = glm::distance(
+            glm::vec3(ctx->depth_pose.translation[0],
+                      ctx->depth_pose.translation[1],
+                      ctx->depth_pose.translation[2]),
+            glm::vec3(tracking->frame->pose.translation[0],
+                      tracking->frame->pose.translation[1],
+                      tracking->frame->pose.translation[2]));
 
-    ne.setRadiusSearch(ctx->normal_depth_change);
-    ne.compute(*tracking->normals);
-#endif
+        gm_debug(ctx->log, "XXX: Angle: %.2f, "
+                 "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
+                 tracking->frame->pose.translation[0] - ctx->depth_pose.translation[0],
+                 tracking->frame->pose.translation[1] - ctx->depth_pose.translation[1],
+                 tracking->frame->pose.translation[2] - ctx->depth_pose.translation[2]);
+        if (angle < 10.f && distance < 0.3f) {
+            if (angle > 0.25f || distance > 0.025f) {
+                new_to_start =
+                    pose_to_matrix(tracking->frame->pose);
+                transform = true;
+            }
+        } else {
+            // We've strayed too far from the initial pose, reset segmentation
+            // and use this as the home pose.
+            ctx->depth_seg.clear();
+            ctx->depth_seg.resize(depth_class_size);
+            ctx->depth_pose = tracking->frame->pose;
+            new_to_start = pose_to_matrix(ctx->depth_pose);
+            ctx->start_to_depth_pose = glm::inverse(new_to_start);
+            gm_debug(ctx->log, "XXX: Resetting pose");
+        }
+    }
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Normal estimation took (%.3f%s)\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+    // Create a mapping of reprojected pixels to their current positions
+    std::vector<std::pair<int, float>> reproj_map(depth_class_size);
+    if (transform) {
+        for (unsigned i = 0; i < depth_class_size; ++i) {
+            float depth = tracking->depth_classification->points[i].z;
+            if (std::isnan(depth)) {
+                reproj_map[i] = std::pair<int, float>(i, nan);
+            } else {
+                reproj_map[i] = std::pair<int, float>(-1, nan);
+            }
+            tracking->depth_classification->points[i].label = -1;
+        }
+    } else {
+        for (unsigned i = 0; i < depth_class_size; ++i) {
+            float depth = tracking->depth_classification->points[i].z;
+            reproj_map[i] = std::pair<int, float>(i, depth);
+        }
+    }
 
-    // Segment clouds into planes
-    start = get_time();
+    // Transform the cloud into ground-aligned space if we have a valid pose
+    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_aligned(
+        new pcl::PointCloud<pcl::PointXYZ>);
+    if (ctx->depth_pose.valid) {
+        ground_aligned->width = tracking->depth_classification->width;
+        ground_aligned->height = tracking->depth_classification->height;
+        ground_aligned->points.resize(depth_class_size);
+        ground_aligned->is_dense = false;
 
-    pcl::OrganizedMultiPlaneSegmentation<pcl::PointXYZ, pcl::Normal, pcl::Label>
-        seg;
-    seg.setMinInliers((unsigned)ctx->min_inliers);
-    seg.setAngularThreshold(pcl::deg2rad(ctx->angular_threshold));
-    seg.setDistanceThreshold(ctx->distance_threshold);
-    seg.setMaximumCurvature(ctx->max_curvature);
-    seg.setInputCloud(lores_cloud);
-    seg.setInputNormals(tracking->normals);
+        foreach_xy_off(tracking->depth_classification->width,
+                       tracking->depth_classification->height) {
+            pcl::PointXYZL &point = tracking->depth_classification->points[off];
+            if (std::isnan(point.z)) {
+                ground_aligned->points[off] = invalid_pt;
+                continue;
+            }
 
-#if 1
-    pcl::EuclideanPlaneCoefficientComparator<pcl::PointXYZ, pcl::Normal>::Ptr
-        plane_comparator(
-            new pcl::EuclideanPlaneCoefficientComparator<pcl::PointXYZ,
-                                                         pcl::Normal>);
-    seg.setComparator(plane_comparator);
-#endif
+            glm::vec4 pt(point.x, point.y, point.z, 1.f);
+            pt = (new_to_start * pt);
 
-#if 1
-    pcl::PlaneRefinementComparator<pcl::PointXYZ, pcl::Normal, pcl::Label>::Ptr
-        refinement_comparator(
-            new pcl::PlaneRefinementComparator<pcl::PointXYZ, pcl::Normal,
-                                               pcl::Label>);
-    seg.setRefinementComparator(refinement_comparator);
-    refinement_comparator->
-        setDistanceThreshold(ctx->refinement_distance_threshold, true);
-#endif
+            ground_aligned->points[off].x = pt.x;
+            ground_aligned->points[off].y = pt.y;
+            ground_aligned->points[off].z = pt.z;
 
-    std::vector<pcl::ModelCoefficients> plane_coeffs;
-    std::vector<pcl::PointIndices> plane_indices;
-    std::vector<Eigen::Vector4f, Eigen::aligned_allocator<Eigen::Vector4f>>
-        plane_centroids;
-    std::vector<Eigen::Matrix3f, Eigen::aligned_allocator<Eigen::Matrix3f>>
-        plane_covariances;
-    tracking->normal_labels =
-        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
-    std::vector<pcl::PointIndices> plane_label_indices;
-    seg.segment(plane_coeffs, plane_indices, plane_centroids,
-                plane_covariances, *tracking->normal_labels, plane_label_indices);
-    seg.refine(plane_coeffs, plane_indices, plane_centroids,
-               plane_covariances, tracking->normal_labels, plane_label_indices);
+            if (transform) {
+                pt = ctx->start_to_depth_pose * pt;
 
-#if 0
-    // Expand the found planes to encompass any connected points that lie near
-    // the same plane.
-    PlaneComparator<pcl::PointXYZ>::Ptr plane_check(
-        new PlaneComparator<pcl::PointXYZ>);
-    plane_check->setInputCloud(lores_cloud);
-    plane_check->setDistanceThreshold(ctx->cluster_tolerance);
+                float nx = ((pt.x * fx / pt.z) + cx);
+                float ny = ((pt.y * fy / pt.z) + cy);
 
-    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZ, pcl::Label>
-        plane_expander(plane_check);
-    plane_expander.setInputCloud(lores_cloud);
+                int dnx = (int)roundf(nx / ctx->seg_res);
+                int dny = (int)roundf(ny / ctx->seg_res);
 
-    pcl::PointCloud<pcl::Label> expander_labels;
-    std::vector<pcl::PointIndices> expander_label_indices;
-    for (unsigned i = 0; i < plane_coeffs.size(); ++i) {
-        std::vector<float> &values = plane_coeffs[i].values;
-        Eigen::Vector4f &centroid = plane_centroids[i];
-        Eigen::Vector4f plane(values[0], values[1], values[2], values[3]);
+                if (dnx < 0 ||
+                    dnx >= (int)tracking->depth_classification->width ||
+                    dny < 0 ||
+                    dny >= (int)tracking->depth_classification->height) {
+                    continue;
+                }
 
-        plane_check->setPlaneCoefficients(plane);
-        expander_labels.points.clear();
-        expander_label_indices.clear();
-        plane_expander.segment(expander_labels, expander_label_indices);
+                int new_off =
+                    (dny * tracking->depth_classification->width) + dnx;
+                float current_depth = reproj_map[new_off].second;
+                if (std::isnan(current_depth) || current_depth > point.z) {
+                    reproj_map[new_off] = std::pair<int, float>(off, point.z);
+                }
+            }
+        }
+    }
 
-        if (expander_label_indices.empty()) {
+    // Do classification of depth buffer
+    foreach_xy_off(tracking->depth_classification->width,
+                   tracking->depth_classification->height) {
+        int depth_off = reproj_map[off].first;
+        if (depth_off < 0) {
             continue;
         }
 
-        // Find the plane cluster that lies nearest the cluster detected via
-        // connected normals
-        float distance = FLT_MAX;
-        pcl::PointIndices &closest_plane_indices = expander_label_indices[0];
-        for (std::vector<pcl::PointIndices>::iterator it =
-             expander_label_indices.begin();
-             it != expander_label_indices.end(); ++it) {
-            Eigen::Vector4f candidate_centroid;
-            pcl::compute3DCentroid(*lores_cloud, *it, candidate_centroid);
-            float candidate_distance = (candidate_centroid - centroid).norm();
-            if (candidate_distance < distance) {
-                distance = candidate_distance;
-                closest_plane_indices = *it;
-            }
+        float depth = tracking->depth_classification->points[depth_off].z;
+        if (std::isnan(depth)) {
+            depth = HUGE_DEPTH;
         }
 
-        // Discard plane cluster
-        for (unsigned p = 0; p < closest_plane_indices.indices.size(); ++p) {
-            int idx = closest_plane_indices.indices[p];
-            lores_cloud->points[idx] = invalid_pt;
+        const uint64_t t = tracking->frame->timestamp;
+        const float tb = ctx->seg_tb;
+        const float tf = ctx->seg_tf;
+        const int b = ctx->seg_b;
+        const int gamma = (float)ctx->seg_gamma;
+        const int alpha = ctx->seg_alpha;
+        const float psi = ctx->seg_psi;
+
+        // Look to see if this pixel falls into an existing codeword
+        int max_n = 0;
+        struct seg_codeword *codeword = NULL;
+        struct seg_codeword *bg_codeword = NULL;
+        std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        for (std::list<struct seg_codeword>::iterator it = codewords.begin();
+             it != codewords.end();) {
+            struct seg_codeword &candidate = *it;
+
+            // Discard the codeword if it's too old
+            if ((t - candidate.tl) / 1000000000.0 >= ctx->seg_timeout) {
+                it = codewords.erase(it);
+                continue;
+            }
+
+            if (!codeword && fabsf(depth - candidate.m) < tb) {
+                codeword = &candidate;
+            }
+            if (candidate.n > max_n) {
+                bg_codeword = &candidate;
+                max_n = candidate.n;
+            }
+
+            ++it;
+        }
+
+        // Classify this depth value
+        const float frame_time = ctx->n_tracking ?
+            (float)(t - ctx->tracking_history[0]->frame->timestamp) :
+            100000000.f;
+
+        if (!codeword) {
+            tracking->depth_classification->points[depth_off].label = FG;
+        } else if (codeword->n == bg_codeword->n) {
+            tracking->depth_classification->points[depth_off].label = BG;
+        } else {
+            bool flat = false, flickering = false;
+            float mean_diff = fabsf(codeword->m - bg_codeword->m);
+            if ((tb < mean_diff) && (mean_diff <= tf)) {
+                flat = true;
+            }
+            if ((b * codeword->nc) > codeword->n &&
+                (int)(((t - codeword->ts) / frame_time) / gamma) <=
+                codeword->nc) {
+                flickering = true;
+            }
+            if (flat || flickering) {
+                tracking->depth_classification->points[depth_off].label =
+                    (flat && flickering) ?
+                        FL_FLK : (flat ?  FL : FLK);
+            } else {
+                if (codeword->n > alpha &&
+                    ((codeword->tl - codeword->ts) / frame_time) /
+                    (float)codeword->n >= psi) {
+                    tracking->depth_classification->
+                        points[depth_off].label = TB;
+                } else {
+                    tracking->depth_classification->
+                        points[depth_off].label = FG;
+                }
+            }
         }
     }
-#else
-    // Remove the points that make up the planes we found above
-    for (std::vector<pcl::PointIndices>::iterator it = plane_indices.begin();
-         it != plane_indices.end(); ++it) {
-        pcl::PointIndices &indices = *it;
-        for (unsigned i = 0; i < indices.indices.size(); ++i) {
-            lores_cloud->points[indices.indices[i]] = invalid_pt;
-        }
-    }
-#endif
 
     end = get_time();
     duration = end - start;
-    LOGI("Plane removal (%d planes) took %.3f%s\n",
-         (int)plane_indices.size(),
+    LOGI("Depth value classification took (%.3f%s)\n",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
     start = get_time();
 
-    // Use depth clustering to split the cloud into possible human clusters.
-    DepthComparator<pcl::PointXYZ, pcl::Normal>::Ptr depth_cluster(
-        new DepthComparator<pcl::PointXYZ, pcl::Normal>);
-    depth_cluster->setInputCloud(lores_cloud);
-    depth_cluster->setInputNormals(tracking->normals);
-    depth_cluster->setDepthThreshold(ctx->cluster_tolerance);
-
-    tracking->cluster_labels =
-        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
     std::vector<pcl::PointIndices> cluster_indices;
-    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZ, pcl::Label>
-        depth_connector(depth_cluster);
-    depth_connector.setInputCloud(lores_cloud);
-    depth_connector.segment(*tracking->cluster_labels, cluster_indices);
+    if (ctx->n_tracking == 0 ||
+        ctx->latest_tracking != ctx->tracking_history[0]) {
+        // If we've not tracked a human yet, the depth classification may not
+        // be reliable - just use a simple clustering technique to find a
+        // human and separate them from the floor, then rely on motion detection
+        // for subsequent frames.
+        int width = (int)tracking->depth_classification->width;
+        int height = (int)tracking->depth_classification->height;
+        int fx = width / 2;
+        int fy = height / 2;
+
+        // Flood-fill from the focal point, with a limit on the x and z
+        // axes for how far a point can be from the focus. This will allow
+        // us to hopefully find the floor level and establish a y limit before
+        // then flood-filling again without the x and z limits.
+
+        struct PointCmp {
+            int x;
+            int y;
+            int lx;
+            int ly;
+        };
+        std::queue<struct PointCmp> flood_fill;
+        flood_fill.push({ fx, fy, fx, fy });
+        std::vector<bool> done_mask(depth_class_size, false);
+
+        float lowest_point = -FLT_MAX;
+        while (!flood_fill.empty()) {
+            struct PointCmp point = flood_fill.front();
+            flood_fill.pop();
+
+            int idx = point.y * width + point.x;
+
+            if (point.x < 0 || point.y < 0 ||
+                point.x >= width || point.y >= height ||
+                done_mask[idx]) {
+                continue;
+            }
+
+            int lidx = point.ly * width + point.lx;
+            pcl::PointXYZL &pcl_pt1 =
+                tracking->depth_classification->points[idx];
+            pcl::PointXYZL &pcl_pt2 =
+                tracking->depth_classification->points[lidx];
+
+            // TODO: Make these values configurable?
+            if (fabsf(pcl_pt2.x - pcl_pt1.x) > 0.25f ||
+                fabsf(pcl_pt2.z - pcl_pt1.z) > 0.2f) {
+                continue;
+            }
+
+            float aligned_y = ctx->depth_pose.valid ?
+                ground_aligned->points[idx].y :
+                tracking->depth_classification->points[idx].y;
+            if (aligned_y > lowest_point) {
+                lowest_point = aligned_y;
+            }
+
+            if (gm_compare_depth(tracking->depth_classification,
+                                 point.x, point.y, point.lx, point.ly,
+                                 ctx->cluster_tolerance)) {
+                done_mask[idx] = true;
+                flood_fill.push({ point.x - 1, point.y, point.x, point.y });
+                flood_fill.push({ point.x + 1, point.y, point.x, point.y });
+                // We're looking for the floor, don't fill upwards
+                //flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+                flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+            }
+        }
+
+        pcl::PointIndices person_indices;
+        flood_fill.push({ fx, fy, fx, fy });
+        std::fill(done_mask.begin(), done_mask.end(), false);
+
+        while(!flood_fill.empty()) {
+            struct PointCmp point = flood_fill.front();
+            flood_fill.pop();
+
+            int idx = point.y * width + point.x;
+
+            if (point.x < 0 || point.y < 0 ||
+                point.x >= width || point.y >= height ||
+                done_mask[idx]) {
+                continue;
+            }
+
+            float aligned_y = ctx->depth_pose.valid ?
+                ground_aligned->points[idx].y :
+                tracking->depth_classification->points[idx].y;
+            if (aligned_y > lowest_point - ctx->floor_threshold) {
+                continue;
+            }
+
+            if (gm_compare_depth(tracking->depth_classification,
+                                 point.x, point.y, point.lx, point.ly,
+                                 ctx->cluster_tolerance)) {
+                done_mask[idx] = true;
+                person_indices.indices.push_back(idx);
+                flood_fill.push({ point.x - 1, point.y, point.x, point.y });
+                flood_fill.push({ point.x + 1, point.y, point.x, point.y });
+                flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+                flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+            }
+        }
+
+        if (!person_indices.indices.empty()) {
+            cluster_indices.push_back(person_indices);
+        }
+    } else {
+        // Use depth clustering to split the cloud into possible human clusters
+        // based on depth and classification.
+        LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
+            new LabelComparator<pcl::PointXYZL>);
+        label_cluster->setInputCloud(tracking->depth_classification);
+        label_cluster->setDepthThreshold(ctx->cluster_tolerance);
+
+        tracking->cluster_labels =
+            pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
+        pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
+            depth_connector(label_cluster);
+        depth_connector.setInputCloud(tracking->depth_classification);
+        depth_connector.segment(*tracking->cluster_labels, cluster_indices);
+    }
 
     end = get_time();
     duration = end - start;
@@ -1988,13 +2407,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     //const float centroid_tolerance = 0.1f;
     std::vector<pcl::PointIndices> persons;
-    for (std::vector<pcl::PointIndices>::const_iterator point_it =
-         cluster_indices.begin();
-         point_it != cluster_indices.end(); ++point_it) {
+    for (unsigned i = 0; i < cluster_indices.size(); ++i) {
+        pcl::PointIndices &points = cluster_indices[i];
 
         // Check if the cluster has human-ish dimensions
         Eigen::Vector4f min, max;
-        pcl::getMinMax3D(*lores_cloud, *point_it, min, max);
+        pcl::getMinMax3D(*tracking->depth_classification, points, min, max);
         Eigen::Vector4f diff = max - min;
         // TODO: Make these limits configurable
         if (diff[0] < 0.15f || diff[0] > 2.0f ||
@@ -2003,7 +2421,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             continue;
         }
         LOGI("Cluster with %d points, (%.2fx%.2fx%.2f)\n",
-             (int)(*point_it).indices.size(), diff[0], diff[1], diff[2]);
+             (int)(points).indices.size(), diff[0], diff[1], diff[2]);
 
 #if 0
         // Work out the centroid of the cloud and see if there's a point
@@ -2013,7 +2431,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // Note that I guess humans are actually quite frequently in a state
         // of semi-falling, so we have a pretty generous tolerance.
         Eigen::VectorXf centroid;
-        pcl::computeNDCentroid(*lores_cloud, *point_it, centroid);
+        pcl::computeNDCentroid(*tracking->depth_classification, points,
+                               centroid);
 
         // Reproject this point into the depth buffer space to get an offset
         // and check if the point exists in the dense cloud.
@@ -2039,7 +2458,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
 #endif
 
-        persons.push_back(*point_it);
+        persons.push_back(points);
     }
 
     end = get_time();
@@ -2049,26 +2468,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        // TODO: We should do an interpolation step here.
-        LOGE("Skipping detection: Could not find a person cluster\n");
-        return false;
-    }
-
-    if (tracking->depth_camera_intrinsics.width == 0 ||
-        tracking->depth_camera_intrinsics.height == 0)
-    {
-        LOGE("Skipping detection: depth camera intrinsics uninitialized\n");
+        update_depth_codebook(ctx, tracking, reproj_map);
+        LOGI("Skipping detection: Could not find a person cluster\n");
         return false;
     }
 
     start = get_time();
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
-
-    if (width == 0 || height == 0) {
-        LOGE("Skipping detection: training camera intrinsics uninitialized\n");
-        return false;
-    }
 
     // Using the lores point cloud as a mask, reproject the hires point cloud
     // into training camera space.
@@ -2097,8 +2504,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         for (std::vector<int>::const_iterator it = (*p_it).indices.begin();
              it != (*p_it).indices.end (); ++it) {
-            int lx = (*it) % lores_cloud->width;
-            int ly = (*it) / lores_cloud->width;
+            int lx = (*it) % tracking->depth_classification->width;
+            int ly = (*it) / tracking->depth_classification->width;
             for (int hy = (int)(ly * ctx->seg_res), ey = 0;
                  hy < (int)hires_cloud->height && ey < ctx->seg_res;
                  ++hy, ++ey) {
@@ -2156,10 +2563,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
     float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
                                          sizeof(float));
     tracking->skeleton.distance = FLT_MAX;
-    for (std::vector<float*>::iterator it = depth_images.begin();
-         it != depth_images.end(); ++it) {
+    int best_person = 0;
+    for (unsigned i = 0; i < depth_images.size(); ++i) {
         start = get_time();
-        float *depth_img = *it;
+        float *depth_img = depth_images[i];
         infer_labels<float>(ctx->decision_trees, ctx->n_decision_trees,
                             depth_img, width, height, label_probs);
         end = get_time();
@@ -2206,39 +2613,88 @@ gm_context_track_skeleton(struct gm_context *ctx,
         if (compare_skeletons(candidate_skeleton, tracking->skeleton)) {
             std::swap(tracking->skeleton, candidate_skeleton);
             std::swap(tracking->label_probs, label_probs);
+            best_person = i;
         }
     }
     xfree(label_probs);
     xfree(weights);
 
-    if (tracking->skeleton.confidence < ctx->skeleton_min_confidence ||
-        tracking->skeleton.distance > ctx->skeleton_max_distance) {
-        return false;
+    bool tracked =
+        tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
+        tracking->skeleton.distance <= ctx->skeleton_max_distance;
+
+    // Update the depth classification so it knows which pixels are tracked
+    // TODO: We should actually use the label cluster points, which may not
+    //       consist of this entire cloud.
+    pcl::PointIndices &person = persons[best_person];
+    for (std::vector<int>::const_iterator it = person.indices.begin();
+         it != person.indices.end(); ++it) {
+        tracking->depth_classification->points[*it].label = tracked ? TRK : CAN;
     }
 
-    start = get_time();
+    if (tracked) {
+        start = get_time();
 
-    // TODO: We just take the most confident skeleton above, but we should
-    //       probably establish some thresholds and spit out multiple skeletons.
-    if (ctx->bone_sanitisation) {
-        sanitise_skeleton(ctx, tracking->skeleton, tracking->frame->timestamp);
-    } else {
-        build_bones(ctx, tracking->skeleton);
+        // The codebook may have been polluted before this point by a human
+        // failing to track. To counteract this, as well as removing and of
+        // the codewords that apply to the tracked figure, we also remove all
+        // but the furthest-away codewords. This is in the hope that if there
+        // was an untracked human in the codebook that at some point we saw
+        // background behind them.
+        if (ctx->n_tracking == 0 ||
+            ctx->latest_tracking != ctx->tracking_history[0]) {
+            foreach_xy_off(tracking->depth_classification->width,
+                           tracking->depth_classification->height) {
+                std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+                if (codewords.size() <= 1) {
+                    continue;
+                }
+
+                std::list<struct seg_codeword>::iterator furthest, it;
+                for (furthest = it = codewords.begin();
+                     it != codewords.end(); ++it) {
+                    if ((*it).m > (*furthest).m) {
+                        furthest = it;
+                    }
+                }
+
+                it = codewords.begin();
+                while (it != codewords.end()) {
+                    if (it == furthest) {
+                        ++it;
+                    } else {
+                        it = codewords.erase(it);
+                    }
+                }
+            }
+        }
+
+        // TODO: We just take the most confident skeleton above, but we should
+        //       probably establish some thresholds and spit out multiple
+        //       skeletons.
+        if (ctx->bone_sanitisation) {
+            sanitise_skeleton(ctx, tracking->skeleton,
+                              tracking->frame->timestamp);
+        } else {
+            build_bones(ctx, tracking->skeleton);
+        }
+        for (int j = 0; j < ctx->n_joints; j++) {
+            int idx = j * 3;
+            tracking->joints_processed[idx] = tracking->skeleton.joints[j].x;
+            tracking->joints_processed[idx+1] = tracking->skeleton.joints[j].y;
+            tracking->joints_processed[idx+2] = tracking->skeleton.joints[j].z;
+        }
+
+        end = get_time();
+        duration = end - start;
+        LOGI("Joint processing took %.3f%s\n",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
+
+        update_depth_codebook(ctx, tracking, reproj_map);
     }
-    for (int j = 0; j < ctx->n_joints; j++) {
-        int idx = j * 3;
-        tracking->joints_processed[idx] = tracking->skeleton.joints[j].x;
-        tracking->joints_processed[idx+1] = tracking->skeleton.joints[j].y;
-        tracking->joints_processed[idx+2] = tracking->skeleton.joints[j].z;
-    }
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Joint processing took %.3f%s\n",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-    return true;
+    return tracked;
 }
 
 static struct gm_event *
@@ -2557,80 +3013,34 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
             };
             std::vector<struct blank> blanks;
 
+            std::vector<float> box;
             foreach_xy_off(rot_width, rot_height) {
                 if (std::isnormal(depth_copy[off])) {
                     continue;
                 }
 
-                // Check to see if gaps can be filled by surrounding pixels on
-                // either the horizontal or vertical axis
-                int left = 0, right = 0, up = 0, down = 0;
-                for (int i = 1;
-                     i <= ctx->gap_dist && !(left && right) && !(up && down); ++i) {
-                    if (!left && (x - i) >= 0 && std::isnormal(depth_copy[off-i])) {
-                        left = i;
+                box.clear();
+                for (int i = -std::min(ctx->gap_dist, y);
+                     i <= ctx->gap_dist; ++i) {
+                    if (y + i >= rot_height) {
+                        break;
                     }
-                    if (!right && (x + i) < rot_width &&
-                        std::isnormal(depth_copy[off+i])) {
-                        right = i;
-                    }
-                    if (!up && (y - i) >= 0 &&
-                        std::isnormal(depth_copy[off - (i * rot_width)])) {
-                        up = i;
-                    }
-                    if (!down && (y + i) < rot_height &&
-                        std::isnormal(depth_copy[off + (i * rot_width)])) {
-                        down = i;
-                    }
-                }
 
-                bool hvalid = false;
-                if (left && right) {
-                    float lval = depth_copy[off-left];
-                    float rval = depth_copy[off+right];
-                    float distance = fabsf(rval - lval);
-                    if (distance < ctx->gap_tolerance * (left + right)) {
-                        hvalid = true;
-                    }
-                }
-                bool vvalid = false;
-                if (up && down) {
-                    int pix_dist = up + down;
-                    float uval = depth_copy[off-(up * rot_width)];
-                    float dval = depth_copy[off+(down * rot_width)];
-                    float distance = fabsf(dval - uval);
-                    if (distance < ctx->gap_tolerance * pix_dist) {
-                        if (pix_dist < left + right || !(left && right)) {
-                            vvalid = true;
-                            hvalid = false;
+                    for (int j = -std::min(ctx->gap_dist, x);
+                         j <= ctx->gap_dist; ++j) {
+                        if (x + j >= rot_width) {
+                            break;
                         }
-                    }
-                }
 
-                if (hvalid || vvalid) {
-                    // Note, this interpolation isn't correct because it doesn't
-                    // take depth into account. This has a more extreme effect
-                    // at oblique angles, but hopefully we won't be filling in
-                    // too many pixels so it shouldn't matter too much.
-                    if (hvalid) {
-                        int pix_dist = left + right;
-                        float lval = depth_copy[off-left];
-                        float rval = depth_copy[off+right];
-                        for (int o = -left + 1, i = 0; o < right; ++o, ++i) {
-                            float new_depth = ((lval * ((pix_dist - 1) - o)) +
-                                               (rval * o)) / (float)(pix_dist - 1);
-                            blanks.push_back({off + o, new_depth});
-                        }
-                    } else {
-                        int pix_dist = up + down;
-                        float uval = depth_copy[off-(up * rot_width)];
-                        float dval = depth_copy[off+(down * rot_width)];
-                        for (int o = -up + 1, i = 0; o < down; ++o, ++i) {
-                            float new_depth = ((uval * ((pix_dist - 1) - o)) +
-                                               (dval * o)) / (float)(pix_dist - 1);
-                            blanks.push_back({off + (o * rot_width), new_depth});
+                        int o_off = (y + i) * rot_width + x + j;
+                        if (std::isnormal(depth_copy[o_off])) {
+                            box.push_back(depth_copy[o_off]);
                         }
                     }
+                }
+                if ((int)box.size() > ctx->gap_dist) {
+                    float depth = *Random::get(box);
+                    blanks.push_back({off, depth});
                 }
             }
 
@@ -3626,7 +4036,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
-    ctx->gap_dist = 2;
+    ctx->gap_dist = 1;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "gap_dist";
@@ -3636,17 +4046,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.ptr = &ctx->gap_dist;
     prop.int_state.min = 0;
     prop.int_state.max = 5;
-    ctx->properties.push_back(prop);
-
-    ctx->gap_tolerance = 0.05f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "gap_tolerance";
-    prop.desc = "Distance threshold when interpolating between gaps";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->gap_tolerance;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.2f;
     ctx->properties.push_back(prop);
 
     ctx->depth_gap_fill = true;
@@ -3700,7 +4099,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10;
     ctx->properties.push_back(prop);
 
-    ctx->seg_res = 3;
+    ctx->seg_res = 1;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "seg_res";
@@ -3711,84 +4110,107 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.max = 4;
     ctx->properties.push_back(prop);
 
-    ctx->normal_depth_change = 0.03f;
+    ctx->seg_tb = 0.05f;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "normal_depth_change";
-    prop.desc = "Maximum depth change for computing object borders";
+    prop.name = "seg_tb";
+    prop.desc = "Segmentation bucket threshold";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->normal_depth_change;
-    prop.float_state.min = 0.01f;
+    prop.float_state.ptr = &ctx->seg_tb;
+    prop.float_state.min = 0.001f;
+    prop.float_state.max = 0.1f;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_tf = 0.2f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_tf";
+    prop.desc = "Segmentation flickering threshold";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->seg_tf;
+    prop.float_state.min = 0.05f;
     prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
-    ctx->normal_smooth = 3.0f;
+    ctx->seg_N = 100;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "normal_smooth";
-    prop.desc = "Size of the area used to smooth normals";
+    prop.name = "seg_N";
+    prop.desc = "Segmentation max existing mean weight";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seg_N;
+    prop.int_state.min = 10;
+    prop.int_state.max = 500;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_b = 3;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_b";
+    prop.desc = "Segmentation flickering frame consecutiveness threshold";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seg_b;
+    prop.int_state.min = 1;
+    prop.int_state.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_gamma = 100;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_gamma";
+    prop.desc = "Segmentation max flickering frame occurence";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seg_gamma;
+    prop.int_state.min = 10;
+    prop.int_state.max = 500;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_alpha = 200;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_alpha";
+    prop.desc = "Segmentation frame-time for uninteresting objects";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seg_alpha;
+    prop.int_state.min = 10;
+    prop.int_state.max = 500;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_psi = 0.8f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_psi";
+    prop.desc = "Segmentation ratio for uninteresting object matches";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->normal_smooth;
-    prop.float_state.min = 1.0f;
+    prop.float_state.ptr = &ctx->seg_psi;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1.f;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_timeout = 3.0f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_timeout";
+    prop.desc = "Unused segmentation codeword recycle timeout";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->seg_timeout;
+    prop.float_state.min = 0.2f;
     prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->min_inliers = 50;
+    ctx->floor_threshold = 0.1f;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "min_inliers";
-    prop.desc = "Minimum number of inliers when doing plane segmentation";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->min_inliers;
-    prop.int_state.min = 5;
-    prop.int_state.max = 200;
-    ctx->properties.push_back(prop);
-
-    ctx->angular_threshold = 10.f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "angular_threshold";
-    prop.desc = "Angular threshold for multi-plane segmentation";
+    prop.name = "floor_threshold";
+    prop.desc = "The threshold from the lowest points of a potential person "
+                "cluster to filter out when looking for the floor.";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->angular_threshold;
-    prop.float_state.min = 0.1f;
-    prop.float_state.max = 45.f;
-    ctx->properties.push_back(prop);
-
-    ctx->distance_threshold = 0.03f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "distance_threshold";
-    prop.desc = "Distance threshold for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->distance_threshold;
+    prop.float_state.ptr = &ctx->floor_threshold;
     prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
+    prop.float_state.max = 0.3f;
     ctx->properties.push_back(prop);
 
-    ctx->refinement_distance_threshold = 0.15f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "refinement_distance_threshold";
-    prop.desc = "Distance threshold for multi-plane segmentation refinement";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->refinement_distance_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->max_curvature = 0.001f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "max_curvature";
-    prop.desc = "Maximum curvature of a plane for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->max_curvature;
-    prop.float_state.min = 0.0005f;
-    prop.float_state.max = 0.03f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_tolerance = 0.03f;
+    ctx->cluster_tolerance = 0.05f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "cluster_tolerance";
@@ -4128,6 +4550,7 @@ gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
 
     foreach_xy_off(*width, *height) {
         float depth = tracking->depth[off];
+#if 0
         struct color rgb = stops_color_from_val(ctx->depth_color_stops,
                                                 ctx->n_depth_color_stops,
                                                 ctx->depth_color_stops_range,
@@ -4135,6 +4558,15 @@ gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
         (*output)[off * 3] = rgb.r;
         (*output)[off * 3 + 1] = rgb.g;
         (*output)[off * 3 + 2] = rgb.b;
+#else
+        depth = std::max(ctx->min_depth, std::min(ctx->max_depth, depth));
+        uint8_t shade = (uint8_t)
+            ((depth - ctx->min_depth) /
+             (ctx->max_depth - ctx->min_depth) * 255.f);
+        (*output)[off * 3] = shade;
+        (*output)[off * 3 + 1] = shade;
+        (*output)[off * 3 + 2] = shade;
+#endif
     }
 }
 
@@ -4217,71 +4649,6 @@ gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
 }
 
 void
-gm_tracking_create_rgb_normals(struct gm_tracking *_tracking,
-                               int *width, int *height, uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
-
-    if (!tracking->normals) {
-        return;
-    }
-
-    *width = (int)tracking->normals->width;
-    *height = (int)tracking->normals->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        pcl::Normal &norm = tracking->normals->points[off];
-        if (std::isnan(norm.normal_z)) {
-            (*output)[off * 3] = 0;
-            (*output)[off * 3 + 1] = 0;
-            (*output)[off * 3 + 2] = 0;
-        } else {
-            uint8_t r = (uint8_t)((norm.normal_x * 127) + 127);
-            uint8_t g = (uint8_t)((norm.normal_y * 127) + 127);
-            uint8_t b = (uint8_t)(255 - ((norm.normal_z * 127) + 127));
-            (*output)[off * 3] = r;
-            (*output)[off * 3 + 1] = g;
-            (*output)[off * 3 + 2] = b;
-        }
-    }
-}
-
-void
-gm_tracking_create_rgb_normal_clusters(struct gm_tracking *_tracking,
-                                       int *width, int *height,
-                                       uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
-
-    if (!tracking->normal_labels) {
-        return;
-    }
-
-    *width = (int)tracking->normal_labels->width;
-    *height = (int)tracking->normal_labels->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        int label = tracking->normal_labels->points[off].label;
-        png_color *color =
-            &default_palette[label % ARRAY_LEN(default_palette)];
-        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 30.f;
-        (*output)[off * 3] = (uint8_t)(color->red * shade);
-        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
-        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
-    }
-}
-
-void
 gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
                                           int *width, int *height,
                                           uint8_t **output)
@@ -4308,6 +4675,90 @@ gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
         (*output)[off * 3] = (uint8_t)(color->red * shade);
         (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
         (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
+    }
+}
+
+void
+gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
+                                            int *width, int *height,
+                                            uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    if (!tracking->depth_classification) {
+        return;
+    }
+
+    *width = (int)tracking->depth_classification->width;
+    *height = (int)tracking->depth_classification->height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+#if 0
+        float depth = tracking->depth_classification->points[off].z;
+        depth = std::max(ctx->min_depth, std::min(ctx->max_depth, depth));
+        uint8_t shade = (uint8_t)
+            ((depth - ctx->min_depth) /
+             (ctx->max_depth - ctx->min_depth) * 255.f);
+        (*output)[off * 3] = shade;
+        (*output)[off * 3 + 1] = shade;
+        (*output)[off * 3 + 2] = shade;
+#else
+        enum seg_class label = (enum seg_class)
+            tracking->depth_classification->points[off].label;
+        switch(label) {
+        case BG:
+            (*output)[off * 3] = 0x00;
+            (*output)[off * 3 + 1] = 0x00;
+            (*output)[off * 3 + 2] = 0x00;
+            break;
+        case FL:
+            (*output)[off * 3] = 0xC0;
+            (*output)[off * 3 + 1] = 0xC0;
+            (*output)[off * 3 + 2] = 0xC0;
+            break;
+        case FLK:
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0x00;
+            (*output)[off * 3 + 2] = 0x00;
+            break;
+        case FL_FLK:
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0xA0;
+            (*output)[off * 3 + 2] = 0x00;
+            break;
+        case TB:
+            (*output)[off * 3] = 0x00;
+            (*output)[off * 3 + 1] = 0x00;
+            (*output)[off * 3 + 2] = 0xFF;
+            break;
+        case FG:
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0xFF;
+            (*output)[off * 3 + 2] = 0xFF;
+            break;
+        case CAN:
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0xFF;
+            (*output)[off * 3 + 2] = 0x00;
+            break;
+        case TRK:
+            (*output)[off * 3] = 0x00;
+            (*output)[off * 3 + 1] = 0xFF;
+            (*output)[off * 3 + 2] = 0x00;
+            break;
+        default:
+            // Invalid/unhandled value
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0x00;
+            (*output)[off * 3 + 2] = 0xFF;
+            break;
+        }
+#endif
     }
 }
 
