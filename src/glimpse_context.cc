@@ -387,6 +387,8 @@ struct gm_context
     struct gm_extrinsics basis_depth_to_video_extrinsics;
     bool basis_extrinsics_set;
 
+    struct gm_pose depth_pose;
+    glm::mat4 start_to_depth_pose;
     std::vector<std::list<struct seg_codeword>> depth_seg;
 
     pthread_t detect_thread;
@@ -2227,35 +2229,80 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Classify depth pixels
     start = get_time();
 
+    bool transform = false;
+    glm::mat4 new_to_start;
     if (!ctx->latest_tracking ||
         ctx->depth_seg.size() != depth_class_size) {
         ctx->depth_seg.empty();
         ctx->depth_seg.resize(depth_class_size);
+        ctx->depth_pose = tracking->frame->pose;
+        ctx->start_to_depth_pose = pose_to_matrix(ctx->depth_pose);
     } else {
-#if 1
-        // Transform the depth segmentation data from the pose of the previous
-        // frame to this one to find the new pixel locations of the old
-        // depth segmentation data
-        glm::mat4 start_to_new = pose_to_matrix(tracking->frame->pose);
-        glm::mat4 old_to_start =
-            glm::inverse(pose_to_matrix(ctx->latest_tracking->frame->pose));
+        // Check if the angle or distance between the current frame and the
+        // reference frame exceeds a certain threshold, and in that case, reset
+        // motion tracking.
+        float angle = glm::degrees(glm::angle(
+            glm::normalize(glm::quat(ctx->depth_pose.orientation[3],
+                                     ctx->depth_pose.orientation[0],
+                                     ctx->depth_pose.orientation[1],
+                                     ctx->depth_pose.orientation[2])) *
+            glm::inverse(glm::normalize(glm::quat(
+                tracking->frame->pose.orientation[3],
+                tracking->frame->pose.orientation[0],
+                tracking->frame->pose.orientation[1],
+                tracking->frame->pose.orientation[2])))));
+        while (angle > 180.f) angle -= 360.f;
 
-        std::vector<std::list<struct seg_codeword>> new_depth_seg;
-        new_depth_seg.resize(depth_class_size);
-        foreach_xy_off(tracking->depth_classification->width,
-                       tracking->depth_classification->height) {
-            pcl::PointXYZL &point =
-                ctx->latest_tracking->depth_classification->points[off];
+        float distance = glm::distance(
+            glm::vec3(ctx->depth_pose.translation[0],
+                      ctx->depth_pose.translation[1],
+                      ctx->depth_pose.translation[2]),
+            glm::vec3(tracking->frame->pose.translation[0],
+                      tracking->frame->pose.translation[1],
+                      tracking->frame->pose.translation[2]));
+
+        gm_debug(ctx->log, "XXX: Angle: %.2f, "
+                 "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
+                 tracking->frame->pose.translation[0] - ctx->depth_pose.translation[0],
+                 tracking->frame->pose.translation[1] - ctx->depth_pose.translation[1],
+                 tracking->frame->pose.translation[2] - ctx->depth_pose.translation[2]);
+        if (angle < 10.f && distance < 0.3f) {
+            if (angle > 0.25f || distance > 0.025f) {
+                new_to_start = glm::inverse(
+                    pose_to_matrix(tracking->frame->pose));
+                transform = true;
+            }
+        } else {
+            // We've strayed too far from the initial pose, reset segmentation
+            // and use this as the home pose.
+            ctx->depth_seg.empty();
+            ctx->depth_seg.resize(depth_class_size);
+            ctx->depth_pose = tracking->frame->pose;
+            ctx->start_to_depth_pose = pose_to_matrix(ctx->depth_pose);
+            gm_debug(ctx->log, "XXX: Resetting pose");
+        }
+    }
+
+    if (transform) {
+        pcl::PointCloud<pcl::PointXYZL>::Ptr
+            t_class(new pcl::PointCloud<pcl::PointXYZL>);
+        t_class->width = tracking->depth_classification->width;
+        t_class->height = tracking->depth_classification->height;
+        t_class->points.resize(t_class->width * t_class->height);
+        t_class->is_dense = false;
+
+        for (unsigned i = 0; i < t_class->points.size(); ++i) {
+            t_class->points[i].x = t_class->points[i].y =
+                t_class->points[i].z = nan;
+        }
+        foreach_xy_off(t_class->width, t_class->height) {
+            pcl::PointXYZL &point = tracking->depth_classification->points[off];
             if (std::isnan(point.z)) {
-                // If the depth at the previous position was nan, we keep the
-                // codebook. We can't reproject in this situation, but losing
-                // the background codebook dramatically, negatively affects the
-                // efficacy of the motion detection.
-                std::swap(new_depth_seg[off], ctx->depth_seg[off]);
                 continue;
             }
+
             glm::vec4 pt(point.x, point.y, point.z, 1.f);
-            pt = start_to_new * (old_to_start * pt);
+            pt = ctx->start_to_depth_pose * (new_to_start * pt);
 
             float nx = ((pt.x * fx / pt.z) + cx);
             float ny = ((pt.y * fy / pt.z) + cy);
@@ -2263,18 +2310,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
             int dnx = (int)roundf(nx / ctx->seg_res);
             int dny = (int)roundf(ny / ctx->seg_res);
 
-            if (dnx < 0 || dnx >= (int)tracking->depth_classification->width ||
-                dny < 0 || dny >= (int)tracking->depth_classification->height) {
+            if (dnx < 0 ||
+                dnx >= (int)tracking->depth_classification->width ||
+                dny < 0 ||
+                dny >= (int)tracking->depth_classification->height) {
                 continue;
             }
 
-            //gm_debug(ctx->log, "XXX %d,%d -> %d,%d", x, y, dnx, dny);
-            int noff = (dny * tracking->depth_classification->width) + dnx;
-
-            std::swap(new_depth_seg[noff], ctx->depth_seg[off]);
+            int new_off =
+                (dny * tracking->depth_classification->width) + dnx;
+            pcl::PointXYZL &current_pt = t_class->points[new_off];
+            if (std::isnan(current_pt.z) || current_pt.z > point.z) {
+                t_class->points[new_off] = point;
+            }
         }
-        std::swap(ctx->depth_seg, new_depth_seg);
-#endif
+        std::swap(t_class, tracking->depth_classification);
     }
 
     foreach_xy_off(tracking->depth_classification->width,
