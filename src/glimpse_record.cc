@@ -243,17 +243,11 @@ gm_recording_init(struct gm_logger *log,
     // Create JSON metadata structure
     JSON_Value *json = json_value_init_object();
 
-    // Save depth intrinsics
-    const struct gm_intrinsics *depth_intrinsics =
-      gm_device_get_depth_intrinsics(device);
-    json_object_set_value(json_object(json), "depth_intrinsics",
-                          gm_record_get_json_intrinsics(depth_intrinsics));
+    int max_depth_pixels = gm_device_get_max_depth_pixels(device);
+    json_object_set_number(json_object(json), "max_depth_pixels", max_depth_pixels);
 
-    // Save video intrinsics
-    const struct gm_intrinsics *video_intrinsics =
-      gm_device_get_video_intrinsics(device);
-    json_object_set_value(json_object(json), "video_intrinsics",
-                          gm_record_get_json_intrinsics(video_intrinsics));
+    int max_video_pixels = gm_device_get_max_video_pixels(device);
+    json_object_set_number(json_object(json), "max_video_pixels", max_video_pixels);
 
     // Save depth-to-video extrinsics
     struct gm_extrinsics *extrinsics =
@@ -368,6 +362,11 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
             json_object_set_number(json_object(frame_meta), "depth_len",
                                    (double)frame->depth->len);
             free(bin_path);
+
+            const struct gm_intrinsics *depth_intrinsics =
+                &frame->depth_intrinsics;
+            json_object_set_value(json_object(frame_meta), "depth_intrinsics",
+                                  gm_record_get_json_intrinsics(depth_intrinsics));
         }
     }
 
@@ -399,6 +398,11 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
             json_object_set_number(json_object(frame_meta), "video_len",
                                    (double)frame->video->len);
             free(bin_path);
+
+            const struct gm_intrinsics *video_intrinsics =
+                &frame->video_intrinsics;
+            json_object_set_value(json_object(frame_meta), "video_intrinsics",
+                                  gm_record_get_json_intrinsics(video_intrinsics));
         }
     }
 

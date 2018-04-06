@@ -59,6 +59,7 @@ enum gm_device_type {
     GM_DEVICE_KINECT,
     GM_DEVICE_RECORDING,
     GM_DEVICE_TANGO,
+    GM_DEVICE_AVF,
 };
 
 struct gm_device_config {
@@ -97,11 +98,11 @@ gm_device_commit_config(struct gm_device *dev, char **err);
 struct gm_ui_properties *
 gm_device_get_ui_properties(struct gm_device *dev);
 
-struct gm_intrinsics *
-gm_device_get_depth_intrinsics(struct gm_device *dev);
+int
+gm_device_get_max_depth_pixels(struct gm_device *dev);
 
-struct gm_intrinsics *
-gm_device_get_video_intrinsics(struct gm_device *dev);
+int
+gm_device_get_max_video_pixels(struct gm_device *dev);
 
 struct gm_extrinsics *
 gm_device_get_depth_to_video_extrinsics(struct gm_device *dev);
