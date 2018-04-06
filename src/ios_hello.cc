@@ -131,20 +131,25 @@ logger_cb(struct gm_logger *logger,
 void glfmMain(GLFMDisplay *display) {
     ExampleApp *app = (ExampleApp *)calloc(1, sizeof(ExampleApp));
 
-    data.log_fp = stdout;
+    char *documents_dir = ios_util_get_documents_path();
+    char log_filename[PATH_MAX];
+    snprintf(log_filename, sizeof(log_filename), "%s/glimpse.log", documents_dir);
+    data.log_fp = fopen(log_filename, "w");
+    free(documents_dir);
+
+    //data.log_fp = stdout;
     data.log = gm_logger_new(logger_cb, &data);
     gm_logger_set_abort_callback(data.log, logger_abort_cb, &data);
 
-    gm_set_assets_root(data.log, getenv("GLIMPSE_ASSETS_ROOT"));
+    char *resources_dir = ios_util_get_resources_path();
+    gm_set_assets_root(data.log, resources_dir);
+    free(resources_dir);
 
     gm_debug(data.log, "Glimpse Log Message");
 
-    char *documents_path = ios_util_get_documents_path();
-    gm_debug(data.log, "documents path = %s", documents_path);
-
     printf("glfmMain XXX\n");
     glfmSetDisplayConfig(display,
-                         GLFMRenderingAPIOpenGLES2,
+                         GLFMRenderingAPIOpenGLES3,
                          GLFMColorFormatRGBA8888,
                          GLFMDepthFormatNone,
                          GLFMStencilFormatNone,
@@ -279,6 +284,8 @@ static void onFrame(GLFMDisplay *display, double frameTime) {
     // Draw background
     glClearColor(1.0f, 1.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
+
+    printf("onFrame\n");
 
     // Draw triangle
     if (app->program == 0) {
