@@ -443,7 +443,7 @@ if snappy_dep.found()
 endif
 
 if glfw_dep.found() and epoxy_dep.found()
-    viewer_defines = client_api_defines + '-DUSE_GLFW'
+    viewer_defines = client_api_defines + [ '-DUSE_GLFW' ]
     imgui_src += 'src/imgui/imgui_impl_glfw_gles3.cpp'
     executable('glimpse_viewer',
                [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
