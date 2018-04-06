@@ -47,6 +47,10 @@
 #include <glm/gtx/quaternion.hpp>
 #endif
 
+#ifdef USE_AVF
+#include "ios_utils.h"
+#endif
+
 #include "parson.h"
 #include "half.hpp"
 #include "xalloc.h"
@@ -175,13 +179,21 @@ struct gm_device
             enum gm_rotation display_to_camera_rotation;
         } tango;
 #endif
+
+#ifdef USE_AVF
+        struct {
+            struct ios_av_session *session;
+        } avf;
+#endif
     };
 
     int camera_rotation; // enum gm_rotation
     int camera_rotation_prop_id;
 
-    struct gm_intrinsics video_camera_intrinsics;
-    struct gm_intrinsics depth_camera_intrinsics;
+    int max_depth_pixels;
+    int max_video_pixels;
+    struct gm_intrinsics video_intrinsics;
+    struct gm_intrinsics depth_intrinsics;
     struct gm_extrinsics depth_to_video_extrinsics;
 
     void (*frame_callback)(struct gm_device *dev,
@@ -434,19 +446,16 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
 
     buf->base.api = &buf->vtable;
 
-    /* allocated large enough for _RGB format */
-    int video_width = dev->video_camera_intrinsics.width;
-    int video_height = dev->video_camera_intrinsics.height;
-
     switch (dev->type) {
     case GM_DEVICE_TANGO:
     case GM_DEVICE_KINECT:
         /* Allocated large enough for RGB data */
-        buf->base.len = video_width * video_height * 3;
+        buf->base.len = dev->max_video_pixels * 3;
         break;
+    case GM_DEVICE_AVF:
     case GM_DEVICE_RECORDING:
         /* Allocated large enough for any data format */
-        buf->base.len = video_width * video_height * 4;
+        buf->base.len = dev->max_video_pixels * 4;
         break;
     }
     buf->base.data = xmalloc(buf->base.len);
@@ -479,21 +488,22 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
 
     buf->base.api = &buf->vtable;
 
-    int depth_width = dev->depth_camera_intrinsics.width;
-    int depth_height = dev->depth_camera_intrinsics.height;
-
     switch (dev->type) {
     case GM_DEVICE_TANGO:
         /* Allocated large enough for _XYZC_F32_M data */
-        buf->base.len = depth_width * depth_height * 16;
+        buf->base.len = dev->max_depth_pixels * 16;
+        break;
+    case GM_DEVICE_AVF:
+        /* Allocated large enough for any data */
+        buf->base.len = dev->max_depth_pixels * 16;
         break;
     case GM_DEVICE_RECORDING:
         /* Allocated large enough for any data */
-        buf->base.len = depth_width * depth_height * 16;
+        buf->base.len = dev->max_depth_pixels * 16;
         break;
     case GM_DEVICE_KINECT:
         /* Allocated large enough for _U16_MM data */
-        buf->base.len = depth_width * depth_height * 2;
+        buf->base.len = dev->max_depth_pixels * 2;
         break;
     }
     buf->base.data = xmalloc(buf->base.len);
@@ -636,20 +646,23 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
      * using these random/plausible intrinsics found on the internet to avoid
      * manually calibrating for now :)
      */
-    dev->depth_camera_intrinsics.width = 640;
-    dev->depth_camera_intrinsics.height = 480;
-    dev->depth_camera_intrinsics.cx = 339.30780975300314;
-    dev->depth_camera_intrinsics.cy = 242.73913761751615;
-    dev->depth_camera_intrinsics.fx = 594.21434211923247;
-    dev->depth_camera_intrinsics.fy = 591.04053696870778;
-    dev->depth_camera_intrinsics.distortion_model = GM_DISTORTION_NONE;
     dev->depth_format = GM_FORMAT_Z_U16_MM;
+    dev->max_depth_pixels = 640 * 480;
+    dev->depth_intrinsics.width = 640;
+    dev->depth_intrinsics.height = 480;
+    dev->depth_intrinsics.cx = 339.30780975300314;
+    dev->depth_intrinsics.cy = 242.73913761751615;
+    dev->depth_intrinsics.fx = 594.21434211923247;
+    dev->depth_intrinsics.fy = 591.04053696870778;
+    dev->depth_intrinsics.distortion_model = GM_DISTORTION_NONE;
 
     /* We're going to use Freenect's registered depth mode, which transforms
      * depth to video space, so we don't need video intrinsics/extrinsics.
      */
     dev->video_format = GM_FORMAT_RGB_U8;
-    dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
+    dev->max_video_pixels = 640 * 480;
+    dev->video_intrinsics = dev->depth_intrinsics;
+
     dev->depth_to_video_extrinsics.rotation[0] = 1.f;
     dev->depth_to_video_extrinsics.rotation[1] = 0.f;
     dev->depth_to_video_extrinsics.rotation[2] = 0.f;
@@ -668,12 +681,12 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
      * Note, these unfortunately don't actually work.
      */
 #if 0
-    dev->video_camera_intrinsics.width = 640;
-    dev->video_camera_intrinsics.height = 480;
-    dev->video_camera_intrinsics.cx = 328.94272028759258;
-    dev->video_camera_intrinsics.cy = 267.48068171871557;
-    dev->video_camera_intrinsics.fx = 529.21508098293293;
-    dev->video_camera_intrinsics.fy = 525.56393630057437;
+    dev->video_intrinsics.width = 640;
+    dev->video_intrinsics.height = 480;
+    dev->video_intrinsics.cx = 328.94272028759258;
+    dev->video_intrinsics.cy = 267.48068171871557;
+    dev->video_intrinsics.fx = 529.21508098293293;
+    dev->video_intrinsics.fy = 525.56393630057437;
 
     dev->depth_to_video_extrinsics.rotation[0] = 0.99984628826577793;
     dev->depth_to_video_extrinsics.rotation[1] = 0.0012635359098409581;
@@ -690,17 +703,15 @@ kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_to_video_extrinsics.translation[2] = -0.010916736334336222;
 #endif
 
-    dev->video_camera_intrinsics = dev->depth_camera_intrinsics;
-
     /* Some alternative intrinsics
      *
      * TODO: we should allow explicit calibrarion and loading these at runtime
      */
 #if 0
-    dev->depth_camera_intrinsics.cx = 322.515987;
-    dev->depth_camera_intrinsics.cy = 259.055966;
-    dev->depth_camera_intrinsics.fx = 521.179233;
-    dev->depth_camera_intrinsics.fy = 493.033034;
+    dev->depth_intrinsics.cx = 322.515987;
+    dev->depth_intrinsics.cy = 259.055966;
+    dev->depth_intrinsics.fx = 521.179233;
+    dev->depth_intrinsics.fy = 493.033034;
 
 #endif
 
@@ -980,13 +991,31 @@ recording_open(struct gm_device *dev,
 
     JSON_Object *meta = json_object(dev->recording.json);
 
+
+    /* Since recordings now associate intrinsics with every frame we won't
+     * necessarily find intrinsics here...
+     */
     JSON_Object *depth_intrinsics =
         json_object_get_object(meta, "depth_intrinsics");
-    read_json_intrinsics(depth_intrinsics, &dev->depth_camera_intrinsics);
+    if (depth_intrinsics) {
+        read_json_intrinsics(depth_intrinsics, &dev->depth_intrinsics);
+        dev->max_depth_pixels = dev->depth_intrinsics.width *
+            dev->depth_intrinsics.height;
+    } else {
+        dev->max_depth_pixels =
+            json_object_get_number(meta, "max_depth_pixels");
+    }
 
     JSON_Object *video_intrinsics =
         json_object_get_object(meta, "video_intrinsics");
-    read_json_intrinsics(video_intrinsics, &dev->video_camera_intrinsics);
+    if (video_intrinsics) {
+        read_json_intrinsics(video_intrinsics, &dev->video_intrinsics);
+        dev->max_video_pixels = dev->video_intrinsics.width *
+            dev->video_intrinsics.height;
+    } else {
+        dev->max_video_pixels =
+            json_object_get_number(meta, "max_video_pixels");
+    }
 
     JSON_Object *extrinsics =
         json_object_get_object(meta, "depth_to_video_extrinsics");
@@ -1098,6 +1127,8 @@ read_frame_buffer(struct gm_device *dev,
                   JSON_Object *frame,
                   const char *filename_prop,
                   const char *len_prop,
+                  const char *intrinsics_prop,
+                  struct gm_intrinsics *intrinsics_out,
                   struct gm_mem_pool *buf_pool)
 {
     size_t base_path_len = strlen(dev->recording.path);
@@ -1134,6 +1165,10 @@ read_frame_buffer(struct gm_device *dev,
 
     fclose(fp);
 
+    JSON_Object *intrinsics =
+        json_object_get_object(frame, intrinsics_prop);
+    read_json_intrinsics(intrinsics, intrinsics_out);
+
     return buf;
 }
 
@@ -1158,7 +1193,9 @@ swap_recorded_frame(struct gm_device *dev,
                     struct gm_pose &pose,
                     enum gm_rotation camera_rotation,
                     struct gm_buffer *depth_buffer,
-                    struct gm_buffer *video_buffer)
+                    struct gm_intrinsics *depth_intrinsics,
+                    struct gm_buffer *video_buffer,
+                    struct gm_intrinsics *video_intrinsics)
 {
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
@@ -1169,6 +1206,8 @@ swap_recorded_frame(struct gm_device *dev,
         dev->frame_pose = pose;
 
         if (depth_buffer) {
+            dev->depth_intrinsics = *depth_intrinsics;
+
             if (dev->recording.last_depth_buf)
                 gm_buffer_unref(dev->recording.last_depth_buf);
             dev->recording.last_depth_buf = gm_buffer_ref(depth_buffer);
@@ -1183,6 +1222,8 @@ swap_recorded_frame(struct gm_device *dev,
         }
 
         if (video_buffer) {
+            dev->video_intrinsics = *video_intrinsics;
+
             if (dev->recording.last_video_buf)
                 gm_buffer_unref(dev->recording.last_video_buf);
             dev->recording.last_video_buf = gm_buffer_ref(video_buffer);
@@ -1292,7 +1333,9 @@ recording_io_thread_cb(void *userdata)
                                     pose,
                                     dev->recording.last_camera_rotation,
                                     depth_buffer,
-                                    video_buffer);
+                                    &dev->depth_intrinsics,
+                                    video_buffer,
+                                    &dev->video_intrinsics);
 
                 if (depth_buffer)
                     gm_buffer_unref(depth_buffer);
@@ -1419,15 +1462,21 @@ recording_io_thread_cb(void *userdata)
             real_progress = time - loop_start;
         }
 
+        struct gm_intrinsics depth_intrinsics;
         struct gm_buffer *depth_buffer = read_frame_buffer(dev,
                                                            frame,
                                                            "depth_file",
                                                            "depth_len",
+                                                           "depth_intrinsics",
+                                                           &depth_intrinsics,
                                                            dev->depth_buf_pool);
+        struct gm_intrinsics video_intrinsics;
         struct gm_buffer *video_buffer = read_frame_buffer(dev,
                                                            frame,
                                                            "video_file",
                                                            "video_len",
+                                                           "video_intrinsics",
+                                                           &video_intrinsics,
                                                            dev->video_buf_pool);
         enum gm_rotation rotation = (enum gm_rotation)
             json_object_get_number(frame, "camera_rotation");
@@ -1437,7 +1486,9 @@ recording_io_thread_cb(void *userdata)
                             pose,
                             rotation,
                             depth_buffer,
-                            video_buffer);
+                            &depth_intrinsics,
+                            video_buffer,
+                            &video_intrinsics);
 
         if (depth_buffer)
             gm_buffer_unref(depth_buffer);
@@ -1537,8 +1588,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         mem_pool_acquire_buffer(dev->depth_buf_pool, "tango depth");
 
     gm_assert(dev->log,
-              point_cloud->num_points < (dev->depth_camera_intrinsics.width *
-                                         dev->depth_camera_intrinsics.height),
+              point_cloud->num_points <= dev->max_depth_pixels,
               "Spurious Tango Point Cloud larger than sensor resolution");
 
     memcpy(depth_buf_back->base.data,
@@ -2034,7 +2084,7 @@ tango_connect(struct gm_device *dev, char **err)
         return false;
     }
 
-    init_intrinsics_from_tango(&dev->video_camera_intrinsics,
+    init_intrinsics_from_tango(&dev->video_intrinsics,
                                &color_camera_intrinsics);
 
     print_basis_and_rotated_intrinsics(dev, "ColorCamera",
@@ -2049,7 +2099,7 @@ tango_connect(struct gm_device *dev, char **err)
         return false;
     }
 
-    init_intrinsics_from_tango(&dev->depth_camera_intrinsics,
+    init_intrinsics_from_tango(&dev->depth_intrinsics,
                                &depth_camera_intrinsics);
 
     print_basis_and_rotated_intrinsics(dev, "DepthCamera",
@@ -2085,12 +2135,12 @@ tango_connect(struct gm_device *dev, char **err)
         std::exit(EXIT_SUCCESS);
     }
 
-    dev->rgbir_camera_intrinsics.width = rgbir_camera_intrinsics.width;
-    dev->rgbir_camera_intrinsics.height = rgbir_camera_intrinsics.height;
-    dev->rgbir_camera_intrinsics.fx = rgbir_camera_intrinsics.fx;
-    dev->rgbir_camera_intrinsics.fy = rgbir_camera_intrinsics.fy;
-    dev->rgbir_camera_intrinsics.cx = rgbir_camera_intrinsics.cx;
-    dev->rgbir_camera_intrinsics.cy = rgbir_camera_intrinsics.cy;
+    dev->rgbir_intrinsics.width = rgbir_camera_intrinsics.width;
+    dev->rgbir_intrinsics.height = rgbir_camera_intrinsics.height;
+    dev->rgbir_intrinsics.fx = rgbir_camera_intrinsics.fx;
+    dev->rgbir_intrinsics.fy = rgbir_camera_intrinsics.fy;
+    dev->rgbir_intrinsics.cx = rgbir_camera_intrinsics.cx;
+    dev->rgbir_intrinsics.cy = rgbir_camera_intrinsics.cy;
 
     float ir_hfov = 2.0 * atan(0.5 * rgbir_camera_intrinsics_.width /
                             rgbir_camera_intrinsics_.fx);
@@ -2176,6 +2226,184 @@ tango_stop(struct gm_device *dev)
 }
 #endif // USE_TANGO
 
+#ifdef USE_AVF
+
+static void
+on_avf_configure_finished_cb(struct ios_av_session *session,
+                             void *user_data)
+{
+    struct gm_device *dev = (struct gm_device *)user_data;
+    gm_debug(dev->log, "glimpse_device: on_avf_configure_finished_cb");
+    notify_device_ready(dev);
+}
+
+static void
+on_avf_video_cb(struct ios_av_session *session,
+                struct gm_intrinsics *intrinsics,
+                int stride,
+                uint8_t *video,
+                void *user_data)
+{
+    struct gm_device *dev = (struct gm_device *)user_data;
+    int width = intrinsics->width;
+    int height = intrinsics->height;
+    gm_debug(dev->log, "glimpse_device: on_avf_video_cb");
+
+    if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_VIDEO)) {
+        gm_debug(dev->log, "> on_avf_video_cb: VIDEO not required");
+        return;
+    }
+
+    if (!dev->running) {
+        gm_debug(dev->log, "> on_avf_video_cb: not running");
+        return;
+    }
+
+    gm_assert(dev->log,
+              width == 640 && height == 480 && stride == width * 4,
+              "Unexpected AVF video frame size/format");
+
+    struct gm_device_buffer *video_buf_back =
+        mem_pool_acquire_buffer(dev->video_buf_pool, "avf video");
+
+    memcpy(video_buf_back->base.data, video, stride * height);
+
+    pthread_mutex_lock(&dev->swap_buffers_lock);
+
+    dev->video_intrinsics = *intrinsics;
+
+    struct gm_device_buffer *old = dev->video_buf_ready;
+    dev->video_buf_ready = video_buf_back;
+    // FIXME: get time from AVF
+    dev->frame_time = get_time();
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+
+    gm_debug(dev->log, "on_avf_video_cb video ready = %p", dev->video_buf_ready);
+
+    if (old)
+        gm_buffer_unref(&old->base);
+
+    pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+}
+
+static void
+on_avf_depth_cb(struct ios_av_session *session,
+                struct gm_intrinsics *intrinsics,
+                int stride,
+                float *disparity,
+                void *user_data)
+{
+    struct gm_device *dev = (struct gm_device *)user_data;
+    int width = intrinsics->width;
+    int height = intrinsics->height;
+    gm_debug(dev->log, "glimpse_device: on_avf_depth_cb");
+
+    struct gm_device_buffer *depth_buf_back =
+        mem_pool_acquire_buffer(dev->depth_buf_pool, "avf depth");
+
+    gm_assert(dev->log,
+              width == 320 && height == 240 && stride == 320 * 4,
+              "Unexpected disparty buffer size/format");
+
+    float *depth = (float *)depth_buf_back->base.data;
+    gm_assert(dev->log,
+              depth_buf_back->base.len >= 320 * 240 * 4,
+              "depth buffer too small");
+
+    for (int y = 0; y < 240; y++) {
+        for (int x = 0; x < 320; x++) {
+            int off = width * y + x;
+            depth[off] = 1.0f / disparity[off];
+        }
+    }
+
+    pthread_mutex_lock(&dev->swap_buffers_lock);
+
+    dev->depth_intrinsics = *intrinsics;
+
+    struct gm_device_buffer *old = dev->depth_buf_ready;
+    dev->depth_buf_ready = depth_buf_back;
+    // TODO: get timestamp from avf
+    dev->frame_time = get_time();
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+    gm_debug(dev->log, "avf depth ready = %p", dev->depth_buf_ready);
+
+    if (old)
+        gm_buffer_unref(&old->base);
+
+    pthread_mutex_unlock(&dev->swap_buffers_lock);
+
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+}
+
+static bool
+avf_open(struct gm_device *dev, struct gm_device_config *config, char **err)
+{
+    gm_debug(dev->log, "AVFrameworks Device Open");
+
+    /* We wait until _configure() time before doing much because we want to
+     * allow the device to be configured with an event callback first
+     * so we will be able to notify that the device is ready if the Tango
+     * service has already been bound.
+     */
+
+    dev->video_format = GM_FORMAT_RGBA_U8;
+    dev->max_video_pixels = 640 * 480;
+
+    dev->depth_format = GM_FORMAT_Z_F32_M;
+    dev->max_depth_pixels = 640 * 480;
+
+    dev->avf.session = ios_util_av_session_new(dev->log,
+                                               on_avf_configure_finished_cb,
+                                               on_avf_depth_cb,
+                                               on_avf_video_cb,
+                                               dev);
+    //ios_util_session_configure(dev->avf.session);
+
+    return true;
+}
+
+static void
+avf_close(struct gm_device *dev)
+{
+    gm_debug(dev->log, "AVFrameworks Device Close");
+}
+
+static bool
+avf_configure(struct gm_device *dev, char **err)
+{
+    dev->configured = true;
+
+    gm_debug(dev->log, "AVFoundation Device Configure");
+    ios_util_session_configure(dev->avf.session);
+    //notify_device_ready(dev);
+
+    return true;
+}
+
+static void
+avf_start(struct gm_device *dev)
+{
+    dev->running = true;
+    gm_debug(dev->log, "avf_start");
+    ios_util_session_start(dev->avf.session);
+}
+
+static void
+avf_stop(struct gm_device *dev)
+{
+    gm_debug(dev->log, "avf_stop");
+    ios_util_session_stop(dev->avf.session);
+    dev->running = false;
+}
+#endif // USE_AVF
+
 struct gm_device *
 gm_device_open(struct gm_logger *log,
                struct gm_device_config *config,
@@ -2228,6 +2456,14 @@ gm_device_open(struct gm_logger *log,
         status = tango_open(dev, config, err);
 #else
         gm_assert(log, 0, "Tango support not enabled");
+#endif
+        break;
+    case GM_DEVICE_AVF:
+        gm_debug(log, "Opening AVFoundation device");
+#ifdef USE_AVF
+        status = avf_open(dev, config, err);
+#else
+        gm_assert(log, 0, "AVFoundation support not enabled");
 #endif
         break;
     }
@@ -2285,6 +2521,11 @@ gm_device_commit_config(struct gm_device *dev, char **err)
     case GM_DEVICE_TANGO:
 #ifdef USE_TANGO
         status = tango_configure(dev, err);
+#endif
+        break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        status = avf_configure(dev, err);
 #endif
         break;
     default:
@@ -2386,6 +2627,13 @@ gm_device_close(struct gm_device *dev)
         tango_close(dev);
 #endif
         break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        gm_debug(dev->log, "avf_close");
+        avf_close(dev);
+#endif
+        break;
+
     }
 
     /* Make sure to release current back/ready buffers to their
@@ -2465,6 +2713,11 @@ gm_device_start(struct gm_device *dev)
         tango_start(dev);
 #endif
         break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        avf_start(dev);
+#endif
+        break;
     }
 }
 
@@ -2494,19 +2747,25 @@ gm_device_stop(struct gm_device *dev)
         tango_stop(dev);
 #endif
         break;
+    case GM_DEVICE_AVF:
+#ifdef USE_AVF
+        gm_debug(dev->log, "avf_stop");
+        avf_stop(dev);
+#endif
+        break;
     }
 }
 
-struct gm_intrinsics *
-gm_device_get_depth_intrinsics(struct gm_device *dev)
+int
+gm_device_get_max_depth_pixels(struct gm_device *dev)
 {
-    return &dev->depth_camera_intrinsics;
+    return dev->max_depth_pixels;
 }
 
-struct gm_intrinsics *
-gm_device_get_video_intrinsics(struct gm_device *dev)
+int
+gm_device_get_max_video_pixels(struct gm_device *dev)
 {
-    return &dev->video_camera_intrinsics;
+    return dev->max_video_pixels;
 }
 
 enum gm_rotation
@@ -2589,6 +2848,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
         gm_assert(dev->log, frame->base.depth != NULL,
                   "Depth ready flag set but buffer missing");
         gm_debug(dev->log, "> depth = %p", frame->base.depth);
+        frame->base.depth_intrinsics = dev->depth_intrinsics;
     }
     if (dev->frame_ready_buffers_mask & GM_REQUEST_FRAME_VIDEO) {
         frame->base.video = &dev->video_buf_ready->base;
@@ -2597,6 +2857,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
         gm_assert(dev->log, frame->base.video != NULL,
                   "Video ready flag set but buffer missing");
         gm_debug(dev->log, "> video = %p", frame->base.video);
+        frame->base.video_intrinsics = dev->video_intrinsics;
     }
 
     frame->base.timestamp = dev->frame_time;

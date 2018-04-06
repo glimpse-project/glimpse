@@ -288,12 +288,12 @@ if platform_ios == true
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
     viewer_deps = client_api_deps + [ glfm_dep ]
-    viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
+    viewer_defines = client_api_defines + [ '-DUSE_GLFM', '-DUSE_AVF' ]
 
     imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
 
     executable('glimpse_viewer',
-               [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
+               [ 'src/glimpse_viewer.cc', 'src/ios_utils.m' ] + client_api_src + imgui_src,
                include_directories: inc,
                dependencies: viewer_deps,
                c_args: viewer_defines,
@@ -303,7 +303,8 @@ if platform_ios == true
                     '-framework', 'OpenGLES',
                     '-framework', 'CoreGraphics',
                     '-framework', 'QuartzCore',
-                    '-framework', 'UIKit'
+                    '-framework', 'UIKit',
+                    '-framework', 'AVFoundation',
               ])
 endif
 

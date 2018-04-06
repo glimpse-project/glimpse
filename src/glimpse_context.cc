@@ -277,12 +277,18 @@ struct gm_tracking_impl
 
     struct gm_context *ctx;
 
-    /* Note: these are derived from the corresponding ctx->basis_* state except
+    /* Note: these are derived from the corresponding frame intrinsics except
      * they take into account the device rotation at the start of tracking.
      */
     struct gm_intrinsics depth_camera_intrinsics;
     struct gm_intrinsics video_camera_intrinsics;
+
+    /* This is currently just a copy of ctx->training_camera_intrinsics */
     struct gm_intrinsics training_camera_intrinsics;
+
+    /* XXX: these are currently a copy of ctx->basis_depth_to_video_extrinsics
+     * and don't take into account device rotation
+     */
     struct gm_extrinsics depth_to_video_extrinsics;
     bool extrinsics_set;
 
@@ -341,9 +347,17 @@ struct gm_context
     bool stopping;
     bool destroying;
 
-    struct gm_intrinsics basis_depth_camera_intrinsics;
-    struct gm_intrinsics basis_video_camera_intrinsics;
-    struct gm_intrinsics basis_training_camera_intrinsics;
+    int max_depth_pixels;
+    int max_video_pixels;
+
+    struct gm_intrinsics training_camera_intrinsics;
+
+    /* '_basis' here implies that the transform does not take into account how
+     * video/depth data may be rotated to match the device orientation
+     *
+     * FIXME: don't just copy this to the tracking state without considering
+     * the device orientation.
+     */
     struct gm_extrinsics basis_depth_to_video_extrinsics;
     bool basis_extrinsics_set;
 
@@ -1721,6 +1735,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
     hires_cloud->height = tracking->depth_camera_intrinsics.height / ctx->cloud_res;
     hires_cloud->points.resize(hires_cloud->width * hires_cloud->height);
     hires_cloud->is_dense = false;
+    gm_debug(ctx->log, "depth intrinsics w=%d,h=%d, cloud res = %d",
+             hires_cloud->width,
+             hires_cloud->height,
+             ctx->cloud_res);
 
     int n_points = 0;
 
@@ -2380,11 +2398,12 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
 static void
 copy_and_rotate_depth_buffer(struct gm_context *ctx,
                              struct gm_tracking_impl *tracking,
+                             struct gm_intrinsics *frame_intrinsics,
                              enum gm_format format,
                              struct gm_buffer *buffer)
 {
-    int width = ctx->basis_depth_camera_intrinsics.width;
-    int height = ctx->basis_depth_camera_intrinsics.height;
+    int width = frame_intrinsics->width;
+    int height = frame_intrinsics->height;
     int rot_width = tracking->depth_camera_intrinsics.width;
     int rot_height = tracking->depth_camera_intrinsics.height;
     enum gm_rotation rotation = tracking->frame->camera_rotation;
@@ -2435,10 +2454,10 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
 
         num_points = buffer->len / 16;
 
-        float fx = ctx->basis_depth_camera_intrinsics.fx;
-        float fy = ctx->basis_depth_camera_intrinsics.fy;
-        float cx = ctx->basis_depth_camera_intrinsics.cx;
-        float cy = ctx->basis_depth_camera_intrinsics.cy;
+        float fx = frame_intrinsics->fx;
+        float fy = frame_intrinsics->fy;
+        float cx = frame_intrinsics->cx;
+        float cy = frame_intrinsics->cy;
 
         float k1, k2, k3;
         k1 = k2 = k3 = 0.f;
@@ -2446,7 +2465,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
         /* XXX: we only support applying the brown's model... */
         bool apply_distortion = ctx->apply_depth_distortion;
         if (apply_distortion) {
-            switch (ctx->basis_depth_camera_intrinsics.distortion_model) {
+            switch (frame_intrinsics->distortion_model) {
             case GM_DISTORTION_NONE:
                 apply_distortion = false;
                 break;
@@ -2454,19 +2473,19 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                 apply_distortion = false;
                 break;
             case GM_DISTORTION_BROWN_K1_K2:
-                k1 = ctx->basis_depth_camera_intrinsics.distortion[0];
-                k2 = ctx->basis_depth_camera_intrinsics.distortion[1];
+                k1 = frame_intrinsics->distortion[0];
+                k2 = frame_intrinsics->distortion[1];
                 k3 = 0;
                 break;
             case GM_DISTORTION_BROWN_K1_K2_K3:
-                k1 = ctx->basis_depth_camera_intrinsics.distortion[0];
-                k2 = ctx->basis_depth_camera_intrinsics.distortion[1];
-                k3 = ctx->basis_depth_camera_intrinsics.distortion[2];
+                k1 = frame_intrinsics->distortion[0];
+                k2 = frame_intrinsics->distortion[1];
+                k3 = frame_intrinsics->distortion[2];
                 break;
             case GM_DISTORTION_BROWN_K1_K2_P1_P2_K3:
-                k1 = ctx->basis_depth_camera_intrinsics.distortion[0];
-                k2 = ctx->basis_depth_camera_intrinsics.distortion[1];
-                k3 = ctx->basis_depth_camera_intrinsics.distortion[4];
+                k1 = frame_intrinsics->distortion[0];
+                k2 = frame_intrinsics->distortion[1];
+                k3 = frame_intrinsics->distortion[4];
                 /* Ignoring tangential distortion */
                 break;
             }
@@ -2771,19 +2790,29 @@ detector_thread_cb(void *data)
         tracking->extrinsics_set = ctx->basis_extrinsics_set;
         tracking->depth_to_video_extrinsics = ctx->basis_depth_to_video_extrinsics;
 
+        gm_assert(ctx->log,
+                  frame->video_intrinsics.width > 0 &&
+                  frame->video_intrinsics.height > 0,
+                  "Invalid frame video intrinsics for tracking");
         gm_context_rotate_intrinsics(ctx,
-                                     &ctx->basis_video_camera_intrinsics,
+                                     &frame->video_intrinsics,
                                      &tracking->video_camera_intrinsics,
                                      tracking->frame->camera_rotation);
+
+        gm_assert(ctx->log,
+                  frame->depth_intrinsics.width > 0 &&
+                  frame->depth_intrinsics.height > 0,
+                  "Invalid frame depth intrinsics for tracking");
         gm_context_rotate_intrinsics(ctx,
-                                     &ctx->basis_depth_camera_intrinsics,
+                                     &frame->depth_intrinsics,
                                      &tracking->depth_camera_intrinsics,
                                      tracking->frame->camera_rotation);
 
-        tracking->training_camera_intrinsics = ctx->basis_training_camera_intrinsics;
+        tracking->training_camera_intrinsics = ctx->training_camera_intrinsics;
 
         copy_and_rotate_depth_buffer(ctx,
                                      tracking,
+                                     &frame->depth_intrinsics,
                                      frame->depth_format,
                                      frame->depth);
 
@@ -2963,8 +2992,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     tracking->pool = pool;
     tracking->ctx = ctx;
 
-    int labels_width = ctx->basis_training_camera_intrinsics.width;
-    int labels_height = ctx->basis_training_camera_intrinsics.height;
+    int labels_width = ctx->training_camera_intrinsics.width;
+    int labels_height = ctx->training_camera_intrinsics.height;
 
     assert(labels_width);
     assert(labels_height);
@@ -2978,18 +3007,16 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     tracking->joints_processed = (float *)
       xcalloc(ctx->n_joints, 3 * sizeof(float));
 
-    int depth_width = ctx->basis_depth_camera_intrinsics.width;
-    int depth_height = ctx->basis_depth_camera_intrinsics.height;
-
-    assert(depth_width);
-    assert(depth_height);
+    gm_assert(ctx->log, ctx->max_depth_pixels,
+              "Undefined maximum number of depth pixels");
 
     tracking->depth = (float *)
-      xcalloc(depth_width * depth_height, sizeof(float));
+      xcalloc(ctx->max_depth_pixels, sizeof(float));
 
-    int video_width = ctx->basis_video_camera_intrinsics.width;
-    int video_height = ctx->basis_video_camera_intrinsics.height;
+    gm_assert(ctx->log, ctx->max_video_pixels,
+              "Undefined maximum number of video pixels");
 
+#if 0
     tracking->face_detect_buf =
         (uint8_t *)xcalloc(video_width * video_height, 1);
 
@@ -3004,6 +3031,7 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 #else
     tracking->face_detect_buf_width = video_width;
     tracking->face_detect_buf_height = video_height;
+#endif
 #endif
 
     return tracking;
@@ -3420,12 +3448,12 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     int labels_width = 172;
     int labels_height = 224;
-    ctx->basis_training_camera_intrinsics.width = labels_width;
-    ctx->basis_training_camera_intrinsics.height = labels_height;
-    ctx->basis_training_camera_intrinsics.cx = 86;
-    ctx->basis_training_camera_intrinsics.cy = 112;
-    ctx->basis_training_camera_intrinsics.fx = 217.461437772;
-    ctx->basis_training_camera_intrinsics.fy = 217.461437772;
+    ctx->training_camera_intrinsics.width = labels_width;
+    ctx->training_camera_intrinsics.height = labels_height;
+    ctx->training_camera_intrinsics.cx = 86;
+    ctx->training_camera_intrinsics.cy = 112;
+    ctx->training_camera_intrinsics.fx = 217.461437772;
+    ctx->training_camera_intrinsics.fy = 217.461437772;
 
     ctx->joint_map = NULL;
     char *open_err = NULL;
@@ -3947,17 +3975,15 @@ gm_context_new(struct gm_logger *logger, char **err)
 }
 
 void
-gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
-                                       struct gm_intrinsics *intrinsics)
+gm_context_set_max_depth_pixels(struct gm_context *ctx, int max_pixels)
 {
-    ctx->basis_depth_camera_intrinsics = *intrinsics;
+    ctx->max_depth_pixels = max_pixels;
 }
 
 void
-gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
-                                       struct gm_intrinsics *intrinsics)
+gm_context_set_max_video_pixels(struct gm_context *ctx, int max_pixels)
 {
-    ctx->basis_video_camera_intrinsics = *intrinsics;
+    ctx->max_video_pixels = max_pixels;
 }
 
 void
@@ -3975,7 +4001,7 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
 const gm_intrinsics *
 gm_context_get_training_intrinsics(struct gm_context *ctx)
 {
-    return &ctx->basis_training_camera_intrinsics;
+    return &ctx->training_camera_intrinsics;
 }
 
 const gm_intrinsics *
@@ -4040,8 +4066,8 @@ gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
 
     uint8_t n_labels = ctx->n_labels;
 
-    *width = (int)ctx->basis_training_camera_intrinsics.width;
-    *height = (int)ctx->basis_training_camera_intrinsics.height;
+    *width = (int)tracking->training_camera_intrinsics.width;
+    *height = (int)tracking->training_camera_intrinsics.height;
 
     if (!(*output)) {
         *output = (uint8_t *)malloc((*width) * (*height) * 3);
@@ -4118,18 +4144,19 @@ gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     struct gm_context *ctx = tracking->ctx;
+    struct gm_frame *frame = tracking->frame;
 
-    *width = (int)ctx->basis_video_camera_intrinsics.width;
-    *height = (int)ctx->basis_video_camera_intrinsics.height;
+    *width = (int)frame->video_intrinsics.width;
+    *height = (int)frame->video_intrinsics.height;
 
     if (!(*output)) {
         *output = (uint8_t *)malloc((*width) * (*height) * 3);
     }
 
     int rot_width = tracking->video_camera_intrinsics.width;
-    enum gm_format format = tracking->frame->video_format;
-    enum gm_rotation rotation = tracking->frame->camera_rotation;
-    uint8_t *video = (uint8_t *)tracking->frame->video->data;
+    enum gm_format format = frame->video_format;
+    enum gm_rotation rotation = frame->camera_rotation;
+    uint8_t *video = (uint8_t *)frame->video->data;
 
     // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
     // us easily combine our rotation with our copy...

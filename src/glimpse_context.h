@@ -43,6 +43,50 @@ enum gm_format {
     GM_FORMAT_POINTS_XYZC_F32_M, // points; not an image
 };
 
+enum gm_distortion_model {
+    GM_DISTORTION_NONE,
+
+    /* The 'FOV model' described in:
+     * > Frédéric Devernay, Olivier Faugeras. Straight lines have to be straight:
+     * > automatic calibration and re-moval of distortion from scenes of
+     * > structured enviroments. Machine Vision and Applications, Springer
+     * > Verlag, 2001, 13 (1), pp.14-24. <10.1007/PL00013269>. <inria-00267247>
+     *
+     * (for fish-eye lenses)
+     */
+    GM_DISTORTION_FOV_MODEL,
+
+    /* Brown's distortion model, with k1, k2 parameters */
+    GM_DISTORTION_BROWN_K1_K2,
+    /* Brown's distortion model, with k1, k2, k3 parameters */
+    GM_DISTORTION_BROWN_K1_K2_K3,
+    /* Brown's distortion model, with k1, k2, p1, p2, k3 parameters */
+    GM_DISTORTION_BROWN_K1_K2_P1_P2_K3,
+};
+
+struct gm_intrinsics {
+  uint32_t width;
+  uint32_t height;
+
+  double fx;
+  double fy;
+  double cx;
+  double cy;
+
+  enum gm_distortion_model distortion_model;
+
+  /* XXX: maybe we should hide these coeficients since we can't represent
+   * more complex models e.g. using a triangle mesh
+   */
+  double distortion[5];
+};
+
+struct gm_extrinsics {
+  float rotation[9];    // Column-major 3x3 rotation matrix
+  float translation[3]; // Translation vector, in meters
+};
+
+
 
 enum gm_event_type
 {
@@ -69,6 +113,8 @@ struct gm_pose {
     float orientation[4];
     float translation[3];
 };
+
+struct gm_buffer;
 
 /* A reference to a single data buffer
  *
@@ -148,11 +194,13 @@ gm_buffer_unref(struct gm_buffer *buffer)
  * released.
  */
 
+struct gm_frame;
+
 struct gm_frame_vtable
 {
     void (*free)(struct gm_frame *self);
     void (*add_breadcrumb)(struct gm_frame *self,
-                      const char *name);
+                           const char *name);
 };
 
 struct gm_frame
@@ -168,10 +216,13 @@ struct gm_frame
     struct gm_pose pose;
     enum gm_rotation camera_rotation;
 
-    enum gm_format depth_format;
     struct gm_buffer *depth;
-    enum gm_format video_format;
+    enum gm_format depth_format; // ignore if depth is NULL
+    struct gm_intrinsics depth_intrinsics; // ignore if depth is NULL
+
     struct gm_buffer *video;
+    enum gm_format video_format; // ignore if video is NULL
+    struct gm_intrinsics video_intrinsics; // ignore if video is NULL
 };
 
 inline void
@@ -196,6 +247,8 @@ gm_frame_unref(struct gm_frame *frame)
     if (__builtin_expect(--(frame->ref) < 1, 0))
         frame->api->free(frame);
 }
+
+struct gm_tracking;
 
 struct gm_tracking_vtable
 {
@@ -224,49 +277,6 @@ gm_tracking_unref(struct gm_tracking *tracking)
         tracking->api->free(tracking);
 }
 
-enum gm_distortion_model {
-    GM_DISTORTION_NONE,
-
-    /* The 'FOV model' described in:
-     * > Frédéric Devernay, Olivier Faugeras. Straight lines have to be straight:
-     * > automatic calibration and re-moval of distortion from scenes of
-     * > structured enviroments. Machine Vision and Applications, Springer
-     * > Verlag, 2001, 13 (1), pp.14-24. <10.1007/PL00013269>. <inria-00267247>
-     *
-     * (for fish-eye lenses)
-     */
-    GM_DISTORTION_FOV_MODEL,
-
-    /* Brown's distortion model, with k1, k2 parameters */
-    GM_DISTORTION_BROWN_K1_K2,
-    /* Brown's distortion model, with k1, k2, k3 parameters */
-    GM_DISTORTION_BROWN_K1_K2_K3,
-    /* Brown's distortion model, with k1, k2, p1, p2, k3 parameters */
-    GM_DISTORTION_BROWN_K1_K2_P1_P2_K3,
-};
-
-struct gm_intrinsics {
-  uint32_t width;
-  uint32_t height;
-
-  double fx;
-  double fy;
-  double cx;
-  double cy;
-
-  enum gm_distortion_model distortion_model;
-
-  /* XXX: maybe we should hide these coeficients since we can't represent
-   * more complex models e.g. using a triangle mesh
-   */
-  double distortion[5];
-};
-
-struct gm_extrinsics {
-  float rotation[9];    // Column-major 3x3 rotation matrix
-  float translation[3]; // Translation vector, in meters
-};
-
 struct gm_context;
 
 struct gm_joint {
@@ -278,6 +288,8 @@ struct gm_joint {
 };
 
 struct gm_skeleton;
+
+struct gm_prediction;
 
 struct gm_prediction_vtable {
     void (*free)(struct gm_prediction *self);
@@ -317,18 +329,16 @@ struct gm_ui_properties *
 gm_context_get_ui_properties(struct gm_context *ctx);
 
 void
-gm_context_set_depth_camera_intrinsics(struct gm_context *ctx,
-                                       struct gm_intrinsics *intrinsics);
+gm_context_set_max_depth_pixels(struct gm_context *ctx, int max_pixels);
 
 void
-gm_context_set_video_camera_intrinsics(struct gm_context *ctx,
-                                       struct gm_intrinsics *intrinsics);
+gm_context_set_max_video_pixels(struct gm_context *ctx, int max_pixels);
 
 void
 gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
                                                 struct gm_extrinsics *extrinsics);
 
-const gm_intrinsics *
+const struct gm_intrinsics *
 gm_context_get_training_intrinsics(struct gm_context *ctx);
 
 void
@@ -382,13 +392,13 @@ gm_prediction_get_skeleton(struct gm_prediction *prediction);
 void
 gm_skeleton_free(struct gm_skeleton *skeleton);
 
-const gm_intrinsics *
+const struct gm_intrinsics *
 gm_tracking_get_video_camera_intrinsics(struct gm_tracking *tracking);
 
-const gm_intrinsics *
+const struct gm_intrinsics *
 gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *tracking);
 
-const gm_intrinsics *
+const struct gm_intrinsics *
 gm_tracking_get_training_camera_intrinsics(struct gm_tracking *tracking);
 
 const float *

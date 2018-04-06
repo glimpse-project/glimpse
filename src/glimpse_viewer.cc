@@ -57,6 +57,10 @@
 #    include <jni.h>
 #endif
 
+#ifdef __APPLE__
+#include "ios_utils.h"
+#endif
+
 #ifdef USE_GLFM
 #    define GLFM_INCLUDE_NONE
 #    include <glfm.h>
@@ -1011,6 +1015,9 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
     int depth_width = depth_intrinsics->width;
     int depth_height = depth_intrinsics->height;
 
+    GLint saved_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
+
     // Ensure the framebuffer texture is valid
     if (!cloud_tex_valid) {
         int width = win_size.x * uiScale.x;
@@ -1039,79 +1046,78 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
         GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
         glDrawBuffers(1, drawBuffers);
 
-        if(glCheckFramebufferStatus(GL_FRAMEBUFFER) !=
-           GL_FRAMEBUFFER_COMPLETE) {
-            fprintf(stderr, "Incomplete framebuffer\n");
-            exit(1);
-        }
-
-        glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        gm_assert(data->log,
+                  (glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                   GL_FRAMEBUFFER_COMPLETE),
+                  "Incomplete framebuffer\n");
     }
 
-    // Calculate the projection matrix
-    glm::mat4 proj = intrinsics_to_project_matrix(depth_intrinsics, 0.01f, 10);
-    glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
-    mvp = glm::translate(mvp, data->focal_point);
-    mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
-    mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
-    mvp = glm::translate(mvp, -data->focal_point);
+    if (gl_db_depth_bo) {
+        // Calculate the projection matrix
+        glm::mat4 proj = intrinsics_to_project_matrix(depth_intrinsics, 0.01f, 10);
+        glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
+        mvp = glm::translate(mvp, data->focal_point);
+        mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
+        mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
+        mvp = glm::translate(mvp, -data->focal_point);
 
-    // Redraw depth buffer as point-cloud to texture
-    glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
+        // Redraw depth buffer as point-cloud to texture
+        glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
 
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LESS);
+        glEnable(GL_DEPTH_TEST);
+        glDepthFunc(GL_LESS);
 
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-    glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
 
-    glUseProgram(gl_db_program);
-    glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-    float pt_size = ceilf((win_size.x * uiScale.x) / depth_width);
-    glUniform1f(gl_db_uni_pt_size, pt_size);
+        glUseProgram(gl_db_program);
+        glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+        float pt_size = ceilf((win_size.x * uiScale.x) / depth_width);
+        glUniform1f(gl_db_uni_pt_size, pt_size);
 
-    // Update camera intrinsics
-    glUniform2i(gl_db_uni_depth_size,
-                (GLint)depth_width,
-                (GLint)depth_height);
-    glUniform2f(gl_db_uni_video_size,
-                (GLfloat)video_width,
-                (GLfloat)video_height);
-    glUniform4f(gl_db_uni_depth_intrinsics,
-                (GLfloat)depth_intrinsics->fx,
-                (GLfloat)depth_intrinsics->fy,
-                (GLfloat)depth_intrinsics->cx,
-                (GLfloat)depth_intrinsics->cy);
-    glUniform4f(gl_db_uni_video_intrinsics,
-                (GLfloat)video_intrinsics->fx,
-                (GLfloat)video_intrinsics->fy,
-                (GLfloat)video_intrinsics->cx,
-                (GLfloat)video_intrinsics->cy);
+        // Update camera intrinsics
+        glUniform2i(gl_db_uni_depth_size,
+                    (GLint)depth_width,
+                    (GLint)depth_height);
+        glUniform2f(gl_db_uni_video_size,
+                    (GLfloat)video_width,
+                    (GLfloat)video_height);
+        glUniform4f(gl_db_uni_depth_intrinsics,
+                    (GLfloat)depth_intrinsics->fx,
+                    (GLfloat)depth_intrinsics->fy,
+                    (GLfloat)depth_intrinsics->cx,
+                    (GLfloat)depth_intrinsics->cy);
+        glUniform4f(gl_db_uni_video_intrinsics,
+                    (GLfloat)video_intrinsics->fx,
+                    (GLfloat)video_intrinsics->fy,
+                    (GLfloat)video_intrinsics->cx,
+                    (GLfloat)video_intrinsics->cy);
 
-    glEnableVertexAttribArray(gl_db_attr_depth);
-    glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
-    glVertexAttribPointer(gl_db_attr_depth, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
+        glEnableVertexAttribArray(gl_db_attr_depth);
+        glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
+        glVertexAttribPointer(gl_db_attr_depth, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
 
-    glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
-    glDrawArrays(GL_POINTS, 0, depth_width * depth_height);
+        glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
+        glDrawArrays(GL_POINTS, 0, depth_width * depth_height);
 
-    glDisableVertexAttribArray(gl_db_attr_depth);
+        glDisableVertexAttribArray(gl_db_attr_depth);
 
-    int n_joints = 0;
-    int n_bones = 0;
-    if (update_skeleton_wireframe_gl_bos(data,
-                                         gm_tracking_get_timestamp(data->latest_tracking),
-                                         &n_joints,
-                                         &n_bones))
-    {
-        // Redraw joints/bones to texture
-        draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
+        int n_joints = 0;
+        int n_bones = 0;
+        if (update_skeleton_wireframe_gl_bos(data,
+                                             gm_tracking_get_timestamp(data->latest_tracking),
+                                             &n_joints,
+                                             &n_bones))
+        {
+            // Redraw joints/bones to texture
+            draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
+        }
     }
 
     // Clean-up
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glUseProgram(0);
-    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, saved_fbo);
     glDisable(GL_DEPTH_TEST);
 }
 
@@ -1161,7 +1167,7 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
             return false;
         }
         const struct gm_intrinsics *video_intrinsics =
-            gm_device_get_video_intrinsics(data->active_device);
+            &data->last_video_frame->video_intrinsics;
         int video_width = video_intrinsics->width;
         int video_height = video_intrinsics->height;
 
@@ -1243,7 +1249,7 @@ draw_ui(Data *data)
 
         skip_controls = true;
     }
-
+#if 1
     if (data->realtime_ar_mode) {
         // Draw a view-picker at the top
         ImGui::SetNextWindowPos(origin);
@@ -1331,7 +1337,7 @@ draw_ui(Data *data)
         draw_view(data, current_view, uiScale, origin.x, origin.y,
                   win_size.x, win_size.y, false);
     }
-
+#endif
     ImGui::PopStyleVar();
 
     // Draw profiler window always-on-top
@@ -1359,7 +1365,7 @@ draw_ar_video(Data *data)
 
     enum gm_rotation rotation = data->last_video_frame->camera_rotation;
     const struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(data->active_device);
+        &data->last_video_frame->video_intrinsics;
     int video_width = video_intrinsics->width;
     int video_height = video_intrinsics->height;
 
@@ -1609,7 +1615,7 @@ handle_device_frame_updates(Data *data)
         device_type != GM_DEVICE_TANGO)
     {
         const struct gm_intrinsics *video_intrinsics =
-            gm_device_get_video_intrinsics(data->active_device);
+            &data->last_video_frame->video_intrinsics;
         int video_width = video_intrinsics->width;
         int video_height = video_intrinsics->height;
 
@@ -1705,6 +1711,9 @@ upload_tracking_textures(Data *data)
 
     /* Update depth buffer and colour buffer */
     const float *depth = gm_tracking_get_depth(data->latest_tracking);
+
+    if (!gl_db_depth_bo)
+        glGenBuffers(1, &gl_db_depth_bo);
     glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
     glBufferData(GL_ARRAY_BUFFER,
                  sizeof(float) * data->depth_rgb_width * data->depth_rgb_height,
@@ -1875,13 +1884,13 @@ handle_device_ready(Data *data, struct gm_device *dev)
     init_viewer_opengl(data);
     init_device_opengl(data);
 
-    struct gm_intrinsics *depth_intrinsics =
-        gm_device_get_depth_intrinsics(dev);
-    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
+    int max_depth_pixels =
+        gm_device_get_max_depth_pixels(dev);
+    gm_context_set_max_depth_pixels(data->ctx, max_depth_pixels);
 
-    struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(dev);
-    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
+    int max_video_pixels =
+        gm_device_get_max_video_pixels(dev);
+    gm_context_set_max_video_pixels(data->ctx, max_video_pixels);
 
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(dev));*/
@@ -2195,7 +2204,7 @@ init_basic_opengl(Data *data)
 {
     glClearColor(0.0, 0.0, 0.0, 1.0);
     glClearStencil(0);
-
+#if 0
     glDebugMessageControl(GL_DONT_CARE, /* source */
                           GL_DONT_CARE, /* type */
                           GL_DONT_CARE, /* severity */
@@ -2212,6 +2221,7 @@ init_basic_opengl(Data *data)
 
     glEnable(GL_DEBUG_OUTPUT);
     glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
+#endif
 }
 
 static void
@@ -2292,22 +2302,13 @@ init_viewer_opengl(Data *data)
         "precision mediump float;\n"
         "precision mediump int;\n\n"
 
-        "uniform sampler2D texture;\n\n"
+        "uniform sampler2D tex;\n\n"
 
         "in vec2 v_tex_coord;\n"
         "layout(location = 0) out vec4 color;\n\n"
 
         "void main() {\n"
-
-        /* XXX: Mesa bug? glsl es 300 should support texture() but this isn't
-         * working with Mesa (and it's not complaining about the
-         * "#version 300 es")
-         */
-#ifdef __ANDROID__
-        "  color = texture(texture, v_tex_coord.st);\n"
-#else
-        "  color = texture2D(texture, v_tex_coord.st);\n"
-#endif
+        "  color = texture(tex, v_tex_coord.st);\n"
         "}\n";
 
 
@@ -2328,7 +2329,6 @@ init_viewer_opengl(Data *data)
     gl_db_uni_video_intrinsics = glGetUniformLocation(gl_db_program,
                                                       "video_intrinsics");
     gl_db_uni_video_size = glGetUniformLocation(gl_db_program, "video_size");
-    glGenBuffers(1, &gl_db_depth_bo);
 
     GLuint video_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
     glUniform1i(video_tex_sampler, 0);
@@ -2544,6 +2544,9 @@ logger_cb(struct gm_logger *logger,
             }
 
             fprintf(data->log_fp, "%s\n", msg);
+#ifdef __APPLE__
+            ios_log(msg);
+#endif
 
             if (backtrace) {
                 int line_len = 100;
@@ -2556,6 +2559,9 @@ logger_cb(struct gm_logger *logger,
                     fprintf(data->log_fp, "> %s\n", line);
                 }
             }
+
+            fflush(data->log_fp);
+            fflush(stdout);
         }
 
         free(msg);
@@ -2780,6 +2786,8 @@ viewer_init(Data *data)
     struct gm_device_config config = {};
 #ifdef USE_TANGO
     config.type = GM_DEVICE_TANGO;
+#elif defined(USE_AVF)
+    config.type = GM_DEVICE_AVF;
 #else
     config.type = GM_DEVICE_KINECT;
 #endif
@@ -2791,7 +2799,9 @@ viewer_init(Data *data)
 #endif
     gm_device_commit_config(data->recording_device, NULL);
 
-    if (config.type == GM_DEVICE_TANGO) {
+    if (config.type == GM_DEVICE_TANGO ||
+        config.type == GM_DEVICE_AVF)
+    {
         data->realtime_ar_mode = true;
     } else {
         data->realtime_ar_mode = false;
@@ -2809,6 +2819,10 @@ main(int argc, char **argv)
 #endif
 {
     Data *data = new Data();
+#ifdef __APPLE__
+    char *documents_dir = ios_util_get_documents_path();
+    permissions_check_passed = true;
+#endif
 
 #ifdef __ANDROID__
 #define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
@@ -2817,6 +2831,12 @@ main(int argc, char **argv)
            true);
     setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
     data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
+#elif defined(__APPLE__)
+    char full_filename[PATH_MAX];
+    snprintf(full_filename, sizeof(full_filename), "%s/glimpse.log", documents_dir);
+    data->log_fp = fopen(full_filename, "w");
+    snprintf(full_filename, sizeof(full_filename), "%s/FakeRecording", documents_dir);
+    setenv("FAKENECT_PATH", full_filename, true);
 #else
     data->log_fp = stderr;
 #endif
@@ -2824,7 +2844,17 @@ main(int argc, char **argv)
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
+    gm_debug(data->log, "Glimpse Viewer");
+
+#ifdef __APPLE__
+    gm_set_assets_root(data->log, documents_dir);
+    char tmp_recordings_path[PATH_MAX];
+    snprintf(tmp_recordings_path, sizeof(tmp_recordings_path), "%s/ViewerRecording",
+             documents_dir);
+    setenv("GLIMPSE_RECORDING_PATH", tmp_recordings_path, true);
+#else
     gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
+#endif
 
     const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
     if (!recordings_path)
@@ -2846,7 +2876,7 @@ main(int argc, char **argv)
 
     index_recordings(data);
 
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(__APPLE__)
     // Quick hack to make scrollbars a bit more usable on small devices
     ImGui::GetStyle().ScrollbarSize *= 2;
 #endif
