@@ -493,13 +493,14 @@ handle_context_tracking_updates(struct glimpse_data *data)
 static void
 handle_device_ready(struct glimpse_data *data)
 {
-    struct gm_intrinsics *depth_intrinsics =
-        gm_device_get_depth_intrinsics(data->device);
-    gm_context_set_depth_camera_intrinsics(data->ctx, depth_intrinsics);
+    int max_depth_pixels =
+        gm_device_get_max_depth_pixels(data->device);
+    gm_context_set_max_depth_pixels(data->ctx, max_depth_pixels);
 
-    struct gm_intrinsics *video_intrinsics =
-        gm_device_get_video_intrinsics(data->device);
-    gm_context_set_video_camera_intrinsics(data->ctx, video_intrinsics);
+    int max_video_pixels =
+        gm_device_get_max_video_pixels(data->device);
+    gm_context_set_max_video_pixels(data->ctx, max_video_pixels);
+
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(data->device));*/
 
@@ -742,15 +743,9 @@ render_ar_video_background(struct glimpse_data *data)
         /* Upload latest video frame if it's changed...
         */
         if (data->last_video_frame != data->visible_frame) {
-            const struct gm_intrinsics *video_intrinsics =
-                gm_device_get_video_intrinsics(data->device);
-            int video_width = video_intrinsics->width;
-            int video_height = video_intrinsics->height;
-
             pthread_mutex_lock(&data->swap_frames_lock);
 
             struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
-
             gm_frame_add_breadcrumb(new_frame, "render thread visible");
 
             if (data->visible_frame) {
@@ -760,6 +755,11 @@ render_ar_video_background(struct glimpse_data *data)
             data->visible_frame = new_frame;
 
             pthread_mutex_unlock(&data->swap_frames_lock);
+
+            const struct gm_intrinsics *video_intrinsics =
+                &new_frame->video_intrinsics;
+            int video_width = video_intrinsics->width;
+            int video_height = video_intrinsics->height;
 
             if (data->gl_vid_tex == 0) {
                 glGenTextures(1, &data->gl_vid_tex);
@@ -1408,10 +1408,9 @@ extern "C" const void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    struct gm_intrinsics *intrinsics =
-      gm_device_get_video_intrinsics(data->device);
 
     if (data->last_video_frame) {
+        struct gm_intrinsics *intrinsics = &data->last_video_frame->video_intrinsics;
         enum gm_rotation rotation = data->last_video_frame->camera_rotation;
         struct gm_intrinsics rotated_intrinsics;
 
@@ -1424,6 +1423,7 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
                glm::value_ptr(intrinsics_to_project_matrix(&rotated_intrinsics, 0.1, 10)),
                sizeof(float) * 16);
     } else {
+        struct gm_intrinsics *intrinsics = &data->last_video_frame->video_intrinsics;
         memcpy(out_mat4,
                glm::value_ptr(intrinsics_to_project_matrix(intrinsics, 0.1, 10)),
                sizeof(float) * 16);
