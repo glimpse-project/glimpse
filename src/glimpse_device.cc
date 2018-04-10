@@ -1589,7 +1589,9 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
 
     gm_assert(dev->log,
               point_cloud->num_points <= dev->max_depth_pixels,
-              "Spurious Tango Point Cloud larger than sensor resolution");
+              "Spurious Tango Point Cloud larger than sensor resolution (%d > max=%d)",
+              point_cloud->num_points,
+              dev->max_depth_pixels);
 
     memcpy(depth_buf_back->base.data,
            point_cloud->points,
@@ -2086,6 +2088,8 @@ tango_connect(struct gm_device *dev, char **err)
 
     init_intrinsics_from_tango(&dev->video_intrinsics,
                                &color_camera_intrinsics);
+    dev->max_video_pixels = color_camera_intrinsics.width *
+        color_camera_intrinsics.height;
 
     print_basis_and_rotated_intrinsics(dev, "ColorCamera",
                                        TANGO_CAMERA_COLOR,
@@ -2101,6 +2105,8 @@ tango_connect(struct gm_device *dev, char **err)
 
     init_intrinsics_from_tango(&dev->depth_intrinsics,
                                &depth_camera_intrinsics);
+    dev->max_depth_pixels = color_camera_intrinsics.width *
+        color_camera_intrinsics.height;
 
     print_basis_and_rotated_intrinsics(dev, "DepthCamera",
                                        TANGO_CAMERA_DEPTH,
