@@ -16,8 +16,8 @@ endian = 'little'
 [properties]
 root = '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer'
 
-c_args = ['-arch', 'arm64', '-miphoneos-version-min=11.0', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.2.sdk']
-cpp_args = ['-arch', 'arm64', '-miphoneos-version-min=11.0', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.2.sdk']
-c_link_args = ['-arch', 'arm64', '-miphoneos-version-min=11.0', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.2.sdk']
-cpp_link_args = ['-arch', 'arm64', '-miphoneos-version-min=11.0', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.2.sdk']
-objc_args = [ '-ObjC', '-arch', 'arm64', '-miphoneos-version-min=11.0', '-fobjc-arc', '-fembed-bitcode-marker', '-fstrict-aliasing', '-fmessage-length=0', '-fdiagnostics-show-note-include-stack', '-fmacro-backtrace-limit=0', '-fpascal-strings', '-fmodules', '-gmodules', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.2.sdk']
+c_args = ['-arch', 'arm64', '-miphoneos-version-min=11.3', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.3.sdk']
+cpp_args = ['-arch', 'arm64', '-miphoneos-version-min=11.3', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.3.sdk']
+c_link_args = ['-arch', 'arm64', '-miphoneos-version-min=11.3', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.3.sdk']
+cpp_link_args = ['-arch', 'arm64', '-miphoneos-version-min=11.3', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.3.sdk']
+objc_args = [ '-ObjC', '-arch', 'arm64', '-miphoneos-version-min=11.3', '-fobjc-arc', '-fembed-bitcode-marker', '-fstrict-aliasing', '-fmessage-length=0', '-fdiagnostics-show-note-include-stack', '-fmacro-backtrace-limit=0', '-fpascal-strings', '-fmodules', '-gmodules', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.3.sdk']
