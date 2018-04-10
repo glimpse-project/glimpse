@@ -2771,6 +2771,9 @@ viewer_init(Data *data)
 
     gm_context_set_event_callback(data->ctx, on_event_cb, data);
 
+    /* TODO: load config for viewer properties */
+    data->prediction_delay = 250000000;
+
     struct gm_asset *config_asset =
         gm_asset_open(data->log,
                       "glimpse-config.json", GM_ASSET_MODE_BUFFER, &open_err);
