@@ -502,7 +502,6 @@ struct gm_context
     bool depth_gap_fill;
     bool apply_depth_distortion;
     int gap_dist;
-    float gap_tolerance;
 
     int cloud_res;
     float min_depth;
@@ -3015,75 +3014,29 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                     continue;
                 }
 
-                // Check to see if gaps can be filled by surrounding pixels on
-                // either the horizontal or vertical axis
-                int left = 0, right = 0, up = 0, down = 0;
-                for (int i = 1;
-                     i <= ctx->gap_dist && !(left && right) && !(up && down); ++i) {
-                    if (!left && (x - i) >= 0 && std::isnormal(depth_copy[off-i])) {
-                        left = i;
+                int n_values = 0;
+                float acc_depth = 0.f;
+                for (int i = -std::min(ctx->gap_dist, y);
+                     i <= ctx->gap_dist; ++i) {
+                    if (y + i >= rot_height) {
+                        break;
                     }
-                    if (!right && (x + i) < rot_width &&
-                        std::isnormal(depth_copy[off+i])) {
-                        right = i;
-                    }
-                    if (!up && (y - i) >= 0 &&
-                        std::isnormal(depth_copy[off - (i * rot_width)])) {
-                        up = i;
-                    }
-                    if (!down && (y + i) < rot_height &&
-                        std::isnormal(depth_copy[off + (i * rot_width)])) {
-                        down = i;
-                    }
-                }
 
-                bool hvalid = false;
-                if (left && right) {
-                    float lval = depth_copy[off-left];
-                    float rval = depth_copy[off+right];
-                    float distance = fabsf(rval - lval);
-                    if (distance < ctx->gap_tolerance * (left + right)) {
-                        hvalid = true;
-                    }
-                }
-                bool vvalid = false;
-                if (up && down) {
-                    int pix_dist = up + down;
-                    float uval = depth_copy[off-(up * rot_width)];
-                    float dval = depth_copy[off+(down * rot_width)];
-                    float distance = fabsf(dval - uval);
-                    if (distance < ctx->gap_tolerance * pix_dist) {
-                        if (pix_dist < left + right || !(left && right)) {
-                            vvalid = true;
-                            hvalid = false;
+                    for (int j = -std::min(ctx->gap_dist, x);
+                         j <= ctx->gap_dist; ++j) {
+                        if (x + j >= rot_width) {
+                            break;
                         }
-                    }
-                }
 
-                if (hvalid || vvalid) {
-                    // Note, this interpolation isn't correct because it doesn't
-                    // take depth into account. This has a more extreme effect
-                    // at oblique angles, but hopefully we won't be filling in
-                    // too many pixels so it shouldn't matter too much.
-                    if (hvalid) {
-                        int pix_dist = left + right;
-                        float lval = depth_copy[off-left];
-                        float rval = depth_copy[off+right];
-                        for (int o = -left + 1, i = 0; o < right; ++o, ++i) {
-                            float new_depth = ((lval * ((pix_dist - 1) - o)) +
-                                               (rval * o)) / (float)(pix_dist - 1);
-                            blanks.push_back({off + o, new_depth});
-                        }
-                    } else {
-                        int pix_dist = up + down;
-                        float uval = depth_copy[off-(up * rot_width)];
-                        float dval = depth_copy[off+(down * rot_width)];
-                        for (int o = -up + 1, i = 0; o < down; ++o, ++i) {
-                            float new_depth = ((uval * ((pix_dist - 1) - o)) +
-                                               (dval * o)) / (float)(pix_dist - 1);
-                            blanks.push_back({off + (o * rot_width), new_depth});
+                        int o_off = (y + i) * rot_width + x + j;
+                        if (std::isnormal(depth_copy[o_off])) {
+                            acc_depth += depth_copy[o_off];
+                            ++n_values;
                         }
                     }
+                }
+                if (n_values) {
+                    blanks.push_back({off, acc_depth / n_values});
                 }
             }
 
@@ -4092,17 +4045,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.ptr = &ctx->gap_dist;
     prop.int_state.min = 0;
     prop.int_state.max = 5;
-    ctx->properties.push_back(prop);
-
-    ctx->gap_tolerance = 0.05f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "gap_tolerance";
-    prop.desc = "Distance threshold when interpolating between gaps";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->gap_tolerance;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.2f;
     ctx->properties.push_back(prop);
 
     ctx->depth_gap_fill = true;
