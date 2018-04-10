@@ -1888,8 +1888,8 @@ pose_to_matrix(struct gm_pose &pose)
         pose.translation[1],
         pose.translation[2]);
 
-    return glm::mat4_cast(rot_start_to_dev) *
-           glm::translate(glm::mat4(1.f), mov_start_to_dev);
+    return glm::translate(glm::mat4(1.f), mov_start_to_dev) *
+           glm::mat4_cast(rot_start_to_dev);
 }
 
 static bool
@@ -2236,7 +2236,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         ctx->depth_seg.empty();
         ctx->depth_seg.resize(depth_class_size);
         ctx->depth_pose = tracking->frame->pose;
-        ctx->start_to_depth_pose = pose_to_matrix(ctx->depth_pose);
+        ctx->start_to_depth_pose = glm::inverse(pose_to_matrix(ctx->depth_pose));
     } else {
         // Check if the angle or distance between the current frame and the
         // reference frame exceeds a certain threshold, and in that case, reset
@@ -2268,8 +2268,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                  tracking->frame->pose.translation[2] - ctx->depth_pose.translation[2]);
         if (angle < 10.f && distance < 0.3f) {
             if (angle > 0.25f || distance > 0.025f) {
-                new_to_start = glm::inverse(
-                    pose_to_matrix(tracking->frame->pose));
+                new_to_start =
+                    pose_to_matrix(tracking->frame->pose);
                 transform = true;
             }
         } else {
@@ -2278,7 +2278,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
             ctx->depth_seg.empty();
             ctx->depth_seg.resize(depth_class_size);
             ctx->depth_pose = tracking->frame->pose;
-            ctx->start_to_depth_pose = pose_to_matrix(ctx->depth_pose);
+            ctx->start_to_depth_pose =
+                glm::inverse(pose_to_matrix(ctx->depth_pose));
             gm_debug(ctx->log, "XXX: Resetting pose");
         }
     }
