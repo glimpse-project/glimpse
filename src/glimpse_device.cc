@@ -2305,17 +2305,13 @@ on_avf_depth_cb(struct ios_av_session *session,
     struct gm_device_buffer *depth_buf_back =
         mem_pool_acquire_buffer(dev->depth_buf_pool, "avf depth");
 
-    gm_assert(dev->log,
-              width == 320 && height == 240 && stride == 320 * 4,
-              "Unexpected disparty buffer size/format");
-
     float *depth = (float *)depth_buf_back->base.data;
     gm_assert(dev->log,
-              depth_buf_back->base.len >= 320 * 240 * 4,
+              depth_buf_back->base.len >= width * height * 4,
               "depth buffer too small");
 
-    for (int y = 0; y < 240; y++) {
-        for (int x = 0; x < 320; x++) {
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
             int off = width * y + x;
             depth[off] = 1.0f / disparity[off];
         }
