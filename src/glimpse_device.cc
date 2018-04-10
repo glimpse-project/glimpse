@@ -1528,13 +1528,6 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         return;
     }
 
-    TangoPoseData pose;
-    TangoErrorType error = TangoService_getPoseAtTime(
-        point_cloud->timestamp,
-        { TANGO_COORDINATE_FRAME_START_OF_SERVICE,
-          TANGO_COORDINATE_FRAME_DEVICE },
-        &pose);
-
     struct gm_device_buffer *depth_buf_back =
         mem_pool_acquire_buffer(dev->depth_buf_pool, "tango depth");
 
@@ -1547,6 +1540,15 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
            point_cloud->points,
            point_cloud->num_points * 4 * sizeof(float));
     depth_buf_back->base.len = point_cloud->num_points * 4 * sizeof(float);
+
+    TangoPoseData pose;
+    TangoErrorType error = TangoSupport_getPoseAtTime(point_cloud->timestamp,
+        TANGO_COORDINATE_FRAME_CAMERA_DEPTH,
+        TANGO_COORDINATE_FRAME_START_OF_SERVICE,
+        TANGO_SUPPORT_ENGINE_OPENGL,
+        TANGO_SUPPORT_ENGINE_OPENGL,
+        (TangoSupportRotation)dev->tango.display_rotation,
+        &pose);
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
 
@@ -1561,28 +1563,11 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
               (float)pose.orientation[2],
               (float)pose.orientation[3] },
             { (float)-pose.translation[0],
-              (float)-pose.translation[1],
-              (float)-pose.translation[2] }
+              (float)pose.translation[1],
+              (float)pose.translation[2] }
         };
-
-        // We need to flip the angle due to our different axis representation.
-        // That's why we negate the x component of the angle above (which is
-        // the simple case for portrait orientation).
-        if (dev->camera_rotation == GM_ROTATION_0 ||
-            dev->camera_rotation == GM_ROTATION_180) {
-            glm::quat orientation =
-                glm::angleAxis((float)(M_PI), glm::vec3(0, 0, 1)) *
-                glm::angleAxis((float)(M_PI/2), glm::vec3(1, 0, 0)) *
-                glm::quat(dev->frame_pose.orientation[3],
-                          -dev->frame_pose.orientation[0],
-                          dev->frame_pose.orientation[1],
-                          dev->frame_pose.orientation[2]);
-            dev->frame_pose.orientation[0] = orientation.x;
-            dev->frame_pose.orientation[1] = orientation.y;
-            dev->frame_pose.orientation[2] = orientation.z;
-            dev->frame_pose.orientation[3] = orientation.w;
-        }
     } else {
+        gm_debug(dev->log, "tango_point_cloud_cb invalid pose");
         dev->frame_pose.valid = false;
     }
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
