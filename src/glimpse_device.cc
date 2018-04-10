@@ -156,6 +156,11 @@ struct gm_device
             struct gm_buffer *last_video_buf;
 
             pthread_t io_thread;
+
+            /* older recordings have intrinsics that apply to the entire recording
+             * and more recent recordings attach intrinsics to each frame
+             */
+            bool fixed_intrinsics;
         } recording;
 
 #ifdef USE_FREENECT
@@ -1001,6 +1006,7 @@ recording_open(struct gm_device *dev,
         read_json_intrinsics(depth_intrinsics, &dev->depth_intrinsics);
         dev->max_depth_pixels = dev->depth_intrinsics.width *
             dev->depth_intrinsics.height;
+        dev->recording.fixed_intrinsics = true;
     } else {
         dev->max_depth_pixels =
             json_object_get_number(meta, "max_depth_pixels");
@@ -1012,6 +1018,8 @@ recording_open(struct gm_device *dev,
         read_json_intrinsics(video_intrinsics, &dev->video_intrinsics);
         dev->max_video_pixels = dev->video_intrinsics.width *
             dev->video_intrinsics.height;
+        gm_assert(dev->log, dev->recording.fixed_intrinsics,
+                  "Inconsistently fixed depth/video intrinsics");
     } else {
         dev->max_video_pixels =
             json_object_get_number(meta, "max_video_pixels");
@@ -1165,9 +1173,20 @@ read_frame_buffer(struct gm_device *dev,
 
     fclose(fp);
 
-    JSON_Object *intrinsics =
-        json_object_get_object(frame, intrinsics_prop);
-    read_json_intrinsics(intrinsics, intrinsics_out);
+    if (dev->recording.fixed_intrinsics) {
+        /* XXX: Feels a bit kludgy... */
+        if (strcmp(intrinsics_prop, "depth_intrinsics") == 0) {
+            *intrinsics_out = dev->depth_intrinsics;
+        } else {
+            gm_assert(dev->log, strcmp(intrinsics_prop, "video_intrinsics") == 0,
+                      "unknown intrinsics prop");
+            *intrinsics_out = dev->video_intrinsics;
+        }
+    } else {
+        JSON_Object *intrinsics =
+            json_object_get_object(frame, intrinsics_prop);
+        read_json_intrinsics(intrinsics, intrinsics_out);
+    }
 
     return buf;
 }
@@ -1208,6 +1227,11 @@ swap_recorded_frame(struct gm_device *dev,
         if (depth_buffer) {
             dev->depth_intrinsics = *depth_intrinsics;
 
+            gm_assert(dev->log,
+                      depth_intrinsics->width > 0 &&
+                      depth_intrinsics->height > 0,
+                      "swapping recorded frame with invalid depth intrinsics");
+
             if (dev->recording.last_depth_buf)
                 gm_buffer_unref(dev->recording.last_depth_buf);
             dev->recording.last_depth_buf = gm_buffer_ref(depth_buffer);
@@ -1223,6 +1247,11 @@ swap_recorded_frame(struct gm_device *dev,
 
         if (video_buffer) {
             dev->video_intrinsics = *video_intrinsics;
+
+            gm_assert(dev->log,
+                      video_intrinsics->width > 0 &&
+                      video_intrinsics->height > 0,
+                      "swapping recorded frame with invalid video intrinsics");
 
             if (dev->recording.last_video_buf)
                 gm_buffer_unref(dev->recording.last_video_buf);
@@ -2849,7 +2878,10 @@ gm_device_get_latest_frame(struct gm_device *dev)
         frame->base.depth_format = dev->depth_format;
         gm_assert(dev->log, frame->base.depth != NULL,
                   "Depth ready flag set but buffer missing");
-        gm_debug(dev->log, "> depth = %p", frame->base.depth);
+        gm_debug(dev->log, "> depth = %p, intrinsics w=%d, h=%d",
+                 frame->base.depth,
+                 dev->depth_intrinsics.width,
+                 dev->depth_intrinsics.height);
         frame->base.depth_intrinsics = dev->depth_intrinsics;
         gm_assert(dev->log,
                   dev->depth_intrinsics.width > 0 &&
