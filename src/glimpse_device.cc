@@ -2895,12 +2895,15 @@ gm_device_combine_frames(struct gm_device *dev, struct gm_frame *master,
 
     frame->base.timestamp = master->timestamp;
     frame->base.pose = master->pose;
+    frame->base.camera_rotation = master->camera_rotation;
 
     frame->base.depth = gm_buffer_ref(depth->depth);
     frame->base.depth_format = depth->depth_format;
+    frame->base.depth_intrinsics = depth->depth_intrinsics;
 
     frame->base.video = gm_buffer_ref(video->video);
     frame->base.video_format = video->video_format;
+    frame->base.video_intrinsics = video->video_intrinsics;
 
     return &frame->base;
 }
