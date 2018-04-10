@@ -2845,6 +2845,10 @@ gm_device_get_latest_frame(struct gm_device *dev)
                   "Depth ready flag set but buffer missing");
         gm_debug(dev->log, "> depth = %p", frame->base.depth);
         frame->base.depth_intrinsics = dev->depth_intrinsics;
+        gm_assert(dev->log,
+                  dev->depth_intrinsics.width > 0 &&
+                  dev->depth_intrinsics.height > 0,
+                  "Invalid intrinsics for latest depth buffer");
     }
     if (dev->frame_ready_buffers_mask & GM_REQUEST_FRAME_VIDEO) {
         frame->base.video = &dev->video_buf_ready->base;
@@ -2852,7 +2856,14 @@ gm_device_get_latest_frame(struct gm_device *dev)
         frame->base.video_format = dev->video_format;
         gm_assert(dev->log, frame->base.video != NULL,
                   "Video ready flag set but buffer missing");
-        gm_debug(dev->log, "> video = %p", frame->base.video);
+        gm_debug(dev->log, "> video = %p, intrinsics w=%d, h=%d",
+                 frame->base.video,
+                 dev->video_intrinsics.width,
+                 dev->video_intrinsics.height);
+        gm_assert(dev->log,
+                  dev->video_intrinsics.width > 0 &&
+                  dev->video_intrinsics.height > 0,
+                  "Invalid intrinsics for latest video buffer");
         frame->base.video_intrinsics = dev->video_intrinsics;
     }
 
