@@ -4368,14 +4368,17 @@ gm_context_notify_frame(struct gm_context *ctx,
 
     pthread_mutex_lock(&ctx->liveness_lock);
 
-    gm_debug(ctx->log, "gm_context_notify_frame: frame = %p, depth=%p, video=%p",
-             frame, frame->depth, frame->video);
+    gm_debug(ctx->log, "gm_context_notify_frame: frame = %p, depth=%p, video=%p (w=%d, h=%d)",
+             frame, frame->depth, frame->video,
+             frame->video_intrinsics.width,
+             frame->video_intrinsics.height);
 
     gm_assert(ctx->log, !ctx->destroying,
               "Spurious notification during tracking context destruction");
 
     pthread_mutex_lock(&ctx->frame_ready_mutex);
     gm_assert(ctx->log, !ctx->destroying, "Spurious frame notification during destruction");
+    gm_assert(ctx->log, ctx->frame_ready != frame, "Notified of the same frame");
     if (ctx->frame_ready)
         gm_frame_unref(ctx->frame_ready);
     ctx->frame_ready = gm_frame_ref(frame);
