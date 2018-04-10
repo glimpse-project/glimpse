@@ -130,7 +130,8 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     float aspect_b = (calib.intrinsicMatrixReferenceDimensions.width /
                       calib.intrinsicMatrixReferenceDimensions.height);
     gm_assert(log,
-              aspect_a == aspect_b,
+              aspect_a > (aspect_b - 5e-3) &&
+              aspect_a < (aspect_b + 5e-3),
               "Intrinsics reference dimensions not consistent with buffer size");
 
     float scale_x = (float)w / calib.intrinsicMatrixReferenceDimensions.width;
@@ -227,9 +228,12 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self->session.sessionPreset = AVCaptureSessionPreset640x480;
     //self->session.sessionPreset = AVCaptureSessionPreset1280x720; XXX: not getting depth with this preset
 
-    self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInDualCamera
+    self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInTrueDepthCamera
                                                                mediaType:AVMediaTypeVideo
-                                                                position:AVCaptureDevicePositionBack];
+                                                                position:AVCaptureDevicePositionFront];
+    //self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInDualCamera
+    //                                                           mediaType:AVMediaTypeVideo
+    //                                                            position:AVCaptureDevicePositionBack];
     if (!self->dual_cam_device) {
         gm_debug(self->log, "Failed to find dual camera device");
         //self->setupResult = AVCamSetupResultSessionConfigurationFailed;
