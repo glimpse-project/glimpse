@@ -1804,19 +1804,25 @@ class DepthComparator: public pcl::Comparator<PointT>
 
 static void
 update_depth_codebook(struct gm_context *ctx,
-                      struct gm_tracking_impl *tracking)
+                      struct gm_tracking_impl *tracking,
+                      std::vector<std::pair<int, float>> &reproj_map)
 {
     uint64_t start = get_time();
 
     int n_codewords = 0;
     foreach_xy_off(tracking->depth_classification->width,
                    tracking->depth_classification->height) {
-        // Don't update pixels that we're tracking
-        if (tracking->depth_classification->points[off].label == TRK) {
+        int depth_off = reproj_map[off].first;
+        if (depth_off < 0) {
             continue;
         }
 
-        float depth = tracking->depth_classification->points[off].z;
+        // Don't update pixels that we're tracking
+        if (tracking->depth_classification->points[depth_off].label == TRK) {
+            continue;
+        }
+
+        float depth = tracking->depth_classification->points[depth_off].z;
         if (std::isnan(depth)) {
             depth = HUGE_DEPTH;
         }
@@ -2283,19 +2289,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    if (transform) {
-        pcl::PointCloud<pcl::PointXYZL>::Ptr
-            t_class(new pcl::PointCloud<pcl::PointXYZL>);
-        t_class->width = tracking->depth_classification->width;
-        t_class->height = tracking->depth_classification->height;
-        t_class->points.resize(t_class->width * t_class->height);
-        t_class->is_dense = false;
+    // Create a mapping of reprojected pixels to their current positions
+    std::vector<std::pair<int, float>> reproj_map(depth_class_size);
 
-        for (unsigned i = 0; i < t_class->points.size(); ++i) {
-            t_class->points[i].x = t_class->points[i].y =
-                t_class->points[i].z = nan;
+    if (transform) {
+        for (unsigned i = 0; i < depth_class_size; ++i) {
+            reproj_map[i] = std::pair<int, float>(-1, nan);
+            tracking->depth_classification->points[i].label = -1;
         }
-        foreach_xy_off(t_class->width, t_class->height) {
+        foreach_xy_off(tracking->depth_classification->width,
+                       tracking->depth_classification->height) {
             pcl::PointXYZL &point = tracking->depth_classification->points[off];
             if (std::isnan(point.z)) {
                 continue;
@@ -2319,17 +2322,26 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
             int new_off =
                 (dny * tracking->depth_classification->width) + dnx;
-            pcl::PointXYZL &current_pt = t_class->points[new_off];
-            if (std::isnan(current_pt.z) || current_pt.z > point.z) {
-                t_class->points[new_off] = point;
+            float current_depth = reproj_map[new_off].second;
+            if (std::isnan(current_depth) || current_depth > point.z) {
+                reproj_map[new_off] = std::pair<int, float>(off, point.z);
             }
         }
-        std::swap(t_class, tracking->depth_classification);
+    } else {
+        for (int i = 0; i < depth_class_size; ++i) {
+            float depth = tracking->depth_classification->points[i].z;
+            reproj_map[i] = std::pair<int, float>(i, depth);
+        }
     }
 
     foreach_xy_off(tracking->depth_classification->width,
                    tracking->depth_classification->height) {
-        float depth = tracking->depth_classification->points[off].z;
+        int depth_off = reproj_map[off].first;
+        if (depth_off < 0) {
+            continue;
+        }
+
+        float depth = tracking->depth_classification->points[depth_off].z;
         if (std::isnan(depth)) {
             depth = HUGE_DEPTH;
         }
@@ -2374,9 +2386,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
             100000000.f;
 
         if (!codeword) {
-            tracking->depth_classification->points[off].label = FG;
+            tracking->depth_classification->points[depth_off].label = FG;
         } else if (codeword->n == bg_codeword->n) {
-            tracking->depth_classification->points[off].label = BG;
+            tracking->depth_classification->points[depth_off].label = BG;
         } else {
             bool flat = false, flickering = false;
             float mean_diff = fabsf(codeword->m - bg_codeword->m);
@@ -2389,16 +2401,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 flickering = true;
             }
             if (flat || flickering) {
-                tracking->depth_classification->points[off].label =
+                tracking->depth_classification->points[depth_off].label =
                     (flat && flickering) ?
                         FL_FLK : (flat ?  FL : FLK);
             } else {
                 if (codeword->n > alpha &&
                     ((codeword->tl - codeword->ts) / frame_time) /
                     (float)codeword->n >= psi) {
-                    tracking->depth_classification->points[off].label = TB;
+                    tracking->depth_classification->
+                        points[depth_off].label = TB;
                 } else {
-                    tracking->depth_classification->points[off].label = FG;
+                    tracking->depth_classification->
+                        points[depth_off].label = FG;
                 }
             }
         }
@@ -2501,7 +2515,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        update_depth_codebook(ctx, tracking);
+        update_depth_codebook(ctx, tracking, reproj_map);
         LOGI("Skipping detection: Could not find a person cluster\n");
         return false;
     }
@@ -2688,7 +2702,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration));
     }
 
-    update_depth_codebook(ctx, tracking);
+    update_depth_codebook(ctx, tracking, reproj_map);
 
     return true;
 }
@@ -4874,6 +4888,12 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
             (*output)[off * 3] = 0x00;
             (*output)[off * 3 + 1] = 0xFF;
             (*output)[off * 3 + 2] = 0x00;
+            break;
+        default:
+            // Invalid/unhandled value
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0x00;
+            (*output)[off * 3 + 2] = 0xFF;
             break;
         }
 #endif
