@@ -1404,7 +1404,7 @@ intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
                       scaley * -height / 2.0f - offsety, near, far);
 }
 
-extern "C" const void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
@@ -1422,11 +1422,9 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
         memcpy(out_mat4,
                glm::value_ptr(intrinsics_to_project_matrix(&rotated_intrinsics, 0.1, 10)),
                sizeof(float) * 16);
+        return true;
     } else {
-        struct gm_intrinsics *intrinsics = &data->last_video_frame->video_intrinsics;
-        memcpy(out_mat4,
-               glm::value_ptr(intrinsics_to_project_matrix(intrinsics, 0.1, 10)),
-               sizeof(float) * 16);
+        return false;
     }
 }
 
