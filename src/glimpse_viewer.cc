@@ -1930,6 +1930,24 @@ upload_tracking_textures(Data *data)
 }
 
 static void
+destroy_joints_recording(Data *data)
+{
+    if (data->joints_recording_val) {
+        json_value_free(data->joints_recording_val);
+        data->joints_recording_val = NULL;
+        data->joints_recording = NULL;
+    }
+}
+
+static void
+start_joints_recording(Data *data)
+{
+    destroy_joints_recording(data);
+    data->joints_recording_val = json_value_init_array();
+    data->joints_recording = json_array(data->joints_recording_val);
+}
+
+static void
 handle_context_tracking_updates(Data *data)
 {
     ProfileScopedSection(UpdatingTracking);
@@ -1975,9 +1993,7 @@ handle_context_tracking_updates(Data *data)
         if (n_frames >= data->requested_recording_len) {
             json_serialize_to_file_pretty(data->joints_recording_val,
                                           "glimpse-joints-recording.json");
-            json_value_free(data->joints_recording_val);
-            data->joints_recording_val = NULL;
-            data->joints_recording = NULL;
+            destroy_joints_recording(data);
         }
     }
 
@@ -2011,6 +2027,9 @@ handle_device_ready(Data *data, struct gm_device *dev)
     if (old_reqs) {
         request_device_frame(data, old_reqs);
     }
+
+    if (data->requested_recording_len)
+        start_joints_recording(data);
 }
 
 static void
@@ -2752,11 +2771,8 @@ viewer_init(Data *data)
     }
 
     const char *n_frames_env = getenv("GLIMPSE_RECORD_N_JOINT_FRAMES");
-    if (n_frames_env) {
-        data->joints_recording_val = json_value_init_array();
-        data->joints_recording = json_array(data->joints_recording_val);
+    if (n_frames_env)
         data->requested_recording_len = strtoull(n_frames_env, NULL, 10);
-    }
 
     // TODO: Might be nice to be able to retrieve this information via the API
     //       rather than reading it separately here.
