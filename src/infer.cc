@@ -276,7 +276,7 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
                 {
                   // Check to see if this pixel can be added to an existing
                   // cluster.
-                  if (last_segment[j] && last_segment[j]->right == x - 1)
+                  if (last_segment[j])
                     {
                       last_segment[j]->right = x;
                     }
