@@ -1643,6 +1643,47 @@ sanitise_skeleton(struct gm_context *ctx,
 }
 
 template<typename PointT>
+class DepthComparator: public pcl::Comparator<PointT>
+{
+  public:
+    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
+    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
+        PointCloudConstPtr;
+
+    typedef boost::shared_ptr<DepthComparator<PointT>> Ptr;
+    typedef boost::shared_ptr<const DepthComparator<PointT>> ConstPtr;
+
+    using pcl::Comparator<PointT>::input_;
+
+    DepthComparator()
+      : depth_threshold_(0.03f) {
+    }
+
+    virtual
+    ~DepthComparator() {
+    }
+
+    inline void
+    setDepthThreshold(float depth_threshold) {
+        depth_threshold_ = depth_threshold;
+    }
+
+    inline float
+    getDepthThreshold() const {
+        return depth_threshold_;
+    }
+
+    virtual bool
+    compare (int idx1, int idx2) const {
+        return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
+            depth_threshold_;
+    }
+
+  protected:
+    float depth_threshold_;
+};
+
+template<typename PointT>
 class PlaneComparator: public pcl::Comparator<PointT>
 {
   public:
@@ -1745,63 +1786,6 @@ class LabelComparator: public pcl::Comparator<PointT>
     float depth_threshold_;
 };
 
-template<typename PointT, typename PointNT>
-class DepthComparator: public pcl::Comparator<PointT>
-{
-  public:
-    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
-    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
-        PointCloudConstPtr;
-
-    typedef typename pcl::PointCloud<PointNT> PointCloudN;
-    typedef typename PointCloudN::Ptr PointCloudNPtr;
-    typedef typename PointCloudN::ConstPtr PointCloudNConstPtr;
-
-    typedef boost::shared_ptr<DepthComparator<PointT, PointNT>> Ptr;
-    typedef boost::shared_ptr<const DepthComparator<PointT, PointNT>> ConstPtr;
-
-    using pcl::Comparator<PointT>::input_;
-
-    DepthComparator()
-      : normals_()
-      , depth_threshold_(0.03f) {
-    }
-
-    virtual
-    ~DepthComparator() {
-    }
-
-    inline void
-    setInputNormals(const PointCloudNConstPtr &normals) {
-        normals_ = normals;
-    }
-
-    inline PointCloudNConstPtr
-    getInputNormals () const {
-        return normals_;
-    }
-
-    inline void
-    setDepthThreshold(float depth_threshold) {
-        depth_threshold_ = depth_threshold;
-    }
-
-    inline float
-    getDepthThreshold() const {
-        return depth_threshold_;
-    }
-
-    virtual bool
-    compare (int idx1, int idx2) const {
-        return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
-            depth_threshold_;
-    }
-
-  protected:
-    PointCloudNConstPtr normals_;
-    float depth_threshold_;
-};
-
 static void
 update_depth_codebook(struct gm_context *ctx,
                       struct gm_tracking_impl *tracking,
@@ -1895,6 +1879,247 @@ pose_to_matrix(struct gm_pose &pose)
 
     return glm::translate(glm::mat4(1.f), mov_start_to_dev) *
            glm::mat4_cast(rot_start_to_dev);
+}
+
+static inline bool
+gm_find_human_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
+                            int x1, int y1, int x2, int y2,
+                            float tolerance)
+{
+#define GET_DEPTH(x,y) (cloud->points[(y) * cloud->width + (x)].z)
+
+    float d1 = GET_DEPTH(x1, y1);
+    float d2 = GET_DEPTH(x2, y2);
+    if (std::isnan(d1) || std::isnan(d2)) {
+        return false;
+    }
+    return fabsf(d1 - d2) <= tolerance;
+}
+
+static std::vector<int>
+gm_find_human(struct gm_context *ctx,
+              pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
+              int fx, int fy)
+{
+    // This function is intended to find a human standing in a neutral pose,
+    // (feet on the ground, arms resting by the sides), not touching anything
+    // except the ground.
+    // For subsequent frames, one can cluster based on the previous knowledge
+    // of where the human was.
+    std::vector<int> person_indices;
+
+#define GET_DEPTH(x,y) (cloud->points[(y) * cloud->width + (x)].z)
+#define CMP(x1,y1,x2,y2) (gm_find_human_compare_depth(cloud,x1,y1,x2,y2,\
+                                                      ctx->cluster_tolerance))
+
+    // First do a sanity check - if the depth value at the focal point is
+    // within range.
+    float depth = GET_DEPTH(fx, fy);
+    if (!std::isnormal(depth) ||
+        depth < ctx->min_depth || depth > ctx->max_depth) {
+        gm_debug(ctx->log, "XXX Focal point has invalid depth (%f)", depth);
+        return person_indices;
+    }
+
+    // Start by checking the width of the scanline that lies on the focal point.
+    // We expect a scanline that takes up no more than 50% of the width of the
+    // buffer (if it takes up more than that, the person is likely standing
+    // too close to track successfully anyway) and at least 10% of the width.
+    int left, right;
+    for (left = fx; left > 0 && CMP(left, fy, left - 1, fy); --left);
+    for (right = fx; right < (int)cloud->width - 1 &&
+         CMP(right, fy, right + 1, fy); ++right);
+
+    int center_width = (right - left) + 1;
+    if (center_width < (int)(cloud->width * 0.1f) ||
+        center_width > (int)(cloud->width * 0.5f)) {
+        gm_debug(ctx->log, "XXX Focal scan has invalid width (%d/%d)",
+                 center_width, (int)cloud->width);
+        return person_indices;
+    }
+
+    gm_debug(ctx->log, "XXX \tFocal scan width (%d)", center_width);
+
+    // Store the center scanline
+    int c_left = left, c_right = right;
+    int scan_threshold = (int)(center_width * 2.f);
+
+    // Now scan upwards - we expect no connected scanline to be more than 50%
+    // larger than the center scanline. Odd poses will break this, but we can
+    // hopefully rely on previous-frame based tracking past this point anyway.
+    for (int y = fy - 1; y >= 0; --y) {
+        // Search for an adjoining pixel along the upper edge of the last
+        // scanline
+        for (; !CMP(left, y, left, y + 1) && left <= right; ++left);
+        if (left > right) {
+            // No intersecting scanline was found, bail out.
+            break;
+        }
+
+        // See if this scanline goes any further left
+        for (; CMP(left, y, left - 1, y) && left > 0; --left);
+
+        // Check that none of the lengths of these scanlines is greater than
+        // the threshold.
+        int last_left = left;
+        int last_right = left;
+        do {
+            // Determine the width of this scan
+            int x;
+            for (x = last_left + 1;
+                 (CMP(x, y, x - 1, y) ||
+                  (x <= right && CMP(x, y, x, y + 1))) &&
+                 x < (int)cloud->width; ++x);
+            last_right = x - 1;
+            int width = last_right - last_left;
+
+            // Check if it goes beyond the threshold
+            if (width > scan_threshold) {
+                gm_debug(ctx->log,
+                         "XXX Scan above focal scan is too large (%d/%d, %d)",
+                         width, scan_threshold, y);
+                return person_indices;
+            }
+
+            // Skip over disconnected pixels
+            for (last_left = x; !CMP(last_left, y, last_left, y + 1) &&
+                 last_left <= right; ++last_left);
+        } while (last_left < right);
+        right = last_right;
+    }
+
+    // Scan downwards from the center scanline. We expect the scanlines to
+    // separate into two sets (the legs) of roughly equal width, and then
+    // either taper slightly and stop or meet a scanline that suddenly becomes
+    // significantly (>20%) bigger than the last - this would be the floor.
+    // If we find the floor, we alter the labels of those pixels to disconnect
+    // it from the rest of the cluster.
+    bool found_legs = false;
+    std::vector<bool> floor_mask(cloud->width * cloud->height, false);
+    left = c_left, right = c_right;
+    for (int y = fy + 1; y < (int)cloud->height; ++y) {
+        int last_width = right - left;
+
+        for (; !CMP(left, y, left, y - 1) && left <= right; ++left);
+        if (left > right) {
+            break;
+        }
+        for (; CMP(left, y, left - 1, y) && left > 0; --left);
+
+        // Check that none of the lengths of these scanlines is greater than
+        // the threshold, and look for two roughly leg-sized scanlines.
+        // We ignore smaller scanlines, which may be artifacts caused by
+        // clothes/noise/etc.
+        int last_left = left;
+        int last_right = left;
+        int n_legs_found = 0;
+        do {
+            int x;
+            for (x = last_left + 1;
+                 (CMP(x, y, x - 1, y) ||
+                  (x <= right && CMP(x, y, x, y + 1))) &&
+                 x < (int)cloud->width; ++x);
+            last_right = x - 1;
+            int width = last_right - last_left;
+
+            if (found_legs && width > (int)(last_width * 0.6f)) {
+                // This is probably the floor, so we want mark it off
+                for (int x2 = last_left; x2 <= last_right; ++x2) {
+                    floor_mask[y * cloud->width + x2] = true;
+                }
+
+                if (left == last_left) {
+                    // Reset left if this was the first scan
+                    left = -1;
+                }
+
+                gm_debug(ctx->log, "XXX \tFound floor (%d->%d(%d), %d)",
+                         last_left, last_right, width, y);
+            } else {
+                if (width > scan_threshold) {
+                    gm_debug(ctx->log,
+                             "XXX Scan below focal scan is too large (%d/%d, %d)",
+                             width, scan_threshold, y);
+                    return person_indices;
+                }
+
+                // This scan is a potential leg.
+                if (width > (int)(last_width * 0.3f) &&
+                    width < (int)(last_width * 0.6f)) {
+                    ++n_legs_found;
+                }
+            }
+
+            // Skip over disconnected pixels
+            for (last_left = x; !CMP(last_left, y, last_left, y + 1) &&
+                 last_left <= right; ++last_left);
+            if (left < 0) {
+                left = last_left;
+            }
+        } while (last_left < right);
+        right = last_right;
+
+        if (left > right) {
+            break;
+        }
+
+        if (found_legs) {
+            if (n_legs_found > 2) {
+                // This probably isn't a human, bail out
+                gm_debug(ctx->log, "XXX Found too many legs (%d, %d)",
+                         n_legs_found, y);
+                return person_indices;
+            }
+        } else {
+            if (n_legs_found == 2) {
+                // We found 2 potential leg scans, we've found the legs.
+                found_legs = true;
+                gm_debug(ctx->log, "XXX \tFound legs (%d)", y);
+            }
+        }
+    }
+
+    if (!found_legs) {
+        gm_debug(ctx->log, "XXX Couldn't find legs");
+        return person_indices;
+    }
+
+    gm_debug(ctx->log, "XXX Found human!");
+
+    // Now flood-fill to rebuild a new indices list
+    struct PointCmp {
+        int x;
+        int y;
+        int lx;
+        int ly;
+    };
+    std::queue<struct PointCmp> flood_fill;
+    flood_fill.push({ fx, fy, fx, fy });
+
+    while (!flood_fill.empty()) {
+        struct PointCmp point = flood_fill.front();
+        flood_fill.pop();
+
+        if (point.x < 0 || point.y < 0 ||
+            point.x >= (int)cloud->width || point.y >= (int)cloud->height) {
+            continue;
+        }
+
+        int idx = point.y * cloud->width + point.x;
+        if (CMP(point.x, point.y, point.lx, point.ly) && !floor_mask[idx]) {
+            person_indices.push_back(idx);
+            floor_mask[idx] = true;
+            flood_fill.push({ point.x - 1, point.y, point.x, point.y });
+            flood_fill.push({ point.x + 1, point.y, point.x, point.y });
+            flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+            flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+        }
+    }
+
+    return person_indices;
+
+#undef GET_DEPTH
+#undef CMP
 }
 
 static bool
@@ -2080,11 +2305,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
                       tracking->frame->pose.translation[1],
                       tracking->frame->pose.translation[2]));
 
-        gm_debug(ctx->log, "XXX: Angle: %.2f, "
+        /*gm_debug(ctx->log, "XXX: Angle: %.2f, "
                  "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
                  tracking->frame->pose.translation[0] - ctx->depth_pose.translation[0],
                  tracking->frame->pose.translation[1] - ctx->depth_pose.translation[1],
-                 tracking->frame->pose.translation[2] - ctx->depth_pose.translation[2]);
+                 tracking->frame->pose.translation[2] - ctx->depth_pose.translation[2]);*/
         if (angle < 10.f && distance < 0.3f) {
             if (angle > 0.25f || distance > 0.025f) {
                 new_to_start =
@@ -2099,7 +2324,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             ctx->depth_pose = tracking->frame->pose;
             ctx->start_to_depth_pose =
                 glm::inverse(pose_to_matrix(ctx->depth_pose));
-            gm_debug(ctx->log, "XXX: Resetting pose");
+            //gm_debug(ctx->log, "XXX: Resetting pose");
         }
     }
 
@@ -2142,7 +2367,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
         }
     } else {
-        for (int i = 0; i < depth_class_size; ++i) {
+        for (int i = 0; i < (int)depth_class_size; ++i) {
             float depth = tracking->depth_classification->points[i].z;
             reproj_map[i] = std::pair<int, float>(i, depth);
         }
@@ -2239,7 +2464,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     start = get_time();
-
+#if 0
     // Use depth clustering to split the cloud into possible human clusters.
     LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
         new LabelComparator<pcl::PointXYZL>);
@@ -2260,7 +2485,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
          (int)cluster_indices.size(),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
-
+#else
+    std::vector<pcl::PointIndices> cluster_indices;
+    std::vector<int> person_indices =
+        gm_find_human(ctx, tracking->depth_classification,
+                      tracking->depth_classification->width / 2,
+                      tracking->depth_classification->height / 2);
+    pcl::PointIndices pcl_person_indices;
+    std::swap(pcl_person_indices.indices, person_indices);
+    cluster_indices.push_back(pcl_person_indices);
+#endif
     // Assume the largest cluster that has roughly human dimensions and
     // contains its centroid may be a person.
     start = get_time();
