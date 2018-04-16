@@ -516,14 +516,6 @@ struct gm_context
     int seg_alpha;
     float seg_psi;
     float seg_timeout;
-
-    float normal_depth_change;
-    float normal_smooth;
-    int min_inliers;
-    float angular_threshold;
-    float distance_threshold;
-    float refinement_distance_threshold;
-    float max_curvature;
     float cluster_tolerance;
 
     bool joint_refinement;
@@ -4023,7 +4015,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
-    ctx->gap_dist = 2;
+    ctx->gap_dist = 1;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "gap_dist";
@@ -4086,7 +4078,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10;
     ctx->properties.push_back(prop);
 
-    ctx->seg_res = 3;
+    ctx->seg_res = 1;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "seg_res";
@@ -4097,7 +4089,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.int_state.max = 4;
     ctx->properties.push_back(prop);
 
-    ctx->seg_tb = 0.005f;
+    ctx->seg_tb = 0.05f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "seg_tb";
@@ -4185,84 +4177,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->normal_depth_change = 0.03f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "normal_depth_change";
-    prop.desc = "Maximum depth change for computing object borders";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->normal_depth_change;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->normal_smooth = 3.0f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "normal_smooth";
-    prop.desc = "Size of the area used to smooth normals";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->normal_smooth;
-    prop.float_state.min = 1.0f;
-    prop.float_state.max = 10.f;
-    ctx->properties.push_back(prop);
-
-    ctx->min_inliers = 50;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "min_inliers";
-    prop.desc = "Minimum number of inliers when doing plane segmentation";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->min_inliers;
-    prop.int_state.min = 5;
-    prop.int_state.max = 200;
-    ctx->properties.push_back(prop);
-
-    ctx->angular_threshold = 10.f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "angular_threshold";
-    prop.desc = "Angular threshold for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->angular_threshold;
-    prop.float_state.min = 0.1f;
-    prop.float_state.max = 45.f;
-    ctx->properties.push_back(prop);
-
-    ctx->distance_threshold = 0.03f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "distance_threshold";
-    prop.desc = "Distance threshold for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->distance_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->refinement_distance_threshold = 0.15f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "refinement_distance_threshold";
-    prop.desc = "Distance threshold for multi-plane segmentation refinement";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->refinement_distance_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->max_curvature = 0.001f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "max_curvature";
-    prop.desc = "Maximum curvature of a plane for multi-plane segmentation";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->max_curvature;
-    prop.float_state.min = 0.0005f;
-    prop.float_state.max = 0.03f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_tolerance = 0.03f;
+    ctx->cluster_tolerance = 0.05f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "cluster_tolerance";
