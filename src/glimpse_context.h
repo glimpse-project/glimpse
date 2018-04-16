@@ -451,20 +451,6 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *tracking,
                                             int *height,
                                             uint8_t **output);
 
-/* Creates an RGB visualisation of the estimated normals of the depth buffer. */
-void
-gm_tracking_create_rgb_normals(struct gm_tracking *tracking,
-                               int *width,
-                               int *height,
-                               uint8_t **output);
-
-/* Creates an RGB visualisation of the clustered-by-normals point labels. */
-void
-gm_tracking_create_rgb_normal_clusters(struct gm_tracking *tracking,
-                                       int *width,
-                                       int *height,
-                                       uint8_t **output);
-
 /* Creates an RGB visualisation of the candidate person clusters. */
 void
 gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *tracking,

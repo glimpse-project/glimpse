@@ -329,12 +329,6 @@ struct gm_tracking_impl
     // Labels based on depth value classification
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_classification;
 
-    // Estimated normals for the depth buffer
-    pcl::PointCloud<pcl::Normal>::Ptr normals;
-
-    // Labels based on similar normals
-    pcl::PointCloud<pcl::Label>::Ptr normal_labels;
-
     // Labels based on clustering after plane removal
     pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
 
@@ -4612,71 +4606,6 @@ gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
     // Output is rotated, so make sure output width/height are correct
     if (rotation == GM_ROTATION_90 || rotation == GM_ROTATION_270) {
         std::swap(*width, *height);
-    }
-}
-
-void
-gm_tracking_create_rgb_normals(struct gm_tracking *_tracking,
-                               int *width, int *height, uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
-
-    if (!tracking->normals) {
-        return;
-    }
-
-    *width = (int)tracking->normals->width;
-    *height = (int)tracking->normals->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        pcl::Normal &norm = tracking->normals->points[off];
-        if (std::isnan(norm.normal_z)) {
-            (*output)[off * 3] = 0;
-            (*output)[off * 3 + 1] = 0;
-            (*output)[off * 3 + 2] = 0;
-        } else {
-            uint8_t r = (uint8_t)((norm.normal_x * 127) + 127);
-            uint8_t g = (uint8_t)((norm.normal_y * 127) + 127);
-            uint8_t b = (uint8_t)(255 - ((norm.normal_z * 127) + 127));
-            (*output)[off * 3] = r;
-            (*output)[off * 3 + 1] = g;
-            (*output)[off * 3 + 2] = b;
-        }
-    }
-}
-
-void
-gm_tracking_create_rgb_normal_clusters(struct gm_tracking *_tracking,
-                                       int *width, int *height,
-                                       uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
-
-    if (!tracking->normal_labels) {
-        return;
-    }
-
-    *width = (int)tracking->normal_labels->width;
-    *height = (int)tracking->normal_labels->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        int label = tracking->normal_labels->points[off].label;
-        png_color *color =
-            &default_palette[label % ARRAY_LEN(default_palette)];
-        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 30.f;
-        (*output)[off * 3] = (uint8_t)(color->red * shade);
-        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
-        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
     }
 }
 
