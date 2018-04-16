@@ -502,6 +502,9 @@ struct gm_context
     float max_depth;
     int seg_res;
 
+    float floor_threshold;
+    float cluster_tolerance;
+
     float seg_tb;
     float seg_tf;
     int seg_N;
@@ -510,7 +513,6 @@ struct gm_context
     int seg_alpha;
     float seg_psi;
     float seg_timeout;
-    float cluster_tolerance;
 
     bool joint_refinement;
     int max_joint_predictions;
@@ -2065,9 +2067,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
         gm_debug(ctx->log, "XXX: Resetting pose");
     } else if (tracking->frame->pose.valid) {
-        // FIXME: Skip frames if we have a valid depth pose but an invalid
-        //        pose for this frame.
-
         // Check if the angle or distance between the current frame and the
         // reference frame exceeds a certain threshold, and in that case, reset
         // motion tracking.
@@ -2340,7 +2339,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 done_mask[idx] = true;
                 flood_fill.push({ point.x - 1, point.y, point.x, point.y });
                 flood_fill.push({ point.x + 1, point.y, point.x, point.y });
-                flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+                // We're looking for the floor, don't fill upwards
+                //flood_fill.push({ point.x, point.y - 1, point.x, point.y });
                 flood_fill.push({ point.x, point.y + 1, point.x, point.y });
             }
         }
@@ -2364,7 +2364,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             float aligned_y = ctx->depth_pose.valid ?
                 ground_aligned->points[idx].y :
                 tracking->depth_classification->points[idx].y;
-            if (aligned_y > lowest_point - 0.10f) {
+            if (aligned_y > lowest_point - ctx->floor_threshold) {
                 continue;
             }
 
@@ -4169,6 +4169,18 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->seg_timeout;
     prop.float_state.min = 0.2f;
     prop.float_state.max = 10.f;
+    ctx->properties.push_back(prop);
+
+    ctx->floor_threshold = 0.1f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "floor_threshold";
+    prop.desc = "The threshold from the lowest points of a potential person "
+                "cluster to filter out when looking for the floor.";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->floor_threshold;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.3f;
     ctx->properties.push_back(prop);
 
     ctx->cluster_tolerance = 0.05f;
