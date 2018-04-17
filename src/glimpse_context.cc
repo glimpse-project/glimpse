@@ -215,7 +215,8 @@ enum seg_class
     FL_FLK,   // Flickering and flat
     TB,       // The bag (uninteresting foreground object)
     FG,       // Foreground
-    TRK       // Tracking
+    CAN,      // Tracking candidate that didn't track
+    TRK,      // Tracking
 };
 
 struct joint_dist
@@ -2054,10 +2055,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     bool transform = false;
     glm::mat4 new_to_start;
-    if (!ctx->latest_tracking ||
-        ctx->depth_seg.size() != depth_class_size ||
-        (!ctx->depth_pose.valid && tracking->frame->pose.valid) ||
-        ctx->latest_tracking != ctx->tracking_history[0]) {
+    if (ctx->depth_seg.size() != depth_class_size ||
+        (!ctx->depth_pose.valid && tracking->frame->pose.valid)) {
         ctx->depth_seg.clear();
         ctx->depth_seg.resize(depth_class_size);
         ctx->depth_pose = tracking->frame->pose;
@@ -2276,7 +2275,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
 
     std::vector<pcl::PointIndices> cluster_indices;
-    if (ctx->latest_tracking &&
+    if (!ctx->latest_tracking ||
         ctx->latest_tracking != ctx->tracking_history[0]) {
         // If we've not tracked a human yet, the depth classification may not
         // be reliable - just use a simple clustering technique to find a
@@ -2624,17 +2623,29 @@ gm_context_track_skeleton(struct gm_context *ctx,
     xfree(label_probs);
     xfree(weights);
 
-    if (tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
-        tracking->skeleton.distance <= ctx->skeleton_max_distance) {
+    bool tracked =
+        tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
+        tracking->skeleton.distance <= ctx->skeleton_max_distance;
+
+    // Update the depth classification so it knows which pixels are tracked
+    // TODO: We should actually use the label cluster points, which may not
+    //       consist of this entire cloud.
+    pcl::PointIndices &person = persons[best_person];
+    for (std::vector<int>::const_iterator it = person.indices.begin();
+         it != person.indices.end(); ++it) {
+        tracking->depth_classification->points[*it].label = tracked ? TRK : CAN;
+    }
+
+    if (tracked) {
         start = get_time();
 
-        // Update the depth classification so it knows which pixels are tracked
-        // TODO: We should actually use the label cluster points, which may not
-        //       consist of this entire cloud.
-        pcl::PointIndices &person = persons[best_person];
-        for (std::vector<int>::const_iterator it = person.indices.begin();
-             it != person.indices.end(); ++it) {
-            tracking->depth_classification->points[*it].label = TRK;
+        // Clear the depth segmentation data on tracking a new human to avoid
+        // polluting the codebook with values that are a human but failed to
+        // track.
+        if (ctx->n_tracking == 0 ||
+            ctx->latest_tracking != ctx->tracking_history[0]) {
+            ctx->depth_seg.clear();
+            ctx->depth_seg.resize(depth_class_size);
         }
 
         // TODO: We just take the most confident skeleton above, but we should
@@ -2660,11 +2671,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration));
 
         update_depth_codebook(ctx, tracking, reproj_map);
-
-        return true;
     }
 
-    return false;
+    return tracked;
 }
 
 static struct gm_event *
@@ -4701,7 +4710,7 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
             break;
         case FL_FLK:
             (*output)[off * 3] = 0xFF;
-            (*output)[off * 3 + 1] = 0xD0;
+            (*output)[off * 3 + 1] = 0xA0;
             (*output)[off * 3 + 2] = 0x00;
             break;
         case TB:
@@ -4713,6 +4722,11 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
             (*output)[off * 3] = 0xFF;
             (*output)[off * 3 + 1] = 0xFF;
             (*output)[off * 3 + 2] = 0xFF;
+            break;
+        case CAN:
+            (*output)[off * 3] = 0xFF;
+            (*output)[off * 3 + 1] = 0xFF;
+            (*output)[off * 3 + 2] = 0x00;
             break;
         case TRK:
             (*output)[off * 3] = 0x00;
