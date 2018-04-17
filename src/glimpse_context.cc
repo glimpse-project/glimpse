@@ -113,6 +113,8 @@
     for (int y = 0, off = 0; y < (int)height; ++y) \
         for (int x = 0; x < (int)width; ++x, ++off)
 
+#define clampf(v, lo, hi) std::min(std::max(v, lo), hi)
+
 /* A suboptimal but convenient way for us to handle image rotations inline with
  * copies/format conversions.
  *
@@ -171,6 +173,14 @@ using Random = effolkronium::random_thread_local;
 #endif
 
 #define TRACK_FRAMES 12
+
+enum tracking_stage {
+    TRACKING_STAGE_START,
+    TRACKING_STAGE_GAP_FILLED,
+    TRACKING_STAGE_DOWNSAMPLED,
+    TRACKING_STAGE_GROUND_SPACE,
+    TRACKING_STAGE_BEST_PERSON,
+};
 
 enum image_format {
     IMAGE_FORMAT_X8,
@@ -341,6 +351,9 @@ struct gm_tracking_impl
     // Labels based on clustering after plane removal
     pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
 
+    std::vector<struct gm_point_rgba> debug_cloud;
+    std::vector<struct gm_point_rgba> debug_lines;
+
     // Whether any person clouds were tracked in this frame
     bool success;
 
@@ -471,6 +484,9 @@ struct gm_context
      */
     int debug_label;
 
+    int debug_cloud_mode;
+    int debug_cloud_stage;
+
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
 
@@ -544,6 +560,8 @@ struct gm_context
     float heat_color_stops_range;
     struct color_stop *heat_color_stops;
 
+    std::vector<struct gm_ui_enumerant> cloud_stage_enumerants;
+    std::vector<struct gm_ui_enumerant> cloud_mode_enumerants;
     std::vector<struct gm_ui_enumerant> label_enumerants;
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -1144,6 +1162,18 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
              get_duration_ns_print_scale_suffix(duration_ns));
     }
 #endif
+}
+
+static void
+tracking_draw_line(struct gm_tracking_impl *tracking,
+                   float x0, float y0, float z0,
+                   float x1, float y1, float z1,
+                   uint32_t rgba)
+{
+    struct gm_point_rgba p0 = { x0, y0, z0, rgba };
+    struct gm_point_rgba p1 = { x1, y1, z1, rgba };
+    tracking->debug_lines.push_back(p0);
+    tracking->debug_lines.push_back(p1);
 }
 
 static inline float
@@ -2125,11 +2155,106 @@ gm_context_fill_gaps(struct gm_context *ctx,
     }
 }
 
+static void
+add_debug_cloud_xyz_from_pcl_xyzl(struct gm_context *ctx,
+                                  struct gm_tracking_impl *tracking,
+                                  pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud)
+{
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+    debug_cloud.resize(debug_cloud.size() + pcl_cloud->size());
+
+    for (unsigned i = 0; i < pcl_cloud->size(); i++) {
+        debug_cloud[i].x = pcl_cloud->points[i].x;
+        debug_cloud[i].y = -pcl_cloud->points[i].y; // FIXME
+        debug_cloud[i].z = pcl_cloud->points[i].z;
+        debug_cloud[i].rgba = 0xffffffff;
+    }
+}
+
+static void
+add_debug_cloud_xyz_from_pcl_xyzl_and_indices(struct gm_context *ctx,
+                                              struct gm_tracking_impl *tracking,
+                                              pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud,
+                                              std::vector<int> &indices)
+{
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+    debug_cloud.resize(debug_cloud.size() + indices.size());
+
+    for (unsigned i = 0; i < indices.size(); i++) {
+        debug_cloud[i].x = pcl_cloud->points[indices[i]].x;
+        debug_cloud[i].y = -pcl_cloud->points[indices[i]].y; // FIXME
+        debug_cloud[i].z = pcl_cloud->points[indices[i]].z;
+        debug_cloud[i].rgba = 0xffffffff;
+    }
+}
+
+static void
+colour_debug_cloud(struct gm_context *ctx, struct gm_tracking_impl *tracking)
+{
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+
+    if (ctx->debug_cloud_mode == 1) {
+        const float vid_fx = tracking->video_camera_intrinsics.fx;
+        const float vid_fy = tracking->video_camera_intrinsics.fy;
+        const float vid_cx = tracking->video_camera_intrinsics.cx;
+        const float vid_cy = tracking->video_camera_intrinsics.cy;
+
+        int vid_width = 0;
+        int vid_height = 0;
+        uint8_t *vid_rgb = NULL;
+        gm_tracking_create_rgb_video(&tracking->base, &vid_width, &vid_height, &vid_rgb);
+        if (vid_rgb) {
+            for (unsigned off = 0; off < debug_cloud.size(); off++) {
+                float x = debug_cloud[off].x;
+                float y = -debug_cloud[off].y; // FIXME
+                float z = debug_cloud[off].z;
+
+                if (!std::isnormal(z))
+                    continue;
+
+                // Reproject the depth coordinates into video space
+                // TODO: Support extrinsics
+                int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width);
+                int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height);
+                int v_off = vy * vid_width * 3 + vx * 3;
+
+                debug_cloud[off].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
+                                         ((uint32_t)vid_rgb[v_off+1])<<16 |
+                                         ((uint32_t)vid_rgb[v_off+2])<<8 |
+                                         0xff);
+            }
+            free(vid_rgb);
+        }
+    } else if (ctx->debug_cloud_mode == 2) {
+        for (unsigned off = 0; off < debug_cloud.size(); off++) {
+            float z = debug_cloud[off].z;
+
+            if (!std::isnormal(z))
+                continue;
+
+            struct color rgb = stops_color_from_val(ctx->depth_color_stops,
+                                                    ctx->n_depth_color_stops,
+                                                    ctx->depth_color_stops_range,
+                                                    z);
+            debug_cloud[off].rgba = (((uint32_t)rgb.r)<<24 |
+                                     ((uint32_t)rgb.g)<<16 |
+                                     ((uint32_t)rgb.b)<<8 |
+                                     0xff);
+        }
+    }
+}
+
+
 static bool
 gm_context_track_skeleton(struct gm_context *ctx,
                           struct gm_tracking_impl *tracking)
 {
     uint64_t start, end, duration;
+
+    if (ctx->debug_cloud_mode) {
+        tracking->debug_cloud.resize(0);
+        tracking->debug_lines.resize(0);
+    }
 
     float nan = std::numeric_limits<float>::quiet_NaN();
     pcl::PointXYZL invalid_pt;
@@ -2191,6 +2316,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration));
     }
 
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_START &&
+        ctx->debug_cloud_mode)
+    {
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_cloud);
+        colour_debug_cloud(ctx, tracking);
+    }
+
     start = get_time();
     if (ctx->depth_gap_fill) {
         gm_context_fill_gaps(ctx, tracking);
@@ -2200,6 +2332,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
     LOGI("Gap filling took %.3f%s",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
+
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_GAP_FILLED &&
+        ctx->debug_cloud_mode)
+    {
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_cloud);
+        colour_debug_cloud(ctx, tracking);
+    }
 
     // Person detection can happen in a sparser cloud made from a downscaled
     // version of the depth buffer. This is significantly cheaper than using a
@@ -2248,6 +2387,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
              n_lores_points,
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
+    }
+
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_DOWNSAMPLED &&
+        ctx->debug_cloud_mode)
+    {
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_classification);
+        colour_debug_cloud(ctx, tracking);
     }
 
     unsigned depth_class_size = tracking->depth_classification->points.size();
@@ -2378,6 +2524,15 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 reproj_map[new_off].push_back(off);
             }
         }
+    } else {
+        tracking->ground_cloud->resize(0);
+    }
+
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_GROUND_SPACE &&
+        ctx->debug_cloud_mode)
+    {
+        // XXX: ignore colour modes in this case
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->ground_cloud);
     }
 
     // Remove depth classification old codewords
@@ -2484,6 +2639,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     start = get_time();
+
+    // This is the center line of sight which we use for simple clustering
+    tracking_draw_line(tracking,
+                       0, 0, 0.2,
+                       0, 0, 4,
+                       0xff0000ff);
 
     std::vector<pcl::PointIndices> cluster_indices;
     if (!ctx->latest_tracking || !ctx->latest_tracking->success) {
@@ -2837,6 +2998,24 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
     xfree(label_probs);
     xfree(weights);
+
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON &&
+        ctx->debug_cloud_mode)
+    {
+        add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                      tracking->depth_classification,
+                                                      persons[best_person].indices);
+        colour_debug_cloud(ctx, tracking);
+
+        /* Also show other failed candidates... */
+        for (int i = 0; i < persons.size(); i++) {
+            if (i == best_person)
+                continue;
+            add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                          tracking->depth_classification,
+                                                          persons[i].indices);
+        }
+    }
 
     bool tracked =
         tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
@@ -4581,14 +4760,13 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.object = ctx;
     prop.name = "debug_label";
     prop.desc = "visualize specific label probabilities";
-    prop.type = GM_PROPERTY_INT;
+    prop.type = GM_PROPERTY_ENUM;
     prop.enum_state.ptr = &ctx->debug_label;
 
     struct gm_ui_enumerant enumerant;
     enumerant = gm_ui_enumerant();
     enumerant.name = "most likely";
     enumerant.desc = "Visualize Most Probable Labels";
-    prop.type = GM_PROPERTY_ENUM;
     enumerant.val = -1;
     ctx->label_enumerants.push_back(enumerant);
 
@@ -4605,6 +4783,78 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
     prop.enum_state.n_enumerants = ctx->label_enumerants.size();
     prop.enum_state.enumerants = ctx->label_enumerants.data();
+    ctx->properties.push_back(prop);
+
+    ctx->debug_cloud_mode = 0;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cloud_mode";
+    prop.desc = "debug mode for point cloud visualization";
+    prop.type = GM_PROPERTY_ENUM;
+    prop.enum_state.ptr = &ctx->debug_cloud_mode;
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "none";
+    enumerant.desc = "Don't create a debug point cloud";
+    enumerant.val = 0;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "video";
+    enumerant.desc = "Texture with video";
+    enumerant.val = 1;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "depth";
+    enumerant.desc = "Texture with depth";
+    enumerant.val = 2;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
+    prop.enum_state.n_enumerants = ctx->cloud_mode_enumerants.size();
+    prop.enum_state.enumerants = ctx->cloud_mode_enumerants.data();
+    ctx->properties.push_back(prop);
+
+    ctx->debug_cloud_stage = TRACKING_STAGE_START;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cloud_stage";
+    prop.desc = "tracking stage to create debug cloud";
+    prop.type = GM_PROPERTY_ENUM;
+    prop.enum_state.ptr = &ctx->debug_cloud_stage;
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "start";
+    enumerant.desc = "Earliest stage";
+    enumerant.val = TRACKING_STAGE_START;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "gap filled";
+    enumerant.desc = "After gap filling";
+    enumerant.val = TRACKING_STAGE_GAP_FILLED;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "downsampled";
+    enumerant.desc = "AFter downsampling depth";
+    enumerant.val = TRACKING_STAGE_DOWNSAMPLED;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "ground space";
+    enumerant.desc = "Projected into ground aligned space";
+    enumerant.val = TRACKING_STAGE_GROUND_SPACE;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "best person";
+    enumerant.desc = "Best person cluster";
+    enumerant.val = TRACKING_STAGE_BEST_PERSON;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    prop.enum_state.n_enumerants = ctx->cloud_stage_enumerants.size();
+    prop.enum_state.enumerants = ctx->cloud_stage_enumerants.data();
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();
@@ -4663,14 +4913,6 @@ gm_tracking_get_training_camera_intrinsics(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     return &tracking->training_camera_intrinsics;
-}
-
-const float *
-gm_tracking_get_depth(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    return tracking->depth;
 }
 
 const float *
@@ -4978,6 +5220,27 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
         }
 #endif
     }
+}
+
+const struct gm_point_rgba *
+gm_tracking_get_debug_point_cloud(struct gm_tracking *_tracking,
+                                  int *n_points)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    *n_points = tracking->debug_cloud.size();
+    return (struct gm_point_rgba *)tracking->debug_cloud.data();
+}
+
+const struct gm_point_rgba *
+gm_tracking_get_debug_lines(struct gm_tracking *_tracking,
+                            int *n_lines)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    gm_assert(tracking->ctx->log,
+              tracking->debug_lines.size() % 2 == 0,
+              "Odd number of points in debug_lines array");
+    *n_lines = tracking->debug_lines.size() / 2;
+    return tracking->debug_lines.data();
 }
 
 const float *

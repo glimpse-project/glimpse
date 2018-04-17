@@ -262,8 +262,33 @@ typedef struct _Data
     GLint video_quad_attrib_pos;
     GLint video_quad_attrib_tex_coords;
 
-    GLuint video_tex_sampler;
-    GLuint gl_vid_tex;
+
+    GLuint cloud_fbo;
+    GLuint cloud_depth_renderbuf;
+    GLuint cloud_fbo_tex;
+    bool cloud_fbo_valid;
+
+    GLuint cloud_program;
+    GLuint cloud_uniform_mvp;
+    GLuint cloud_uniform_pt_size;
+
+    GLuint cloud_bo;
+    GLint cloud_attr_pos;
+    GLint cloud_attr_col;
+    int n_cloud_points;
+
+    GLuint lines_bo;
+    GLint lines_attr_pos;
+    GLint lines_attr_col;
+    int n_lines;
+
+    GLuint skel_joints_bo;
+    GLuint skel_bones_bo;
+
+    GLuint video_rgb_tex;
+
+    GLuint ar_video_tex_sampler;
+    GLuint ar_video_tex;
 
 } Data;
 
@@ -295,33 +320,9 @@ static GLuint gl_depth_rgb_tex;
 static GLuint gl_classify_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
 
-static GLuint gl_db_program;
-static GLuint gl_db_attr_depth;
-static GLuint gl_db_uni_mvp;
-static GLuint gl_db_uni_pt_size;
-static GLuint gl_db_uni_depth_size;
-static GLuint gl_db_uni_depth_intrinsics;
-static GLuint gl_db_uni_video_intrinsics;
-static GLuint gl_db_uni_video_size;
-static GLuint gl_db_vid_tex;
-static GLuint gl_db_depth_bo;
-
-static GLuint gl_cloud_program;
-static GLuint gl_cloud_attr_pos;
-static GLuint gl_cloud_attr_col;
-static GLuint gl_cloud_uni_mvp;
-static GLuint gl_cloud_uni_size;
-static GLuint gl_joints_bo;
-static GLuint gl_bones_bo;
-static GLuint gl_cloud_fbo;
-static GLuint gl_cloud_depth_bo;
-static GLuint gl_cloud_tex;
-
 static const char *views[] = {
     "Controls", "Video Buffer", "Depth Buffer",
     "Depth classification", "Candidate clusters", "Labels", "Cloud" };
-
-static bool cloud_tex_valid = false;
 
 static bool pause_profile;
 
@@ -565,9 +566,30 @@ adjust_aspect(ImVec2 &input, int width, int height)
     input = output;
 }
 
+static struct gm_ui_property *
+find_prop(struct gm_ui_properties *props, const char *name)
+{
+    for (int p = 0; p < props->n_properties; ++p) {
+        struct gm_ui_property *prop = &props->properties[p];
+
+        if (prop->read_only)
+            continue;
+
+        if (strcmp(name, prop->name) == 0)
+            return prop;
+    }
+
+    return NULL;
+}
+
 static bool
 draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 {
+    struct gm_ui_properties *dev_props =
+        gm_device_get_ui_properties(data->active_device);
+    struct gm_ui_properties *ctx_props =
+        gm_context_get_ui_properties(data->ctx);
+
     ImGui::SetNextWindowPos(ImVec2(x, y));
     ImGui::SetNextWindowSize(ImVec2(width, height));
     ImGui::Begin("Controls", NULL,
@@ -586,7 +608,23 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
     ImGui::Spacing();
 
+    bool current_ar_mode = data->realtime_ar_mode;
     ImGui::Checkbox("Real-time AR Mode", &data->realtime_ar_mode);
+    if (data->realtime_ar_mode != current_ar_mode)
+    {
+        if (data->realtime_ar_mode) {
+            // Make sure to disable the debug cloud in real-time AR mode since it
+            // may be costly to create.
+            //
+            // Note: We don't have to explicitly disable most debug views because
+            // we only do work when we pull the data from the context, but that's
+            // not the case for the cloud debug view.
+            gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 0);
+        } else {
+            gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
+        }
+    }
+
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
     ImGui::SliderInt("Prediction delay", &data->prediction_delay,
                      0, 1000000000);
@@ -597,9 +635,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
     ImGui::Spacing();
 
-    struct gm_ui_properties *props =
-        gm_device_get_ui_properties(data->active_device);
-    draw_properties(props);
+    draw_properties(dev_props);
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -607,14 +643,13 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
     ImGui::Spacing();
 
-    props = gm_context_get_ui_properties(data->ctx);
-    draw_properties(props);
+    draw_properties(ctx_props);
 
     ImGui::Spacing();
     ImGui::Separator();
 
     if (ImGui::Button("Save config")) {
-        char *json = gm_config_save(data->log, props);
+        char *json = gm_config_save(data->log, ctx_props);
         const char *assets_root = gm_get_assets_root();
         char filename[512];
 
@@ -905,7 +940,7 @@ update_skeleton_wireframe_gl_bos(Data *data,
         colored_joints[i].z = joint->z;
         colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
     }
-    glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
+    glBindBuffer(GL_ARRAY_BUFFER, data->skel_joints_bo);
     glBufferData(GL_ARRAY_BUFFER,
                  sizeof(XYZRGBA) * n_joints,
                  colored_joints, GL_DYNAMIC_DRAW);
@@ -932,7 +967,7 @@ update_skeleton_wireframe_gl_bos(Data *data,
             }
         }
     }
-    glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
+    glBindBuffer(GL_ARRAY_BUFFER, data->skel_bones_bo);
     glBufferData(GL_ARRAY_BUFFER,
                  sizeof(XYZRGBA) * n_bones * 2,
                  colored_bones, GL_DYNAMIC_DRAW);
@@ -954,95 +989,108 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
                         int n_joints,
                         int n_bones)
 {
-    glUseProgram(gl_cloud_program);
+    glUseProgram(data->cloud_program);
 
     // Set projection transform
-    glUniformMatrix4fv(gl_cloud_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+    glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
 
     // Enable vertex arrays for drawing joints/bones
-    glEnableVertexAttribArray(gl_cloud_attr_pos);
-    glEnableVertexAttribArray(gl_cloud_attr_col);
+    glEnableVertexAttribArray(data->cloud_attr_pos);
+    glEnableVertexAttribArray(data->cloud_attr_col);
 
-    // Have bones appear over everything, but depth test them against each
-    // other.
-    glClear(GL_DEPTH_BUFFER_BIT);
+    glBindBuffer(GL_ARRAY_BUFFER, data->skel_bones_bo);
 
-    // Bind bones buffer-object
-    glBindBuffer(GL_ARRAY_BUFFER, gl_bones_bo);
-
-    glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
+    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
                           GL_FALSE, sizeof(XYZRGBA), nullptr);
-    glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
                           GL_TRUE, sizeof(XYZRGBA),
                           (void *)offsetof(XYZRGBA, rgba));
 
-    // Draw bone lines
     glDrawArrays(GL_LINES, 0, n_bones * 2);
 
-    // Have joint points appear over everything, but depth test them
-    // against each other.
-    glClear(GL_DEPTH_BUFFER_BIT);
+    glUniform1f(data->cloud_uniform_pt_size, pt_size * 3.f);
 
-    // Set point size for joints
-    glUniform1f(gl_cloud_uni_size, pt_size * 3.f);
+    glBindBuffer(GL_ARRAY_BUFFER, data->skel_joints_bo);
 
-    // Bind joints buffer-object
-    glBindBuffer(GL_ARRAY_BUFFER, gl_joints_bo);
-
-    glVertexAttribPointer(gl_cloud_attr_pos, 3, GL_FLOAT,
+    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
                           GL_FALSE, sizeof(XYZRGBA), nullptr);
-    glVertexAttribPointer(gl_cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
                           GL_TRUE, sizeof(XYZRGBA),
                           (void *)offsetof(XYZRGBA, rgba));
 
-    // Draw joint points
     glDrawArrays(GL_POINTS, 0, n_joints);
 
-    // Clean-up
-    glDisableVertexAttribArray(gl_cloud_attr_pos);
-    glDisableVertexAttribArray(gl_cloud_attr_col);
+    glDisableVertexAttribArray(data->cloud_attr_pos);
+    glDisableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
 }
 
 static void
-update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
+draw_debug_lines(Data *data, glm::mat4 mvp)
 {
-    const struct gm_intrinsics *video_intrinsics =
-        gm_tracking_get_video_camera_intrinsics(data->latest_tracking);
-    int video_width = video_intrinsics->width;
-    int video_height = video_intrinsics->height;
+    if (!data->n_lines)
+        return;
 
+    glUseProgram(data->cloud_program);
+
+    glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+
+    glEnableVertexAttribArray(data->cloud_attr_pos);
+    glEnableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, data->lines_bo);
+
+    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
+                          GL_FALSE, sizeof(struct gm_point_rgba), nullptr);
+    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                          GL_TRUE, sizeof(struct gm_point_rgba),
+                          (void *)offsetof(struct gm_point_rgba, rgba));
+
+    glDrawArrays(GL_LINES, 0, data->n_lines * 2);
+
+    glDisableVertexAttribArray(data->cloud_attr_pos);
+    glDisableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+}
+
+static void
+draw_tracking_scene_to_texture(Data *data,
+                               struct gm_tracking *tracking,
+                               ImVec2 win_size, ImVec2 uiScale)
+{
     const struct gm_intrinsics *depth_intrinsics =
-        gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
+        gm_tracking_get_depth_camera_intrinsics(tracking);
     int depth_width = depth_intrinsics->width;
-    int depth_height = depth_intrinsics->height;
 
     GLint saved_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
 
     // Ensure the framebuffer texture is valid
-    if (!cloud_tex_valid) {
+    if (!data->cloud_fbo_valid) {
         int width = win_size.x * uiScale.x;
         int height = win_size.y * uiScale.y;
 
         // Generate textures
-        glBindTexture(GL_TEXTURE_2D, gl_cloud_tex);
+        glBindTexture(GL_TEXTURE_2D, data->cloud_fbo_tex);
         glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                      width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
 
-        cloud_tex_valid = true;
-
         // Bind colour/depth to point-cloud fbo
-        glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
 
-        glBindRenderbuffer(GL_RENDERBUFFER, gl_cloud_depth_bo);
+        glBindRenderbuffer(GL_RENDERBUFFER, data->cloud_depth_renderbuf);
         glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
                               width, height);
         glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                                  GL_RENDERBUFFER, gl_cloud_depth_bo);
+                                  GL_RENDERBUFFER, data->cloud_depth_renderbuf);
 
         glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
                                GL_TEXTURE_2D,
-                               gl_cloud_tex, 0);
+                               data->cloud_fbo_tex, 0);
 
         GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
         glDrawBuffers(1, drawBuffers);
@@ -1051,10 +1099,11 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
                   (glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
                    GL_FRAMEBUFFER_COMPLETE),
                   "Incomplete framebuffer\n");
+
+        data->cloud_fbo_valid = true;
     }
 
-    if (gl_db_depth_bo) {
-        // Calculate the projection matrix
+    if (data->cloud_bo) {
         glm::mat4 proj = intrinsics_to_project_matrix(depth_intrinsics, 0.01f, 10);
         glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
         mvp = glm::translate(mvp, data->focal_point);
@@ -1062,46 +1111,40 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
         mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
         mvp = glm::translate(mvp, -data->focal_point);
 
-        // Redraw depth buffer as point-cloud to texture
-        glBindFramebuffer(GL_FRAMEBUFFER, gl_cloud_fbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
+
+        glUseProgram(data->cloud_program);
+        glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+        float pt_size = ceilf((win_size.x * uiScale.x) / depth_width);
+        glUniform1f(data->cloud_uniform_pt_size, pt_size);
+
+        glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
+        if (data->cloud_attr_pos != -1) {
+            glEnableVertexAttribArray(data->cloud_attr_pos);
+            glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT, GL_FALSE,
+                                  sizeof(struct gm_point_rgba), 0);
+        }
+        glEnableVertexAttribArray(data->cloud_attr_col);
+        glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                              GL_TRUE,
+                              sizeof(struct gm_point_rgba),
+                              (void *)offsetof(struct gm_point_rgba, rgba));
 
         glEnable(GL_DEPTH_TEST);
         glDepthFunc(GL_LESS);
 
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
+        glDrawArrays(GL_POINTS, 0, data->n_cloud_points);
 
-        glUseProgram(gl_db_program);
-        glUniformMatrix4fv(gl_db_uni_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-        float pt_size = ceilf((win_size.x * uiScale.x) / depth_width);
-        glUniform1f(gl_db_uni_pt_size, pt_size);
+        glDisable(GL_DEPTH_TEST);
 
-        // Update camera intrinsics
-        glUniform2i(gl_db_uni_depth_size,
-                    (GLint)depth_width,
-                    (GLint)depth_height);
-        glUniform2f(gl_db_uni_video_size,
-                    (GLfloat)video_width,
-                    (GLfloat)video_height);
-        glUniform4f(gl_db_uni_depth_intrinsics,
-                    (GLfloat)depth_intrinsics->fx,
-                    (GLfloat)depth_intrinsics->fy,
-                    (GLfloat)depth_intrinsics->cx,
-                    (GLfloat)depth_intrinsics->cy);
-        glUniform4f(gl_db_uni_video_intrinsics,
-                    (GLfloat)video_intrinsics->fx,
-                    (GLfloat)video_intrinsics->fy,
-                    (GLfloat)video_intrinsics->cx,
-                    (GLfloat)video_intrinsics->cy);
+        glDisableVertexAttribArray(data->cloud_attr_pos);
+        if (data->cloud_attr_pos != -1)
+            glDisableVertexAttribArray(data->cloud_attr_col);
 
-        glEnableVertexAttribArray(gl_db_attr_depth);
-        glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
-        glVertexAttribPointer(gl_db_attr_depth, 1, GL_FLOAT, GL_FALSE, 0, nullptr);
-
-        glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
-        glDrawArrays(GL_POINTS, 0, depth_width * depth_height);
-
-        glDisableVertexAttribArray(gl_db_attr_depth);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
 
         int n_joints = 0;
         int n_bones = 0;
@@ -1110,16 +1153,13 @@ update_cloud_vis(Data *data, ImVec2 win_size, ImVec2 uiScale)
                                              &n_joints,
                                              &n_bones))
         {
-            // Redraw joints/bones to texture
             draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
         }
+
+        draw_debug_lines(data, mvp);
     }
 
-    // Clean-up
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glUseProgram(0);
     glBindFramebuffer(GL_FRAMEBUFFER, saved_fbo);
-    glDisable(GL_DEPTH_TEST);
 }
 
 static bool
@@ -1137,9 +1177,9 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
 
     ImVec2 win_size = ImGui::GetContentRegionMax();
     adjust_aspect(win_size, depth_width, depth_height);
-    update_cloud_vis(data, win_size, uiScale);
+    draw_tracking_scene_to_texture(data, data->latest_tracking, win_size, uiScale);
 
-    ImGui::Image((void *)(intptr_t)gl_cloud_tex, win_size);
+    ImGui::Image((void *)(intptr_t)data->cloud_fbo_tex, win_size);
 
     // Handle input for cloud visualisation
     if (ImGui::IsWindowHovered()) {
@@ -1164,18 +1204,11 @@ draw_view(Data *data, int view, ImVec2 &uiScale,
     case 0:
         return draw_controls(data, x, y, width, height, disabled);
     case 1: {
-        if (!data->last_video_frame) {
-            return false;
-        }
-        const struct gm_intrinsics *video_intrinsics =
-            &data->last_video_frame->video_intrinsics;
-        int video_width = video_intrinsics->width;
-        int video_height = video_intrinsics->height;
-
         return draw_visualisation(data, x, y, width, height,
-                                  video_width, video_height,
-                                  views[view], data->gl_vid_tex,
-                                  data->last_video_frame->camera_rotation);
+                                  data->video_rgb_width,
+                                  data->video_rgb_height,
+                                  views[view], data->video_rgb_tex,
+                                  GM_ROTATION_0);
     }
     case 2:
         return draw_visualisation(data, x, y, width, height,
@@ -1346,7 +1379,7 @@ draw_ui(Data *data)
     // it gets recreated at the right size next time it's displayed.
     if (main_view != current_view &&
         (main_view == cloud_view || current_view == cloud_view)) {
-        cloud_tex_valid = false;
+        data->cloud_fbo_valid = false;
     }
 }
 
@@ -1457,7 +1490,7 @@ draw_ar_video(Data *data)
     GLenum target = GL_TEXTURE_2D;
     if (device_type == GM_DEVICE_TANGO)
         target = GL_TEXTURE_EXTERNAL_OES;
-    glBindTexture(target, data->gl_vid_tex);
+    glBindTexture(target, data->ar_video_tex);
 
     glDepthMask(GL_FALSE);
     glDisable(GL_DEPTH_TEST);
@@ -1619,7 +1652,7 @@ handle_device_frame_updates(Data *data)
         /*
          * Update video from camera
          */
-        glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
+        glBindTexture(GL_TEXTURE_2D, data->ar_video_tex);
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
@@ -1659,7 +1692,7 @@ handle_device_frame_updates(Data *data)
     {
 #ifdef USE_TANGO
         if (TangoService_updateTextureExternalOes(
-                TANGO_CAMERA_COLOR, data->gl_vid_tex,
+                TANGO_CAMERA_COLOR, data->ar_video_tex,
                 NULL /* ignore timestamp */) != TANGO_SUCCESS)
         {
             gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
@@ -1704,25 +1737,41 @@ upload_tracking_textures(Data *data)
         free(depth_rgb);
     }
 
-    /* Update depth buffer and colour buffer */
-    const float *depth = gm_tracking_get_depth(data->latest_tracking);
+    int n_points = 0;
+    const struct gm_point_rgba *debug_points =
+        gm_tracking_get_debug_point_cloud(data->latest_tracking, &n_points);
+    if (n_points) {
+        if (!data->cloud_bo)
+            glGenBuffers(1, &data->cloud_bo);
+        glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(debug_points[0]) * n_points,
+                     debug_points, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        data->n_cloud_points = n_points;
+    }
 
-    if (!gl_db_depth_bo)
-        glGenBuffers(1, &gl_db_depth_bo);
-    glBindBuffer(GL_ARRAY_BUFFER, gl_db_depth_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(float) * data->depth_rgb_width * data->depth_rgb_height,
-                 depth, GL_DYNAMIC_DRAW);
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    int n_lines = 0;
+    const struct gm_point_rgba *debug_lines =
+        gm_tracking_get_debug_lines(data->latest_tracking, &n_lines);
+    if (n_lines) {
+        if (!data->lines_bo)
+            glGenBuffers(1, &data->lines_bo);
+        glBindBuffer(GL_ARRAY_BUFFER, data->lines_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(debug_lines[0]) * n_lines * 2,
+                     debug_lines, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        data->n_lines = n_lines;
+    }
 
     uint8_t *video_rgb = NULL;
     gm_tracking_create_rgb_video(data->latest_tracking,
                                  &data->video_rgb_width,
                                  &data->video_rgb_height,
                                  &video_rgb);
-
     if (video_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
+        glBindTexture(GL_TEXTURE_2D, data->video_rgb_tex);
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
@@ -1974,7 +2023,7 @@ surface_created_cb(GLFMDisplay *display, int width, int height)
 
     data->win_width = width;
     data->win_height = height;
-    cloud_tex_valid = false;
+    data->cloud_fbo_valid = false;
 }
 
 static void
@@ -1983,7 +2032,7 @@ surface_destroyed_cb(GLFMDisplay *display)
     Data *data = (Data *)glfmGetUserData(display);
     gm_debug(data->log, "Surface destroyed");
     data->surface_created = false;
-    cloud_tex_valid = false;
+    data->cloud_fbo_valid = false;
 }
 
 static void
@@ -2084,7 +2133,7 @@ on_window_fb_size_change_cb(GLFWwindow *window, int width, int height)
 
     data->win_width = width;
     data->win_height = height;
-    cloud_tex_valid = false;
+    data->cloud_fbo_valid = false;
 }
 
 static void
@@ -2207,7 +2256,7 @@ init_viewer_opengl(Data *data)
     if (data->gl_initialized)
         return;
 
-    static const char *vertShaderCloud =
+    static const char *cloud_vert_shader =
         "#version 300 es\n"
         "precision mediump float;\n"
         "uniform mat4 mvp;\n"
@@ -2218,11 +2267,11 @@ init_viewer_opengl(Data *data)
         "\n"
         "void main() {\n"
         "  gl_PointSize = size;\n"
-        "  gl_Position =  mvp * vec4(pos, 1.0);\n"
+        "  gl_Position =  mvp * vec4(pos.x, pos.y, pos.z, 1.0);\n"
         "  v_color = color_in;\n"
         "}\n";
 
-    static const char *fragShaderCloud =
+    static const char *cloud_frag_shader =
         "#version 300 es\n"
         "precision mediump float;\n"
         "in vec4 v_color;\n"
@@ -2231,103 +2280,23 @@ init_viewer_opengl(Data *data)
         "  color = v_color.abgr;\n"
         "}\n";
 
-    static const char *vertShaderDepth =
-        "#version 300 es\n"
-        "precision mediump float;\n\n"
-        "precision mediump int;\n\n"
+    data->cloud_program = gm_gl_create_program(data->log,
+                                               cloud_vert_shader,
+                                               cloud_frag_shader,
+                                               NULL);
 
-        "uniform mat4 mvp;\n"
-        "uniform float pt_size;\n"
-        "uniform ivec2 depth_size;\n"
-        "uniform vec4 depth_intrinsics;\n"
-        "uniform vec4 video_intrinsics;\n"
-        "uniform vec2 video_size;\n\n"
+    glUseProgram(data->cloud_program);
 
-        "in float depth;\n"
-        "out vec2 v_tex_coord;\n\n"
-
-        "void main() {\n"
-        // Unproject the depth information into 3d space
-        "  float fx = depth_intrinsics.x;\n"
-        "  float fy = depth_intrinsics.y;\n"
-        "  float cx = depth_intrinsics.z;\n"
-        "  float cy = depth_intrinsics.w;\n\n"
-
-        "  int x = int(gl_VertexID) % depth_size.x;\n"
-        "  int y = int(gl_VertexID) / depth_size.x;\n"
-        "  float dx = ((float(x) - cx) * depth) / fx;\n"
-        "  float dy = (-(float(y) - cy) * depth) / fy;\n\n"
-
-        // Reproject the depth coordinates into video space
-        // TODO: Support extrinsics
-        "  fx = video_intrinsics.x;\n"
-        "  fy = video_intrinsics.y;\n"
-        "  cx = video_intrinsics.z;\n"
-        "  cy = video_intrinsics.w;\n"
-
-        "  float tx = ((dx * fx / depth) + cx) / video_size.x;\n"
-        "  float ty = ((dy * fy / depth) + (video_size.y - cy)) / video_size.y;\n"
-
-        // Output values for the fragment shader
-        "  gl_PointSize = pt_size;\n"
-        "  gl_Position =  mvp * vec4(dx, dy, depth, 1.0);\n"
-        "  v_tex_coord = vec2(tx, 1.0 - ty);\n"
-        "}\n";
-
-    static const char *fragShaderDepth =
-        "#version 300 es\n"
-        "precision mediump float;\n"
-        "precision mediump int;\n\n"
-
-        "uniform sampler2D tex;\n\n"
-
-        "in vec2 v_tex_coord;\n"
-        "layout(location = 0) out vec4 color;\n\n"
-
-        "void main() {\n"
-        "  color = texture(tex, v_tex_coord.st);\n"
-        "}\n";
-
-
-    // Create depth-buffer point shader
-    gl_db_program = gm_gl_create_program(data->log,
-                                         vertShaderDepth,
-                                         fragShaderDepth,
-                                         NULL);
-
-    glUseProgram(gl_db_program);
-
-    gl_db_attr_depth = glGetAttribLocation(gl_db_program, "depth");
-    gl_db_uni_mvp = glGetUniformLocation(gl_db_program, "mvp");
-    gl_db_uni_pt_size = glGetUniformLocation(gl_db_program, "pt_size");
-    gl_db_uni_depth_size = glGetUniformLocation(gl_db_program, "depth_size");
-    gl_db_uni_depth_intrinsics = glGetUniformLocation(gl_db_program,
-                                                      "depth_intrinsics");
-    gl_db_uni_video_intrinsics = glGetUniformLocation(gl_db_program,
-                                                      "video_intrinsics");
-    gl_db_uni_video_size = glGetUniformLocation(gl_db_program, "video_size");
-
-    GLuint video_tex_sampler = glGetUniformLocation(gl_db_program, "texture");
-    glUniform1i(video_tex_sampler, 0);
+    data->cloud_attr_pos = glGetAttribLocation(data->cloud_program, "pos");
+    data->cloud_attr_col = glGetAttribLocation(data->cloud_program, "color_in");
+    data->cloud_uniform_mvp = glGetUniformLocation(data->cloud_program, "mvp");
+    data->cloud_uniform_pt_size = glGetUniformLocation(data->cloud_program, "size");
 
     glUseProgram(0);
 
-    // Create point-cloud shader
-    gl_cloud_program = gm_gl_create_program(data->log,
-                                            vertShaderCloud,
-                                            fragShaderCloud,
-                                            NULL);
-
-    glUseProgram(gl_cloud_program);
-
-    gl_cloud_attr_pos = glGetAttribLocation(gl_cloud_program, "pos");
-    gl_cloud_attr_col = glGetAttribLocation(gl_cloud_program, "color_in");
-    gl_cloud_uni_mvp = glGetUniformLocation(gl_cloud_program, "mvp");
-    gl_cloud_uni_size = glGetUniformLocation(gl_cloud_program, "size");
-    glGenBuffers(1, &gl_joints_bo);
-    glGenBuffers(1, &gl_bones_bo);
-
-    glUseProgram(0);
+    glGenBuffers(1, &data->lines_bo);
+    glGenBuffers(1, &data->skel_bones_bo);
+    glGenBuffers(1, &data->skel_joints_bo);
 
     // Generate texture objects
     glGenTextures(1, &gl_depth_rgb_tex);
@@ -2350,17 +2319,17 @@ init_viewer_opengl(Data *data)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glGenTextures(1, &gl_db_vid_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_db_vid_tex);
+    glGenTextures(1, &data->video_rgb_tex);
+    glBindTexture(GL_TEXTURE_2D, data->video_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
-    glGenTextures(1, &gl_cloud_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_cloud_tex);
+    glGenFramebuffers(1, &data->cloud_fbo);
+    glGenRenderbuffers(1, &data->cloud_depth_renderbuf);
+    glGenTextures(1, &data->cloud_fbo_tex);
+    glBindTexture(GL_TEXTURE_2D, data->cloud_fbo_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glGenFramebuffers(1, &gl_cloud_fbo);
-    glGenRenderbuffers(1, &gl_cloud_depth_bo);
 
     glGenBuffers(1, &data->video_quad_attrib_bo);
 
@@ -2426,23 +2395,26 @@ init_device_opengl(Data *data)
     data->video_quad_attrib_tex_coords =
         glGetAttribLocation(data->video_program, "tex_coords_in");
 
-    data->video_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
+    data->ar_video_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
 
     glUseProgram(data->video_program);
-    glUniform1i(data->video_tex_sampler, 0);
+    glUniform1i(data->ar_video_tex_sampler, 0);
     glUseProgram(0);
 
-    glGenTextures(1, &data->gl_vid_tex);
+    glGenTextures(1, &data->ar_video_tex);
     GLenum target = GL_TEXTURE_2D;
     if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
         target = GL_TEXTURE_EXTERNAL_OES;
     }
 
-    glBindTexture(target, data->gl_vid_tex);
+    glBindTexture(target, data->ar_video_tex);
     glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
     glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
+    data->cloud_fbo_valid = false;
 
     data->device_gl_initialized = true;
 }
@@ -2459,13 +2431,16 @@ deinit_device_opengl(Data *data)
 
         data->video_quad_attrib_pos = 0;
         data->video_quad_attrib_tex_coords = 0;
-        data->video_tex_sampler = 0;
+        data->ar_video_tex_sampler = 0;
     }
 
-    if (data->gl_vid_tex) {
-        glDeleteTextures(1, &data->gl_vid_tex);
-        data->gl_vid_tex = 0;
+    if (data->ar_video_tex) {
+        glDeleteTextures(1, &data->ar_video_tex);
+        data->ar_video_tex = 0;
     }
+
+    // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
+    data->cloud_fbo_valid = false;
 
     data->device_gl_initialized = false;
 }
@@ -2788,7 +2763,10 @@ viewer_init(Data *data)
     {
         data->realtime_ar_mode = true;
     } else {
+        struct gm_ui_properties *ctx_props =
+            gm_context_get_ui_properties(data->ctx);
         data->realtime_ar_mode = false;
+        gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
     }
     data->initialized = true;
 }
