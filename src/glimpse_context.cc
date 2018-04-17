@@ -2313,8 +2313,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
 
     std::vector<pcl::PointIndices> cluster_indices;
-    if (ctx->n_tracking == 0 ||
-        ctx->latest_tracking != ctx->tracking_history[0]) {
+    if (!ctx->latest_tracking || !ctx->latest_tracking->success) {
         // If we've not tracked a human yet, the depth classification may not
         // be reliable - just use a simple clustering technique to find a
         // human and separate them from the floor, then rely on motion detection
@@ -2684,8 +2683,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // but the furthest-away codewords. This is in the hope that if there
         // was an untracked human in the codebook that at some point we saw
         // background behind them.
-        if (ctx->n_tracking == 0 ||
-            ctx->latest_tracking != ctx->tracking_history[0]) {
+        if (!ctx->latest_tracking || !ctx->latest_tracking->success) {
 #if 0
             foreach_xy_off(tracking->depth_classification->width,
                            tracking->depth_classification->height) {
