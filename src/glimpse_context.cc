@@ -2686,6 +2686,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // background behind them.
         if (ctx->n_tracking == 0 ||
             ctx->latest_tracking != ctx->tracking_history[0]) {
+#if 0
             foreach_xy_off(tracking->depth_classification->width,
                            tracking->depth_classification->height) {
                 std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
@@ -2710,6 +2711,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
                     }
                 }
             }
+#else
+            ctx->depth_seg.clear();
+            ctx->depth_seg.resize(depth_class_size);
         }
 
         // TODO: We just take the most confident skeleton above, but we should
