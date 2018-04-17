@@ -114,6 +114,16 @@ struct gm_pose {
     float translation[3];
 };
 
+/* XXX: beware a PCL PointXYZRGBA made of 3 floats + a uint32 rgba member
+ * doesn't have a size of 16 bytes, it has a size of 32 bytes and the
+ * typedefs in PCL are a tangle of macros and templates. We define our own
+ * type for our C api...
+ */
+struct gm_point_rgba {
+    float x, y, z;
+    uint32_t rgba;
+};
+
 struct gm_buffer;
 
 /* A reference to a single data buffer
@@ -406,8 +416,13 @@ gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
                                     int *width,
                                     int *height);
 
-const float *
-gm_tracking_get_depth(struct gm_tracking *tracking);
+const struct gm_point_rgba *
+gm_tracking_get_debug_point_cloud(struct gm_tracking *tracking,
+                                  int *n_points);
+
+const struct gm_point_rgba *
+gm_tracking_get_debug_lines(struct gm_tracking *tracking,
+                            int *n_lines);
 
 /* Deprecated */
 const float *
