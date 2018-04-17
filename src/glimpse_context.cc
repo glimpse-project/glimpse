@@ -1794,72 +1794,73 @@ class DepthComparator: public pcl::Comparator<PointT>
 static void
 update_depth_codebook(struct gm_context *ctx,
                       struct gm_tracking_impl *tracking,
-                      std::vector<std::pair<int, float>> &reproj_map)
+                      std::vector<std::vector<int>> &reproj_map)
 {
     uint64_t start = get_time();
 
     int n_codewords = 0;
     foreach_xy_off(tracking->depth_classification->width,
                    tracking->depth_classification->height) {
-        int depth_off = reproj_map[off].first;
-        if (depth_off < 0) {
-            continue;
-        }
+        for (std::vector<int>::iterator rit = reproj_map[off].begin();
+             rit != reproj_map[off].end(); ++rit) {
+            int depth_off = *rit;
 
-        float depth = tracking->depth_classification->points[depth_off].z;
-        if (std::isnan(depth)) {
-            depth = HUGE_DEPTH;
-        }
-
-        // Look to see if this pixel falls into an existing codeword
-        struct seg_codeword *codeword = NULL;
-        std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
-        std::list<struct seg_codeword>::iterator it;
-        for (it = codewords.begin(); it != codewords.end(); ++it) {
-            struct seg_codeword &candidate = *it;
-
-            if (fabsf(depth - candidate.m) < ctx->seg_tb) {
-                codeword = &candidate;
-                break;
+            float depth = tracking->depth_classification->points[depth_off].z;
+            if (std::isnan(depth)) {
+                depth = HUGE_DEPTH;
             }
-        }
 
-        // Don't update pixels that we're tracking
-        if (tracking->depth_classification->points[depth_off].label == TRK) {
-            if (codeword) {
-                codewords.erase(it);
+            // Look to see if this pixel falls into an existing codeword
+            struct seg_codeword *codeword = NULL;
+            std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+            std::list<struct seg_codeword>::iterator it;
+            for (it = codewords.begin(); it != codewords.end(); ++it) {
+                struct seg_codeword &candidate = *it;
+
+                if (fabsf(depth - candidate.m) < ctx->seg_tb) {
+                    codeword = &candidate;
+                    break;
+                }
             }
-            continue;
+
+            // Don't update pixels that we're tracking
+            if (tracking->depth_classification->points[depth_off].label ==
+                TRK) {
+                if (codeword) {
+                    codewords.erase(it);
+                }
+                continue;
+            }
+
+            const uint64_t t = tracking->frame->timestamp;
+
+            // Create a new codeword if one didn't fit
+            if (!codeword) {
+                codewords.push_front({ 0, 0, t, t, 0 });
+                codeword = &codewords.front();
+            }
+
+            // Update the codeword info
+            // Update the mean depth
+            float n = (float)std::min(ctx->seg_N, codeword->n);
+            codeword->m = ((n * codeword->m) + depth) / (n + 1.f);
+
+            // Increment number of depth values
+            ++codeword->n;
+
+            // Increment consecutive number of depth values if its happened in
+            // consecutive frames
+            if (!ctx->n_tracking ||
+                codeword->tl != ctx->tracking_history[0]->frame->timestamp) {
+                ++codeword->nc;
+            }
+
+            // Track the latest timestamp to touch this codeword
+            codeword->tl = t;
+
+            // Keep track of the amount of codewords we have
+            n_codewords += (int)codewords.size();
         }
-
-        const uint64_t t = tracking->frame->timestamp;
-
-        // Create a new codeword if one didn't fit
-        if (!codeword) {
-            codewords.push_front({ 0, 0, t, t, 0 });
-            codeword = &codewords.front();
-        }
-
-        // Update the codeword info
-        // Update the mean depth
-        float n = (float)std::min(ctx->seg_N, codeword->n);
-        codeword->m = ((n * codeword->m) + depth) / (n + 1.f);
-
-        // Increment number of depth values
-        ++codeword->n;
-
-        // Increment consecutive number of depth values if its happened in
-        // consecutive frames
-        if (!ctx->n_tracking ||
-            codeword->tl != ctx->tracking_history[0]->frame->timestamp) {
-            ++codeword->nc;
-        }
-
-        // Track the latest timestamp to touch this codeword
-        codeword->tl = t;
-
-        // Keep track of the amount of codewords we have
-        n_codewords += (int)codewords.size();
     }
 
     uint64_t end = get_time();
@@ -2151,21 +2152,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     // Create a mapping of reprojected pixels to their current positions
-    std::vector<std::pair<int, float>> reproj_map(depth_class_size);
+    std::vector<std::vector<int>> reproj_map(depth_class_size);
     if (transform) {
         for (unsigned i = 0; i < depth_class_size; ++i) {
             float depth = tracking->depth_classification->points[i].z;
             if (std::isnan(depth)) {
-                reproj_map[i] = std::pair<int, float>(i, nan);
+                reproj_map[i].push_back(i);
             } else {
-                reproj_map[i] = std::pair<int, float>(-1, nan);
+                tracking->depth_classification->points[i].label = -1;
             }
-            tracking->depth_classification->points[i].label = -1;
         }
     } else {
         for (unsigned i = 0; i < depth_class_size; ++i) {
             float depth = tracking->depth_classification->points[i].z;
-            reproj_map[i] = std::pair<int, float>(i, depth);
+            reproj_map[i].push_back(i);
         }
     }
 
@@ -2211,10 +2211,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
                 int new_off =
                     (dny * tracking->depth_classification->width) + dnx;
-                float current_depth = reproj_map[new_off].second;
-                if (std::isnan(current_depth) || current_depth > point.z) {
-                    reproj_map[new_off] = std::pair<int, float>(off, point.z);
-                }
+                reproj_map[new_off].push_back(off);
             }
         }
     }
@@ -2222,83 +2219,83 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Do classification of depth buffer
     foreach_xy_off(tracking->depth_classification->width,
                    tracking->depth_classification->height) {
-        int depth_off = reproj_map[off].first;
-        if (depth_off < 0) {
-            continue;
-        }
+        for (std::vector<int>::iterator rit = reproj_map[off].begin();
+             rit != reproj_map[off].end(); ++rit) {
+            int depth_off = *rit;
 
-        float depth = tracking->depth_classification->points[depth_off].z;
-        if (std::isnan(depth)) {
-            depth = HUGE_DEPTH;
-        }
-
-        const uint64_t t = tracking->frame->timestamp;
-        const float tb = ctx->seg_tb;
-        const float tf = ctx->seg_tf;
-        const int b = ctx->seg_b;
-        const int gamma = (float)ctx->seg_gamma;
-        const int alpha = ctx->seg_alpha;
-        const float psi = ctx->seg_psi;
-
-        // Look to see if this pixel falls into an existing codeword
-        int max_n = 0;
-        struct seg_codeword *codeword = NULL;
-        struct seg_codeword *bg_codeword = NULL;
-        std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
-        for (std::list<struct seg_codeword>::iterator it = codewords.begin();
-             it != codewords.end();) {
-            struct seg_codeword &candidate = *it;
-
-            // Discard the codeword if it's too old
-            if ((t - candidate.tl) / 1000000000.0 >= ctx->seg_timeout) {
-                it = codewords.erase(it);
-                continue;
+            float depth = tracking->depth_classification->points[depth_off].z;
+            if (std::isnan(depth)) {
+                depth = HUGE_DEPTH;
             }
 
-            if (!codeword && fabsf(depth - candidate.m) < tb) {
-                codeword = &candidate;
-            }
-            if (candidate.n > max_n) {
-                bg_codeword = &candidate;
-                max_n = candidate.n;
+            const uint64_t t = tracking->frame->timestamp;
+            const float tb = ctx->seg_tb;
+            const float tf = ctx->seg_tf;
+            const int b = ctx->seg_b;
+            const int gamma = (float)ctx->seg_gamma;
+            const int alpha = ctx->seg_alpha;
+            const float psi = ctx->seg_psi;
+
+            // Look to see if this pixel falls into an existing codeword
+            int max_n = 0;
+            struct seg_codeword *codeword = NULL;
+            struct seg_codeword *bg_codeword = NULL;
+            std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+            for (std::list<struct seg_codeword>::iterator it =
+                 codewords.begin(); it != codewords.end();) {
+                struct seg_codeword &candidate = *it;
+
+                // Discard the codeword if it's too old
+                if ((t - candidate.tl) / 1000000000.0 >= ctx->seg_timeout) {
+                    it = codewords.erase(it);
+                    continue;
+                }
+
+                if (!codeword && fabsf(depth - candidate.m) < tb) {
+                    codeword = &candidate;
+                }
+                if (candidate.n > max_n) {
+                    bg_codeword = &candidate;
+                    max_n = candidate.n;
+                }
+
+                ++it;
             }
 
-            ++it;
-        }
+            // Classify this depth value
+            const float frame_time = ctx->n_tracking ?
+                (float)(t - ctx->tracking_history[0]->frame->timestamp) :
+                100000000.f;
 
-        // Classify this depth value
-        const float frame_time = ctx->n_tracking ?
-            (float)(t - ctx->tracking_history[0]->frame->timestamp) :
-            100000000.f;
-
-        if (!codeword) {
-            tracking->depth_classification->points[depth_off].label = FG;
-        } else if (codeword->n == bg_codeword->n) {
-            tracking->depth_classification->points[depth_off].label = BG;
-        } else {
-            bool flat = false, flickering = false;
-            float mean_diff = fabsf(codeword->m - bg_codeword->m);
-            if ((tb < mean_diff) && (mean_diff <= tf)) {
-                flat = true;
-            }
-            if ((b * codeword->nc) > codeword->n &&
-                (int)(((t - codeword->ts) / frame_time) / gamma) <=
-                codeword->nc) {
-                flickering = true;
-            }
-            if (flat || flickering) {
-                tracking->depth_classification->points[depth_off].label =
-                    (flat && flickering) ?
-                        FL_FLK : (flat ?  FL : FLK);
+            if (!codeword) {
+                tracking->depth_classification->points[depth_off].label = FG;
+            } else if (codeword->n == bg_codeword->n) {
+                tracking->depth_classification->points[depth_off].label = BG;
             } else {
-                if (codeword->n > alpha &&
-                    ((codeword->tl - codeword->ts) / frame_time) /
-                    (float)codeword->n >= psi) {
-                    tracking->depth_classification->
-                        points[depth_off].label = TB;
+                bool flat = false, flickering = false;
+                float mean_diff = fabsf(codeword->m - bg_codeword->m);
+                if ((tb < mean_diff) && (mean_diff <= tf)) {
+                    flat = true;
+                }
+                if ((b * codeword->nc) > codeword->n &&
+                    (int)(((t - codeword->ts) / frame_time) / gamma) <=
+                    codeword->nc) {
+                    flickering = true;
+                }
+                if (flat || flickering) {
+                    tracking->depth_classification->points[depth_off].label =
+                        (flat && flickering) ?
+                            FL_FLK : (flat ?  FL : FLK);
                 } else {
-                    tracking->depth_classification->
-                        points[depth_off].label = FG;
+                    if (codeword->n > alpha &&
+                        ((codeword->tl - codeword->ts) / frame_time) /
+                        (float)codeword->n >= psi) {
+                        tracking->depth_classification->
+                            points[depth_off].label = TB;
+                    } else {
+                        tracking->depth_classification->
+                            points[depth_off].label = FG;
+                    }
                 }
             }
         }
