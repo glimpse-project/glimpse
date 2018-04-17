@@ -2714,6 +2714,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 #else
             ctx->depth_seg.clear();
             ctx->depth_seg.resize(depth_class_size);
+#endif
         }
 
         // TODO: We just take the most confident skeleton above, but we should
