@@ -2271,7 +2271,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
 
     std::vector<pcl::PointIndices> cluster_indices;
-    if (!ctx->latest_tracking ||
+    if (ctx->n_tracking == 0 ||
         ctx->latest_tracking != ctx->tracking_history[0]) {
         // If we've not tracked a human yet, the depth classification may not
         // be reliable - just use a simple clustering technique to find a
@@ -2316,6 +2316,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             pcl::PointXYZL &pcl_pt2 =
                 tracking->depth_classification->points[lidx];
 
+            // TODO: Make these values configurable?
             if (fabsf(pcl_pt2.x - pcl_pt1.x) > 0.25f ||
                 fabsf(pcl_pt2.z - pcl_pt1.z) > 0.2f) {
                 continue;
@@ -2635,13 +2636,38 @@ gm_context_track_skeleton(struct gm_context *ctx,
     if (tracked) {
         start = get_time();
 
-        // Clear the depth segmentation data on tracking a new human to avoid
-        // polluting the codebook with values that are a human but failed to
-        // track.
+        // The codebook may have been polluted before this point by a human
+        // failing to track. To counteract this, as well as removing and of
+        // the codewords that apply to the tracked figure, we also remove all
+        // but the furthest-away codewords. This is in the hope that if there
+        // was an untracked human in the codebook that at some point we saw
+        // background behind them.
         if (ctx->n_tracking == 0 ||
             ctx->latest_tracking != ctx->tracking_history[0]) {
-            ctx->depth_seg.clear();
-            ctx->depth_seg.resize(depth_class_size);
+            foreach_xy_off(tracking->depth_classification->width,
+                           tracking->depth_classification->height) {
+                std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+                if (codewords.size() <= 1) {
+                    continue;
+                }
+
+                std::list<struct seg_codeword>::iterator furthest, it;
+                for (furthest = it = codewords.begin();
+                     it != codewords.end(); ++it) {
+                    if ((*it).m > (*furthest).m) {
+                        furthest = it;
+                    }
+                }
+
+                it = codewords.begin();
+                while (it != codewords.end()) {
+                    if (it == furthest) {
+                        ++it;
+                    } else {
+                        it = codewords.erase(it);
+                    }
+                }
+            }
         }
 
         // TODO: We just take the most confident skeleton above, but we should
