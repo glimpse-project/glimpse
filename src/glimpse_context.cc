@@ -1990,6 +1990,49 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 
+    if (ctx->depth_gap_fill) {
+        struct blank {
+            int off;
+            float new_depth;
+        };
+        std::vector<struct blank> blanks;
+
+        std::vector<float> box;
+        foreach_xy_off(hires_cloud->width, hires_cloud->height) {
+            if (std::isnormal(tracking->depth[off])) {
+                continue;
+            }
+
+            box.clear();
+            for (int i = -std::min(ctx->gap_dist, y);
+                 i <= ctx->gap_dist; ++i) {
+                if (y + i >= (int)hires_cloud->height) {
+                    break;
+                }
+
+                for (int j = -std::min(ctx->gap_dist, x);
+                     j <= ctx->gap_dist; ++j) {
+                    if (x + j >= (int)hires_cloud->width) {
+                        break;
+                    }
+
+                    int o_off = (y + i) * hires_cloud->width + x + j;
+                    if (std::isnormal(tracking->depth[o_off])) {
+                        box.push_back(tracking->depth[o_off]);
+                    }
+                }
+            }
+            if ((int)box.size() > ctx->gap_dist) {
+                float depth = *Random::get(box);
+                blanks.push_back({off, depth});
+            }
+        }
+
+        for (unsigned i = 0; i < blanks.size(); ++i) {
+            tracking->depth[blanks[i].off] = blanks[i].new_depth;
+        }
+    }
+
     foreach_xy_off(hires_cloud->width, hires_cloud->height) {
         int doff = (y * ctx->cloud_res) *
                    tracking->depth_camera_intrinsics.width +
@@ -2862,7 +2905,6 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     int width = frame_intrinsics->width;
     int height = frame_intrinsics->height;
     int rot_width = tracking->depth_camera_intrinsics.width;
-    int rot_height = tracking->depth_camera_intrinsics.height;
     enum gm_rotation rotation = tracking->frame->camera_rotation;
     void *depth = buffer->data;
     float *depth_copy = tracking->depth;
@@ -3002,52 +3044,6 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
                                     { depth_copy[roff] = point_t.z; });
-        }
-
-        if (ctx->depth_gap_fill) {
-            // Our code doesn't deal well with gaps in the data, so make some
-            // effort to fill in gaps that may have been caused by bad data,
-            // distortion transforms, etc.
-            struct blank {
-                int off;
-                float new_depth;
-            };
-            std::vector<struct blank> blanks;
-
-            std::vector<float> box;
-            foreach_xy_off(rot_width, rot_height) {
-                if (std::isnormal(depth_copy[off])) {
-                    continue;
-                }
-
-                box.clear();
-                for (int i = -std::min(ctx->gap_dist, y);
-                     i <= ctx->gap_dist; ++i) {
-                    if (y + i >= rot_height) {
-                        break;
-                    }
-
-                    for (int j = -std::min(ctx->gap_dist, x);
-                         j <= ctx->gap_dist; ++j) {
-                        if (x + j >= rot_width) {
-                            break;
-                        }
-
-                        int o_off = (y + i) * rot_width + x + j;
-                        if (std::isnormal(depth_copy[o_off])) {
-                            box.push_back(depth_copy[o_off]);
-                        }
-                    }
-                }
-                if ((int)box.size() > ctx->gap_dist) {
-                    float depth = *Random::get(box);
-                    blanks.push_back({off, depth});
-                }
-            }
-
-            for (unsigned i = 0; i < blanks.size(); ++i) {
-                depth_copy[blanks[i].off] = blanks[i].new_depth;
-            }
         }
         break;
     }
@@ -4688,7 +4684,6 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
                                             uint8_t **output)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
 
     if (!tracking->depth_classification) {
         return;
@@ -4703,6 +4698,7 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
 
     foreach_xy_off(*width, *height) {
 #if 0
+        struct gm_context *ctx = tracking->ctx;
         float depth = tracking->depth_classification->points[off].z;
         depth = std::max(ctx->min_depth, std::min(ctx->max_depth, depth));
         uint8_t shade = (uint8_t)
