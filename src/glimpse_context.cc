@@ -1996,14 +1996,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
                    (x * ctx->cloud_res);
         float depth = tracking->depth[doff];
 
-        if (!std::isnormal(depth)) {
+        if (!std::isnormal(depth) ||
+            depth < ctx->min_depth || depth > ctx->max_depth) {
             continue;
-        }
-
-        if (depth < ctx->min_depth) {
-            depth = ctx->min_depth;
-        } else if (depth > ctx->max_depth) {
-            depth = ctx->max_depth;
         }
 
         float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
