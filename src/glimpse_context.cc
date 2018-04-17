@@ -3013,7 +3013,7 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                         }
                     }
                 }
-                if (!box.empty()) {
+                if ((int)box.size() > ctx->gap_dist) {
                     float depth = *Random::get(box);
                     blanks.push_back({off, depth});
                 }
