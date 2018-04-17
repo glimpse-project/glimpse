@@ -73,6 +73,7 @@
 #include <setjmp.h>
 
 #include "half.hpp"
+#include "random.hpp"
 
 #include "xalloc.h"
 #include "wrapper_image.h"
@@ -155,7 +156,7 @@
 
 using half_float::half;
 using namespace pcl::common;
-
+using Random = effolkronium::random_thread_local;
 
 #define DOWNSAMPLE_1_2
 //#define DOWNSAMPLE_1_4
@@ -2992,13 +2993,13 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
             };
             std::vector<struct blank> blanks;
 
+            std::vector<float> box;
             foreach_xy_off(rot_width, rot_height) {
                 if (std::isnormal(depth_copy[off])) {
                     continue;
                 }
 
-                int n_values = 0;
-                float acc_depth = 0.f;
+                box.clear();
                 for (int i = -std::min(ctx->gap_dist, y);
                      i <= ctx->gap_dist; ++i) {
                     if (y + i >= rot_height) {
@@ -3013,13 +3014,13 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
 
                         int o_off = (y + i) * rot_width + x + j;
                         if (std::isnormal(depth_copy[o_off])) {
-                            acc_depth += depth_copy[o_off];
-                            ++n_values;
+                            box.push_back(depth_copy[o_off]);
                         }
                     }
                 }
-                if (n_values) {
-                    blanks.push_back({off, acc_depth / n_values});
+                if (!box.empty()) {
+                    float depth = *Random::get(box);
+                    blanks.push_back({off, depth});
                 }
             }
 
