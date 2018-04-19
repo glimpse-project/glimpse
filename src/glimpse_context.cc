@@ -505,7 +505,6 @@ struct gm_context
     bool apply_depth_distortion;
     int gap_dist;
 
-    int cloud_res;
     float min_depth;
     float max_depth;
     int seg_res;
@@ -1917,10 +1916,8 @@ gm_context_init_depth_cloud(struct gm_context *ctx,
         tracking->depth_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
     }
-    tracking->depth_cloud->width =
-        tracking->depth_camera_intrinsics.width / ctx->cloud_res;
-    tracking->depth_cloud->height =
-        tracking->depth_camera_intrinsics.height / ctx->cloud_res;
+    tracking->depth_cloud->width = tracking->depth_camera_intrinsics.width;
+    tracking->depth_cloud->height = tracking->depth_camera_intrinsics.height;
     tracking->depth_cloud->points.resize(
         tracking->depth_cloud->width * tracking->depth_cloud->height);
     tracking->depth_cloud->is_dense = false;
@@ -2043,8 +2040,8 @@ gm_context_fill_gaps(struct gm_context *ctx,
 
         int x = off % tracking->depth_cloud->width;
         int y = off / tracking->depth_cloud->width;
-        float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
-        float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
+        float dx = (x - cx) * depth * inv_fx;
+        float dy = (y - cy) * depth * inv_fy;
 
         tracking->depth_cloud->points[off].x = dx;
         tracking->depth_cloud->points[off].y = dy;
@@ -2085,9 +2082,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         foreach_xy_off(tracking->depth_cloud->width,
                        tracking->depth_cloud->height) {
-            int doff = (y * ctx->cloud_res) *
-                       tracking->depth_camera_intrinsics.width +
-                       (x * ctx->cloud_res);
+            int doff = y * tracking->depth_camera_intrinsics.width + x;
             float depth = tracking->depth[doff];
 
             if (!std::isnormal(depth) ||
@@ -2095,8 +2090,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
-            float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
-            float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
+            float dx = (x - cx) * depth * inv_fx;
+            float dy = (y - cy) * depth * inv_fy;
 
             tracking->depth_cloud->points[off].x = dx;
             tracking->depth_cloud->points[off].y = dy;
@@ -4201,17 +4196,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.desc = "Apply the distortion model of depth camera";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->apply_depth_distortion;
-    ctx->properties.push_back(prop);
-
-    ctx->cloud_res = 1;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cloud_res";
-    prop.desc = "Resolution divider for depth camera cloud";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->cloud_res;
-    prop.int_state.min = 1;
-    prop.int_state.max = 4;
     ctx->properties.push_back(prop);
 
     ctx->min_depth = 0.5;
