@@ -1909,24 +1909,10 @@ gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
     return fabsf(d1 - d2) <= tolerance;
 }
 
-static bool
-gm_context_track_skeleton(struct gm_context *ctx,
-                          struct gm_tracking_impl *tracking)
+static void
+gm_context_init_depth_cloud(struct gm_context *ctx,
+                            struct gm_tracking_impl *tracking)
 {
-    uint64_t start, end, duration;
-
-    float nan = std::numeric_limits<float>::quiet_NaN();
-    pcl::PointXYZL invalid_pt;
-    invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
-    invalid_pt.label = -1;
-
-    // X increases to the right
-    // Y increases downwards
-    // Z increases outwards
-
-    // Project depth buffer into cloud and filter out points that are too
-    // near/far.
-    start = get_time();
     if (!tracking->depth_cloud) {
         tracking->depth_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
@@ -1938,19 +1924,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
     tracking->depth_cloud->points.resize(
         tracking->depth_cloud->width * tracking->depth_cloud->height);
     tracking->depth_cloud->is_dense = false;
-    gm_debug(ctx->log, "depth intrinsics w=%d,h=%d, cloud res = %d",
-             tracking->depth_cloud->width,
-             tracking->depth_cloud->height,
-             ctx->cloud_res);
 
-    int n_points = 0;
-
-    const float fx = tracking->depth_camera_intrinsics.fx;
-    const float fy = tracking->depth_camera_intrinsics.fy;
-    const float inv_fx = 1.0f / tracking->depth_camera_intrinsics.fx;
-    const float inv_fy = 1.0f / tracking->depth_camera_intrinsics.fy;
-    const float cx = tracking->depth_camera_intrinsics.cx;
-    const float cy = tracking->depth_camera_intrinsics.cy;
+    float nan = std::numeric_limits<float>::quiet_NaN();
+    pcl::PointXYZL invalid_pt;
+    invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
+    invalid_pt.label = -1;
 
 #if 0
     if (ctx->latest_tracking) {
@@ -1962,6 +1940,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
         glm::mat4 start_to_new = pose_to_matrix(tracking->frame->pose);
         glm::mat4 old_to_start =
             glm::inverse(pose_to_matrix(ctx->latest_tracking->frame->pose));
+
+        const float fx = tracking->depth_camera_intrinsics.fx;
+        const float fy = tracking->depth_camera_intrinsics.fy;
+        const float cx = tracking->depth_camera_intrinsics.cx;
+        const float cy = tracking->depth_camera_intrinsics.cy;
 
         foreach_xy_off(ctx->latest_tracking->depth_classification->width,
                        ctx->latest_tracking->depth_classification->height) {
@@ -2003,81 +1986,151 @@ gm_context_track_skeleton(struct gm_context *ctx,
             tracking->depth_cloud->points[off] = invalid_pt;
         }
     }
+}
 
-    if (ctx->depth_gap_fill) {
-        struct blank {
-            int off;
-            float new_depth;
-        };
-        std::vector<struct blank> blanks;
-
-        foreach_xy_off(tracking->depth_cloud->width,
-                       tracking->depth_cloud->height) {
-            if (std::isnormal(tracking->depth[off])) {
-                continue;
-            }
-
-            int n_neighbours = 0;
-            for (int i = -std::min(ctx->gap_dist, y);
-                 i <= ctx->gap_dist && n_neighbours <= ctx->gap_dist; ++i) {
-                if (y + i >= (int)tracking->depth_cloud->height) {
-                    break;
-                }
-
-                for (int j = -std::min(ctx->gap_dist, x);
-                     j <= ctx->gap_dist; ++j) {
-                    if (x + j >= (int)tracking->depth_cloud->width) {
-                        break;
-                    }
-
-                    int o_off = (y + i) * tracking->depth_cloud->width + x + j;
-                    if (std::isnormal(tracking->depth[o_off])) {
-                        ++n_neighbours;
-                    }
-
-                    if (n_neighbours > ctx->gap_dist) {
-                        blanks.push_back({off, tracking->depth[o_off]});
-                        break;
-                    }
-                }
-            }
-        }
-
-        for (unsigned i = 0; i < blanks.size(); ++i) {
-            tracking->depth[blanks[i].off] = blanks[i].new_depth;
-        }
-    }
+static void
+gm_context_fill_gaps(struct gm_context *ctx,
+                     struct gm_tracking_impl *tracking)
+{
+    struct blank {
+        int off;
+        float new_depth;
+    };
+    std::vector<struct blank> blanks;
 
     foreach_xy_off(tracking->depth_cloud->width,
                    tracking->depth_cloud->height) {
-        int doff = (y * ctx->cloud_res) *
-                   tracking->depth_camera_intrinsics.width +
-                   (x * ctx->cloud_res);
-        float depth = tracking->depth[doff];
-
-        if (!std::isnormal(depth) ||
-            depth < ctx->min_depth || depth > ctx->max_depth) {
+        if (std::isnormal(tracking->depth_cloud->points[off].z)) {
             continue;
         }
 
+        int n_neighbours = 0;
+        for (int i = -std::min(ctx->gap_dist, y);
+             i <= ctx->gap_dist && n_neighbours <= ctx->gap_dist; ++i) {
+            if (y + i >= (int)tracking->depth_cloud->height) {
+                break;
+            }
+
+            for (int j = -std::min(ctx->gap_dist, x);
+                 j <= ctx->gap_dist; ++j) {
+                if (x + j >= (int)tracking->depth_cloud->width) {
+                    break;
+                }
+
+                int o_off = (y + i) * tracking->depth_cloud->width + x + j;
+                float depth = tracking->depth_cloud->points[o_off].z;
+                if (std::isnormal(depth)) {
+                    ++n_neighbours;
+                }
+
+                if (n_neighbours > ctx->gap_dist) {
+                    blanks.push_back({off, depth});
+                    break;
+                }
+            }
+        }
+    }
+
+    const float inv_fx = 1.0f / tracking->depth_camera_intrinsics.fx;
+    const float inv_fy = 1.0f / tracking->depth_camera_intrinsics.fy;
+    const float cx = tracking->depth_camera_intrinsics.cx;
+    const float cy = tracking->depth_camera_intrinsics.cy;
+
+    for (unsigned i = 0; i < blanks.size(); ++i) {
+        int off = blanks[i].off;
+        float depth = blanks[i].new_depth;
+        tracking->depth[off] = depth;
+
+        int x = off % tracking->depth_cloud->width;
+        int y = off / tracking->depth_cloud->width;
         float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
         float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
 
         tracking->depth_cloud->points[off].x = dx;
         tracking->depth_cloud->points[off].y = dy;
         tracking->depth_cloud->points[off].z = depth;
-        ++n_points;
     }
+}
+
+static bool
+gm_context_track_skeleton(struct gm_context *ctx,
+                          struct gm_tracking_impl *tracking)
+{
+    uint64_t start, end, duration;
+
+    float nan = std::numeric_limits<float>::quiet_NaN();
+    pcl::PointXYZL invalid_pt;
+    invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
+    invalid_pt.label = -1;
+
+    // X increases to the right
+    // Y increases downwards
+    // Z increases outwards
+
+    // Project depth buffer into cloud and filter out points that are too
+    // near/far.
+    const float fx = tracking->depth_camera_intrinsics.fx;
+    const float fy = tracking->depth_camera_intrinsics.fy;
+    const float inv_fx = 1.0f / tracking->depth_camera_intrinsics.fx;
+    const float inv_fy = 1.0f / tracking->depth_camera_intrinsics.fy;
+    const float cx = tracking->depth_camera_intrinsics.cx;
+    const float cy = tracking->depth_camera_intrinsics.cy;
+
+    if (tracking->frame->depth_format != GM_FORMAT_POINTS_XYZC_F32_M &&
+        !ctx->apply_depth_distortion) {
+        start = get_time();
+        int n_points = 0;
+
+        gm_context_init_depth_cloud(ctx, tracking);
+
+        foreach_xy_off(tracking->depth_cloud->width,
+                       tracking->depth_cloud->height) {
+            int doff = (y * ctx->cloud_res) *
+                       tracking->depth_camera_intrinsics.width +
+                       (x * ctx->cloud_res);
+            float depth = tracking->depth[doff];
+
+            if (!std::isnormal(depth) ||
+                depth < ctx->min_depth || depth > ctx->max_depth) {
+                continue;
+            }
+
+            float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
+            float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
+
+            tracking->depth_cloud->points[off].x = dx;
+            tracking->depth_cloud->points[off].y = dy;
+            tracking->depth_cloud->points[off].z = depth;
+            ++n_points;
+        }
+
+        end = get_time();
+        duration = end - start;
+        LOGI("Projection (%d points) took %.3f%s",
+             n_points,
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
+    }
+
+    start = get_time();
+    if (ctx->depth_gap_fill) {
+        gm_context_fill_gaps(ctx, tracking);
+    }
+    end = get_time();
+    duration = end - start;
+    LOGI("Gap filling took %.3f%s",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 
     // Person detection can happen in a sparser cloud made from a downscaled
     // version of the depth buffer. This is significantly cheaper than using a
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
-    int n_lores_points;
     if (ctx->seg_res == 1) {
         tracking->depth_classification = tracking->depth_cloud;
-        n_lores_points = n_points;
     } else {
+        start = get_time();
+
         if (!tracking->depth_classification ||
             tracking->depth_classification == tracking->depth_cloud) {
             tracking->depth_classification =
@@ -2094,7 +2147,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             tracking->depth_classification->height);
         tracking->depth_classification->is_dense = false;
 
-        n_lores_points = 0;
+        int n_lores_points = 0;
         foreach_xy_off(tracking->depth_classification->width,
                        tracking->depth_classification->height) {
             int hoff = (y * ctx->seg_res) * tracking->depth_cloud->width +
@@ -2109,16 +2162,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 ++n_lores_points;
             }
         }
+
+        end = get_time();
+        duration = end - start;
+        LOGI("Cloud down-scaling (%d points) took %.3f%s",
+             n_lores_points,
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
     }
 
     unsigned depth_class_size = tracking->depth_classification->points.size();
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Projection (%d points, %d low-res) took %.3f%s",
-         n_points, n_lores_points,
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
 
     // Classify depth pixels
     start = get_time();
@@ -3051,6 +3104,8 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
                 /* Ignoring tangential distortion */
                 break;
             }
+        } else {
+            gm_context_init_depth_cloud(ctx, tracking);
         }
 
         for (int off = 0; off < num_points; off++) {
@@ -3106,7 +3161,33 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
 
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
-                                    { depth_copy[roff] = point_t.z; });
+                {
+                    depth_copy[roff] = point_t.z;
+                    if (!ctx->apply_depth_distortion &&
+                        !std::isnan(point_t.z) &&
+                        point_t.z >= ctx->min_depth &&
+                        point_t.z <= ctx->max_depth) {
+                        switch(rotation) {
+                        case GM_ROTATION_0:
+                            tracking->depth_cloud->points[roff].x = point_t.x;
+                            tracking->depth_cloud->points[roff].y = point_t.y;
+                            break;
+                        case GM_ROTATION_90:
+                            tracking->depth_cloud->points[roff].x = point_t.y;
+                            tracking->depth_cloud->points[roff].y = -point_t.y;
+                            break;
+                        case GM_ROTATION_180:
+                            tracking->depth_cloud->points[roff].x = -point_t.x;
+                            tracking->depth_cloud->points[roff].y = -point_t.y;
+                            break;
+                        case GM_ROTATION_270:
+                            tracking->depth_cloud->points[roff].x = -point_t.y;
+                            tracking->depth_cloud->points[roff].y = point_t.x;
+                            break;
+                        }
+                        tracking->depth_cloud->points[roff].z = point_t.z;
+                    }
+                });
         }
         break;
     }
@@ -3316,7 +3397,13 @@ detector_thread_cb(void *data)
 
         gm_context_detect_faces(ctx, tracking);
 #endif
+        end = get_time();
+        duration = end - start;
+        gm_debug(ctx->log, "Tracking preparation took %.3f%s",
+                 get_duration_ns_print_scale(duration),
+                 get_duration_ns_print_scale_suffix(duration));
 
+        start = get_time();
         bool tracked = gm_context_track_skeleton(ctx, tracking);
 
         end = get_time();
