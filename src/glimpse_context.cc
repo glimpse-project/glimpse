@@ -2011,16 +2011,15 @@ gm_context_track_skeleton(struct gm_context *ctx,
         };
         std::vector<struct blank> blanks;
 
-        std::vector<float> box;
         foreach_xy_off(tracking->depth_cloud->width,
                        tracking->depth_cloud->height) {
             if (std::isnormal(tracking->depth[off])) {
                 continue;
             }
 
-            box.clear();
+            int n_neighbours = 0;
             for (int i = -std::min(ctx->gap_dist, y);
-                 i <= ctx->gap_dist; ++i) {
+                 i <= ctx->gap_dist && n_neighbours <= ctx->gap_dist; ++i) {
                 if (y + i >= (int)tracking->depth_cloud->height) {
                     break;
                 }
@@ -2033,13 +2032,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
                     int o_off = (y + i) * tracking->depth_cloud->width + x + j;
                     if (std::isnormal(tracking->depth[o_off])) {
-                        box.push_back(tracking->depth[o_off]);
+                        ++n_neighbours;
+                    }
+
+                    if (n_neighbours > ctx->gap_dist) {
+                        blanks.push_back({off, tracking->depth[o_off]});
+                        break;
                     }
                 }
-            }
-            if ((int)box.size() > ctx->gap_dist) {
-                float depth = *Random::get(box);
-                blanks.push_back({off, depth});
             }
         }
 
