@@ -2688,9 +2688,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // TODO: We should actually use the label cluster points, which may not
     //       consist of this entire cloud.
     pcl::PointIndices &person = persons[best_person];
+    int tracked_label = tracked ? TRK : CAN;
     for (std::vector<int>::const_iterator it = person.indices.begin();
          it != person.indices.end(); ++it) {
-        tracking->depth_classification->points[*it].label = tracked ? TRK : CAN;
+        tracking->depth_classification->points[*it].label = tracked_label;
     }
 
     end = get_time();
