@@ -1857,7 +1857,7 @@ update_depth_codebook(struct gm_context *ctx,
             // Increment consecutive number of depth values if its happened in
             // consecutive frames
             if (!ctx->n_tracking ||
-                codeword->tl != ctx->tracking_history[0]->frame->timestamp) {
+                codeword->tl != ctx->latest_tracking->frame->timestamp) {
                 ++codeword->nc;
             }
 
