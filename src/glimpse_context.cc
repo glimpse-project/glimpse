@@ -2316,15 +2316,17 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     // Do classification of depth buffer
-    foreach_xy_off(tracking->depth_classification->width,
-                   tracking->depth_classification->height) {
+    for (int off = 0; off < depth_class_size; ++off) {
         for (std::vector<int>::iterator rit = reproj_map[off].begin();
              rit != reproj_map[off].end(); ++rit) {
             int depth_off = *rit;
 
             float depth = tracking->depth_classification->points[depth_off].z;
             if (std::isnan(depth)) {
-                depth = HUGE_DEPTH;
+                // We'll never cluster a nan value, so we can immediately
+                // classify it as background.
+                tracking->depth_classification->points[depth_off].label = BG;
+                continue;
             }
 
             const uint64_t t = tracking->frame->timestamp;
