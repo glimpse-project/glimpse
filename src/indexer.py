@@ -78,6 +78,17 @@ if args.seed:
 data_dir = args.data[0]
 full_filename = os.path.join(data_dir, "index.%s" % args.full[0])
 
+def get_frame_keys(frame):
+    (path,image) = os.path.split(frame)
+    (mocap, section) = os.path.split(path)
+    with open(os.path.join('labels', frame[1:].strip() + ".json")) as fp:
+        js = json.load(fp)
+        frame_no = int(js['frame'])
+        if 'viewing_angle' in js['camera']:
+            viewing_angle = int(js['camera']['viewing_angle'])
+            return (mocap, frame_no, viewing_angle)
+        else:
+            return (mocap, frame_no)
 
 # 1. Load the full index
 try:
@@ -96,6 +107,8 @@ except FileNotFoundError as e:
                 if args.verbose:
                     print("mocap = %s, section = %s, frame = %s" %
                             (mocap, section, frame_name))
+
+    full_index.sort(key=get_frame_keys)
 
     with open(full_filename, 'w+') as fp:
         for frame in full_index:
@@ -122,7 +135,7 @@ if args.exclude:
     n_frames = len(full_index)
     print("\n%u frames left after applying exclusions" % n_frames)
     print("sorting...")
-    full_index.sort()
+    full_index.sort(key=get_frame_keys)
 
 
 # 3. Create randomly sampled index files
