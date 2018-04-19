@@ -2195,7 +2195,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     } else {
         for (unsigned i = 0; i < depth_class_size; ++i) {
-            float depth = tracking->depth_classification->points[i].z;
             reproj_map[i].push_back(i);
         }
     }
@@ -2249,6 +2248,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 
+    // Remove depth classification old codewords
+    for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
+        std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        for (std::list<struct seg_codeword>::iterator it = codewords.begin();
+             it != codewords.end();) {
+            if ((tracking->frame->timestamp - (*it).tl) / 1000000000.0 >=
+                ctx->seg_timeout) {
+                it = codewords.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
     // Do classification of depth buffer
     foreach_xy_off(tracking->depth_classification->width,
                    tracking->depth_classification->height) {
@@ -2273,26 +2286,22 @@ gm_context_track_skeleton(struct gm_context *ctx,
             int max_n = 0;
             struct seg_codeword *codeword = NULL;
             struct seg_codeword *bg_codeword = NULL;
+            float codeword_distance;
             std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
             for (std::list<struct seg_codeword>::iterator it =
-                 codewords.begin(); it != codewords.end();) {
+                 codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
 
-                // Discard the codeword if it's too old
-                if ((t - candidate.tl) / 1000000000.0 >= ctx->seg_timeout) {
-                    it = codewords.erase(it);
-                    continue;
-                }
-
-                if (!codeword && fabsf(depth - candidate.m) < tb) {
+                float dist = fabsf(depth - candidate.m);
+                if ((codeword && dist < codeword_distance) ||
+                    (!codeword && dist < tb)) {
                     codeword = &candidate;
+                    codeword_distance = dist;
                 }
                 if (candidate.n > max_n) {
                     bg_codeword = &candidate;
                     max_n = candidate.n;
                 }
-
-                ++it;
             }
 
             // Classify this depth value
