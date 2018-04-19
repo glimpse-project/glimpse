@@ -2649,21 +2649,44 @@ gm_context_track_skeleton(struct gm_context *ctx,
     for (unsigned i = 0; i < depth_images.size(); ++i) {
         float *depth_img = depth_images[i];
 
+        uint64_t lstart, lend, lduration;
+
         // Do inference
+        lstart = get_time();
         infer_labels<float>(ctx->decision_trees, ctx->n_decision_trees,
                             depth_img, width, height, label_probs);
+        lend = get_time();
+        lduration = lend - lstart;
+        LOGI("\tLabel inference took %.3f%s",
+             get_duration_ns_print_scale(lduration),
+             get_duration_ns_print_scale_suffix(lduration));
+
+        lstart = get_time();
         calc_pixel_weights<float>(depth_img, label_probs, width, height,
                                   ctx->n_labels, ctx->joint_map, weights);
+        lend = get_time();
+        lduration = lend - lstart;
+        LOGI("\tCalculating pixel weights took %.3f%s",
+             get_duration_ns_print_scale(lduration),
+             get_duration_ns_print_scale_suffix(lduration));
+
+        lstart = get_time();
         InferredJoints *candidate =
             infer_joints_fast<float>(depth_img, label_probs, weights,
                                      width, height, ctx->n_labels,
                                      ctx->joint_map,
                                      vfov, ctx->joint_params->joint_params);
         xfree(depth_img);
+        lend = get_time();
+        lduration = lend - lstart;
+        LOGI("\tJoint inference took %.3f%s",
+             get_duration_ns_print_scale(lduration),
+             get_duration_ns_print_scale_suffix(lduration));
 
         assert(candidate->n_joints == ctx->n_joints);
 
         // Build and refine skeleton
+        lstart = get_time();
         struct gm_skeleton candidate_skeleton(ctx->n_joints);
         build_skeleton(ctx, candidate, candidate_skeleton);
         refine_skeleton(ctx, candidate, candidate_skeleton);
@@ -2676,6 +2699,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
             std::swap(tracking->label_probs, label_probs);
             best_person = i;
         }
+        lend = get_time();
+        lduration = lend - lstart;
+        LOGI("\tSkeleton building took %.3f%s",
+             get_duration_ns_print_scale(lduration),
+             get_duration_ns_print_scale_suffix(lduration));
     }
     xfree(label_probs);
     xfree(weights);
