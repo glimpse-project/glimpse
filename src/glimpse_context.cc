@@ -2594,13 +2594,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        start = get_time();
         update_depth_codebook(ctx, tracking, reproj_map);
-        end = get_time();
-        duration = end - start;
-        LOGI("Updating depth codebook took %.3f%s",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
         LOGI("Skipping detection: Could not find a person cluster");
         return false;
     }
@@ -2845,13 +2839,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
-        start = get_time();
         update_depth_codebook(ctx, tracking, reproj_map);
-        end = get_time();
-        duration = end - start;
-        LOGI("Updating depth codebook took %.3f%s",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
     }
 
     return tracked;
