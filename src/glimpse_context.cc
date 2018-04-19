@@ -328,6 +328,12 @@ struct gm_tracking_impl
     // Label probability tables
     float *label_probs;
 
+    // The unprojected full-resolution depth cloud
+    pcl::PointCloud<pcl::PointXYZL>::Ptr depth_cloud;
+
+    // The ground-aligned segmentation-resolution depth cloud
+    pcl::PointCloud<pcl::PointXYZL>::Ptr ground_cloud;
+
     // Labels based on depth value classification
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_classification;
 
@@ -1865,7 +1871,7 @@ update_depth_codebook(struct gm_context *ctx,
 
     uint64_t end = get_time();
     uint64_t duration = end - start;
-    LOGI("Codeword update (%.2f codewords/pix) took (%.3f%s)\n",
+    LOGI("Codeword update (%.2f codewords/pix) took %.3f%s",
          n_codewords / (float)(tracking->depth_classification->width *
                                tracking->depth_classification->height),
          get_duration_ns_print_scale(duration),
@@ -1910,7 +1916,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
     uint64_t start, end, duration;
 
     float nan = std::numeric_limits<float>::quiet_NaN();
-    pcl::PointXYZ invalid_pt(nan, nan, nan);
+    pcl::PointXYZL invalid_pt;
+    invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
+    invalid_pt.label = -1;
 
     // X increases to the right
     // Y increases downwards
@@ -1919,15 +1927,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Project depth buffer into cloud and filter out points that are too
     // near/far.
     start = get_time();
-    pcl::PointCloud<pcl::PointXYZ>::Ptr hires_cloud(
-        new pcl::PointCloud<pcl::PointXYZ>);
-    hires_cloud->width = tracking->depth_camera_intrinsics.width / ctx->cloud_res;
-    hires_cloud->height = tracking->depth_camera_intrinsics.height / ctx->cloud_res;
-    hires_cloud->points.resize(hires_cloud->width * hires_cloud->height);
-    hires_cloud->is_dense = false;
+    if (!tracking->depth_cloud) {
+        tracking->depth_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
+            new pcl::PointCloud<pcl::PointXYZL>);
+    }
+    tracking->depth_cloud->width =
+        tracking->depth_camera_intrinsics.width / ctx->cloud_res;
+    tracking->depth_cloud->height =
+        tracking->depth_camera_intrinsics.height / ctx->cloud_res;
+    tracking->depth_cloud->points.resize(
+        tracking->depth_cloud->width * tracking->depth_cloud->height);
+    tracking->depth_cloud->is_dense = false;
     gm_debug(ctx->log, "depth intrinsics w=%d,h=%d, cloud res = %d",
-             hires_cloud->width,
-             hires_cloud->height,
+             tracking->depth_cloud->width,
+             tracking->depth_cloud->height,
              ctx->cloud_res);
 
     int n_points = 0;
@@ -1966,27 +1979,28 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             int nx = (int)roundf((pt.x * fx / pt.z) + cx);
-            if (nx < 0 || nx >= (int)hires_cloud->width) {
+            if (nx < 0 || nx >= (int)tracking->depth_cloud->width) {
                 continue;
             }
 
             int ny = (int)roundf((pt.y * fy / pt.z) + cy);
-            if (ny < 0 || ny >= (int)hires_cloud->height) {
+            if (ny < 0 || ny >= (int)tracking->depth_cloud->height) {
                 continue;
             }
 
-            int noff = (ny * hires_cloud->width) + nx;
-            hires_cloud->points[noff].x = pt.x;
-            hires_cloud->points[noff].y = pt.y;
-            hires_cloud->points[noff].z = pt.z;
+            int noff = (ny * tracking->depth_cloud->width) + nx;
+            tracking->depth_cloud->points[noff].x = pt.x;
+            tracking->depth_cloud->points[noff].y = pt.y;
+            tracking->depth_cloud->points[noff].z = pt.z;
         }
     } else
 #endif
     {
         // There's no tracking history, so initialise the cloud with invalid
         // values
-        foreach_xy_off(hires_cloud->width, hires_cloud->height) {
-            hires_cloud->points[off] = invalid_pt;
+        foreach_xy_off(tracking->depth_cloud->width,
+                       tracking->depth_cloud->height) {
+            tracking->depth_cloud->points[off] = invalid_pt;
         }
     }
 
@@ -1998,7 +2012,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         std::vector<struct blank> blanks;
 
         std::vector<float> box;
-        foreach_xy_off(hires_cloud->width, hires_cloud->height) {
+        foreach_xy_off(tracking->depth_cloud->width,
+                       tracking->depth_cloud->height) {
             if (std::isnormal(tracking->depth[off])) {
                 continue;
             }
@@ -2006,17 +2021,17 @@ gm_context_track_skeleton(struct gm_context *ctx,
             box.clear();
             for (int i = -std::min(ctx->gap_dist, y);
                  i <= ctx->gap_dist; ++i) {
-                if (y + i >= (int)hires_cloud->height) {
+                if (y + i >= (int)tracking->depth_cloud->height) {
                     break;
                 }
 
                 for (int j = -std::min(ctx->gap_dist, x);
                      j <= ctx->gap_dist; ++j) {
-                    if (x + j >= (int)hires_cloud->width) {
+                    if (x + j >= (int)tracking->depth_cloud->width) {
                         break;
                     }
 
-                    int o_off = (y + i) * hires_cloud->width + x + j;
+                    int o_off = (y + i) * tracking->depth_cloud->width + x + j;
                     if (std::isnormal(tracking->depth[o_off])) {
                         box.push_back(tracking->depth[o_off]);
                     }
@@ -2033,7 +2048,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    foreach_xy_off(hires_cloud->width, hires_cloud->height) {
+    foreach_xy_off(tracking->depth_cloud->width,
+                   tracking->depth_cloud->height) {
         int doff = (y * ctx->cloud_res) *
                    tracking->depth_camera_intrinsics.width +
                    (x * ctx->cloud_res);
@@ -2047,9 +2063,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
         float dx = ((x * ctx->cloud_res) - cx) * depth * inv_fx;
         float dy = ((y * ctx->cloud_res) - cy) * depth * inv_fy;
 
-        hires_cloud->points[off].x = dx;
-        hires_cloud->points[off].y = dy;
-        hires_cloud->points[off].z = depth;
+        tracking->depth_cloud->points[off].x = dx;
+        tracking->depth_cloud->points[off].y = dy;
+        tracking->depth_cloud->points[off].z = depth;
         ++n_points;
     }
 
@@ -2058,33 +2074,48 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
     int n_lores_points;
-    tracking->depth_classification = pcl::PointCloud<pcl::PointXYZL>::Ptr(
-        new pcl::PointCloud<pcl::PointXYZL>);
-    tracking->depth_classification->width = hires_cloud->width / ctx->seg_res;
-    tracking->depth_classification->height = hires_cloud->height / ctx->seg_res;
-    unsigned depth_class_size = tracking->depth_classification->width *
-                                tracking->depth_classification->height;
-    tracking->depth_classification->points.resize(depth_class_size);
-    tracking->depth_classification->is_dense = false;
+    if (ctx->seg_res == 1) {
+        tracking->depth_classification = tracking->depth_cloud;
+        n_lores_points = n_points;
+    } else {
+        if (!tracking->depth_classification ||
+            tracking->depth_classification == tracking->depth_cloud) {
+            tracking->depth_classification =
+                pcl::PointCloud<pcl::PointXYZL>::Ptr(
+                    new pcl::PointCloud<pcl::PointXYZL>);
+        }
 
-    n_lores_points = 0;
-    foreach_xy_off(tracking->depth_classification->width,
-                   tracking->depth_classification->height) {
-        int hoff = (y * ctx->seg_res) * hires_cloud->width + (x * ctx->seg_res);
-        tracking->depth_classification->points[off].x =
-            hires_cloud->points[hoff].x;
-        tracking->depth_classification->points[off].y =
-            hires_cloud->points[hoff].y;
-        tracking->depth_classification->points[off].z =
-            hires_cloud->points[hoff].z;
-        if (!std::isnan(tracking->depth_classification->points[off].z)) {
-            ++n_lores_points;
+        tracking->depth_classification->width =
+            tracking->depth_cloud->width / ctx->seg_res;
+        tracking->depth_classification->height =
+            tracking->depth_cloud->height / ctx->seg_res;
+        tracking->depth_classification->points.resize(
+            tracking->depth_classification->width *
+            tracking->depth_classification->height);
+        tracking->depth_classification->is_dense = false;
+
+        n_lores_points = 0;
+        foreach_xy_off(tracking->depth_classification->width,
+                       tracking->depth_classification->height) {
+            int hoff = (y * ctx->seg_res) * tracking->depth_cloud->width +
+                (x * ctx->seg_res);
+            tracking->depth_classification->points[off].x =
+                tracking->depth_cloud->points[hoff].x;
+            tracking->depth_classification->points[off].y =
+                tracking->depth_cloud->points[hoff].y;
+            tracking->depth_classification->points[off].z =
+                tracking->depth_cloud->points[hoff].z;
+            if (!std::isnan(tracking->depth_classification->points[off].z)) {
+                ++n_lores_points;
+            }
         }
     }
 
+    unsigned depth_class_size = tracking->depth_classification->points.size();
+
     end = get_time();
     duration = end - start;
-    LOGI("Projection (%d points, %d low-res) took (%.3f%s)\n",
+    LOGI("Projection (%d points, %d low-res) took %.3f%s",
          n_points, n_lores_points,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
@@ -2170,28 +2201,30 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     // Transform the cloud into ground-aligned space if we have a valid pose
-    pcl::PointCloud<pcl::PointXYZ>::Ptr ground_aligned(
-        new pcl::PointCloud<pcl::PointXYZ>);
+    if (!tracking->ground_cloud) {
+        tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
+            new pcl::PointCloud<pcl::PointXYZL>);
+    }
     if (ctx->depth_pose.valid) {
-        ground_aligned->width = tracking->depth_classification->width;
-        ground_aligned->height = tracking->depth_classification->height;
-        ground_aligned->points.resize(depth_class_size);
-        ground_aligned->is_dense = false;
+        tracking->ground_cloud->width = tracking->depth_classification->width;
+        tracking->ground_cloud->height = tracking->depth_classification->height;
+        tracking->ground_cloud->points.resize(depth_class_size);
+        tracking->ground_cloud->is_dense = false;
 
         foreach_xy_off(tracking->depth_classification->width,
                        tracking->depth_classification->height) {
             pcl::PointXYZL &point = tracking->depth_classification->points[off];
             if (std::isnan(point.z)) {
-                ground_aligned->points[off] = invalid_pt;
+                tracking->ground_cloud->points[off] = invalid_pt;
                 continue;
             }
 
             glm::vec4 pt(point.x, point.y, point.z, 1.f);
             pt = (new_to_start * pt);
 
-            ground_aligned->points[off].x = pt.x;
-            ground_aligned->points[off].y = pt.y;
-            ground_aligned->points[off].z = pt.z;
+            tracking->ground_cloud->points[off].x = pt.x;
+            tracking->ground_cloud->points[off].y = pt.y;
+            tracking->ground_cloud->points[off].z = pt.z;
 
             if (transform) {
                 pt = ctx->start_to_depth_pose * pt;
@@ -2303,7 +2336,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     end = get_time();
     duration = end - start;
-    LOGI("Depth value classification took (%.3f%s)\n",
+    LOGI("Depth value classification took %.3f%s",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
@@ -2361,7 +2394,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             float aligned_y = ctx->depth_pose.valid ?
-                ground_aligned->points[idx].y :
+                tracking->ground_cloud->points[idx].y :
                 tracking->depth_classification->points[idx].y;
             if (aligned_y > lowest_point) {
                 lowest_point = aligned_y;
@@ -2396,7 +2429,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             float aligned_y = ctx->depth_pose.valid ?
-                ground_aligned->points[idx].y :
+                tracking->ground_cloud->points[idx].y :
                 tracking->depth_classification->points[idx].y;
             if (aligned_y > lowest_point - ctx->floor_threshold) {
                 continue;
@@ -2433,16 +2466,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         depth_connector.segment(*tracking->cluster_labels, cluster_indices);
     }
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Clustering took (%d clusters) %.3f%s\n",
-         (int)cluster_indices.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-    // Assume the largest cluster that has roughly human dimensions and
+    // Assume the any cluster that has roughly human dimensions and
     // contains its centroid may be a person.
-    start = get_time();
 
     //const float centroid_tolerance = 0.1f;
     std::vector<pcl::PointIndices> persons;
@@ -2490,8 +2515,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
 
         int off = y * tracking->depth_camera_intrinsics.width + x;
-        if (std::isnan(hires_cloud->points[off].z) ||
-            fabsf(centroid[2] - hires_cloud->points[off].z) >
+        if (std::isnan(tracking->depth_cloud->points[off].z) ||
+            fabsf(centroid[2] - tracking->depth_cloud->points[off].z) >
             centroid_tolerance) {
             continue;
         }
@@ -2502,13 +2527,19 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     end = get_time();
     duration = end - start;
-    LOGI("People detection took %.3f%s\n",
+    LOGI("Clustering and people detection took %.3f%s",
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
+        start = get_time();
         update_depth_codebook(ctx, tracking, reproj_map);
-        LOGI("Skipping detection: Could not find a person cluster\n");
+        end = get_time();
+        duration = end - start;
+        LOGI("Updating depth codebook took %.3f%s",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
+        LOGI("Skipping detection: Could not find a person cluster");
         return false;
     }
 
@@ -2546,17 +2577,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
             int lx = (*it) % tracking->depth_classification->width;
             int ly = (*it) / tracking->depth_classification->width;
             for (int hy = (int)(ly * ctx->seg_res), ey = 0;
-                 hy < (int)hires_cloud->height && ey < ctx->seg_res;
+                 hy < (int)tracking->depth_cloud->height && ey < ctx->seg_res;
                  ++hy, ++ey) {
                 for (int hx = (int)(lx * ctx->seg_res), ex = 0;
-                     hx < (int)hires_cloud->width && ex < ctx->seg_res;
+                     hx < (int)tracking->depth_cloud->width &&
+                     ex < ctx->seg_res;
                      ++hx, ++ex) {
-                    int off = hy * hires_cloud->width + hx;
+                    int off = hy * tracking->depth_cloud->width + hx;
 
                     // Reproject this point into training camera space
-                    glm::vec3 point_t(hires_cloud->points[off].x,
-                                      hires_cloud->points[off].y,
-                                      hires_cloud->points[off].z);
+                    glm::vec3 point_t(tracking->depth_cloud->points[off].x,
+                                      tracking->depth_cloud->points[off].y,
+                                      tracking->depth_cloud->points[off].z);
 
                     if (tracking->extrinsics_set) {
                         point_t = (rotate * point_t) + translate;
@@ -2590,10 +2622,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     end = get_time();
     duration = end - start;
-    LOGI("Re-projecting %d %dx%d point clouds took %.3f%s\n",
+    LOGI("Re-projecting %d %dx%d point clouds took %.3f%s",
          (int)persons.size(), (int)width, (int)height,
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
+
+    start = get_time();
 
     float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
                                tracking->training_camera_intrinsics.fy));
@@ -2604,27 +2638,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
     tracking->skeleton.distance = FLT_MAX;
     int best_person = 0;
     for (unsigned i = 0; i < depth_images.size(); ++i) {
-        start = get_time();
         float *depth_img = depth_images[i];
+
+        // Do inference
         infer_labels<float>(ctx->decision_trees, ctx->n_decision_trees,
                             depth_img, width, height, label_probs);
-        end = get_time();
-        duration = end - start;
-        LOGI("Label probability (%d trees, %dx%d) inference took %.3f%s\n",
-             (int)ctx->n_decision_trees, (int)width, (int)height,
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
-
-        start = get_time();
         calc_pixel_weights<float>(depth_img, label_probs, width, height,
                                   ctx->n_labels, ctx->joint_map, weights);
-        end = get_time();
-        duration = end - start;
-        LOGI("Calculating pixel weights took %.3f%s\n",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
-
-        start = get_time();
         InferredJoints *candidate =
             infer_joints_fast<float>(depth_img, label_probs, weights,
                                      width, height, ctx->n_labels,
@@ -2634,21 +2654,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         assert(candidate->n_joints == ctx->n_joints);
 
-        end = get_time();
-        duration = end - start;
-
+        // Build and refine skeleton
         struct gm_skeleton candidate_skeleton(ctx->n_joints);
         build_skeleton(ctx, candidate, candidate_skeleton);
         refine_skeleton(ctx, candidate, candidate_skeleton);
 
         free_joints(candidate);
 
-        LOGI("Inferring joints and refinement took %.3f%s "
-             "(confidence: %f, distance: %f)\n",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration),
-             candidate_skeleton.confidence, candidate_skeleton.distance);
-
+        // If this skeleton has higher confidence than the last, keep it
         if (compare_skeletons(candidate_skeleton, tracking->skeleton)) {
             std::swap(tracking->skeleton, candidate_skeleton);
             std::swap(tracking->label_probs, label_probs);
@@ -2670,6 +2683,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
          it != person.indices.end(); ++it) {
         tracking->depth_classification->points[*it].label = tracked ? TRK : CAN;
     }
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Inference on %d clouds took %.3f%s",
+         (int)depth_images.size(),
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 
     if (tracked) {
         start = get_time();
@@ -2730,11 +2750,17 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         end = get_time();
         duration = end - start;
-        LOGI("Joint processing took %.3f%s\n",
+        LOGI("Joint processing took %.3f%s",
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
+        start = get_time();
         update_depth_codebook(ctx, tracking, reproj_map);
+        end = get_time();
+        duration = end - start;
+        LOGI("Updating depth codebook took %.3f%s",
+             get_duration_ns_print_scale(duration),
+             get_duration_ns_print_scale_suffix(duration));
     }
 
     return tracked;
@@ -3132,7 +3158,7 @@ detector_thread_cb(void *data)
     uint64_t end = get_time();
     uint64_t duration = end - start;
 
-    gm_debug(ctx->log, "Initialized Dlib frontal face detector: %.3f%s",
+    gm_debug(ctx->log, "Initialising Dlib frontal face detector took %.3f%s",
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
@@ -3257,7 +3283,7 @@ detector_thread_cb(void *data)
 
         end = get_time();
         duration = end - start;
-        gm_debug(ctx->log, "Finished skeletal tracking (%.3f%s)",
+        gm_debug(ctx->log, "Skeletal tracking took %.3f%s",
                  get_duration_ns_print_scale(duration),
                  get_duration_ns_print_scale_suffix(duration));
 
