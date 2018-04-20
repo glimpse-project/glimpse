@@ -4342,7 +4342,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 0.2f;
     ctx->properties.push_back(prop);
 
-    ctx->joint_refinement = true;
+    ctx->joint_refinement = false;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "joint_refinement";
