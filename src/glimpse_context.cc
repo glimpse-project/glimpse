@@ -262,6 +262,7 @@ struct gm_skeleton {
     std::vector<struct bone_info> bones;
     float confidence;
     float distance;
+    uint64_t timestamp;
 
     gm_skeleton() :
       confidence(0.f),
@@ -1146,20 +1147,97 @@ gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *trackin
 }
 
 static inline float
-distance_between(float *point1, float *point2)
+distance_between(const float *point1, const float *point2)
 {
     return sqrtf(powf(point1[0] - point2[0], 2.f) +
                  powf(point1[1] - point2[1], 2.f) +
                  powf(point1[2] - point2[2], 2.f));
 }
 
+static inline bool
+is_bone_length_diff(const struct bone_info &ref_bone,
+                    const struct bone_info &bone,
+                    float max_variance)
+{
+    return fabsf(bone.length - ref_bone.length) > max_variance;
+}
+
+static inline bool
+is_bone_angle_diff(const struct bone_info &bone,
+                   const struct gm_skeleton &ref_skel,
+                   const struct gm_skeleton &skel,
+                   float max_angle)
+{
+    glm::vec3 bone_vec = glm::vec3(skel.joints[bone.tail].x -
+                                   skel.joints[bone.head].x,
+                                   skel.joints[bone.tail].y -
+                                   skel.joints[bone.head].y,
+                                   skel.joints[bone.tail].z -
+                                   skel.joints[bone.head].z);
+    glm::vec3 ref_vec = glm::vec3(ref_skel.joints[bone.tail].x -
+                                  ref_skel.joints[bone.head].x,
+                                  ref_skel.joints[bone.tail].y -
+                                  ref_skel.joints[bone.head].y,
+                                  ref_skel.joints[bone.tail].z -
+                                  ref_skel.joints[bone.head].z);
+    float angle = glm::degrees(acosf(
+        glm::dot(glm::normalize(bone_vec), glm::normalize(ref_vec))));
+    while (angle > 180.f) angle -= 360.f;
+    float time = (float)((skel.timestamp - ref_skel.timestamp) / 1e9);
+    float angle_delta = fabsf(angle) / time;
+
+    return angle_delta > max_angle;
+}
+
+static int
+is_skeleton_diff(const struct gm_context *ctx,
+                 const struct gm_skeleton &skel,
+                 const struct gm_skeleton &ref)
+{
+    int violations = 0;
+    for (unsigned i = 0; i < ref.bones.size(); ++i) {
+        const struct bone_info &ref_bone = ref.bones[i];
+        if (ref_bone.head < 0) {
+            continue;
+        }
+
+        bool bone_found = false;
+        for (unsigned j = 0; j < skel.bones.size(); ++j) {
+            const struct bone_info &bone = skel.bones[i];
+
+            if (bone.head != ref_bone.head ||
+                bone.tail != ref_bone.tail) {
+                continue;
+            }
+
+            bone_found = true;
+
+            if (is_bone_length_diff(bone, ref_bone,
+                                    ctx->bone_length_variance)) {
+                ++violations;
+            }
+            if (is_bone_angle_diff(bone, ref, skel,
+                                   ctx->bone_rotation_variance)) {
+                ++violations;
+            }
+            break;
+        }
+
+        if (!bone_found) {
+            violations += 2;
+        }
+    }
+
+    return violations;
+}
+
 static bool
 compare_skeletons(const struct gm_skeleton &skel1,
                   const struct gm_skeleton &skel2)
 {
-    return (skel1.distance < skel2.distance) ||
-           (skel1.distance == skel2.distance &&
-            skel1.confidence > skel2.confidence);
+    return (skel1.distance == skel2.distance) ?
+        skel1.confidence > skel2.confidence :
+        skel1.distance < skel2.distance;
 }
 
 static void
@@ -1301,6 +1379,14 @@ refine_skeleton(struct gm_context *ctx,
     gm_debug(ctx->log, "Prime skeleton confidence: %f, distance: %f",
              skeleton.confidence, skeleton.distance);
 
+    // If we tracked the previous frame, predict a skeleton to use as a
+    // reference for refinement.
+    int skel_diff = 0;
+    if (ctx->n_tracking && ctx->tracking_history[0]) {
+        skel_diff = is_skeleton_diff(ctx, skeleton,
+                                     ctx->tracking_history[0]->skeleton);
+    }
+
     // For each joint, we look at the score of the skeleton using each
     // joint cluster and if it scores higher than the most confident
     // joint, we replace that joint and continue.
@@ -1312,6 +1398,8 @@ refine_skeleton(struct gm_context *ctx,
 
         for (LList *l = result->joints[j]->next; l; l = l->next) {
             struct gm_skeleton candidate_skeleton(result->n_joints);
+            candidate_skeleton.timestamp = skeleton.timestamp;
+
             Joint *joint = (Joint *)l->data;
             candidate_skeleton.joints[j].x = joint->x;
             candidate_skeleton.joints[j].y = joint->y;
@@ -1319,10 +1407,20 @@ refine_skeleton(struct gm_context *ctx,
             candidate_skeleton.joints[j].confidence = joint->confidence;
             candidate_skeleton.joints[j].predicted = false;
             candidate_skeleton.confidence += joint->confidence;
-            build_skeleton(ctx, result, candidate_skeleton, j, j);
 
-            if (compare_skeletons(candidate_skeleton, skeleton)) {
+            build_skeleton(ctx, result, candidate_skeleton, j, j);
+            build_bones(ctx, candidate_skeleton);
+
+            int cand_diff = 0;
+            if (ctx->n_tracking && ctx->tracking_history[0]) {
+                cand_diff =
+                    is_skeleton_diff(ctx, candidate_skeleton,
+                                     ctx->tracking_history[0]->skeleton);
+            }
+            if (cand_diff < skel_diff &&
+                compare_skeletons(candidate_skeleton, skeleton)) {
                 std::swap(skeleton, candidate_skeleton);
+                skel_diff = cand_diff;
                 is_refined = true;
             }
         }
@@ -1445,7 +1543,8 @@ sanitise_skeleton(struct gm_context *ctx,
                          parent_joint.x, parent_joint.y, parent_joint.z,
                          prediction.x, prediction.y, prediction.z,
                          prev0.x, prev0.y, prev0.z,
-                         distance, distance / prev_dist, parent_joint.confidence);
+                         distance, distance / prev_dist,
+                         parent_joint.confidence);
                     parent_joint.x = prediction.x;
                     parent_joint.y = prediction.y;
                     parent_joint.z = prediction.z;
@@ -1455,7 +1554,7 @@ sanitise_skeleton(struct gm_context *ctx,
         }
     }
 
-    // Calculate the bone metadata
+    // (Re-)calculate the bone metadata
     build_bones(ctx, skeleton);
 
     // For each bone, we compare the bone length and look at the change in
@@ -1507,8 +1606,8 @@ sanitise_skeleton(struct gm_context *ctx,
 
             // If the bone length has changed significantly, adjust the length
             // so that it remains within our acceptable bounds of variation.
-            float bone_length_diff = fabsf(bone.length - prev_bone.length);
-            if (bone_length_diff > ctx->bone_length_variance) {
+            if (is_bone_length_diff(bone, prev_bone,
+                                    ctx->bone_length_variance)) {
                 float new_length = (bone.length > prev_bone.length) ?
                     prev_bone.length + ctx->bone_length_variance :
                     prev_bone.length - ctx->bone_length_variance;
@@ -1556,31 +1655,10 @@ sanitise_skeleton(struct gm_context *ctx,
         if (prev_angle) {
             struct gm_skeleton &prev_skel = prev_angle->skeleton;
 
-            // Calculate the angle between the bone and the last uncorrected
-            // bone.
-            glm::vec3 bone_vec = glm::vec3(skeleton.joints[bone.tail].x -
-                                           skeleton.joints[bone.head].x,
-                                           skeleton.joints[bone.tail].y -
-                                           skeleton.joints[bone.head].y,
-                                           skeleton.joints[bone.tail].z -
-                                           skeleton.joints[bone.head].z);
-            glm::vec3 prev_vec = glm::vec3(prev_skel.joints[bone.tail].x -
-                                           prev_skel.joints[bone.head].x,
-                                           prev_skel.joints[bone.tail].y -
-                                           prev_skel.joints[bone.head].y,
-                                           prev_skel.joints[bone.tail].z -
-                                           prev_skel.joints[bone.head].z);
-
-            float angle = glm::degrees(acosf(
-                glm::dot(glm::normalize(bone_vec), glm::normalize(prev_vec))));
-            while (angle > 180.f) angle -= 360.f;
-            float time = (float)
-                ((timestamp - prev_angle->frame->timestamp) / 1e9);
-
             // If the bone angle has changed quicker than we expected, use the
             // previous bone angle.
-            float angle_delta = fabsf(angle) / time;
-            if (angle_delta > ctx->bone_rotation_variance) {
+            if (is_bone_angle_diff(bone, skeleton, prev_skel,
+                                   ctx->bone_rotation_variance)) {
 #if 0
                 // It feels like mixing in some of the angle from the spurious
                 // tracking might be nice, but generally, if we're doing this
@@ -1621,16 +1699,14 @@ sanitise_skeleton(struct gm_context *ctx,
                 build_bones(ctx, skeleton, false);
 
                 gm_debug(ctx->log, "Bone angle correction (%s->%s) "
-                         "(%.2f, %.2f, %.2f)->(%.2f, %.2f, %.2f) "
-                         "l: %.2f, a: %.2f",
+                         "(%.2f, %.2f, %.2f)->(%.2f, %.2f, %.2f)",
                          joint_name(bone.head), joint_name(bone.tail),
                          skeleton.joints[bone.head].x,
                          skeleton.joints[bone.head].y,
                          skeleton.joints[bone.head].z,
                          skeleton.joints[bone.tail].x,
                          skeleton.joints[bone.tail].y,
-                         skeleton.joints[bone.tail].z,
-                         bone.length, angle_delta);
+                         skeleton.joints[bone.tail].z);
             }
         }
     }
@@ -2311,7 +2387,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     // Do classification of depth buffer
-    for (int off = 0; off < depth_class_size; ++off) {
+    for (unsigned off = 0; off < depth_class_size; ++off) {
         for (std::vector<int>::iterator rit = reproj_map[off].begin();
              rit != reproj_map[off].end(); ++rit) {
             int depth_off = *rit;
@@ -2688,7 +2764,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
         xmalloc(width * height * ctx->n_joints * sizeof(float));
     float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
                                          sizeof(float));
-    tracking->skeleton.distance = FLT_MAX;
     int best_person = 0;
     for (unsigned i = 0; i < depth_images.size(); ++i) {
         float *depth_img = depth_images[i];
@@ -2733,12 +2808,15 @@ gm_context_track_skeleton(struct gm_context *ctx,
         lstart = get_time();
         struct gm_skeleton candidate_skeleton(ctx->n_joints);
         build_skeleton(ctx, candidate, candidate_skeleton);
+        candidate_skeleton.timestamp = tracking->frame->timestamp;
+        build_bones(ctx, candidate_skeleton);
         refine_skeleton(ctx, candidate, candidate_skeleton);
 
         free_joints(candidate);
 
         // If this skeleton has higher confidence than the last, keep it
-        if (compare_skeletons(candidate_skeleton, tracking->skeleton)) {
+        if (i == 0 ||
+            compare_skeletons(candidate_skeleton, tracking->skeleton)) {
             std::swap(tracking->skeleton, candidate_skeleton);
             std::swap(tracking->label_probs, label_probs);
             best_person = i;
@@ -4342,7 +4420,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 0.2f;
     ctx->properties.push_back(prop);
 
-    ctx->joint_refinement = false;
+    ctx->joint_refinement = true;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "joint_refinement";
