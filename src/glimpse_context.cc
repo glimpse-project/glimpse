@@ -3990,7 +3990,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     /* Load the decision trees immediately so we know how many labels we're
      * dealing with asap.
      */
-    int max_trees = 3;
+    int max_trees = 10;
     ctx->n_decision_trees = 0;
     ctx->decision_trees = (RDTree**)xcalloc(max_trees, sizeof(RDTree*));
 
@@ -4022,9 +4022,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                                        GM_ASSET_MODE_BUFFER,
                                        &open_err);
             if (!tree_asset) {
-                gm_warn(logger,
-                         "Failed to open tree%u.rdt and tree%u.json: %s",
-                         i, i, open_err);
                 free(open_err);
                 break;
             }
@@ -4044,10 +4041,10 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_asset_close(tree_asset);
 
         if (!ctx->decision_trees[i]) {
-            gm_warn(logger, "Failed to load %s", name);
             break;
         }
 
+        gm_info(logger, "Opened %s", name);
         ctx->n_decision_trees++;
     }
 
@@ -4055,6 +4052,8 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_throw(logger, err, "Failed to open any decision tree assets");
         gm_context_destroy(ctx);
         return NULL;
+    } else {
+        gm_info(logger, "Loaded %d decision trees", ctx->n_decision_trees);
     }
 
     ctx->n_labels = ctx->decision_trees[0]->header.n_labels;
