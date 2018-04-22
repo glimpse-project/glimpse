@@ -2149,8 +2149,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
     const float cx = tracking->depth_camera_intrinsics.cx;
     const float cy = tracking->depth_camera_intrinsics.cy;
 
-    if (tracking->frame->depth_format != GM_FORMAT_POINTS_XYZC_F32_M &&
-        !ctx->apply_depth_distortion) {
+
+    /* XXX: there's a special case in copy_and_rotate_depth_buffer that
+     * results in tracking->depth_cloud being initialized so we don't need to
+     * go via tracking->depth and also handles min/max thresholding.
+     * TODO: avoid this special case and change copy_and_rotate_depth_buffer to
+     * update ->depth_cloud in all cases.
+     */
+    if (tracking->frame->depth_format != GM_FORMAT_POINTS_XYZC_F32_M ||
+        ctx->apply_depth_distortion)
+    {
         start = get_time();
         int n_points = 0;
 
@@ -3225,7 +3233,19 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
             with_rotated_rx_ry_roff(x, y, width, height,
                                     rotation, rot_width,
                 {
+                    /* FIXME: This is redundant now (if we aren't visualizing depth
+                     * in the viewer) so we should avoid this copy...
+                     */
                     depth_copy[roff] = point_t.z;
+
+                    /*
+                     * FIXME:
+                     * XXX: this is really non-obvious/unexpected behaviour for
+                     * this function and inconsistent with all other formats.
+                     * XXX: there is a corresponding special case in
+                     * gm_context_track_skeleton that knows to treat the same
+                     * conditions as a spcial case.
+                     */
                     if (!ctx->apply_depth_distortion &&
                         !std::isnan(point_t.z) &&
                         point_t.z >= ctx->min_depth &&
