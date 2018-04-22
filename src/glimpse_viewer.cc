@@ -69,6 +69,7 @@
 #    define GLFW_INCLUDE_NONE
 #    include <GLFW/glfw3.h>
 #    include <imgui_impl_glfw_gles3.h>
+#    include <getopt.h>
 #endif
 
 #define GLSL_SHADER_VERSION "#version 300 es\n"
@@ -327,6 +328,11 @@ static bool pause_profile;
 #ifdef USE_GLFM
 static bool permissions_check_failed;
 static bool permissions_check_passed;
+#endif
+
+#ifdef USE_GLFW
+static enum gm_device_type device_type_opt = GM_DEVICE_KINECT;
+static char *device_recording_opt;
 #endif
 
 static void viewer_init(Data *data);
@@ -2569,6 +2575,9 @@ init_winsys_glfm(Data *data, GLFMDisplay *display)
     glfmSetMainLoopFunc(display, frame_cb);
 
     ImGui_ImplGlfmGLES3_Init(display, true);
+
+    // Quick hack to make scrollbars a bit more usable on small devices
+    ImGui::GetStyle().ScrollbarSize *= 2;
 }
 #endif
 
@@ -2758,7 +2767,13 @@ viewer_init(Data *data)
 #elif defined(USE_AVF)
     config.type = GM_DEVICE_AVF;
 #else
-    config.type = GM_DEVICE_KINECT;
+    config.type = device_type_opt;
+    char rec_path[1024];
+    if (config.type == GM_DEVICE_RECORDING) {
+        xsnprintf(rec_path, sizeof(rec_path), "%s/%s",
+                  glimpse_recordings_path, device_recording_opt);
+        config.recording.path = rec_path;
+    }
 #endif
     data->recording_device = gm_device_open(data->log, &config, NULL);
     data->active_device = data->recording_device;
@@ -2778,79 +2793,141 @@ viewer_init(Data *data)
     data->initialized = true;
 }
 
+#if !defined(USE_GLFM)
+static void
+usage(void)
+{
+    printf(
+"Usage glimpse_viewer [options]\n"
+"\n"
+"    -d,--device=DEV            Device type to use\n\n"
+"                               - kinect:    Either a Kinect camera or Fakenect\n"
+"                                            recording (default)\n"
+"                               - recording: A glimpse_viewer recording (must\n"
+"                                            pass -r/--recording option too)\n"
+"    -r,--recording=NAME        Name or recording to play\n"
+"\n"
+"    -h,--help                  Display this help\n\n"
+"\n"
+    );
+
+    exit(1);
+}
+
+static void
+parse_args(Data *data, int argc, char **argv)
+{
+    int opt;
+
+#define DEVICE_OPT              (CHAR_MAX + 1)
+#define RECORDING_OPT           (CHAR_MAX + 1)
+
+    /* N.B. The initial '+' means that getopt will stop looking for options
+     * after the first non-option argument...
+     */
+    const char *short_options="+hd:r:";
+    const struct option long_options[] = {
+        {"help",            no_argument,        0, 'h'},
+        {"device",          required_argument,  0, DEVICE_OPT},
+        {"recording",       required_argument,  0, RECORDING_OPT},
+        {0, 0, 0, 0}
+    };
+
+    while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
+           != -1)
+    {
+        switch (opt) {
+            case 'h':
+                usage();
+                return;
+            case 'd':
+                if (strcmp(optarg, "kinect") == 0)
+                    device_type_opt = GM_DEVICE_KINECT;
+                else if (strcmp(optarg, "recording") == 0)
+                    device_type_opt = GM_DEVICE_RECORDING;
+                else
+                    usage();
+                break;
+            case 'r':
+                    device_recording_opt = strdup(optarg);
+                break;
+            default:
+                usage();
+                break;
+        }
+    }
+}
+#endif
 
 #ifdef USE_GLFM
 void
 glfmMain(GLFMDisplay *display)
-#else
+#else  // USE_GLFW
 int
 main(int argc, char **argv)
 #endif
 {
     Data *data = new Data();
+    const char *recordings_path = NULL;
 #ifdef __APPLE__
-    char *documents_dir = ios_util_get_documents_path();
+    char *assets_root = ios_util_get_documents_path();
+    char log_filename_tmp[PATH_MAX];
+    snprintf(log_filename_tmp, sizeof(log_filename_tmp),
+             "%s/glimpse.log", assets_root);
+    data->log_fp = fopen(log_filename_tmp, "w");
+    char recordings_path_tmp[PATH_MAX];
+    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
+             "%s/ViewerRecording", assets_root);
+    recordings_path = recordings_path_tmp;
     permissions_check_passed = true;
+#elif defined(__ANDROID__)
+    char *assets_root = strdup("/sdcard/Glimpse");
+    char log_filename_tmp[PATH_MAX];
+    snprintf(log_filename_tmp, sizeof(log_filename_tmp),
+             "%s/glimpse.log", assets_root);
+    data->log_fp = fopen(log_filename_tmp, "w");
+    char recordings_path_tmp[PATH_MAX];
+    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
+             "%s/ViewerRecording", assets_root);
+    recordings_path = recordings_path_tmp;
+#else
+    parse_args(data, argc, argv);
+
+    char *assets_root = strdup(getenv("GLIMPSE_ASSETS_ROOT"));
+    data->log_fp = stderr;
+    recordings_path = getenv("GLIMPSE_RECORDING_PATH");
 #endif
 
-#ifdef __ANDROID__
-#define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
-    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
-    setenv("GLIMPSE_RECORDING_PATH", ANDROID_ASSETS_ROOT "/ViewerRecording",
-           true);
-    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
-    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
-#elif defined(__APPLE__)
-    char full_filename[PATH_MAX];
-    snprintf(full_filename, sizeof(full_filename), "%s/glimpse.log", documents_dir);
-    data->log_fp = fopen(full_filename, "w");
-    snprintf(full_filename, sizeof(full_filename), "%s/FakeRecording", documents_dir);
-    setenv("FAKENECT_PATH", full_filename, true);
-#else
-    data->log_fp = stderr;
-#endif
+    if (!getenv("FAKENECT_PATH")) {
+        char fakenect_path[PATH_MAX];
+        snprintf(fakenect_path, sizeof(fakenect_path),
+                 "%s/FakeRecording", assets_root);
+        setenv("FAKENECT_PATH", fakenect_path, true);
+    }
 
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
     gm_debug(data->log, "Glimpse Viewer");
 
-#ifdef __APPLE__
-    gm_set_assets_root(data->log, documents_dir);
-    char tmp_recordings_path[PATH_MAX];
-    snprintf(tmp_recordings_path, sizeof(tmp_recordings_path), "%s/ViewerRecording",
-             documents_dir);
-    setenv("GLIMPSE_RECORDING_PATH", tmp_recordings_path, true);
-#else
-    gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
-#endif
+    gm_set_assets_root(data->log, assets_root);
 
-    const char *recordings_path = getenv("GLIMPSE_RECORDING_PATH");
     if (!recordings_path)
         recordings_path = gm_get_assets_root();
     if (!recordings_path)
         recordings_path = "glimpse_viewer_recording";
     glimpse_recordings_path = strdup(recordings_path);
-
-#ifdef USE_GLFW
-    init_winsys_glfw(data);
-#endif
-#ifdef USE_GLFM
-    init_winsys_glfm(data, display);
-#endif
+    index_recordings(data);
 
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);
 
-    index_recordings(data);
+#ifdef USE_GLFM
+    init_winsys_glfm(data, display);
+#else // USE_GLFW
+    init_winsys_glfw(data);
 
-#if defined(__ANDROID__) || defined(__APPLE__)
-    // Quick hack to make scrollbars a bit more usable on small devices
-    ImGui::GetStyle().ScrollbarSize *= 2;
-#endif
-
-#ifdef USE_GLFW
     viewer_init(data);
 
     event_loop(data);
