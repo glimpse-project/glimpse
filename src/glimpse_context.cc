@@ -2323,15 +2323,17 @@ gm_context_track_skeleton(struct gm_context *ctx,
         colour_debug_cloud(ctx, tracking);
     }
 
-    start = get_time();
     if (ctx->depth_gap_fill) {
+        start = get_time();
+
         gm_context_fill_gaps(ctx, tracking);
+
+        end = get_time();
+        duration = end - start;
+        gm_info(ctx->log, "Gap filling took %.3f%s",
+                get_duration_ns_print_scale(duration),
+                get_duration_ns_print_scale_suffix(duration));
     }
-    end = get_time();
-    duration = end - start;
-    LOGI("Gap filling took %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
 
     if (ctx->debug_cloud_stage == TRACKING_STAGE_GAP_FILLED &&
         ctx->debug_cloud_mode)
