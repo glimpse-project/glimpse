@@ -4768,7 +4768,7 @@ gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
 
     foreach_xy_off(*width, *height) {
         float depth = tracking->depth[off];
-#if 0
+#if 1
         struct color rgb = stops_color_from_val(ctx->depth_color_stops,
                                                 ctx->n_depth_color_stops,
                                                 ctx->depth_color_stops_range,
