@@ -174,6 +174,8 @@ infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
           if (pthread_create(&threads[i], NULL, infer_labels_thread<FloatT>,
                              (void*)(&data[i])) != 0)
             {
+              fprintf(stderr,
+                      "Error creating thread, results will be incomplete.\n");
               n_threads = i;
               break;
             }
