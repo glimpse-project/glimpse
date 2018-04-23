@@ -2980,7 +2980,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         xmalloc(width * height * ctx->n_joints * sizeof(float));
     float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
                                          sizeof(float));
-    int best_person = 0;
+    unsigned best_person = 0;
     for (unsigned i = 0; i < depth_images.size(); ++i) {
         float *depth_img = depth_images[i];
 
@@ -3055,7 +3055,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         colour_debug_cloud(ctx, tracking);
 
         /* Also show other failed candidates... */
-        for (int i = 0; i < persons.size(); i++) {
+        for (unsigned i = 0; i < persons.size(); i++) {
             if (i == best_person)
                 continue;
             add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
