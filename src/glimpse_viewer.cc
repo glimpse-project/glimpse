@@ -2871,7 +2871,8 @@ main(int argc, char **argv)
 #else
     parse_args(data, argc, argv);
 
-    char *assets_root = strdup(getenv("GLIMPSE_ASSETS_ROOT"));
+    const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
+    char *assets_root = strdup(assets_root_env ? assets_root_env : "");
     data->log_fp = stderr;
     recordings_path = getenv("GLIMPSE_RECORDING_PATH");
 #endif
@@ -2892,8 +2893,6 @@ main(int argc, char **argv)
 
     if (!recordings_path)
         recordings_path = gm_get_assets_root();
-    if (!recordings_path)
-        recordings_path = "glimpse_viewer_recording";
     glimpse_recordings_path = strdup(recordings_path);
     index_recordings(data);
 
