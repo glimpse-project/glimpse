@@ -1292,7 +1292,9 @@ draw_ui(Data *data)
          * entries, we only want to expose these two options in
          * realtime_ar_mode, while we aren't uploading any other debug textures
          */
-        ImGui::Combo("View", &main_view, views, 2);
+        if (ImGui::Button((main_view == 0) ? "Close" : "Properties")) {
+            main_view = (main_view == 0) ? 1 : 0;
+        }
 
         int x = origin.x;
         int y = ImGui::GetWindowHeight() + origin.y;
