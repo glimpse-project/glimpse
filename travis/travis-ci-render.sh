@@ -11,7 +11,6 @@ python3 --version
 pip3 --version
 ninja --version
 
-pip3 install meson
 export PATH=$HOME/.local/bin:$PATH
 
 # Even though it's an out-of-date version we install Blender via apt-get
