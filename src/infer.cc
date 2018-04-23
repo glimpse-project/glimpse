@@ -156,16 +156,6 @@ infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
   float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
   memset(output_pr, 0, output_size);
 
-/*typedef struct {
-    uint8_t thread;
-    uint8_t n_threads;
-    RDTree** forest;
-    uint8_t n_trees;
-    void* depth_image;
-    uint32_t width;
-    uint32_t height;
-    float* output;
-} InferThreadData;*/
   unsigned int n_threads = std::thread::hardware_concurrency();
   if (!use_threads || n_threads <= 1)
     {
