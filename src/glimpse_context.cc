@@ -2153,7 +2153,7 @@ pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
             continue; \
         } \
         point.x = (x - cx) * point.z * inv_fx; \
-        point.y = -((y - cy) * point.z * inv_fy); \
+        point.y = ((y - cy) * point.z * inv_fy); \
         point.label = -1; \
         pcl_cloud->points[row + x] = point; \
     } \
@@ -2184,6 +2184,8 @@ pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
                 };
 
                 uint32_t rnd = xorshift32(&seed);
+                //printf("XOR RND (idx=%d): |%*s'%*s|\n",
+                //       rnd, (rnd%8), (rnd%8), "", 7-(rnd%8), "");
                 point.z = neighbours[rnd % 8];
                 for (int i = 1; !std::isnormal(point.z) && i < 8; i++) {
                     point.z = neighbours[(rnd + i) % 8];
