@@ -2683,6 +2683,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int height = (int)tracking->depth_classification->height;
         int fx = width / 2;
         int fy = height / 2;
+        int fidx = fy * width + fx;
 
         // First search a small box in the center of the image and pick the
         // nearest point to start our flood-fill from.
@@ -2752,6 +2753,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
         flood_fill.push({ fx, fy, fx, fy });
         std::vector<bool> done_mask(depth_class_size, false);
 
+        pcl::PointXYZL &focus_pt =
+            tracking->depth_classification->points[fidx];
+
         float lowest_point = -FLT_MAX;
         while (!flood_fill.empty()) {
             struct PointCmp point = flood_fill.front();
@@ -2765,15 +2769,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
-            int lidx = point.ly * width + point.lx;
-            pcl::PointXYZL &pcl_pt1 =
+            pcl::PointXYZL &pcl_pt =
                 tracking->depth_classification->points[idx];
-            pcl::PointXYZL &pcl_pt2 =
-                tracking->depth_classification->points[lidx];
 
             // TODO: Make these values configurable?
-            if (fabsf(pcl_pt2.x - pcl_pt1.x) > 0.25f ||
-                fabsf(pcl_pt2.z - pcl_pt1.z) > 0.2f) {
+            if (fabsf(focus_pt.x - pcl_pt.x) > 0.25f ||
+                fabsf(focus_pt.z - pcl_pt.z) > 0.5f) {
                 continue;
             }
 
@@ -2800,7 +2801,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         flood_fill.push({ fx, fy, fx, fy });
         std::fill(done_mask.begin(), done_mask.end(), false);
 
-        while(!flood_fill.empty()) {
+        while (!flood_fill.empty()) {
             struct PointCmp point = flood_fill.front();
             flood_fill.pop();
 
@@ -3158,8 +3159,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
         if (ctx->bone_sanitisation) {
             sanitise_skeleton(ctx, tracking->skeleton,
                               tracking->frame->timestamp);
-        } else {
-            build_bones(ctx, tracking->skeleton);
         }
         for (int j = 0; j < ctx->n_joints; j++) {
             int idx = j * 3;
