@@ -2642,12 +2642,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     start = get_time();
 
-    // This is the center line of sight which we use for simple clustering
-    tracking_draw_line(tracking,
-                       0, 0, 0.2,
-                       0, 0, 4,
-                       0xff0000ff);
-
     std::vector<pcl::PointIndices> cluster_indices;
     if (!ctx->latest_tracking || !ctx->latest_tracking->success) {
         // If we've not tracked a human yet, the depth classification may not
@@ -2658,6 +2652,59 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int height = (int)tracking->depth_classification->height;
         int fx = width / 2;
         int fy = height / 2;
+
+        // First search a small box in the center of the image and pick the
+        // nearest point to start our flood-fill from.
+        int fw = width / 8; // TODO: make box size configurable
+        int fh = height / 8;
+
+        float fz = FLT_MAX;
+        float line_x = 0;
+        float line_y = 0;
+#if 1
+        int x0 = fx - fw / 2;
+        int y0 = fy - fh / 2;
+        for (int y = y0; y < (y0 + fh); y++) {
+            for (int x = x0; x < (x0 + fw); x++) {
+                int idx = y * width + x;
+                pcl::PointXYZL &point =
+                    tracking->depth_classification->points[idx];
+                float depth = point.z;
+                if (depth < fz) {
+                    line_x = point.x;
+                    line_y = point.y;
+                    fx = x;
+                    fy = y;
+                    fz = depth;
+                }
+            }
+        }
+#else // Just start from center pixel...
+        int idx = fy * width + fx;
+        float depth = tracking->depth_classification->points[fy * width + fx].z;
+        if (depth < fz)
+            fz = depth;
+#endif
+
+        if (ctx->debug_cloud_mode) {
+            // Draw the lines of focus...
+            if (fz != FLT_MAX) {
+                tracking_draw_line(tracking,
+                                   0, 0, 0,
+                                   0, 0, 4,
+                                   0x808080ff);
+                tracking_draw_line(tracking,
+                                   0, 0, 0,
+                                   line_x, line_y, fz,
+                                   0x00ff00ff);
+
+            } else {
+                tracking_draw_line(tracking,
+                                   0, 0, 0,
+                                   0, 0, 4,
+                                   0xff0000ff);
+            }
+        }
 
         // Flood-fill from the focal point, with a limit on the x and z
         // axes for how far a point can be from the focus. This will allow
