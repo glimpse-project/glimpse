@@ -2296,6 +2296,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
             if (!std::isnormal(depth) ||
                 depth < ctx->min_depth || depth > ctx->max_depth) {
+                tracking->depth_cloud->points[off].z = nan;
                 continue;
             }
 
