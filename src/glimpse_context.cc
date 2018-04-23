@@ -2925,22 +2925,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
 
-    // Using the lores point cloud as a mask, reproject the hires point cloud
-    // into training camera space.
-    glm::mat3 rotate;
-    glm::vec3 translate;
-    if (tracking->extrinsics_set) {
-        const float *r = tracking->depth_to_video_extrinsics.rotation;
-        rotate = glm::mat3(r[0], r[1], r[2],
-                           r[3], r[4], r[5],
-                           r[6], r[7], r[8]);
-        const float *t = tracking->depth_to_video_extrinsics.translation;
-        translate = glm::vec3(t[0], t[1], t[2]);
-    } else {
-        rotate = glm::mat3();
-        translate = glm::vec3();
-    }
-
     std::vector<float*> depth_images;
     for (std::vector<pcl::PointIndices>::iterator p_it = persons.begin();
          p_it != persons.end(); ++p_it) {
@@ -2967,10 +2951,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
                     glm::vec3 point_t(tracking->depth_cloud->points[off].x,
                                       tracking->depth_cloud->points[off].y,
                                       tracking->depth_cloud->points[off].z);
-
-                    if (tracking->extrinsics_set) {
-                        point_t = (rotate * point_t) + translate;
-                    }
 
                     int x = (int)
                         ((point_t.x * tracking->training_camera_intrinsics.fx /
