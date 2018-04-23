@@ -28,6 +28,8 @@
 #include <vector>
 #include <list>
 #include <forward_list>
+#include <thread>
+#include <pthread.h>
 
 #include "half.hpp"
 
@@ -57,73 +59,141 @@ typedef struct {
     uint8_t labels[2];
 } JointMapEntry;
 
+typedef struct {
+    uint8_t thread;
+    uint8_t n_threads;
+    RDTree** forest;
+    uint8_t n_trees;
+    void* depth_image;
+    uint32_t width;
+    uint32_t height;
+    float* output;
+} InferThreadData;
+
+template<typename FloatT>
+static void*
+infer_labels_thread(void* userdata)
+{
+  InferThreadData* data = (InferThreadData*)userdata;
+  FloatT* depth_image = (FloatT*)data->depth_image;
+  uint8_t n_labels = data->forest[0]->header.n_labels;
+
+  // Accumulate probability map
+  for (uint32_t off = (uint32_t)data->thread; off < data->width * data->height;
+       off += (uint32_t)data->n_threads)
+    {
+      int y = off / data->width;
+      int x = off % data->width;
+
+      float* out_pr_table = &data->output[off * n_labels];
+      float depth_value = (float)depth_image[off];
+
+      // TODO: Provide a configurable threshold here?
+      if (depth_value >= HUGE_DEPTH)
+        {
+          out_pr_table[data->forest[0]->header.bg_label] += 1.0f;
+          continue;
+        }
+
+      Int2D pixel = { (int32_t)x, (int32_t)y };
+      for (uint8_t i = 0; i < data->n_trees; ++i)
+        {
+          RDTree* tree = data->forest[i];
+          Node* node = tree->nodes;
+
+          uint32_t id = 0;
+          while (node->label_pr_idx == 0)
+            {
+              float value = sample_uv<FloatT>(depth_image,
+                                              data->width, data->height,
+                                              pixel, depth_value, node->uv);
+
+              /* NB: The nodes are arranged in breadth-first, left then
+               * right child order with the root node at index zero.
+               *
+               * In this case if you have an index for any particular node
+               * ('id' here) then 2 * id + 1 is the index for the left
+               * child and 2 * id + 2 is the index for the right child...
+               */
+              id = (value < node->t) ? 2 * id + 1 : 2 * id + 2;
+
+              node = &tree->nodes[id];
+            }
+
+          /* NB: node->label_pr_idx is a base-one index since index zero
+           * is reserved to indicate that the node is not a leaf node
+           */
+          float* pr_table =
+            &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
+          for (int n = 0; n < n_labels; ++n)
+            {
+              out_pr_table[n] += pr_table[n];
+            }
+        }
+
+      for (int n = 0; n < n_labels; ++n)
+        {
+          out_pr_table[n] /= (float)data->n_trees;
+        }
+    }
+
+  if (data->n_threads > 1)
+    {
+      pthread_exit(NULL);
+    }
+
+  return NULL;
+}
 
 template<typename FloatT>
 float*
 infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
-             uint32_t width, uint32_t height, float* out_labels)
+             uint32_t width, uint32_t height, float* out_labels,
+             bool use_threads)
 {
   uint8_t n_labels = forest[0]->header.n_labels;
-
-  size_t output_size = width * height *
-                       forest[0]->header.n_labels * sizeof(float);
+  size_t output_size = width * height * n_labels * sizeof(float);
   float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
   memset(output_pr, 0, output_size);
 
-  // Accumulate probability map
-  for (uint32_t y = 0; y < height; y++)
+/*typedef struct {
+    uint8_t thread;
+    uint8_t n_threads;
+    RDTree** forest;
+    uint8_t n_trees;
+    void* depth_image;
+    uint32_t width;
+    uint32_t height;
+    float* output;
+} InferThreadData;*/
+  unsigned int n_threads = std::thread::hardware_concurrency();
+  if (!use_threads || n_threads <= 1)
     {
-      for (uint32_t x = 0; x < width; x++)
+      InferThreadData data = { 1, 1, forest, n_trees, (void*)depth_image, width, height, output_pr};
+      infer_labels_thread<FloatT>((void*)(&data));
+    }
+  else
+    {
+      pthread_t threads[n_threads];
+      InferThreadData data[n_threads];
+
+      for (unsigned int i = 0; i < n_threads; ++i)
         {
-          float* out_pr_table = &output_pr[(y * width * n_labels) +
-                                           (x * n_labels)];
-          float depth_value = (float)depth_image[y * width + x];
-
-          // TODO: Provide a configurable threshold here?
-          if (depth_value >= HUGE_DEPTH)
+          data[i] = { (uint8_t)i, (uint8_t)n_threads, forest, n_trees,
+                      (void*)depth_image, width, height, output_pr };
+          if (pthread_create(&threads[i], NULL, infer_labels_thread<FloatT>,
+                             (void*)(&data[i])) != 0)
             {
-              out_pr_table[forest[0]->header.bg_label] += 1.0f;
-              continue;
+              n_threads = i;
+              break;
             }
+        }
 
-          Int2D pixel = { (int32_t)x, (int32_t)y };
-          for (uint8_t i = 0; i < n_trees; ++i)
+      for (unsigned int i = 0; i < n_threads; ++i)
+        {
+          if (pthread_join(threads[i], NULL) != 0)
             {
-              RDTree* tree = forest[i];
-              Node* node = tree->nodes;
-
-              uint32_t id = 0;
-              while (node->label_pr_idx == 0)
-                {
-                  float value = sample_uv<FloatT>(depth_image, width, height,
-                                                  pixel, depth_value, node->uv);
-
-                  /* NB: The nodes are arranged in breadth-first, left then
-                   * right child order with the root node at index zero.
-                   *
-                   * In this case if you have an index for any particular node
-                   * ('id' here) then 2 * id + 1 is the index for the left
-                   * child and 2 * id + 2 is the index for the right child...
-                   */
-                  id = (value < node->t) ? 2 * id + 1 : 2 * id + 2;
-
-                  node = &tree->nodes[id];
-                }
-
-              /* NB: node->label_pr_idx is a base-one index since index zero
-               * is reserved to indicate that the node is not a leaf node
-               */
-              float* pr_table =
-                &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
-              for (int n = 0; n < n_labels; ++n)
-                {
-                  out_pr_table[n] += pr_table[n];
-                }
-            }
-
-          for (int n = 0; n < n_labels; ++n)
-            {
-              out_pr_table[n] /= (float)n_trees;
+              fprintf(stderr, "Error joining thread, trying to continue...\n");
             }
         }
     }
@@ -132,9 +202,11 @@ infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
 }
 
 template float*
-infer_labels<half>(RDTree**, uint8_t, half*, uint32_t, uint32_t, float*);
+infer_labels<half>(RDTree**, uint8_t, half*, uint32_t, uint32_t, float*,
+                   bool);
 template float*
-infer_labels<float>(RDTree**, uint8_t, float*, uint32_t, uint32_t, float*);
+infer_labels<float>(RDTree**, uint8_t, float*, uint32_t, uint32_t, float*,
+                    bool);
 
 /* We don't want to be making lots of function calls or dereferencing
  * lots of pointers while accessing the joint map within inner loops

@@ -25,6 +25,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #include "loader.h"
 #include "llist.h"
@@ -50,7 +51,8 @@ float* infer_labels(RDTree** forest,
                     FloatT* depth_image,
                     uint32_t width,
                     uint32_t height,
-                    float* out_labels = NULL);
+                    float* out_labels = NULL,
+                    bool use_threads = false);
 
 template<typename FloatT>
 float* calc_pixel_weights(FloatT* depth_image,
