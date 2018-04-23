@@ -408,6 +408,7 @@ struct gm_context
     struct gm_pose depth_pose;
     glm::mat4 start_to_depth_pose;
     std::vector<std::list<struct seg_codeword>> depth_seg;
+    std::vector<struct seg_codeword *> depth_seg_bg;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -2600,6 +2601,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     if (reset_pose) {
         ctx->depth_seg.clear();
         ctx->depth_seg.resize(depth_class_size);
+        ctx->depth_seg_bg.resize(depth_class_size);
         ctx->depth_pose = tracking->frame->pose;
         ctx->start_to_depth_pose = glm::inverse(to_start);
 
@@ -2662,12 +2664,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Remove depth classification old codewords
     for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
         std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        ctx->depth_seg_bg[off] = NULL;
         for (std::list<struct seg_codeword>::iterator it = codewords.begin();
              it != codewords.end();) {
-            if ((tracking->frame->timestamp - (*it).tl) / 1000000000.0 >=
+            struct seg_codeword &codeword = *it;
+            if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
                 ctx->seg_timeout) {
                 it = codewords.erase(it);
             } else {
+                if (!ctx->depth_seg_bg[off] ||
+                    codeword.n > ctx->depth_seg_bg[off]->n) {
+                    ctx->depth_seg_bg[off] = &codeword;
+                }
                 ++it;
             }
         }
@@ -2705,24 +2713,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
             const float psi = ctx->seg_psi;
 
             // Look to see if this pixel falls into an existing codeword
-            int max_n = 0;
             struct seg_codeword *codeword = NULL;
-            struct seg_codeword *bg_codeword = NULL;
-            float codeword_distance;
+            struct seg_codeword *bg_codeword = ctx->depth_seg_bg[off];
+
             std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
             for (std::list<struct seg_codeword>::iterator it =
                  codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
 
                 float dist = fabsf(depth - candidate.m);
-                if ((codeword && dist < codeword_distance) ||
-                    (!codeword && dist < tb)) {
+                if (dist < tb) {
                     codeword = &candidate;
-                    codeword_distance = dist;
-                }
-                if (candidate.n > max_n) {
-                    bg_codeword = &candidate;
-                    max_n = candidate.n;
+                    break;
                 }
             }
 
@@ -3251,6 +3253,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 #else
             ctx->depth_seg.clear();
             ctx->depth_seg.resize(depth_class_size);
+            ctx->depth_seg_bg.resize(depth_class_size);
 #endif
         }
 
