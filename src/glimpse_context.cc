@@ -179,6 +179,7 @@ enum tracking_stage {
     TRACKING_STAGE_GAP_FILLED,
     TRACKING_STAGE_DOWNSAMPLED,
     TRACKING_STAGE_GROUND_SPACE,
+    TRACKING_STAGE_CODEBOOK_SPACE,
     TRACKING_STAGE_BEST_PERSON_BUF,
     TRACKING_STAGE_BEST_PERSON_CLOUD,
 };
@@ -1903,24 +1904,79 @@ class DepthComparator: public pcl::Comparator<PointT>
     float depth_threshold_;
 };
 
+/* TODO: combine the to_start and to_codebook matrices
+ */
+static int
+project_point_into_codebook(pcl::PointXYZL *point,
+                            glm::mat4 to_start,
+                            glm::mat4 start_to_codebook,
+                            struct gm_intrinsics *intrinsics,
+                            int seg_res)
+{
+    if (std::isnan(point->z))
+        return -1;
+
+    const int width = intrinsics->width / seg_res;
+    const int height = intrinsics->height / seg_res;
+    const float fx = intrinsics->fx;
+    const float fy = intrinsics->fy;
+    const float cx = intrinsics->cx;
+    const float cy = intrinsics->cy;
+
+    glm::vec4 pt(point->x, point->y, point->z, 1.f);
+    pt = (to_start * pt);
+    pt = (start_to_codebook * pt);
+    point->x = pt.x;
+    point->y = pt.y;
+    point->z = pt.z;
+
+    float nx = ((pt.x * fx / pt.z) + cx);
+    float ny = ((pt.y * fy / pt.z) + cy);
+
+    /* XXX: check the rounding here... */
+    int dnx = (int)roundf(nx / seg_res);
+    int dny = (int)roundf(ny / seg_res);
+
+    if (dnx < 0 || dnx >= width ||
+        dny < 0 || dny >= height)
+    {
+        return -1;
+    }
+
+    return width * dny + dnx;
+}
+
 static void
 update_depth_codebook(struct gm_context *ctx,
                       struct gm_tracking_impl *tracking,
-                      std::vector<std::vector<int>> &reproj_map)
+                      glm::mat4 to_start,
+                      glm::mat4 to_codebook,
+                      int seg_res)
 {
     uint64_t start = get_time();
 
     int n_codewords = 0;
-    foreach_xy_off(tracking->depth_classification->width,
-                   tracking->depth_classification->height) {
-        for (std::vector<int>::iterator rit = reproj_map[off].begin();
-             rit != reproj_map[off].end(); ++rit) {
-            int depth_off = *rit;
+    struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
 
-            float depth = tracking->depth_classification->points[depth_off].z;
-            if (std::isnan(depth)) {
-                depth = HUGE_DEPTH;
-            }
+    unsigned depth_class_size = tracking->depth_classification->points.size();
+    for (unsigned depth_off = 0; depth_off < depth_class_size; ++depth_off) {
+        pcl::PointXYZL point = tracking->depth_classification->points[depth_off];
+
+        if (std::isnan(point.z)) {
+            continue;
+        } else {
+            int off = project_point_into_codebook(&point,
+                                                  to_start,
+                                                  to_codebook,
+                                                  &intrinsics,
+                                                  seg_res);
+            // Falls outside of codebook so we can't classify...
+            if (off < 0)
+                continue;
+
+            // At this point z has been projected into the coordinate space of
+            // the codebook
+            float depth = point.z;
 
             // Look to see if this pixel falls into an existing codeword
             struct seg_codeword *codeword = NULL;
@@ -1998,8 +2054,8 @@ pose_to_matrix(struct gm_pose &pose)
         pose.translation[1],
         pose.translation[2]);
 
-    return glm::translate(glm::mat4(1.f), mov_start_to_dev) *
-           glm::mat4_cast(rot_start_to_dev);
+    return glm::mat4_cast(rot_start_to_dev) *
+        glm::translate(glm::mat4(1.f), mov_start_to_dev);
 }
 
 static inline bool
@@ -2280,6 +2336,35 @@ add_debug_cloud_xyz_from_dense_depth_buf(struct gm_context *ctx,
 }
 
 static void
+add_debug_cloud_xyz_of_codebook_space(struct gm_context *ctx,
+                                      struct gm_tracking_impl *tracking,
+                                      pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud,
+                                      glm::mat4 to_start,
+                                      glm::mat4 start_to_codebook,
+                                      struct gm_intrinsics *intrinsics,
+                                      int seg_res)
+{
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+
+    for (unsigned i = 0; i < pcl_cloud->size(); i++) {
+        pcl::PointXYZL pcl_point = pcl_cloud->points[i];
+        struct gm_point_rgba point;
+
+        project_point_into_codebook(&pcl_point,
+                                    to_start,
+                                    start_to_codebook,
+                                    &tracking->depth_camera_intrinsics,
+                                    seg_res);
+        point.x = pcl_point.x;
+        point.y = -pcl_point.y; // FIXME
+        point.z = pcl_point.z;
+        point.rgba = 0xffffffff;
+
+        debug_cloud.push_back(point);
+    }
+}
+
+static void
 colour_debug_cloud(struct gm_context *ctx, struct gm_tracking_impl *tracking)
 {
     std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
@@ -2334,7 +2419,6 @@ colour_debug_cloud(struct gm_context *ctx, struct gm_tracking_impl *tracking)
         }
     }
 }
-
 
 static bool
 gm_context_track_skeleton(struct gm_context *ctx,
@@ -2403,7 +2487,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // version of the depth buffer. This is significantly cheaper than using a
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
-    if (ctx->seg_res == 1) {
+    int seg_res = ctx->seg_res;
+    if (seg_res == 1) {
         tracking->depth_classification = tracking->depth_cloud;
     } else {
         start = get_time();
@@ -2416,9 +2501,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
 
         tracking->depth_classification->width =
-            tracking->depth_cloud->width / ctx->seg_res;
+            tracking->depth_cloud->width / seg_res;
         tracking->depth_classification->height =
-            tracking->depth_cloud->height / ctx->seg_res;
+            tracking->depth_cloud->height / seg_res;
         tracking->depth_classification->points.resize(
             tracking->depth_classification->width *
             tracking->depth_classification->height);
@@ -2427,14 +2512,15 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int n_lores_points = 0;
         foreach_xy_off(tracking->depth_classification->width,
                        tracking->depth_classification->height) {
-            int hoff = (y * ctx->seg_res) * tracking->depth_cloud->width +
-                (x * ctx->seg_res);
+            int hoff = (y * seg_res) * tracking->depth_cloud->width +
+                (x * seg_res);
             tracking->depth_classification->points[off].x =
                 tracking->depth_cloud->points[hoff].x;
             tracking->depth_classification->points[off].y =
                 tracking->depth_cloud->points[hoff].y;
             tracking->depth_classification->points[off].z =
                 tracking->depth_cloud->points[hoff].z;
+            tracking->depth_classification->points[off].label = -1;
             if (!std::isnan(tracking->depth_classification->points[off].z)) {
                 ++n_lores_points;
             }
@@ -2460,21 +2546,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Classify depth pixels
     start = get_time();
 
-    bool transform = false;
-    glm::mat4 new_to_start;
+    bool reset_pose = false;
+
     if (ctx->depth_seg.size() != depth_class_size ||
         (!ctx->depth_pose.valid && tracking->frame->pose.valid))
     {
         gm_debug(ctx->log, "XXX: Resetting pose");
-        ctx->depth_seg.clear();
-        ctx->depth_seg.resize(depth_class_size);
-        ctx->depth_pose = tracking->frame->pose;
-        if (tracking->frame->pose.valid) {
-            new_to_start = pose_to_matrix(ctx->depth_pose);
-            ctx->start_to_depth_pose = glm::inverse(new_to_start);
-        } else {
-            gm_debug(ctx->log, "XXX: No tracking pose");
-        }
+        reset_pose = true;
     } else if (tracking->frame->pose.valid) {
         // Check if the angle or distance between the current frame and the
         // reference frame exceeds a certain threshold, and in that case, reset
@@ -2504,39 +2582,29 @@ gm_context_track_skeleton(struct gm_context *ctx,
                  tracking->frame->pose.translation[0] - ctx->depth_pose.translation[0],
                  tracking->frame->pose.translation[1] - ctx->depth_pose.translation[1],
                  tracking->frame->pose.translation[2] - ctx->depth_pose.translation[2]);
-        if (angle < 10.f && distance < 0.3f) {
-            if (angle > 0.25f || distance > 0.025f) {
-                new_to_start =
-                    pose_to_matrix(tracking->frame->pose);
-                transform = true;
-            }
-        } else {
+        if (angle > 10.f || distance > 0.3f) {
             // We've strayed too far from the initial pose, reset segmentation
             // and use this as the home pose.
-            ctx->depth_seg.clear();
-            ctx->depth_seg.resize(depth_class_size);
-            ctx->depth_pose = tracking->frame->pose;
-            new_to_start = pose_to_matrix(ctx->depth_pose);
-            ctx->start_to_depth_pose = glm::inverse(new_to_start);
-            gm_debug(ctx->log, "XXX: Resetting pose");
+            gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
+            reset_pose = true;
         }
     }
 
-    // Create a mapping of reprojected pixels to their current positions
-    std::vector<std::vector<int>> reproj_map(depth_class_size);
-    if (transform) {
-        for (unsigned i = 0; i < depth_class_size; ++i) {
-            float depth = tracking->depth_classification->points[i].z;
-            if (std::isnan(depth)) {
-                reproj_map[i].push_back(i);
-            } else {
-                tracking->depth_classification->points[i].label = -1;
-            }
-        }
+    glm::mat4 to_start;
+    if (tracking->frame->pose.valid) {
+        to_start = pose_to_matrix(tracking->frame->pose);
     } else {
-        for (unsigned i = 0; i < depth_class_size; ++i) {
-            reproj_map[i].push_back(i);
-        }
+        to_start = glm::mat4(1.0);
+    }
+
+    if (reset_pose) {
+        ctx->depth_seg.clear();
+        ctx->depth_seg.resize(depth_class_size);
+        ctx->depth_pose = tracking->frame->pose;
+        ctx->start_to_depth_pose = glm::inverse(to_start);
+
+        if (!tracking->frame->pose.valid)
+            gm_debug(ctx->log, "XXX: No tracking pose");
     }
 
     // Transform the cloud into ground-aligned space if we have a valid pose
@@ -2559,32 +2627,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             glm::vec4 pt(point.x, point.y, point.z, 1.f);
-            pt = (new_to_start * pt);
+            pt = (to_start * pt);
 
             tracking->ground_cloud->points[off].x = pt.x;
             tracking->ground_cloud->points[off].y = pt.y;
             tracking->ground_cloud->points[off].z = pt.z;
-
-            if (transform) {
-                pt = ctx->start_to_depth_pose * pt;
-
-                float nx = ((pt.x * fx / pt.z) + cx);
-                float ny = ((pt.y * fy / pt.z) + cy);
-
-                int dnx = (int)roundf(nx / ctx->seg_res);
-                int dny = (int)roundf(ny / ctx->seg_res);
-
-                if (dnx < 0 ||
-                    dnx >= (int)tracking->depth_classification->width ||
-                    dny < 0 ||
-                    dny >= (int)tracking->depth_classification->height) {
-                    continue;
-                }
-
-                int new_off =
-                    (dny * tracking->depth_classification->width) + dnx;
-                reproj_map[new_off].push_back(off);
-            }
         }
     } else {
         tracking->ground_cloud->resize(0);
@@ -2595,6 +2642,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
     {
         // XXX: ignore colour modes in this case
         add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->ground_cloud);
+    }
+
+    glm::mat4 start_to_codebook = ctx->start_to_depth_pose;
+
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_CODEBOOK_SPACE &&
+        ctx->debug_cloud_mode)
+    {
+        add_debug_cloud_xyz_of_codebook_space(ctx, tracking,
+                                              tracking->depth_classification,
+                                              to_start,
+                                              start_to_codebook,
+                                              &tracking->depth_camera_intrinsics,
+                                              seg_res);
+        if (ctx->debug_cloud_mode == 2) // XXX: don't try and texture with video
+            colour_debug_cloud(ctx, tracking);
     }
 
     // Remove depth classification old codewords
@@ -2612,18 +2674,27 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     // Do classification of depth buffer
-    for (unsigned off = 0; off < depth_class_size; ++off) {
-        for (std::vector<int>::iterator rit = reproj_map[off].begin();
-             rit != reproj_map[off].end(); ++rit) {
-            int depth_off = *rit;
+    for (unsigned depth_off = 0; depth_off < depth_class_size; ++depth_off) {
+        pcl::PointXYZL point = tracking->depth_classification->points[depth_off];
 
-            float depth = tracking->depth_classification->points[depth_off].z;
-            if (std::isnan(depth)) {
-                // We'll never cluster a nan value, so we can immediately
-                // classify it as background.
-                tracking->depth_classification->points[depth_off].label = BG;
+        if (std::isnan(point.z)) {
+            // We'll never cluster a nan value, so we can immediately
+            // classify it as background.
+            tracking->depth_classification->points[depth_off].label = BG;
+            continue;
+        } else {
+            int off = project_point_into_codebook(&point,
+                                                  to_start,
+                                                  start_to_codebook,
+                                                  &tracking->depth_camera_intrinsics,
+                                                  seg_res);
+            // Falls outside of codebook so we can't classify...
+            if (off < 0)
                 continue;
-            }
+
+            // At this point z has been projected into the coordinate space of
+            // the codebook
+            float depth = point.z;
 
             const uint64_t t = tracking->frame->timestamp;
             const float tb = ctx->seg_tb;
@@ -2946,7 +3017,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        update_depth_codebook(ctx, tracking, reproj_map);
+        update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
+                              seg_res);
         LOGI("Skipping detection: Could not find a person cluster");
         return false;
     }
@@ -2968,12 +3040,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
              it != (*p_it).indices.end (); ++it) {
             int lx = (*it) % tracking->depth_classification->width;
             int ly = (*it) / tracking->depth_classification->width;
-            for (int hy = (int)(ly * ctx->seg_res), ey = 0;
-                 hy < (int)tracking->depth_cloud->height && ey < ctx->seg_res;
+            for (int hy = (int)(ly * seg_res), ey = 0;
+                 hy < (int)tracking->depth_cloud->height && ey < seg_res;
                  ++hy, ++ey) {
-                for (int hx = (int)(lx * ctx->seg_res), ex = 0;
+                for (int hx = (int)(lx * seg_res), ex = 0;
                      hx < (int)tracking->depth_cloud->width &&
-                     ex < ctx->seg_res;
+                     ex < seg_res;
                      ++hx, ++ex) {
                     int off = hy * tracking->depth_cloud->width + hx;
 
@@ -3202,7 +3274,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
-        update_depth_codebook(ctx, tracking, reproj_map);
+        update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
+                              seg_res);
     }
 
     return tracked;
@@ -4908,6 +4981,12 @@ gm_context_new(struct gm_logger *logger, char **err)
     enumerant.name = "ground space";
     enumerant.desc = "Projected into ground aligned space";
     enumerant.val = TRACKING_STAGE_GROUND_SPACE;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "codebook space";
+    enumerant.desc = "Projected into codebook aligned space";
+    enumerant.val = TRACKING_STAGE_CODEBOOK_SPACE;
     ctx->cloud_stage_enumerants.push_back(enumerant);
 
     enumerant = gm_ui_enumerant();
