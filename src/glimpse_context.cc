@@ -179,7 +179,8 @@ enum tracking_stage {
     TRACKING_STAGE_GAP_FILLED,
     TRACKING_STAGE_DOWNSAMPLED,
     TRACKING_STAGE_GROUND_SPACE,
-    TRACKING_STAGE_BEST_PERSON,
+    TRACKING_STAGE_BEST_PERSON_BUF,
+    TRACKING_STAGE_BEST_PERSON_CLOUD,
 };
 
 enum image_format {
@@ -2188,6 +2189,35 @@ add_debug_cloud_xyz_from_pcl_xyzl_and_indices(struct gm_context *ctx,
     }
 }
 
+/* 'Dense' here means we don't expect any NAN values */
+static void
+add_debug_cloud_xyz_from_dense_depth_buf(struct gm_context *ctx,
+                                         struct gm_tracking_impl *tracking,
+                                         float *depth,
+                                         struct gm_intrinsics *intrinsics)
+{
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+    int width = intrinsics->width;
+    int height = intrinsics->height;
+
+    const float fx = intrinsics->fx;
+    const float fy = intrinsics->fy;
+    const float inv_fx = 1.0f / fx;
+    const float inv_fy = 1.0f / fy;
+    const float cx = intrinsics->cx;
+    const float cy = intrinsics->cy;
+
+    foreach_xy_off(width, height) {
+        struct gm_point_rgba point;
+
+        point.z = depth[off];
+        point.x = (x - cx) * point.z * inv_fx;
+        point.y = -((y - cy) * point.z * inv_fy); // FIXME
+
+        debug_cloud.push_back(point);
+    }
+}
+
 static void
 colour_debug_cloud(struct gm_context *ctx, struct gm_tracking_impl *tracking)
 {
@@ -3012,7 +3042,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
                                      width, height, ctx->n_labels,
                                      ctx->joint_map,
                                      vfov, ctx->joint_params->joint_params);
-        xfree(depth_img);
         lend = get_time();
         lduration = lend - lstart;
         LOGI("\tJoint inference took %.3f%s",
@@ -3047,12 +3076,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
     xfree(label_probs);
     xfree(weights);
 
-    if (ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON &&
-        ctx->debug_cloud_mode)
+    if (ctx->debug_cloud_mode &&
+        (ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON_BUF ||
+         ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON_CLOUD))
     {
-        add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                      tracking->depth_classification,
-                                                      persons[best_person].indices);
+        if (ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON_BUF) {
+            float *depth_img = depth_images[best_person];
+            add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
+                                                     depth_img,
+                                                     &tracking->training_camera_intrinsics);
+        } else {
+            add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                          tracking->depth_classification,
+                                                          persons[best_person].indices);
+        }
+
         colour_debug_cloud(ctx, tracking);
 
         /* Also show other failed candidates... */
@@ -3063,6 +3101,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
                                                           tracking->depth_classification,
                                                           persons[i].indices);
         }
+    }
+
+    for (unsigned i = 0; i < depth_images.size(); ++i) {
+        float *depth_img = depth_images[i];
+        xfree(depth_img);
     }
 
     bool tracked =
@@ -4896,9 +4939,15 @@ gm_context_new(struct gm_logger *logger, char **err)
     ctx->cloud_stage_enumerants.push_back(enumerant);
 
     enumerant = gm_ui_enumerant();
-    enumerant.name = "best person";
-    enumerant.desc = "Best person cluster";
-    enumerant.val = TRACKING_STAGE_BEST_PERSON;
+    enumerant.name = "best person buffer";
+    enumerant.desc = "Best person inference buffer";
+    enumerant.val = TRACKING_STAGE_BEST_PERSON_BUF;
+    ctx->cloud_stage_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "best person indices";
+    enumerant.desc = "Best person indices";
+    enumerant.val = TRACKING_STAGE_BEST_PERSON_CLOUD;
     ctx->cloud_stage_enumerants.push_back(enumerant);
 
     prop.enum_state.n_enumerants = ctx->cloud_stage_enumerants.size();
