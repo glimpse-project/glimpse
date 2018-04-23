@@ -2461,15 +2461,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
     bool transform = false;
     glm::mat4 new_to_start;
     if (ctx->depth_seg.size() != depth_class_size ||
-        (!ctx->depth_pose.valid && tracking->frame->pose.valid)) {
+        (!ctx->depth_pose.valid && tracking->frame->pose.valid))
+    {
+        gm_debug(ctx->log, "XXX: Resetting pose");
         ctx->depth_seg.clear();
         ctx->depth_seg.resize(depth_class_size);
         ctx->depth_pose = tracking->frame->pose;
         if (tracking->frame->pose.valid) {
             new_to_start = pose_to_matrix(ctx->depth_pose);
             ctx->start_to_depth_pose = glm::inverse(new_to_start);
+        } else {
+            gm_debug(ctx->log, "XXX: No tracking pose");
         }
-        gm_debug(ctx->log, "XXX: Resetting pose");
     } else if (tracking->frame->pose.valid) {
         // Check if the angle or distance between the current frame and the
         // reference frame exceeds a certain threshold, and in that case, reset
