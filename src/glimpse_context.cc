@@ -407,7 +407,7 @@ struct gm_context
 
     struct gm_pose depth_pose;
     glm::mat4 start_to_depth_pose;
-    std::vector<std::list<struct seg_codeword>> depth_seg;
+    std::vector<std::vector<struct seg_codeword>> depth_seg;
     std::vector<struct seg_codeword *> depth_seg_bg;
 
     pthread_t detect_thread;
@@ -1981,8 +1981,8 @@ update_depth_codebook(struct gm_context *ctx,
 
             // Look to see if this pixel falls into an existing codeword
             struct seg_codeword *codeword = NULL;
-            std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
-            std::list<struct seg_codeword>::iterator it;
+            std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
+            std::vector<struct seg_codeword>::iterator it;
             for (it = codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
 
@@ -1996,7 +1996,12 @@ update_depth_codebook(struct gm_context *ctx,
             if (tracking->depth_classification->points[depth_off].label ==
                 TRK) {
                 if (codeword) {
-                    codewords.erase(it);
+                    if (codewords.size() > 2) {
+                        std::swap(*it, codewords.back());
+                        codewords.pop_back();
+                    } else {
+                        codewords.erase(it);
+                    }
                 }
                 continue;
             }
@@ -2005,8 +2010,8 @@ update_depth_codebook(struct gm_context *ctx,
 
             // Create a new codeword if one didn't fit
             if (!codeword) {
-                codewords.push_front({ 0, 0, t, t, 0 });
-                codeword = &codewords.front();
+                codewords.push_back({ 0, 0, t, t, 0 });
+                codeword = &codewords.back();
             }
 
             // Update the codeword info
@@ -2663,20 +2668,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     // Remove depth classification old codewords
     for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
-        std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
         ctx->depth_seg_bg[off] = NULL;
-        for (std::list<struct seg_codeword>::iterator it = codewords.begin();
-             it != codewords.end();) {
-            struct seg_codeword &codeword = *it;
+        for (unsigned i = 0; i < codewords.size();) {
+            struct seg_codeword &codeword = codewords[i];
             if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
                 ctx->seg_timeout) {
-                it = codewords.erase(it);
+                std::swap(codeword, codewords.back());
+                codewords.pop_back();
             } else {
                 if (!ctx->depth_seg_bg[off] ||
                     codeword.n > ctx->depth_seg_bg[off]->n) {
                     ctx->depth_seg_bg[off] = &codeword;
                 }
-                ++it;
+                ++i;
             }
         }
     }
@@ -2716,8 +2721,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
             struct seg_codeword *codeword = NULL;
             struct seg_codeword *bg_codeword = ctx->depth_seg_bg[off];
 
-            std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
-            for (std::list<struct seg_codeword>::iterator it =
+            std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
+            for (std::vector<struct seg_codeword>::iterator it =
                  codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
 
@@ -2727,6 +2732,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                     break;
                 }
             }
+
+            assert(bg_codeword || (!bg_codeword && !codeword));
 
             // Classify this depth value
             const float frame_time = ctx->n_tracking ?
