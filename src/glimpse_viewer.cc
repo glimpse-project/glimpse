@@ -290,7 +290,9 @@ typedef struct _Data
     GLuint video_rgb_tex;
 
     GLuint ar_video_tex_sampler;
-    GLuint ar_video_tex;
+    std::vector<GLuint> ar_video_queue;
+    int ar_video_queue_len;
+    int ar_video_queue_pos;
 
 } Data;
 
@@ -584,6 +586,73 @@ find_prop(struct gm_ui_properties *props, const char *name)
     return NULL;
 }
 
+static GLuint
+gen_ar_video_texture(Data *data)
+{
+    GLuint ar_video_tex;
+
+    glGenTextures(1, &ar_video_tex);
+
+    GLenum target = GL_TEXTURE_2D;
+    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
+        target = GL_TEXTURE_EXTERNAL_OES;
+    }
+
+    glBindTexture(target, ar_video_tex);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    return ar_video_tex;
+}
+
+static void
+update_ar_video_queue_len(Data *data, int len)
+{
+    if (len >= data->ar_video_queue_len) {
+        data->ar_video_queue_len = len;
+        return;
+    }
+    glDeleteTextures(data->ar_video_queue.size(),
+                     data->ar_video_queue.data());
+    data->ar_video_queue.resize(0);
+    data->ar_video_queue_len = len;
+    data->ar_video_queue_pos = -1;
+}
+
+static GLuint
+get_next_ar_video_tex(Data *data)
+{
+    if (data->ar_video_queue_len < 1) {
+        update_ar_video_queue_len(data, 1);
+    }
+
+    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
+        GLuint ar_video_tex = gen_ar_video_texture(data);
+
+        data->ar_video_queue_pos = data->ar_video_queue.size();
+        data->ar_video_queue.push_back(ar_video_tex);
+        return data->ar_video_queue.back();
+    } else {
+        data->ar_video_queue_pos =
+            (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
+        return data->ar_video_queue[data->ar_video_queue_pos];
+    }
+}
+
+static GLuint
+get_oldest_ar_video_tex(Data *data)
+{
+    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
+        return data->ar_video_queue[0];
+    } else {
+        int oldest = (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
+        return data->ar_video_queue[oldest];
+    }
+}
+
+
 static bool
 draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 {
@@ -628,6 +697,12 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     }
 
     ImGui::Checkbox("Show profiler", &data->show_profiler);
+
+    int queue_len = data->ar_video_queue_len;
+    ImGui::SliderInt("AR video queue len", &queue_len, 1, 30);
+    if (data->ar_video_queue_len != queue_len) {
+        update_ar_video_queue_len(data, queue_len);
+    }
 
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
     ImGui::SliderInt("Prediction delay", &data->prediction_delay,
@@ -1498,7 +1573,8 @@ draw_ar_video(Data *data)
     GLenum target = GL_TEXTURE_2D;
     if (device_type == GM_DEVICE_TANGO)
         target = GL_TEXTURE_EXTERNAL_OES;
-    glBindTexture(target, data->ar_video_tex);
+    GLuint ar_video_tex = get_oldest_ar_video_tex(data);
+    glBindTexture(target, ar_video_tex);
 
     glDepthMask(GL_FALSE);
     glDisable(GL_DEPTH_TEST);
@@ -1660,7 +1736,8 @@ handle_device_frame_updates(Data *data)
         /*
          * Update video from camera
          */
-        glBindTexture(GL_TEXTURE_2D, data->ar_video_tex);
+        GLuint ar_video_tex = get_next_ar_video_tex(data);
+        glBindTexture(GL_TEXTURE_2D, ar_video_tex);
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
@@ -1699,8 +1776,9 @@ handle_device_frame_updates(Data *data)
                device_type == GM_DEVICE_TANGO)
     {
 #ifdef USE_TANGO
+        GLuint ar_video_tex = get_next_ar_video_tex(data);
         if (TangoService_updateTextureExternalOes(
-                TANGO_CAMERA_COLOR, data->ar_video_tex,
+                TANGO_CAMERA_COLOR, ar_video_tex,
                 NULL /* ignore timestamp */) != TANGO_SUCCESS)
         {
             gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
@@ -2409,18 +2487,6 @@ init_device_opengl(Data *data)
     glUniform1i(data->ar_video_tex_sampler, 0);
     glUseProgram(0);
 
-    glGenTextures(1, &data->ar_video_tex);
-    GLenum target = GL_TEXTURE_2D;
-    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
-        target = GL_TEXTURE_EXTERNAL_OES;
-    }
-
-    glBindTexture(target, data->ar_video_tex);
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
     // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
     data->cloud_fbo_valid = false;
 
@@ -2442,10 +2508,7 @@ deinit_device_opengl(Data *data)
         data->ar_video_tex_sampler = 0;
     }
 
-    if (data->ar_video_tex) {
-        glDeleteTextures(1, &data->ar_video_tex);
-        data->ar_video_tex = 0;
-    }
+    update_ar_video_queue_len(data, 0);
 
     // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
     data->cloud_fbo_valid = false;
@@ -2776,6 +2839,9 @@ viewer_init(Data *data)
         data->realtime_ar_mode = false;
         gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
     }
+
+    update_ar_video_queue_len(data, 6);
+
     data->initialized = true;
 }
 
