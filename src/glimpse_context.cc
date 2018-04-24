@@ -1849,8 +1849,8 @@ class LabelComparator: public pcl::Comparator<PointT>
              input_->points[idx1].label == FG) &&
             (input_->points[idx2].label == FLK ||
              input_->points[idx2].label == FG)) {
-            return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
-                depth_threshold_;
+            return distance_between(&input_->points[idx1].x,
+                                    &input_->points[idx2].x) < depth_threshold_;
         }
 
         return false;
@@ -2080,9 +2080,9 @@ gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
                  int x1, int y1, int x2, int y2,
                  float tolerance)
 {
-    float d1 = cloud->points[y1 * cloud->width + x1].z;
-    float d2 = cloud->points[y2 * cloud->width + x2].z;
-    if (std::isnan(d1) || std::isnan(d2)) {
+    pcl::PointXYZL &pt1 = cloud->points[y1 * cloud->width + x1];
+    pcl::PointXYZL &pt2 = cloud->points[y2 * cloud->width + x2];
+    if (std::isnan(pt1.z) || std::isnan(pt2.z)) {
         return false;
     }
 
@@ -2094,10 +2094,10 @@ gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
      * NB: d2 corresponds to a point that we've already decided is inside
      * the cluster/body
      */
-    if (d1 < d2)
+    if (pt1.z < pt2.z)
         return true;
 
-    return fabsf(d1 - d2) <= tolerance;
+    return distance_between(&pt1.x, &pt2.x) <= tolerance;
 }
 
 static void
@@ -3030,11 +3030,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
         std::queue<struct PointCmp> flood_fill;
         flood_fill.push({ fx, fy, fx, fy });
         std::vector<bool> done_mask(depth_class_size, false);
+        std::vector<int> y_accumulation;
 
         pcl::PointXYZL &focus_pt =
             tracking->depth_class->points[fidx];
+        float focus_aligned_y = ctx->depth_pose.valid ?
+            tracking->ground_cloud->points[fidx].y :
+            tracking->depth_class->points[fidx].y;
 
-        float lowest_point = -FLT_MAX;
+        // First, fill downwards and count the cumulative number of points we
+        // have, dividing them by their ground-aligned Y value. We do this to
+        // see if this cloud is colliding with the floor, and where that floor
+        // would be if they are.
         while (!flood_fill.empty()) {
             struct PointCmp point = flood_fill.front();
             flood_fill.pop();
@@ -3052,15 +3059,28 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
             // TODO: Make these values configurable?
             if (fabsf(focus_pt.x - pcl_pt.x) > 0.5f ||
+                fabsf(focus_pt.y - pcl_pt.y) > 2.0f ||
                 fabsf(focus_pt.z - pcl_pt.z) > 0.75f) {
+                continue;
+            }
+
+            pcl::PointXYZL &last_pt =
+                tracking->depth_class->points[point.ly * width + point.lx];
+            if (distance_between(&pcl_pt.x, &last_pt.x) >
+                ctx->cluster_tolerance) {
                 continue;
             }
 
             float aligned_y = ctx->depth_pose.valid ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_class->points[idx].y;
-            if (aligned_y > lowest_point) {
-                lowest_point = aligned_y;
+            int strata = (int)((aligned_y - focus_aligned_y) /
+                               ctx->cluster_tolerance);
+            if (strata >= 0) {
+                while ((int)y_accumulation.size() < (strata + 1)) {
+                    y_accumulation.push_back(0);
+                }
+                ++y_accumulation[strata];
             }
 
             if (gm_compare_depth(tracking->depth_class,
@@ -3091,6 +3111,22 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
         }
 
+        // Look through the accumulated strata and see if there are any
+        // sudden increases - this will (hopefully) be the floor and we can
+        // use that as a cut-off.
+        float floor = FLT_MAX;
+        if (y_accumulation.size()) {
+            for (unsigned i = (unsigned)y_accumulation.size() - 1; i > 1; --i) {
+                if ((float)y_accumulation[i] > y_accumulation[i - 1] *
+                    ctx->floor_threshold) {
+                    floor = (i * ctx->cluster_tolerance) + focus_aligned_y;
+                    gm_debug(ctx->log, "XXX: Floor detected maybe at %.2f",
+                             floor);
+                    break;
+                }
+            }
+        }
+
         pcl::PointIndices person_indices;
         flood_fill.push({ fx, fy, fx, fy });
         std::fill(done_mask.begin(), done_mask.end(), false);
@@ -3110,7 +3146,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             float aligned_y = ctx->depth_pose.valid ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_class->points[idx].y;
-            if (aligned_y > lowest_point - ctx->floor_threshold) {
+            if (aligned_y >= floor) {
                 continue;
             }
 
@@ -4998,16 +5034,16 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->floor_threshold = 0.1f;
+    ctx->floor_threshold = 1.75f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "floor_threshold";
-    prop.desc = "The threshold from the lowest points of a potential person "
-                "cluster to filter out when looking for the floor.";
+    prop.desc = "The threshold difference at which points may represent a "
+                "floor when looking at a potential person cloud.";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->floor_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.3f;
+    prop.float_state.min = 1.0f;
+    prop.float_state.max = 5.0f;
     ctx->properties.push_back(prop);
 
     ctx->cluster_tolerance = 0.10f;
