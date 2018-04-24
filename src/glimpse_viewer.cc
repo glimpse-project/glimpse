@@ -162,6 +162,8 @@ typedef struct _Data
      */
     bool realtime_ar_mode;
 
+    bool show_profiler;
+
     /* In realtime mode, we use predicted joint positions so that the
      * presented skeleton keeps up with the video. This allows us to add a
      * synthetic delay to the timestamp we request in this mode, which adds
@@ -624,6 +626,8 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
             gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
         }
     }
+
+    ImGui::Checkbox("Show profiler", &data->show_profiler);
 
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
     ImGui::SliderInt("Prediction delay", &data->prediction_delay,
@@ -1370,10 +1374,12 @@ draw_ui(Data *data)
 #endif
     ImGui::PopStyleVar();
 
-    // Draw profiler window always-on-top
-    ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
-    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
-    ProfileDrawUI();
+    if (data->show_profiler) {
+        // Draw profiler window always-on-top
+        ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
+        ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
+        ProfileDrawUI();
+    }
 
     ImGui::Render();
 
