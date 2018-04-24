@@ -2783,7 +2783,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
 
     std::vector<pcl::PointIndices> cluster_indices;
-    if (!ctx->latest_tracking || !ctx->latest_tracking->success) {
+    if (!ctx->latest_tracking || !ctx->latest_tracking->success || reset_pose) {
         // If we've not tracked a human yet, the depth classification may not
         // be reliable - just use a simple clustering technique to find a
         // human and separate them from the floor, then rely on motion detection
