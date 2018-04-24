@@ -1916,8 +1916,8 @@ project_point_into_codebook(pcl::PointXYZL *point,
     if (std::isnan(point->z))
         return -1;
 
-    const int width = intrinsics->width;
-    const int height = intrinsics->height;
+    const int width = intrinsics->width / seg_res;
+    const int height = intrinsics->height / seg_res;
     const float fx = intrinsics->fx;
     const float fy = intrinsics->fy;
     const float cx = intrinsics->cx;
@@ -1950,12 +1950,12 @@ static void
 update_depth_codebook(struct gm_context *ctx,
                       struct gm_tracking_impl *tracking,
                       glm::mat4 to_start,
-                      glm::mat4 to_codebook)
+                      glm::mat4 to_codebook,
+                      int seg_res)
 {
     uint64_t start = get_time();
 
     int n_codewords = 0;
-    int seg_res = ctx->seg_res;
     struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
 
     unsigned depth_class_size = tracking->depth_classification->points.size();
@@ -2487,7 +2487,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // version of the depth buffer. This is significantly cheaper than using a
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
-    if (ctx->seg_res == 1) {
+    int seg_res = ctx->seg_res;
+    if (seg_res == 1) {
         tracking->depth_classification = tracking->depth_cloud;
     } else {
         start = get_time();
@@ -2500,9 +2501,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
 
         tracking->depth_classification->width =
-            tracking->depth_cloud->width / ctx->seg_res;
+            tracking->depth_cloud->width / seg_res;
         tracking->depth_classification->height =
-            tracking->depth_cloud->height / ctx->seg_res;
+            tracking->depth_cloud->height / seg_res;
         tracking->depth_classification->points.resize(
             tracking->depth_classification->width *
             tracking->depth_classification->height);
@@ -2511,8 +2512,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int n_lores_points = 0;
         foreach_xy_off(tracking->depth_classification->width,
                        tracking->depth_classification->height) {
-            int hoff = (y * ctx->seg_res) * tracking->depth_cloud->width +
-                (x * ctx->seg_res);
+            int hoff = (y * seg_res) * tracking->depth_cloud->width +
+                (x * seg_res);
             tracking->depth_classification->points[off].x =
                 tracking->depth_cloud->points[hoff].x;
             tracking->depth_classification->points[off].y =
@@ -2606,10 +2607,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
             gm_debug(ctx->log, "XXX: No tracking pose");
     }
 
-    glm::mat4 start_to_codebook = ctx->start_to_depth_pose;
-    int seg_res = ctx->seg_res;
-
-
     // Transform the cloud into ground-aligned space if we have a valid pose
     if (!tracking->ground_cloud) {
         tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
@@ -2646,6 +2643,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // XXX: ignore colour modes in this case
         add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->ground_cloud);
     }
+
+    glm::mat4 start_to_codebook = ctx->start_to_depth_pose;
 
     if (ctx->debug_cloud_stage == TRACKING_STAGE_CODEBOOK_SPACE &&
         ctx->debug_cloud_mode)
@@ -3018,7 +3017,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        update_depth_codebook(ctx, tracking, to_start, start_to_codebook);
+        update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
+                              seg_res);
         LOGI("Skipping detection: Could not find a person cluster");
         return false;
     }
@@ -3040,12 +3040,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
              it != (*p_it).indices.end (); ++it) {
             int lx = (*it) % tracking->depth_classification->width;
             int ly = (*it) / tracking->depth_classification->width;
-            for (int hy = (int)(ly * ctx->seg_res), ey = 0;
-                 hy < (int)tracking->depth_cloud->height && ey < ctx->seg_res;
+            for (int hy = (int)(ly * seg_res), ey = 0;
+                 hy < (int)tracking->depth_cloud->height && ey < seg_res;
                  ++hy, ++ey) {
-                for (int hx = (int)(lx * ctx->seg_res), ex = 0;
+                for (int hx = (int)(lx * seg_res), ex = 0;
                      hx < (int)tracking->depth_cloud->width &&
-                     ex < ctx->seg_res;
+                     ex < seg_res;
                      ++hx, ++ex) {
                     int off = hy * tracking->depth_cloud->width + hx;
 
@@ -3274,7 +3274,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
-        update_depth_codebook(ctx, tracking, to_start, start_to_codebook);
+        update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
+                              seg_res);
     }
 
     return tracked;
