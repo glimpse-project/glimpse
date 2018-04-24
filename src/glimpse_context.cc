@@ -2863,11 +2863,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
         std::queue<struct PointCmp> flood_fill;
         flood_fill.push({ fx, fy, fx, fy });
         std::vector<bool> done_mask(depth_class_size, false);
+        std::vector<int> y_accumulation;
 
         pcl::PointXYZL &focus_pt =
             tracking->depth_classification->points[fidx];
+        float focus_aligned_y = ctx->depth_pose.valid ?
+            tracking->ground_cloud->points[fidx].y :
+            tracking->depth_classification->points[fidx].y;
 
-        float lowest_point = -FLT_MAX;
+        // First, fill downwards and count the cumulative number of points we
+        // have, dividing them by their ground-aligned Y value. We do this to
+        // see if this cloud is colliding with the floor, and where that floor
+        // would be if they are.
         while (!flood_fill.empty()) {
             struct PointCmp point = flood_fill.front();
             flood_fill.pop();
@@ -2885,6 +2892,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
             // TODO: Make these values configurable?
             if (fabsf(focus_pt.x - pcl_pt.x) > 0.25f ||
+                fabsf(focus_pt.y - pcl_pt.y) > 2.0f ||
                 fabsf(focus_pt.z - pcl_pt.z) > 0.5f) {
                 continue;
             }
@@ -2892,8 +2900,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
             float aligned_y = ctx->depth_pose.valid ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_classification->points[idx].y;
-            if (aligned_y > lowest_point) {
-                lowest_point = aligned_y;
+            int strata = (int)((aligned_y - focus_aligned_y) /
+                               ctx->cluster_tolerance);
+            if (strata >= 0) {
+                while ((int)y_accumulation.size() < (strata + 1)) {
+                    y_accumulation.push_back(0);
+                }
+                ++y_accumulation[strata];
             }
 
             if (gm_compare_depth(tracking->depth_classification,
@@ -2905,6 +2918,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 // We're looking for the floor, don't fill upwards
                 //flood_fill.push({ point.x, point.y - 1, point.x, point.y });
                 flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+            }
+        }
+
+        // Look through the accumulated strata and see if there are any
+        // sudden increases - this will (hopefully) be the floor and we can
+        // use that as a cut-off.
+        float floor = -FLT_MAX;
+        for (unsigned i = std::max((unsigned)1,
+                                   (unsigned)(y_accumulation.size() / 2));
+             i < y_accumulation.size(); ++i) {
+            if ((float)y_accumulation[i] > y_accumulation[i - 1] *
+                ctx->floor_threshold) {
+                floor = (i * ctx->cluster_tolerance) + focus_aligned_y;
+                gm_debug(ctx->log, "XXX: Floor detected maybe at %.2f", floor);
+                break;
             }
         }
 
@@ -2927,7 +2955,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             float aligned_y = ctx->depth_pose.valid ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_classification->points[idx].y;
-            if (aligned_y > lowest_point - ctx->floor_threshold) {
+            if (aligned_y >= floor) {
                 continue;
             }
 
@@ -4753,16 +4781,16 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->floor_threshold = 0.1f;
+    ctx->floor_threshold = 1.5f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "floor_threshold";
-    prop.desc = "The threshold from the lowest points of a potential person "
-                "cluster to filter out when looking for the floor.";
+    prop.desc = "The threshold difference at which points may represent a "
+                "floor when looking at a potential person cloud.";
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->floor_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.3f;
+    prop.float_state.min = 1.0f;
+    prop.float_state.max = 5.0f;
     ctx->properties.push_back(prop);
 
     ctx->cluster_tolerance = 0.05f;
