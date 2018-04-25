@@ -3843,11 +3843,17 @@ detector_thread_cb(void *data)
         if (tracked) {
             tracking->success = true;
 
-            // Clear the tracking history if we've gone back in time
-            if (ctx->n_tracking && tracking->frame->timestamp <
-                ctx->tracking_history[0]->frame->timestamp) {
-                gm_warn(ctx->log,
-                        "Tracking has gone back in time, clearing history");
+            // Clear the tracking history if we've gone back in time or if
+            // the distance between this frame and the last tracked frame
+            // exceeds 2 * the maximum prediction delta.
+            if (ctx->n_tracking &&
+                (tracking->frame->timestamp <
+                 ctx->tracking_history[0]->frame->timestamp ||
+                 (tracking->frame->timestamp -
+                  ctx->tracking_history[0]->frame->timestamp) >
+                 2000000.0 * ctx->max_prediction_delta)) {
+                gm_debug(ctx->log,
+                         "Tracking time is inconsistent, clearing history");
 
                 for (int i = 0; i < ctx->n_tracking; ++i) {
                     gm_tracking_unref(&ctx->tracking_history[i]->base);
