@@ -1216,7 +1216,9 @@ is_bone_angle_diff(const struct bone_info &bone,
     float angle = glm::degrees(acosf(
         glm::dot(glm::normalize(bone_vec), glm::normalize(ref_vec))));
     while (angle > 180.f) angle -= 360.f;
-    float time = (float)((skel.timestamp - ref_skel.timestamp) / 1e9);
+    float time = skel.timestamp > ref_skel.timestamp ?
+        (float)((skel.timestamp - ref_skel.timestamp) / 1e9) :
+        (float)((ref_skel.timestamp - skel.timestamp) / 1e9);
     float angle_delta = fabsf(angle) / time;
 
     return angle_delta > max_angle;
