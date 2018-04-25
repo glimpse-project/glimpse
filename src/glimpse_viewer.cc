@@ -2486,6 +2486,7 @@ init_device_opengl(Data *data)
     glUseProgram(data->video_program);
     glUniform1i(data->ar_video_tex_sampler, 0);
     glUseProgram(0);
+    update_ar_video_queue_len(data, 6);
 
     // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
     data->cloud_fbo_valid = false;
