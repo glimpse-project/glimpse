@@ -1722,68 +1722,65 @@ handle_device_frame_updates(Data *data)
 
     enum gm_device_type device_type = gm_device_get_type(data->active_device);
 
-    if (upload_video_texture &&
-        data->device_gl_initialized &&
-        device_type != GM_DEVICE_TANGO)
-    {
-        const struct gm_intrinsics *video_intrinsics =
-            &data->last_video_frame->video_intrinsics;
-        int video_width = video_intrinsics->width;
-        int video_height = video_intrinsics->height;
+    if (upload_video_texture && data->device_gl_initialized) {
+        if (device_type != GM_DEVICE_TANGO) {
+            const struct gm_intrinsics *video_intrinsics =
+                &data->last_video_frame->video_intrinsics;
+            int video_width = video_intrinsics->width;
+            int video_height = video_intrinsics->height;
 
-        ProfileScopedSection(UploadFrameTextures);
+            ProfileScopedSection(UploadFrameTextures);
 
-        /*
-         * Update video from camera
-         */
-        GLuint ar_video_tex = get_next_ar_video_tex(data);
-        glBindTexture(GL_TEXTURE_2D, ar_video_tex);
+            /*
+             * Update video from camera
+             */
+            GLuint ar_video_tex = get_next_ar_video_tex(data);
+            glBindTexture(GL_TEXTURE_2D, ar_video_tex);
 
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
-        void *video_front = data->last_video_frame->video->data;
-        enum gm_format video_format = data->last_video_frame->video_format;
+            void *video_front = data->last_video_frame->video->data;
+            enum gm_format video_format = data->last_video_frame->video_format;
 
-        switch (video_format) {
-        case GM_FORMAT_LUMINANCE_U8:
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                         video_width, video_height,
-                         0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
-            break;
+            switch (video_format) {
+            case GM_FORMAT_LUMINANCE_U8:
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                             video_width, video_height,
+                             0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+                break;
 
-        case GM_FORMAT_RGB_U8:
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                         video_width, video_height,
-                         0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
-            break;
+            case GM_FORMAT_RGB_U8:
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                             video_width, video_height,
+                             0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
+                break;
 
-        case GM_FORMAT_RGBX_U8:
-        case GM_FORMAT_RGBA_U8:
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                         video_width, video_height,
-                         0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
-            break;
+            case GM_FORMAT_RGBX_U8:
+            case GM_FORMAT_RGBA_U8:
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                             video_width, video_height,
+                             0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+                break;
 
-        case GM_FORMAT_UNKNOWN:
-        case GM_FORMAT_Z_U16_MM:
-        case GM_FORMAT_Z_F32_M:
-        case GM_FORMAT_Z_F16_M:
-        case GM_FORMAT_POINTS_XYZC_F32_M:
-            gm_assert(data->log, 0, "Unexpected format for video buffer");
-            break;
-        }
-    } else if (data->device_gl_initialized &&
-               device_type == GM_DEVICE_TANGO)
-    {
+            case GM_FORMAT_UNKNOWN:
+            case GM_FORMAT_Z_U16_MM:
+            case GM_FORMAT_Z_F32_M:
+            case GM_FORMAT_Z_F16_M:
+            case GM_FORMAT_POINTS_XYZC_F32_M:
+                gm_assert(data->log, 0, "Unexpected format for video buffer");
+                break;
+            }
+        } else {
 #ifdef USE_TANGO
-        GLuint ar_video_tex = get_next_ar_video_tex(data);
-        if (TangoService_updateTextureExternalOes(
-                TANGO_CAMERA_COLOR, ar_video_tex,
-                NULL /* ignore timestamp */) != TANGO_SUCCESS)
-        {
-            gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
-        }
+            GLuint ar_video_tex = get_next_ar_video_tex(data);
+            if (TangoService_updateTextureExternalOes(
+                    TANGO_CAMERA_COLOR, ar_video_tex,
+                    NULL /* ignore timestamp */) != TANGO_SUCCESS)
+            {
+                gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
+            }
 #endif
+        }
     }
 }
 
