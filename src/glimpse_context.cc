@@ -1572,22 +1572,29 @@ sanitise_skeleton(struct gm_context *ctx,
 
                     // If linear interpolation from the last joint confidence
                     // joint positions is closer to the previous position than
-                    // the current tracking position, replace it.
+                    // the current tracking position, replace it. If it isn't,
+                    // just use the previous position.
+                    struct gm_joint old_joint = parent_joint;
                     if (new_distance < distance) {
-                        LOGI("Anchor joint %s replaced (%.2f, %.2f, %.2f)->"
-                             "(%.2f, %.2f, %.2f) (prev: %.2f, %.2f, %.2f) "
-                             "(%.2f, %.2fx, c %.2f)",
-                             joint_name(joint),
-                             parent_joint.x, parent_joint.y, parent_joint.z,
-                             prediction.x, prediction.y, prediction.z,
-                             prev0.x, prev0.y, prev0.z,
-                             distance, distance / prev_dist,
-                             parent_joint.confidence);
                         parent_joint.x = prediction.x;
                         parent_joint.y = prediction.y;
                         parent_joint.z = prediction.z;
                         parent_joint.predicted = true;
+                    } else {
+                        parent_joint.x = prev0.x;
+                        parent_joint.y = prev0.y;
+                        parent_joint.z = prev0.z;
+                        parent_joint.predicted = true;
                     }
+                    LOGI("Anchor joint %s replaced (%.2f, %.2f, %.2f)->"
+                         "(%.2f, %.2f, %.2f) (prev: %.2f, %.2f, %.2f) "
+                         "(%.2f, %.2fx, c %.2f)",
+                         joint_name(joint),
+                         old_joint.x, old_joint.y, old_joint.z,
+                         parent_joint.x, parent_joint.y, parent_joint.z,
+                         prev0.x, prev0.y, prev0.z,
+                         distance, distance / prev_dist,
+                         parent_joint.confidence);
                 }
             }
         }
