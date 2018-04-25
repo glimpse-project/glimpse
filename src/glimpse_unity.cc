@@ -157,7 +157,10 @@ struct glimpse_data
     GLint attrib_quad_pos;
     GLint attrib_quad_tex_coords;
 
-    GLuint uniform_tex_sampler;
+    GLuint ar_video_tex_sampler;
+    std::vector<GLuint> ar_video_queue;
+    int ar_video_queue_len;
+    int ar_video_queue_pos;
 };
 
 #ifdef __ANDROID__
@@ -252,6 +255,7 @@ logger_cb(struct gm_logger *logger,
                     fprintf(data->log_fp, "> %s\n", line);
                 }
             }
+            fflush(data->log_fp);
         }
 
         free(msg);
@@ -442,34 +446,6 @@ handle_device_frame_updates(struct glimpse_data *data)
          */
         request_device_frame(data, GM_REQUEST_FRAME_VIDEO);
     }
-
-#if 0
-    if (upload) {
-        ProfileScopedSection(UploadFrameTextures);
-
-        /*
-         * Update luminance from RGB camera
-         */
-        glBindTexture(GL_TEXTURE_2D, gl_lum_tex);
-
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        /* NB: gles2 only allows npot textures with clamp to edge
-         * coordinate wrapping
-         */
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        void *video_front = gm_frame_get_video_buffer(data->last_video_frame);
-        enum gm_format video_format =
-            gm_frame_get_video_format(data->last_video_frame);
-
-        assert(video_format == GM_FORMAT_LUMINANCE_U8);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                     data->video_width, data->video_height,
-                     0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
-    }
-#endif
 }
 
 static void
@@ -600,6 +576,72 @@ gm_unity_process_events(void)
     process_events(plugin_data);
 }
 
+static GLuint
+gen_ar_video_texture(struct glimpse_data *data)
+{
+    GLuint ar_video_tex;
+
+    glGenTextures(1, &ar_video_tex);
+
+    GLenum target = GL_TEXTURE_2D;
+    if (data->device_type == GM_DEVICE_TANGO) {
+        target = GL_TEXTURE_EXTERNAL_OES;
+    }
+
+    glBindTexture(target, ar_video_tex);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    return ar_video_tex;
+}
+
+static void
+update_ar_video_queue_len(struct glimpse_data *data, int len)
+{
+    if (len >= data->ar_video_queue_len) {
+        data->ar_video_queue_len = len;
+        return;
+    }
+    glDeleteTextures(data->ar_video_queue.size(),
+                     data->ar_video_queue.data());
+    data->ar_video_queue.resize(0);
+    data->ar_video_queue_len = len;
+    data->ar_video_queue_pos = -1;
+}
+
+static GLuint
+get_next_ar_video_tex(struct glimpse_data *data)
+{
+    if (data->ar_video_queue_len < 1) {
+        update_ar_video_queue_len(data, 1);
+    }
+
+    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
+        GLuint ar_video_tex = gen_ar_video_texture(data);
+
+        data->ar_video_queue_pos = data->ar_video_queue.size();
+        data->ar_video_queue.push_back(ar_video_tex);
+        return data->ar_video_queue.back();
+    } else {
+        data->ar_video_queue_pos =
+            (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
+        return data->ar_video_queue[data->ar_video_queue_pos];
+    }
+}
+
+static GLuint
+get_oldest_ar_video_tex(struct glimpse_data *data)
+{
+    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
+        return data->ar_video_queue[0];
+    } else {
+        int oldest = (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
+        return data->ar_video_queue[oldest];
+    }
+}
+
 static void
 draw_video(struct glimpse_data *data,
            float *xyst_verts,
@@ -676,9 +718,9 @@ draw_video(struct glimpse_data *data,
         data->attrib_quad_tex_coords =
             glGetAttribLocation(data->video_program, "tex_coords_in");
 
-        data->uniform_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
+        data->ar_video_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
         glUseProgram(data->video_program);
-        glUniform1i(data->uniform_tex_sampler, 0);
+        glUniform1i(data->ar_video_tex_sampler, 0);
     }
 
     glUseProgram(data->video_program);
@@ -694,21 +736,15 @@ draw_video(struct glimpse_data *data,
                               2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)8);
     }
 
+    GLuint ar_video_tex = get_oldest_ar_video_tex(data);
     GLenum target = GL_TEXTURE_2D;
 #ifdef __ANDROID__
-    if (data->device_type == GM_DEVICE_TANGO) {
+    if (data->device_type == GM_DEVICE_TANGO)
         target = GL_TEXTURE_EXTERNAL_OES;
-        glBindTexture(target, data->gl_vid_tex);
-    } else {
-        glBindTexture(target, data->gl_vid_tex);
-    }
+    glBindTexture(target, ar_video_tex);
 #else
-    glBindTextureUnit(0, data->gl_vid_tex);
+    glBindTextureUnit(0, ar_video_tex);
 #endif
-    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
 
     /* Don't touch the depth buffer, otherwise everything rendered by later
      * cameras will likely be discarded...
@@ -737,106 +773,110 @@ draw_video(struct glimpse_data *data,
 static void
 render_ar_video_background(struct glimpse_data *data)
 {
+    static int call_count = 0;
+    int local_call_count = call_count++;
+    struct gm_frame *new_frame = NULL;
+    GLuint ar_video_tex = 0;
+
     gm_assert(data->log, !!data->ctx, "render_ar_video_background, NULL ctx");
 
-    if (data->device_type != GM_DEVICE_TANGO) {
-        /* Upload latest video frame if it's changed...
-        */
-        if (data->last_video_frame != data->visible_frame) {
-            pthread_mutex_lock(&data->swap_frames_lock);
+    if (data->last_video_frame != data->visible_frame) {
+        gm_info(data->log, "XXX %d: YES, last_video_frame != visible_frame (%p, %p)",
+                local_call_count,
+                data->last_video_frame,
+                data->visible_frame);
 
-            struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
-            gm_frame_add_breadcrumb(new_frame, "render thread visible");
+        pthread_mutex_lock(&data->swap_frames_lock);
 
-            if (data->visible_frame) {
-                gm_frame_add_breadcrumb(data->visible_frame, "render thread discard");
-                gm_frame_unref(data->visible_frame);
-            }
-            data->visible_frame = new_frame;
+        new_frame = gm_frame_ref(data->last_video_frame);
+        gm_info(data->log, "XXX %d: > new_frame = %p",
+                local_call_count,
+                new_frame);
+        gm_frame_add_breadcrumb(new_frame, "render thread visible");
 
-            pthread_mutex_unlock(&data->swap_frames_lock);
-
-            const struct gm_intrinsics *video_intrinsics =
-                &new_frame->video_intrinsics;
-            int video_width = video_intrinsics->width;
-            int video_height = video_intrinsics->height;
-
-            if (data->gl_vid_tex == 0) {
-                glGenTextures(1, &data->gl_vid_tex);
-                glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            }
-
-            glBindTexture(GL_TEXTURE_2D, data->gl_vid_tex);
-
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-            void *video_front = new_frame->video->data;
-            enum gm_format video_format = new_frame->video_format;
-
-            switch (video_format) {
-            case GM_FORMAT_LUMINANCE_U8:
-                gm_debug(data->log, "uploading U8 %dx%d", video_width, video_height);
-#ifdef __ANDROID__
-                /* Annoyingly it doesn't seem to work on GLES3 + Android to
-                 * upload a GL_RED texture + set a swizzle like we need to do
-                 * for core GL (even though it looks like component swizzling
-                 * is part of GLES3)
-                 */
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                             video_width, video_height,
-                             0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
-#else
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RED,
-                             video_width, video_height,
-                             0, GL_RED, GL_UNSIGNED_BYTE, video_front);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
-                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
-#endif
-                break;
-
-            case GM_FORMAT_RGB_U8:
-                gm_debug(data->log, "uploading RGB8 %dx%d", video_width, video_height);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                             video_width, video_height,
-                             0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
-                break;
-
-            case GM_FORMAT_RGBX_U8:
-            case GM_FORMAT_RGBA_U8:
-                gm_debug(data->log, "uploading RGBA8 %dx%d", video_width, video_height);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                             video_width, video_height,
-                             0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
-                break;
-
-            case GM_FORMAT_UNKNOWN:
-            case GM_FORMAT_Z_U16_MM:
-            case GM_FORMAT_Z_F32_M:
-            case GM_FORMAT_Z_F16_M:
-            case GM_FORMAT_POINTS_XYZC_F32_M:
-                gm_assert(data->log, 0, "Unexpected format for video buffer");
-                break;
-            }
-
-            glBindTexture(GL_TEXTURE_2D, 0);
+        if (data->visible_frame) {
+            gm_frame_add_breadcrumb(data->visible_frame, "render thread discard");
+            gm_frame_unref(data->visible_frame);
         }
+        data->visible_frame = new_frame;
+
+        pthread_mutex_unlock(&data->swap_frames_lock);
     } else {
-        if (data->gl_vid_tex == 0) {
-            glGenTextures(1, &data->gl_vid_tex);
-            glBindTexture(GL_TEXTURE_EXTERNAL_OES, data->gl_vid_tex);
+        gm_info(data->log, "XXX %d: data->last_video_frame == data->visible_frame (%p, %p)",
+                local_call_count,
+                data->last_video_frame,
+                data->visible_frame);
+    }
 
-            glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-            glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-            glTexParameteri(GL_TEXTURE_EXTERNAL_OES, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-        }
-        if (data->last_video_frame) {
+    if (new_frame) {
+        gm_info(data->log, "XXX %d: YES, new_frame", local_call_count);
+        if (data->ar_video_queue_len == 0)
+            update_ar_video_queue_len(data, 6); // XXX should be configurable
+
+        if (data->device_type != GM_DEVICE_TANGO) {
+                const struct gm_intrinsics *video_intrinsics =
+                    &new_frame->video_intrinsics;
+                int video_width = video_intrinsics->width;
+                int video_height = video_intrinsics->height;
+
+                ar_video_tex = get_next_ar_video_tex(data);
+                glBindTexture(GL_TEXTURE_2D, ar_video_tex);
+
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+                void *video_front = new_frame->video->data;
+                enum gm_format video_format = new_frame->video_format;
+
+                switch (video_format) {
+                case GM_FORMAT_LUMINANCE_U8:
+                    gm_debug(data->log, "uploading U8 %dx%d", video_width, video_height);
+#ifdef __ANDROID__
+                    /* Annoyingly it doesn't seem to work on GLES3 + Android to
+                     * upload a GL_RED texture + set a swizzle like we need to do
+                     * for core GL (even though it looks like component swizzling
+                     * is part of GLES3)
+                     */
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                                 video_width, video_height,
+                                 0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+#else
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RED,
+                                 video_width, video_height,
+                                 0, GL_RED, GL_UNSIGNED_BYTE, video_front);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_RED);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_RED);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+#endif
+                    break;
+
+                case GM_FORMAT_RGB_U8:
+                    gm_debug(data->log, "uploading RGB8 %dx%d", video_width, video_height);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                                 video_width, video_height,
+                                 0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
+                    break;
+
+                case GM_FORMAT_RGBX_U8:
+                case GM_FORMAT_RGBA_U8:
+                    gm_debug(data->log, "uploading RGBA8 %dx%d", video_width, video_height);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                                 video_width, video_height,
+                                 0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+                    break;
+
+                case GM_FORMAT_UNKNOWN:
+                case GM_FORMAT_Z_U16_MM:
+                case GM_FORMAT_Z_F32_M:
+                case GM_FORMAT_Z_F16_M:
+                case GM_FORMAT_POINTS_XYZC_F32_M:
+                    gm_assert(data->log, 0, "Unexpected format for video buffer");
+                    break;
+                }
+
+                glBindTexture(GL_TEXTURE_2D, 0);
+        } else {
 #ifdef USE_TANGO
+            ar_video_tex = get_next_ar_video_tex(data);
             if (TangoService_updateTextureExternalOes(
                     TANGO_CAMERA_COLOR, data->gl_vid_tex,
                     NULL /* ignore timestamp */) != TANGO_SUCCESS)
@@ -845,10 +885,18 @@ render_ar_video_background(struct glimpse_data *data)
             }
 #endif
         }
+    } else {
+        gm_info(data->log, "XXX %d: !new_frame %p", local_call_count, new_frame);
     }
 
-    if (data->gl_vid_tex != 0 && data->last_video_frame != NULL) {
+    if (data->last_video_frame && data->ar_video_queue.size()) {
 
+        gm_info(data->log, "XXX %d: YES, (data->last_video_frame && data->ar_video_queue.size())",
+                local_call_count);
+
+        /* XXX: might not technically be the appropriate rotation but the
+         * minimal buffer should mean it's not a big problem...
+         */
         enum gm_rotation rotation = data->last_video_frame->camera_rotation;
 
         struct {
@@ -896,6 +944,9 @@ render_ar_video_background(struct glimpse_data *data)
                  xyst_verts[3].t);
 
         draw_video(data, (float *)xyst_verts, 4);
+    } else {
+        gm_info(data->log, "XXX %d: !(data->last_video_frame && data->ar_video_queue.size())",
+                local_call_count);
     }
 }
 
