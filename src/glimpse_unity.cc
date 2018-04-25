@@ -1032,6 +1032,12 @@ on_device_event_cb(struct gm_device_event *device_event,
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_terminate(void)
 {
+    /* Just in case we have multiple OnApplicationQuit attempts to terminate
+     * the plugin state... */
+    if (plugin_data == NULL) {
+        return;
+    }
+
     struct glimpse_data *data = plugin_data;
 
     gm_debug(data->log, "GLIMPSE: Terminate\n");
@@ -1110,9 +1116,19 @@ gm_unity_terminate(void)
     plugin_data = NULL;
 }
 
+/* XXX: multiple calls to _init will return the same singleton plugin
+ * state.
+ * XXX: Only a single call to _terminate will destroy the plugin state
+ * (i.e. it's not ref-counted.
+ */
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_init(char *config_json)
 {
+    if (plugin_data) {
+        gm_info(plugin_data->log, "gm_unity_init lite init, returning existing plugin_data");
+        return (intptr_t )plugin_data;
+    }
+
     struct glimpse_data *data = new glimpse_data();
 
     data->config_val = json_parse_string(config_json);
