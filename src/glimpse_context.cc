@@ -241,6 +241,7 @@ struct joint_dist
 
 struct joint_info
 {
+    bool anchor;
     int n_connections;
     int *connections;
     struct joint_dist *dist;
@@ -1339,9 +1340,6 @@ build_bones(struct gm_context *ctx,
     }
 
     for (int i = 0; i < ctx->joint_stats[joint_no].n_connections; ++i) {
-        if (ctx->joint_stats[joint_no].connections[i] == last_joint_no) {
-            continue;
-        }
         build_bones(ctx, skeleton, reset,
                     ctx->joint_stats[joint_no].connections[i], joint_no);
     }
@@ -1394,9 +1392,6 @@ build_skeleton(struct gm_context *ctx,
 
     // Follow the connections for this joint to build up a whole skeleton
     for (int i = 0; i < ctx->joint_stats[joint_no].n_connections; ++i) {
-        if (ctx->joint_stats[joint_no].connections[i] == last_joint_no) {
-            continue;
-        }
         build_skeleton(ctx, result, skeleton,
                        ctx->joint_stats[joint_no].connections[i], joint_no);
     }
@@ -1522,68 +1517,77 @@ sanitise_skeleton(struct gm_context *ctx,
     //       with no regard to bone length or previous transformations. Length
     //       will be corrected in the next loop that decides on bone angles,
     //       but we could still be cleverer than this.
-    for (int i = 0; i <= ctx->joint_stats[parent_head].n_connections; ++i) {
-        int joint = i ?
-            ctx->joint_stats[parent_head].connections[i-1] : parent_head;
-        struct gm_joint &parent_joint = skeleton.joints[joint];
-
-        // Find the index of the last 2 unpredicted parent joint positions
-        int np = 0;
-        int prev_frames = 0;
-        struct gm_tracking_impl *prev[2];
-        for (int i = 0; i < ctx->n_tracking &&
-             np < ctx->max_joint_predictions; ++i) {
-            if (ctx->tracking_history[i]->skeleton.
-                joints[joint].predicted) {
-                ++np;
-                continue;
-            }
-
-            if (prev_frames < 2) {
-                prev[prev_frames++] = ctx->tracking_history[i];
-            }
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        if (!ctx->joint_stats[j].anchor) {
+            continue;
         }
 
-        if (prev_frames == 2 && np < ctx->max_joint_predictions) {
-            struct gm_joint &prev0 = prev[0]->skeleton.joints[joint];
-            struct gm_joint &prev1 = prev[1]->skeleton.joints[joint];
+        for (int i = 0; i <= ctx->joint_stats[j].n_connections; ++i) {
+            int joint = i ? ctx->joint_stats[j].connections[i-1] : j;
+            struct gm_joint &parent_joint = skeleton.joints[joint];
 
-            float time = (float)((timestamp - prev[0]->frame->timestamp) / 1e9);
-            float distance = distance_between(&parent_joint.x, &prev0.x) / time;
+            // Find the index of the last 2 unpredicted parent joint positions
+            int np = 0;
+            int prev_frames = 0;
+            struct gm_tracking_impl *prev[2];
+            for (int i = 0; i < ctx->n_tracking &&
+                 np < ctx->max_joint_predictions; ++i) {
+                if (ctx->tracking_history[i]->skeleton.
+                    joints[joint].predicted) {
+                    ++np;
+                    continue;
+                }
 
-            float prev_time = (float)
-                ((prev[0]->frame->timestamp -
-                  prev[1]->frame->timestamp) / 1e9);
-            float prev_dist = distance_between(&prev0.x, &prev1.x) / prev_time;
+                if (prev_frames < 2) {
+                    prev[prev_frames++] = ctx->tracking_history[i];
+                }
+            }
 
-            if (distance > ctx->joint_move_threshold &&
-                (distance > ctx->joint_max_travel ||
-                 distance > (prev_dist * ctx->joint_scale_threshold))) {
-                glm::vec3 delta = glm::vec3(prev0.x, prev0.y, prev0.z) -
-                                  glm::vec3(prev1.x, prev1.y, prev1.z);
-                glm::vec3 prediction =
-                    glm::vec3(prev1.x, prev1.y, prev1.z) +
-                    (delta / prev_time) * time;
+            if (prev_frames == 2 && np < ctx->max_joint_predictions) {
+                struct gm_joint &prev0 = prev[0]->skeleton.joints[joint];
+                struct gm_joint &prev1 = prev[1]->skeleton.joints[joint];
 
-                float new_distance = distance_between(&prediction.x, &prev0.x);
+                float time = (float)
+                    ((timestamp - prev[0]->frame->timestamp) / 1e9);
+                float distance =
+                    distance_between(&parent_joint.x, &prev0.x) / time;
 
-                // If linear interpolation from the last joint confidence
-                // joint positions is closer to the previous position than the
-                // current tracking position, replace it.
-                if (new_distance < distance) {
-                    LOGI("Parent joint %s replaced (%.2f, %.2f, %.2f)->"
-                         "(%.2f, %.2f, %.2f) (prev: %.2f, %.2f, %.2f) "
-                         "(%.2f, %.2fx, c %.2f)",
-                         joint_name(joint),
-                         parent_joint.x, parent_joint.y, parent_joint.z,
-                         prediction.x, prediction.y, prediction.z,
-                         prev0.x, prev0.y, prev0.z,
-                         distance, distance / prev_dist,
-                         parent_joint.confidence);
-                    parent_joint.x = prediction.x;
-                    parent_joint.y = prediction.y;
-                    parent_joint.z = prediction.z;
-                    parent_joint.predicted = true;
+                float prev_time = (float)
+                    ((prev[0]->frame->timestamp -
+                      prev[1]->frame->timestamp) / 1e9);
+                float prev_dist =
+                    distance_between(&prev0.x, &prev1.x) / prev_time;
+
+                if (distance > ctx->joint_move_threshold &&
+                    (distance > ctx->joint_max_travel ||
+                     distance > (prev_dist * ctx->joint_scale_threshold))) {
+                    glm::vec3 delta = glm::vec3(prev0.x, prev0.y, prev0.z) -
+                                      glm::vec3(prev1.x, prev1.y, prev1.z);
+                    glm::vec3 prediction =
+                        glm::vec3(prev1.x, prev1.y, prev1.z) +
+                        (delta / prev_time) * time;
+
+                    float new_distance =
+                        distance_between(&prediction.x, &prev0.x);
+
+                    // If linear interpolation from the last joint confidence
+                    // joint positions is closer to the previous position than
+                    // the current tracking position, replace it.
+                    if (new_distance < distance) {
+                        LOGI("Anchor joint %s replaced (%.2f, %.2f, %.2f)->"
+                             "(%.2f, %.2f, %.2f) (prev: %.2f, %.2f, %.2f) "
+                             "(%.2f, %.2fx, c %.2f)",
+                             joint_name(joint),
+                             parent_joint.x, parent_joint.y, parent_joint.z,
+                             prediction.x, prediction.y, prediction.z,
+                             prev0.x, prev0.y, prev0.z,
+                             distance, distance / prev_dist,
+                             parent_joint.confidence);
+                        parent_joint.x = prediction.x;
+                        parent_joint.y = prediction.y;
+                        parent_joint.z = prediction.z;
+                        parent_joint.predicted = true;
+                    }
                 }
             }
         }
@@ -1602,6 +1606,11 @@ sanitise_skeleton(struct gm_context *ctx,
         struct bone_info &bone = *it;
 
         if (bone.head < 0) {
+            continue;
+        }
+
+        // We don't want to move anchor points
+        if (ctx->joint_stats[bone.tail].anchor) {
             continue;
         }
 
@@ -4520,6 +4529,10 @@ gm_context_new(struct gm_logger *logger, char **err)
         for (int i = 0; i < ctx->n_joints; i++) {
             JSON_Object *joint =
                 json_array_get_object(json_array(ctx->joint_map), i);
+            ctx->joint_stats[i].anchor =
+                json_object_has_value(joint, "anchor") ?
+                    json_object_get_boolean(joint, "anchor") :
+                    false;
             JSON_Array *connections =
                 json_object_get_array(joint, "connections");
             for (int c = 0; c < (int)json_array_get_count(connections); c++) {
@@ -4530,15 +4543,18 @@ gm_context_new(struct gm_logger *logger, char **err)
                     if (strcmp(json_object_get_string(connection, "joint"),
                                name) != 0) { continue; }
 
-                    // Add the connection to this joint and add the reverse
-                    // connection.
+                    // Add the connection to this joint.
                     int idx = ctx->joint_stats[i].n_connections;
                     ctx->joint_stats[i].connections[idx] = j;
                     ++ctx->joint_stats[i].n_connections;
 
-                    idx = ctx->joint_stats[j].n_connections;
+                    // Add the reverse connection.
+                    // Note: We don't do this and we assume the graph is
+                    //       acyclic. This allows us to have multiple anchor
+                    //       points.
+                    /*idx = ctx->joint_stats[j].n_connections;
                     ctx->joint_stats[j].connections[idx] = i;
-                    ++ctx->joint_stats[j].n_connections;
+                    ++ctx->joint_stats[j].n_connections;*/
 
                     break;
                 }

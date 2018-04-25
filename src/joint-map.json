@@ -2,7 +2,8 @@
     {
         "joint": "head.tail",
         "labels": [ 2, 3 ],
-        "connections": [ "neck_01.head" ]
+        "connections": [ "neck_01.head" ],
+        "anchor": true
     },
     {
         "joint": "neck_01.head",
@@ -42,7 +43,8 @@
     {
         "joint": "thigh_l.head",
         "labels": [ 19 ],
-        "connections": [ "thigh_l.tail" ]
+        "connections": [ "thigh_l.tail" ],
+        "anchor": true
     },
     {
         "joint": "thigh_l.tail",
@@ -52,7 +54,8 @@
     {
         "joint": "thigh_r.head",
         "labels": [ 21 ],
-        "connections": [ "thigh_r.tail" ]
+        "connections": [ "thigh_r.tail" ],
+        "anchor": true
     },
     {
         "joint": "thigh_r.tail",
