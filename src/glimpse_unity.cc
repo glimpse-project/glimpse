@@ -121,7 +121,6 @@ struct glimpse_data
      * gm_frame before uploading to a texture for display.
      */
     struct gm_frame *visible_frame;
-    GLuint gl_vid_tex;
 
     /* Set when gm_context sends a _REQUEST_FRAME event */
     bool context_needs_frame;
@@ -615,7 +614,7 @@ static GLuint
 get_next_ar_video_tex(struct glimpse_data *data)
 {
     if (data->ar_video_queue_len < 1) {
-        update_ar_video_queue_len(data, 1);
+        update_ar_video_queue_len(data, 6);
     }
 
     if (data->ar_video_queue.size() < data->ar_video_queue_len) {
@@ -878,7 +877,7 @@ render_ar_video_background(struct glimpse_data *data)
 #ifdef USE_TANGO
             ar_video_tex = get_next_ar_video_tex(data);
             if (TangoService_updateTextureExternalOes(
-                    TANGO_CAMERA_COLOR, data->gl_vid_tex,
+                    TANGO_CAMERA_COLOR, ar_video_tex,
                     NULL /* ignore timestamp */) != TANGO_SUCCESS)
             {
                 gm_warn(data->log, "Failed to get a color image.");
