@@ -4257,6 +4257,7 @@ gm_context_destroy(struct gm_context *ctx)
     pthread_mutex_unlock(&ctx->liveness_lock);
 
     gm_context_stop_tracking(ctx);
+    gm_context_clear_tracking(ctx);
 
     /* Free the prediction pool. The user must have made sure to unref any
      * predictions before destroying the context.
@@ -4266,7 +4267,6 @@ gm_context_destroy(struct gm_context *ctx)
     /* Make sure all resourced are returned to their pools before destroying
      * the pools which will in-turn destroy the resources...
      */
-    gm_context_clear_tracking(ctx);
     mem_pool_foreach(ctx->tracking_pool,
                      print_tracking_info_cb,
                      ctx);
