@@ -1278,6 +1278,8 @@ recording_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
 
+    gm_debug(dev->log, "Started recording IO thread");
+
     JSON_Array *frames =
         json_object_get_array(json_object(dev->recording.json), "frames");
     JSON_Object *frame0 = json_array_get_object(frames, 0);
@@ -1563,6 +1565,8 @@ recording_stop(struct gm_device *dev)
     if (retval != NULL) {
         gm_error(dev->log, "Recording IO thread exited with error: %d",
                  (int)(intptr_t)retval);
+    } else {
+        gm_debug(dev->log, "Successfully joined recording io thread");
     }
 }
 
