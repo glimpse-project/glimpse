@@ -4359,17 +4359,22 @@ gm_context_new(struct gm_logger *logger, char **err)
             ctx->decision_trees[i] =
                 load_tree((uint8_t *)gm_asset_get_buffer(tree_asset),
                           gm_asset_get_length(tree_asset));
+            if (!ctx->decision_trees[i]) {
+                gm_warn(ctx->log,
+                        "Failed to open binary decision tree '%s': %s",
+                        name, catch_err);
+            }
         } else {
             free(catch_err);
-            char *open_err = NULL;
+            catch_err = NULL;
 
             name = json_name;
             tree_asset = gm_asset_open(logger,
                                        json_name,
                                        GM_ASSET_MODE_BUFFER,
-                                       &open_err);
+                                       &catch_err);
             if (!tree_asset) {
-                free(open_err);
+                free(catch_err);
                 break;
             }
 
@@ -4383,6 +4388,11 @@ gm_context_new(struct gm_logger *logger, char **err)
             ctx->decision_trees[i] =
                 load_json_tree((uint8_t *)gm_asset_get_buffer(tree_asset),
                                gm_asset_get_length(tree_asset));
+            if (!ctx->decision_trees[i]) {
+                gm_warn(ctx->log,
+                        "Failed to open JSON decision tree '%s': %s",
+                        name, catch_err);
+            }
         }
 
         gm_asset_close(tree_asset);
@@ -4391,7 +4401,7 @@ gm_context_new(struct gm_logger *logger, char **err)
             break;
         }
 
-        gm_info(logger, "Opened %s", name);
+        gm_info(logger, "Opened decision tree '%s'", name);
         ctx->n_decision_trees++;
     }
 
