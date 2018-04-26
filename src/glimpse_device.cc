@@ -2730,6 +2730,10 @@ gm_device_set_event_callback(struct gm_device *dev,
 void
 gm_device_start(struct gm_device *dev)
 {
+    if (dev->running) {
+        return;
+    }
+
     switch (dev->type) {
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
