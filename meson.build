@@ -347,7 +347,7 @@ executable('image-pre-processor',
            dependencies: [ libpng_dep, threads_dep ])
 
 executable('train_rdt',
-           [ 'src/train_rdt.cc',
+           [ 'src/glimpse_rdt.cc',
              'src/train_utils.cc',
              'src/image_utils.cc',
              'src/loader.cc',
