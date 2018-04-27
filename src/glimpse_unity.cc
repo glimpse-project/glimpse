@@ -1486,7 +1486,7 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
                                      rotation);
 
         memcpy(out_mat4,
-               glm::value_ptr(intrinsics_to_project_matrix(&rotated_intrinsics, 0.1, 10)),
+               glm::value_ptr(intrinsics_to_project_matrix(&rotated_intrinsics, 0.1, 100)),
                sizeof(float) * 16);
         return true;
     } else {
