@@ -36,17 +36,17 @@
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
-typedef vector(int32_t, 2) Int2D;
+typedef vector(int, 2) Int2D;
 typedef vector(float, 4) UVPair;
 
 typedef struct {
     Int2D xy;
-    uint32_t i;
+    int i;
 } Int3D;
 
 template<typename FloatT>
 inline float
-sample_uv(FloatT* depth_image, uint32_t width, uint32_t height,
+sample_uv(FloatT* depth_image, int width, int height,
           Int2D pixel, float depth, UVPair uv)
 {
 #if 0
@@ -67,16 +67,16 @@ sample_uv(FloatT* depth_image, uint32_t width, uint32_t height,
 
     return upixel - vpixel;
 #else
-    Int2D u = { (int32_t)(pixel[0] + uv[0] / depth),
-                (int32_t)(pixel[1] + uv[1] / depth) };
-    Int2D v = { (int32_t)(pixel[0] + uv[2] / depth),
-                (int32_t)(pixel[1] + uv[3] / depth) };
+    Int2D u = { (int)(pixel[0] + uv[0] / depth),
+                (int)(pixel[1] + uv[1] / depth) };
+    Int2D v = { (int)(pixel[0] + uv[2] / depth),
+                (int)(pixel[1] + uv[3] / depth) };
 
-    float upixel = (u[0] >= 0 && u[0] < (int32_t)width &&
-                    u[1] >= 0 && u[1] < (int32_t)height) ?
+    float upixel = (u[0] >= 0 && u[0] < (int)width &&
+                    u[1] >= 0 && u[1] < (int)height) ?
         (float)depth_image[((u[1] * width) + u[0])] : 1000.f;
-    float vpixel = (v[0] >= 0 && v[0] < (int32_t)width &&
-                    v[1] >= 0 && v[1] < (int32_t)height) ?
+    float vpixel = (v[0] >= 0 && v[0] < (int)width &&
+                    v[1] >= 0 && v[1] < (int)height) ?
         (float)depth_image[((v[1] * width) + v[0])] : 1000.f;
 
     return upixel - vpixel;
