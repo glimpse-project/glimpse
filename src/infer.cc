@@ -60,13 +60,13 @@ typedef struct {
 } JointMapEntry;
 
 typedef struct {
-    uint8_t thread;
-    uint8_t n_threads;
+    int thread;
+    int n_threads;
     RDTree** forest;
-    uint8_t n_trees;
+    int n_trees;
     void* depth_image;
-    uint32_t width;
-    uint32_t height;
+    int width;
+    int height;
     float* output;
 } InferThreadData;
 
@@ -76,11 +76,12 @@ infer_labels_thread(void* userdata)
 {
   InferThreadData* data = (InferThreadData*)userdata;
   FloatT* depth_image = (FloatT*)data->depth_image;
-  uint8_t n_labels = data->forest[0]->header.n_labels;
+  int n_labels = data->forest[0]->header.n_labels;
 
   // Accumulate probability map
-  for (uint32_t off = (uint32_t)data->thread; off < data->width * data->height;
-       off += (uint32_t)data->n_threads)
+  for (int off = data->thread;
+       off < data->width * data->height;
+       off += data->n_threads)
     {
       int y = off / data->width;
       int x = off % data->width;
@@ -95,13 +96,13 @@ infer_labels_thread(void* userdata)
           continue;
         }
 
-      Int2D pixel = { (int32_t)x, (int32_t)y };
-      for (uint8_t i = 0; i < data->n_trees; ++i)
+      Int2D pixel = { x, y };
+      for (int i = 0; i < data->n_trees; ++i)
         {
           RDTree* tree = data->forest[i];
           Node* node = tree->nodes;
 
-          uint32_t id = 0;
+          int id = 0;
           while (node->label_pr_idx == 0)
             {
               float value = sample_uv<FloatT>(depth_image,
@@ -147,16 +148,16 @@ infer_labels_thread(void* userdata)
 
 template<typename FloatT>
 float*
-infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
-             uint32_t width, uint32_t height, float* out_labels,
+infer_labels(RDTree** forest, int n_trees, FloatT* depth_image,
+             int width, int height, float* out_labels,
              bool use_threads)
 {
-  uint8_t n_labels = forest[0]->header.n_labels;
+  int n_labels = (int)forest[0]->header.n_labels;
   size_t output_size = width * height * n_labels * sizeof(float);
   float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
   memset(output_pr, 0, output_size);
 
-  unsigned int n_threads = std::thread::hardware_concurrency();
+  int n_threads = std::thread::hardware_concurrency();
   if (!use_threads || n_threads <= 1)
     {
       InferThreadData data = { 1, 1, forest, n_trees, (void*)depth_image, width, height, output_pr};
@@ -167,9 +168,9 @@ infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
       pthread_t threads[n_threads];
       InferThreadData data[n_threads];
 
-      for (unsigned int i = 0; i < n_threads; ++i)
+      for (int i = 0; i < n_threads; ++i)
         {
-          data[i] = { (uint8_t)i, (uint8_t)n_threads, forest, n_trees,
+          data[i] = { i, n_threads, forest, n_trees,
                       (void*)depth_image, width, height, output_pr };
           if (pthread_create(&threads[i], NULL, infer_labels_thread<FloatT>,
                              (void*)(&data[i])) != 0)
@@ -181,7 +182,7 @@ infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
             }
         }
 
-      for (unsigned int i = 0; i < n_threads; ++i)
+      for (int i = 0; i < n_threads; ++i)
         {
           if (pthread_join(threads[i], NULL) != 0)
             {
@@ -194,10 +195,10 @@ infer_labels(RDTree** forest, uint8_t n_trees, FloatT* depth_image,
 }
 
 template float*
-infer_labels<half>(RDTree**, uint8_t, half*, uint32_t, uint32_t, float*,
+infer_labels<half>(RDTree**, int, half*, int, int, float*,
                    bool);
 template float*
-infer_labels<float>(RDTree**, uint8_t, float*, uint32_t, uint32_t, float*,
+infer_labels<float>(RDTree**, int, float*, int, int, float*,
                     bool);
 
 /* We don't want to be making lots of function calls or dereferencing
@@ -212,16 +213,16 @@ unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
     {
       JSON_Object *entry = json_array_get_object(json_array(joint_map), i);
       JSON_Array *labels = json_object_get_array(entry, "labels");
-      unsigned n_labels = json_array_get_count(labels);
+      int n_labels = json_array_get_count(labels);
 
-      if (n_labels > ARRAY_LEN(map[0].labels))
+      if (n_labels > (int)ARRAY_LEN(map[0].labels))
         {
           fprintf(stderr, "Didn't expect joint to be mapped to > 2 labels\n");
           exit(1);
         }
 
       map[i].n_labels = n_labels;
-      for (unsigned n = 0; n < n_labels; n++)
+      for (int n = 0; n < n_labels; n++)
         {
           map[i].labels[n] = json_array_get_number(labels, n);
         }
@@ -231,7 +232,7 @@ unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
 template<typename FloatT>
 float*
 calc_pixel_weights(FloatT* depth_image, float* pr_table,
-                   int32_t width, int32_t height, uint8_t n_labels,
+                   int width, int height, int n_labels,
                    JSON_Value* joint_map, float* weights)
 {
   int n_joints = json_array_get_count(json_array(joint_map));
@@ -244,19 +245,19 @@ calc_pixel_weights(FloatT* depth_image, float* pr_table,
       weights = (float*)xmalloc(width * height * n_joints * sizeof(float));
     }
 
-  for (int32_t y = 0, weight_idx = 0, pixel_idx = 0; y < height; y++)
+  for (int y = 0, weight_idx = 0, pixel_idx = 0; y < height; y++)
     {
-      for (int32_t x = 0; x < width; x++, pixel_idx++)
+      for (int x = 0; x < width; x++, pixel_idx++)
         {
           float depth = (float)depth_image[pixel_idx];
           float depth_2 = depth * depth;
 
-          for (uint8_t j = 0; j < n_joints; j++, weight_idx++)
+          for (int j = 0; j < n_joints; j++, weight_idx++)
             {
               float pr = 0.f;
               for (int n = 0; n < map[j].n_labels; n++)
                 {
-                  uint8_t label = map[j].labels[n];
+                  int label = (int)map[j].labels[n];
                   pr += pr_table[(pixel_idx * n_labels) + label];
                 }
               weights[weight_idx] = pr * depth_2;
@@ -268,10 +269,10 @@ calc_pixel_weights(FloatT* depth_image, float* pr_table,
 }
 
 template float*
-calc_pixel_weights<half>(half*, float*, int32_t, int32_t, uint8_t,
+calc_pixel_weights<half>(half*, float*, int, int, int,
                          JSON_Value*, float*);
 template float*
-calc_pixel_weights<float>(float*, float*, int32_t, int32_t, uint8_t,
+calc_pixel_weights<float>(float*, float*, int, int, int,
                           JSON_Value*, float*);
 
 static int
@@ -285,7 +286,7 @@ compare_joints(LList* a, LList* b, void* userdata)
 template<typename FloatT>
 InferredJoints*
 infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
-                  int32_t width, int32_t height, uint8_t n_labels,
+                  int width, int height, int n_labels,
                   JSON_Value* joint_map, float vfov, JIParam* params)
 {
   int n_joints = json_array_get_count(json_array(joint_map));
@@ -305,9 +306,9 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
   //       TODO: Figure out a way to divide clusters that are only loosely
   //             connected?
   typedef struct {
-    int32_t y;
-    int32_t left;
-    int32_t right;
+    int y;
+    int left;
+    int right;
   } ScanlineSegment;
 
   typedef std::forward_list<ScanlineSegment> Cluster;
@@ -317,17 +318,17 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
 
   // Collect clusters across scanlines
   ScanlineSegment* last_segment[n_joints];
-  for (int32_t y = 0; y < height; ++y)
+  for (int y = 0; y < height; ++y)
     {
       memset(last_segment, 0, sizeof(ScanlineSegment*) * n_joints);
-      for (int32_t x = 0; x < width; ++x)
+      for (int x = 0; x < width; ++x)
         {
-          for (int32_t j = 0; j < n_joints; ++j)
+          for (int j = 0; j < n_joints; ++j)
             {
               bool threshold_passed = false;
               for (int n = 0; n < map[j].n_labels; ++n)
                 {
-                  uint8_t label = map[j].labels[n];
+                  int label = (int)map[j].labels[n];
                   float label_pr = pr_table[(y * width + x) * n_labels + label];
                   if (label_pr >= params[j].threshold)
                     {
@@ -482,18 +483,18 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
 }
 
 template InferredJoints*
-infer_joints_fast<half>(half*, float*, float*, int32_t, int32_t, uint8_t,
+infer_joints_fast<half>(half*, float*, float*, int, int, int,
                         JSON_Value*, float, JIParam*);
 
 template InferredJoints*
-infer_joints_fast<float>(float*, float*, float*, int32_t, int32_t, uint8_t,
+infer_joints_fast<float>(float*, float*, float*, int, int, int,
                          JSON_Value*, float, JIParam*);
 
 template<typename FloatT>
 InferredJoints*
 infer_joints(FloatT* depth_image, float* pr_table, float* weights,
-             int32_t width, int32_t height,
-             uint8_t n_labels, JSON_Value* joint_map,
+             int width, int height,
+             int n_labels, JSON_Value* joint_map,
              float vfov, JIParam* params)
 {
   int n_joints = json_array_get_count(json_array(joint_map));
@@ -503,7 +504,7 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
 
   // Use mean-shift to find the inferred joint positions, set them back into
   // the body using the given offset, and return the results
-  uint32_t* n_pixels = (uint32_t*)xcalloc(n_joints, sizeof(uint32_t));
+  int* n_pixels = (int*)xcalloc(n_joints, sizeof(int));
   size_t points_size = n_joints * width * height * 3 * sizeof(float);
   float* points = (float*)xmalloc(points_size);
   float* density = (float*)xmalloc(points_size);
@@ -520,13 +521,13 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
 
   float root_2pi = sqrtf(2 * M_PI);
 
-  uint32_t too_many_pixels = (width * height) / 2;
+  int too_many_pixels = (width * height) / 2;
 
   // Gather pixels above the given threshold
-  for (int32_t y = 0, idx = 0; y < height; y++)
+  for (int y = 0, idx = 0; y < height; y++)
     {
       float t = -((y / half_height) - 1.f);
-      for (int32_t x = 0; x < width; x++, idx++)
+      for (int x = 0; x < width; x++, idx++)
         {
           float s = (x / half_width) - 1.f;
           float depth = (float)depth_image[idx];
@@ -535,14 +536,14 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
               continue;
             }
 
-          for (uint8_t j = 0; j < n_joints; j++)
+          for (int j = 0; j < n_joints; j++)
             {
               float threshold = params[j].threshold;
-              uint32_t joint_idx = j * width * height;
+              int joint_idx = j * width * height;
 
               for (int n = 0; n < map[j].n_labels; n++)
                 {
-                  uint8_t label = map[j].labels[n];
+                  int label = (int)map[j].labels[n];
                   float label_pr = pr_table[(idx * n_labels) + label];
                   if (label_pr >= threshold)
                     {
@@ -571,7 +572,7 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
   result->joints = (LList**)xcalloc(n_joints, sizeof(LList*));
 
   // Means shift to find joint modes
-  for (uint8_t j = 0; j < n_joints; j++)
+  for (int j = 0; j < n_joints; j++)
     {
       if (n_pixels[j] == 0 || n_pixels[j] > too_many_pixels)
         {
@@ -581,18 +582,18 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
       float bandwidth = params[j].bandwidth;
       float offset = params[j].offset;
 
-      uint32_t joint_idx = j * width * height;
-      for (uint32_t s = 0; s < N_SHIFTS; s++)
+      int joint_idx = j * width * height;
+      for (int s = 0; s < N_SHIFTS; s++)
         {
           float new_points[n_pixels[j] * 3];
           bool moved = false;
-          for (uint32_t p = 0; p < n_pixels[j]; p++)
+          for (int p = 0; p < n_pixels[j]; p++)
             {
               float* x = &points[(joint_idx + p) * 3];
               float* nx = &new_points[p * 3];
               float numerator[3] = { 0.f, };
               float denominator = 0.f;
-              for (uint32_t n = 0; n < n_pixels[j]; n++)
+              for (int n = 0; n < n_pixels[j]; n++)
                 {
                   float* xi = &points[(joint_idx + n) * 3];
                   float distance = sqrtf(pow(x[0] - xi[0], 2.f) +
@@ -638,9 +639,9 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
               joint->confidence = 0;
               result->joints[j] = llist_new(joint);
 
-              //uint32_t unique_points = 1;
+              //int unique_points = 1;
 
-              for (uint32_t p = 0; p < n_pixels[j]; p++)
+              for (int p = 0; p < n_pixels[j]; p++)
                 {
                   float* point = &points[(joint_idx + p) * 3];
                   if (fabs(point[0]-last_point[0]) >= SHIFT_THRESHOLD ||
@@ -675,11 +676,11 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
 }
 
 template InferredJoints*
-infer_joints<half>(half*, float*, float*, int32_t, int32_t, uint8_t,
+infer_joints<half>(half*, float*, float*, int, int, int,
                    JSON_Value*, float, JIParam*);
 
 template InferredJoints*
-infer_joints<float>(float*, float*, float*, int32_t, int32_t, uint8_t,
+infer_joints<float>(float*, float*, float*, int, int, int,
                     JSON_Value*, float, JIParam*);
 
 void
@@ -695,8 +696,8 @@ free_joints(InferredJoints* joints)
 
 template<typename FloatT>
 float*
-reproject(FloatT* depth_image, int32_t width, int32_t height,
-          float vfov, float threshold, uint32_t* n_points, float* out_cloud)
+reproject(FloatT* depth_image, int width, int height,
+          float vfov, float threshold, int* n_points, float* out_cloud)
 {
   float half_width = width / 2.f;
   float half_height = height / 2.f;
@@ -710,11 +711,11 @@ reproject(FloatT* depth_image, int32_t width, int32_t height,
     (float*)xmalloc(width * height * 3 * sizeof(float));
 
   *n_points = 0;
-  int32_t ty = -1;
-  for (int32_t y = 0, idx = 0; y < height; y++)
+  int ty = -1;
+  for (int y = 0, idx = 0; y < height; y++)
     {
       float t;
-      for (int32_t x = 0; x < width; x++, idx++)
+      for (int x = 0; x < width; x++, idx++)
         {
           float depth = (float)depth_image[idx];
           if (!std::isnormal(depth) || depth > threshold)
@@ -728,7 +729,7 @@ reproject(FloatT* depth_image, int32_t width, int32_t height,
               t = -((y / half_height) - 1.f);
               ty = y;
             }
-          uint32_t cloud_idx = (*n_points) * 3;
+          int cloud_idx = (*n_points) * 3;
 
           point_cloud[cloud_idx] = (tan_half_hfov * depth) * s;
           point_cloud[cloud_idx + 1] = (tan_half_vfov * depth) * t;
@@ -748,14 +749,14 @@ reproject(FloatT* depth_image, int32_t width, int32_t height,
 }
 
 template float*
-reproject<half>(half*, int32_t, int32_t, float, float, uint32_t*, float*);
+reproject<half>(half*, int, int, float, float, int*, float*);
 
 template float*
-reproject<float>(float*, int32_t, int32_t, float, float, uint32_t*, float*);
+reproject<float>(float*, int, int, float, float, int*, float*);
 
 template<typename FloatT>
 FloatT*
-project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
+project(float* point_cloud, int n_points, int width, int height,
         float vfov, float background, FloatT* out_depth)
 {
   float half_width = width / 2.f;
@@ -769,12 +770,12 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
   FloatT* depth_image = out_depth ? out_depth :
     (FloatT*)xmalloc(width * height * sizeof(FloatT));
   FloatT bg_half = (FloatT)background;
-  for (int32_t i = 0; i < width * height; i++)
+  for (int i = 0; i < width * height; i++)
     {
       depth_image[i] = bg_half;
     }
 
-  for (uint32_t i = 0, idx = 0; i < n_points; i++, idx += 3)
+  for (int i = 0, idx = 0; i < n_points; i++, idx += 3)
     {
       float* point = &point_cloud[idx];
 
@@ -793,8 +794,8 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
       x = (x + 1.0f) * half_width;
       y = (y + 1.0f) * half_height;
 
-      int32_t col = x;
-      int32_t row = y;
+      int col = x;
+      int row = y;
 
       depth_image[row * width + col] = (FloatT)point[2];
     }
@@ -803,7 +804,7 @@ project(float* point_cloud, uint32_t n_points, int32_t width, int32_t height,
 }
 
 template half*
-project<half>(float*, uint32_t, int32_t, int32_t, float, float, half*);
+project<half>(float*, int, int, int, float, float, half*);
 
 template float*
-project<float>(float*, uint32_t, int32_t, int32_t, float, float, float*);
+project<float>(float*, int, int, int, float, float, float*);

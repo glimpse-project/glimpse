@@ -245,12 +245,14 @@ void
 gather_train_data(const char* data_dir,
                   const char* index_name,
                   const char* joint_map_path,
-                  uint32_t limit, uint32_t skip, bool shuffle,
-                  uint32_t* out_n_images, uint8_t* out_n_joints,
-                  int32_t* out_width, int32_t* out_height,
-                  half** out_depth_images, uint8_t** out_label_images,
+                  int* out_n_images,
+                  int* out_n_joints,
+                  int* out_width,
+                  int* out_height,
+                  half** out_depth_images,
+                  uint8_t** out_label_images,
                   float** out_joints,
-                  uint8_t* out_n_labels,
+                  int* out_n_labels,
                   float* out_fov)
 {
   char meta_filename[1024];
@@ -259,9 +261,9 @@ gather_train_data(const char* data_dir,
     0,                                    // Field of view used to render depth
     0,                                    // Number of training images
     0,                                    // Number of joints
-    limit,                                // Limit to number of training images
-    skip,                                 // Number of images to skip
-    shuffle,                              // Whether to shuffle images
+    INT_MAX,                              // Limit to number of training images
+    0,                                    // Number of images to skip
+    false,                                // Whether to shuffle images
     NULL,                                 // Image paths
     {0,0,IU_FORMAT_U8},                   // Label image specification
     {0,0,IU_FORMAT_HALF},                 // Depth image specification

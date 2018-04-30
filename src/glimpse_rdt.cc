@@ -46,56 +46,77 @@
 #include "loader.h"
 #include "train_utils.h"
 
+#include "glimpse_rdt.h"
+#include "glimpse_log.h"
+#include "glimpse_config.h"
+
 using half_float::half;
 
-static bool verbose = false;
 static bool interrupted = false;
-static uint32_t seed = 0;
 
-typedef struct {
-    int32_t  width;         // Width of training images
-    int32_t  height;        // Height of training images
+typedef struct gm_rdt_context_impl {
+
+    struct gm_rdt_context base;
+
+    struct gm_logger* log;
+
+    bool     reload;        // Reload and continue training with pre-existing tree
+    bool     verbose;       // Verbose logging
+    int      seed;          // Seed for RNG
+
+    char*    data_dir;      // Location of training data
+    char*    index_name;    // Name of the frame index like <name>.index to read
+    char*    out_filename;  // Filename of tree (.json or .rdt) to write
+
+    int      width;         // Width of training images
+    int      height;        // Height of training images
     float    fov;           // Camera field of view
-    uint8_t  n_labels;      // Number of labels in label images
+    int      n_labels;      // Number of labels in label images
 
-    uint32_t n_images;      // Number of training images
+    int      n_images;      // Number of training images
     uint8_t* label_images;  // Label images (row-major)
     half*    depth_images;  // Depth images (row-major)
 
-    uint32_t n_uv;          // Number of combinations of u,v pairs
+    int      n_uv;          // Number of combinations of u,v pairs
     float    uv_range;      // Range of u,v combinations to generate
-    uint32_t n_t;           // The number of thresholds
+    int      n_t;           // The number of thresholds
     float    t_range;       // Range of thresholds to test
-    uint8_t  max_depth;     // Maximum depth to train to
-    uint32_t n_pixels;      // Number of pixels to sample
+    int      max_depth;     // Maximum depth to train to
+    int      n_pixels;      // Number of pixels to sample
     UVPair*  uvs;           // A list of uv pairs to test
     float*   ts;            // A list of thresholds to test
-} TrainContext;
+
+    int      n_threads;     // How many threads to spawn for training
+    int      bg_label;      // label that represents the background
+
+    struct gm_ui_properties properties_state;
+    std::vector<struct gm_ui_property> properties;
+};
 
 typedef struct {
-    uint32_t  id;              // Unique id to place the node a tree.
-    uint32_t  depth;           // Tree depth at which this node sits.
-    uint32_t  n_pixels;        // Number of pixels that have reached this node.
+    int       id;              // Unique id to place the node a tree.
+    int       depth;           // Tree depth at which this node sits.
+    int       n_pixels;        // Number of pixels that have reached this node.
     Int3D*    pixels;          // A list of pixel pairs and image indices.
 } NodeTrainData;
 
 typedef struct {
-    TrainContext*      ctx;                // The context to use
+    struct gm_rdt_context_impl* ctx;       // The context to use
     NodeTrainData**    data;               // The node data to use and modify
-    uint32_t           c_start;            // The uv combination to start on
-    uint32_t           c_end;              // The uv combination to end on
+    int                c_start;            // The uv combination to start on
+    int                c_end;              // The uv combination to end on
     float*             root_nhistogram;    // Normalised histogram of labels
     float*             best_gain;          // Best gain achieved
-    uint32_t*          best_uv;            // Index of the best uv combination
-    uint32_t*          best_t;             // Index of the best threshold
-    uint32_t*          n_lr_pixels;        // Number of pixels in each branch
+    int*               best_uv;            // Index of the best uv combination
+    int*               best_t;             // Index of the best threshold
+    int*               n_lr_pixels;        // Number of pixels in each branch
     pthread_barrier_t* ready_barrier;      // Barrier to wait on to start work
     pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
 } TrainThreadData;
 
 static NodeTrainData*
-create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
-                       uint32_t n_pixels, Int3D* pixels)
+create_node_train_data(struct gm_rdt_context_impl* ctx, int id, int depth,
+                       int n_pixels, Int3D* pixels)
 {
     NodeTrainData* data = (NodeTrainData*)xcalloc(1, sizeof(NodeTrainData));
 
@@ -114,12 +135,12 @@ create_node_train_data(TrainContext* ctx, uint32_t id, uint32_t depth,
         data->pixels = (Int3D*)xmalloc(data->n_pixels * sizeof(Int3D));
 
         //std::random_device rd;
-        std::mt19937 rng(seed);
+        std::mt19937 rng(ctx->seed);
         std::uniform_int_distribution<int> rand_x(0, ctx->width - 1);
         std::uniform_int_distribution<int> rand_y(0, ctx->height - 1);
-        for (uint32_t i = 0, idx = 0; i < ctx->n_images; i++)
+        for (int i = 0, idx = 0; i < ctx->n_images; i++)
         {
-            for (uint32_t j = 0; j < ctx->n_pixels; j++, idx++)
+            for (int j = 0; j < ctx->n_pixels; j++, idx++)
             {
                 data->pixels[idx].xy[0] = rand_x(rng);
                 data->pixels[idx].xy[1] = rand_y(rng);
@@ -139,7 +160,7 @@ destroy_node_train_data(NodeTrainData* data)
 }
 
 static inline Int2D
-normalize_histogram(uint32_t* histogram, uint8_t n_labels, float* normalized)
+normalize_histogram(int* histogram, int n_labels, float* normalized)
 {
     Int2D sums = { 0, 0 };
 
@@ -168,7 +189,7 @@ normalize_histogram(uint32_t* histogram, uint8_t n_labels, float* normalized)
 }
 
 static inline float
-calculate_shannon_entropy(float* normalized_histogram, uint8_t n_labels)
+calculate_shannon_entropy(float* normalized_histogram, int n_labels)
 {
     float entropy = 0.f;
     for (int i = 0; i < n_labels; i++)
@@ -183,45 +204,42 @@ calculate_shannon_entropy(float* normalized_histogram, uint8_t n_labels)
 }
 
 static inline float
-calculate_gain(float entropy, uint32_t n_pixels,
-               float l_entropy, uint32_t l_n_pixels,
-               float r_entropy, uint32_t r_n_pixels)
+calculate_gain(float entropy, int n_pixels,
+               float l_entropy, int l_n_pixels,
+               float r_entropy, int r_n_pixels)
 {
     return entropy - ((l_n_pixels / (float)n_pixels * l_entropy) +
                       (r_n_pixels / (float)n_pixels * r_entropy));
 }
 
 static void
-accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
-                      uint32_t c_start, uint32_t c_end,
-                      uint32_t* root_histogram, uint32_t* lr_histograms)
+accumulate_histograms(struct gm_rdt_context_impl* ctx,
+                      NodeTrainData* data,
+                      int c_start, int c_end,
+                      int* root_histogram, int* lr_histograms)
 {
-    for (uint32_t p = 0; p < data->n_pixels && !interrupted; p++)
+    for (int p = 0; p < data->n_pixels && !interrupted; p++)
     {
         Int2D pixel = data->pixels[p].xy;
-        uint32_t i = data->pixels[p].i;
-        uint32_t image_idx = i * ctx->width * ctx->height;
+        int i = data->pixels[p].i;
+        int image_idx = i * ctx->width * ctx->height;
 
         half* depth_image = &ctx->depth_images[image_idx];
         uint8_t* label_image = &ctx->label_images[image_idx];
 
-        uint32_t pixel_idx = (pixel[1] * ctx->width) + pixel[0];
-        uint8_t label = label_image[pixel_idx];
+        int pixel_idx = (pixel[1] * ctx->width) + pixel[0];
+        int label = (int)label_image[pixel_idx];
         float depth = depth_image[pixel_idx];
 
-        if (label >= ctx->n_labels)
-        {
-            fprintf(stderr, "Label '%u' is bigger than expected (max %u)\n",
-                    (uint32_t)label, (uint32_t)ctx->n_labels - 1);
-            exit(1);
-        }
+        gm_assert(ctx->log, label < ctx->n_labels,
+                  "Label '%d' is bigger than expected (max %d)\n",
+                  label, ctx->n_labels - 1);
 
         // Accumulate root histogram
         ++root_histogram[label];
 
         // Don't waste processing time if this is the last depth
-        if (data->depth >= (uint32_t)ctx->max_depth - 1)
-        {
+        if (data->depth >= ctx->max_depth - 1) {
             continue;
         }
 
@@ -229,7 +247,7 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
 
         // Sample pixels
         float samples[c_end - c_start];
-        for (uint32_t c = c_start; c < c_end; c++)
+        for (int c = c_start; c < c_end; c++)
         {
             UVPair uv = ctx->uvs[c];
             samples[c - c_start] = sample_uv(depth_image,
@@ -238,9 +256,9 @@ accumulate_histograms(TrainContext* ctx, NodeTrainData* data,
         }
 
         // Partition on thresholds
-        for (uint32_t c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
+        for (int c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
         {
-            for (uint32_t t = 0; t < ctx->n_t;
+            for (int t = 0; t < ctx->n_t;
                  t++, lr_histogram_idx += ctx->n_labels * 2)
             {
                 // Accumulate histogram for this particular uvt combination
@@ -260,13 +278,13 @@ thread_body(void* userdata)
     TrainThreadData* data = (TrainThreadData*)userdata;
 
     // Histogram for the node being processed
-    uint32_t* root_histogram = (uint32_t*)
-        malloc(data->ctx->n_labels * sizeof(uint32_t));
+    int* root_histogram = (int*)
+        malloc(data->ctx->n_labels * sizeof(int));
 
     // Histograms for each uvt combination being tested
-    uint32_t* lr_histograms = (uint32_t*)
+    int* lr_histograms = (int*)
         malloc(data->ctx->n_labels * (data->c_end - data->c_start) *
-               data->ctx->n_t * 2 * sizeof(uint32_t));
+               data->ctx->n_t * 2 * sizeof(int));
 
     float* nhistogram = (float*)xmalloc(data->ctx->n_labels * sizeof(float));
     float* root_nhistogram = data->root_nhistogram ? data->root_nhistogram :
@@ -284,10 +302,10 @@ thread_body(void* userdata)
         }
 
         // Clear histogram accumulators
-        memset(root_histogram, 0, data->ctx->n_labels * sizeof(uint32_t));
+        memset(root_histogram, 0, data->ctx->n_labels * sizeof(int));
         memset(lr_histograms, 0, data->ctx->n_labels *
                (data->c_end - data->c_start) * data->ctx->n_t * 2 *
-               sizeof(uint32_t));
+               sizeof(int));
 
         // Accumulate histograms
         accumulate_histograms(data->ctx, *data->data, data->c_start, data->c_end,
@@ -304,17 +322,17 @@ thread_body(void* userdata)
 
         // If there's only 1 label, skip all this, gain is zero
         if (root_n_pixels[1] > 1 &&
-            (*data->data)->depth < (uint32_t)data->ctx->max_depth - 1)
+            (*data->data)->depth < data->ctx->max_depth - 1)
         {
             // Calculate the shannon entropy for the normalised label histogram
             float entropy = calculate_shannon_entropy(root_nhistogram,
                                                       data->ctx->n_labels);
 
             // Calculate the gain for each combination of u,v,t and store the best
-            for (uint32_t i = data->c_start, lr_histo_base = 0;
+            for (int i = data->c_start, lr_histo_base = 0;
                  i < data->c_end && !interrupted; i++)
             {
-                for (uint32_t j = 0; j < data->ctx->n_t && !interrupted;
+                for (int j = 0; j < data->ctx->n_t && !interrupted;
                      j++, lr_histo_base += data->ctx->n_labels * 2)
                 {
                     float l_entropy, r_entropy, gain;
@@ -369,8 +387,10 @@ thread_body(void* userdata)
 }
 
 static void
-collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
-               Int3D** l_pixels, Int3D** r_pixels, uint32_t* n_lr_pixels)
+collect_pixels(struct gm_rdt_context_impl* ctx,
+               NodeTrainData* data,
+               UVPair uv, float t,
+               Int3D** l_pixels, Int3D** r_pixels, int* n_lr_pixels)
 {
     *l_pixels = (Int3D*)xmalloc((n_lr_pixels[0] ? n_lr_pixels[0] :
                                  data->n_pixels) *
@@ -379,12 +399,12 @@ collect_pixels(TrainContext* ctx, NodeTrainData* data, UVPair uv, float t,
                                  data->n_pixels) *
                                 sizeof(Int3D));
 
-    uint32_t l_index = 0;
-    uint32_t r_index = 0;
-    for (uint32_t p = 0; p < data->n_pixels; p++)
+    int l_index = 0;
+    int r_index = 0;
+    for (int p = 0; p < data->n_pixels; p++)
     {
         Int3D* pixel = &data->pixels[p];
-        uint32_t image_idx = pixel->i * ctx->width * ctx->height;
+        int image_idx = pixel->i * ctx->width * ctx->height;
         half* depth_image = &ctx->depth_images[image_idx];
 
         float depth = depth_image[(pixel->xy[1] * ctx->width) + pixel->xy[0]];
@@ -421,311 +441,264 @@ list_free_cb(LList* node, uint32_t index, void* userdata)
     return true;
 }
 
-static void
-print_usage(FILE* stream)
-{
-    fprintf(stream,
-            "Usage: train_rdt <data dir> <index name> <out file> [OPTIONS]\n"
-            "Train a randomised decision tree to infer n_labels from depth and label images\n"
-            "with a given camera FOV. Default values assume depth data to be in meters.\n"
-            "\n"
-            "  -l, --limit=NUMBER[,NUMBER]   Limit training data to this many images.\n"
-            "                                Optionally, skip the first N images.\n"
-            "  -s, --shuffle                 Shuffle order of training images.\n"
-            "  -p, --pixels=NUMBER           Number of pixels to sample per image.\n"
-            "                                  (default: 2000)\n"
-            "  -t, --thresholds=NUMBER       Number of thresholds to test.\n"
-            "                                  (default: 50)\n"
-            "  -r, --t-range=NUMBER          Range of thresholds to test.\n"
-            "                                  (default: 1.29)\n"
-            "  -c, --combos=NUMBER           Number of UV combinations to test.\n"
-            "                                  (default: 2000)\n"
-            "  -u, --uv-range=NUMBER         Range of UV combinations to test.\n"
-            "                                  (default 1.29)\n"
-            "  -d, --depth=NUMBER            Depth to train tree to.\n"
-            "                                  (default: 20)\n"
-            "  -m, --threads=NUMBER          Number of threads to use.\n"
-            "                                  (default: autodetect)\n"
-            "  -b, --background=NUMBER       Index of the background label\n"
-            "                                  (default: 0)\n"
-            "  -n, --seed=NUMBER             Seed to use for RNG.\n"
-            "                                  (default: 0)\n"
-            "  -i, --continue                Continue training from an interrupted run.\n"
-            "  -v, --verbose                 Verbose output.\n"
-            "  -h, --help                    Display this message.\n");
-}
-
 void
 sigint_handler(int signum)
 {
-    if (!interrupted)
-    {
-        printf("\nUser-triggered interrupt, saving checkpoint...\n");
-        interrupted = true;
-    }
-    else
-    {
-        printf("\nInterrupted during checkpoint, quitting!\n");
-        exit(1);
-    }
+    interrupted = true;
 }
 
-int
-main(int argc, char **argv)
+struct gm_ui_properties *
+gm_rdt_context_get_ui_properties(struct gm_rdt_context *_ctx)
 {
-    TrainContext ctx = { 0, };
+    struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
+    return &ctx->properties_state;
+}
+
+struct gm_rdt_context *
+gm_rdt_context_new(struct gm_logger *log)
+{
+    struct gm_rdt_context_impl *ctx = new gm_rdt_context_impl();
+    ctx->log = log;
+
+    struct gm_ui_property prop;
+
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "data_dir";
+    prop.desc = "Location of training data";
+    prop.type = GM_PROPERTY_STRING;
+    prop.string_state.ptr = &ctx->data_dir;
+    ctx->properties.push_back(prop);
+
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "index_name";
+    prop.desc = "Name of frame index to load";
+    prop.type = GM_PROPERTY_STRING;
+    prop.string_state.ptr = &ctx->index_name;
+    ctx->properties.push_back(prop);
+
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "out_file";
+    prop.desc = "Filename of tree to write";
+    prop.type = GM_PROPERTY_STRING;
+    prop.string_state.ptr = &ctx->out_filename;
+    ctx->properties.push_back(prop);
+
+    ctx->reload = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "reload";
+    prop.desc = "Reload and continue training pre-existing tree";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->reload;
+    ctx->properties.push_back(prop);
+
+    ctx->n_pixels = 2000;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "n_pixels";
+    prop.desc = "Number of pixels to sample per image";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_pixels;
+    prop.int_state.min = 1;
+    prop.int_state.max = INT_MAX;
+    ctx->properties.push_back(prop);
+
+    ctx->n_t = 50;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "n_t";
+    prop.desc = "Number of thresholds to test";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_t;
+    prop.int_state.min = 1;
+    prop.int_state.max = INT_MAX;
+    ctx->properties.push_back(prop);
+
+    ctx->t_range = 1.29;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "t_range";
+    prop.desc = "Range of thresholds to test";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->t_range;
+    prop.float_state.min = 0;
+    prop.float_state.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->n_uv = 2000;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "n_uv";
+    prop.desc = "Number of UV combinations to test";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_uv;
+    prop.int_state.min = 1;
+    prop.int_state.max = INT_MAX;
+    ctx->properties.push_back(prop);
+
+    ctx->uv_range = 1.29;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "uv_range";
+    prop.desc = "Range of UV combinations to test";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->uv_range;
+    prop.float_state.min = 0;
+    prop.float_state.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->max_depth = 20;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "max_depth";
+    prop.desc = "Depth to train tree to";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_uv;
+    prop.int_state.min = 1;
+    prop.int_state.max = 30;
+    ctx->properties.push_back(prop);
+
+    ctx->bg_label = 0;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "bg_label";
+    prop.desc = "Index of the background label";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->bg_label;
+    prop.int_state.min = 0;
+    prop.int_state.max = 255;
+    ctx->properties.push_back(prop);
+
+    ctx->seed = 0;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seed";
+    prop.desc = "Seed to use for RNG";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seed;
+    prop.int_state.min = 0;
+    prop.int_state.max = INT_MAX;
+    ctx->properties.push_back(prop);
+
+    ctx->verbose = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "verbose";
+    prop.desc = "Verbose logging output";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->verbose;
+    ctx->properties.push_back(prop);
+
+    ctx->n_threads = std::thread::hardware_concurrency();
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "n_threads";
+    prop.desc = "Number of threads to spawn";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->n_threads;
+    prop.int_state.min = 1;
+    prop.int_state.max = 128;
+    ctx->properties.push_back(prop);
+
+    ctx->properties_state.n_properties = ctx->properties.size();
+    pthread_mutex_init(&ctx->properties_state.lock, NULL);
+    ctx->properties_state.properties = &ctx->properties[0];
+
+    return &ctx->base;
+}
+
+void
+gm_rdt_context_destroy(struct gm_rdt_context *_ctx)
+{
+    struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
+    gm_logger_destroy(ctx->log);
+    delete ctx;
+}
+
+bool
+gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
+{
+    struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
     TimeForDisplay since_begin, since_last;
     struct timespec begin, last, now;
-    uint32_t n_threads = std::thread::hardware_concurrency();
-    uint8_t bg_label = 0;
+    int n_threads = ctx->n_threads;
 
-    if (argc < 4)
-    {
-        print_usage(stderr);
-        exit(1);
+    const char *data_dir = ctx->data_dir;
+    if (!data_dir) {
+        gm_throw(ctx->log, err, "Data directory not specified");
+        return false;
+    }
+    const char *index_name = ctx->index_name;
+    if (!index_name) {
+        gm_throw(ctx->log, err, "Index name not specified");
+        return false;
+    }
+    const char *out_filename = ctx->out_filename;
+    if (!out_filename) {
+        gm_throw(ctx->log, err, "Output filename not specified");
+        return false;
     }
 
-    const char *data_dir = argv[1];
-    const char *index_name = argv[2];
-    const char *out_filename = argv[3];
-
-    // Set default parameters
-    ctx.n_uv = 2000;
-    ctx.uv_range = 1.29;
-    ctx.n_t = 50;
-    ctx.t_range = 1.29;
-    ctx.max_depth = 20;
-    ctx.n_pixels = 2000;
-    uint32_t limit = UINT32_MAX;
-    uint32_t skip = 0;
-    bool shuffle = false;
-
-    for (int i = 4; i < argc; i++)
-    {
-        // All arguments should start with '-'
-        if (argv[i][0] != '-')
-        {
-            print_usage(stderr);
-            return 1;
-        }
-        char* arg = &argv[i][1];
-
-        char param = '\0';
-        char* value = NULL;
-        if (arg[0] == '-')
-        {
-            // Store the location of the value (if applicable)
-            value = strchr(arg, '=');
-            if (value)
-            {
-                value += 1;
-            }
-
-            // Check argument
-            arg++;
-            if (strstr(arg, "limit="))
-            {
-                param = 'l';
-            }
-            else if (strcmp(arg, "shuffle") == 0)
-            {
-                param = 's';
-            }
-            else if (strstr(arg, "pixels="))
-            {
-                param = 'p';
-            }
-            else if (strstr(arg, "thresholds="))
-            {
-                param = 't';
-            }
-            else if (strstr(arg, "t-range="))
-            {
-                param = 'r';
-            }
-            else if (strstr(arg, "combos="))
-            {
-                param = 'c';
-            }
-            else if (strstr(arg, "uv-range="))
-            {
-                param = 'u';
-            }
-            else if (strstr(arg, "depth="))
-            {
-                param = 'd';
-            }
-            else if (strstr(arg, "background="))
-            {
-                param = 'b';
-            }
-            else if (strstr(arg, "threads="))
-            {
-                param = 'm';
-            }
-            else if (strstr(arg, "seed="))
-            {
-                param = 'n';
-            }
-            else if (strcmp(arg, "continue") == 0)
-            {
-                param = 'i';
-            }
-            else if (strcmp(arg, "verbose") == 0)
-            {
-                param = 'v';
-            }
-            else if (strcmp(arg, "help") == 0)
-            {
-                param = 'h';
-            }
-            arg--;
-        }
-        else
-        {
-            if (arg[1] == '\0')
-            {
-                param = arg[0];
-            }
-
-            if (i + 1 < argc)
-            {
-                value = argv[i + 1];
-            }
-        }
-
-        // Check for parameter-less options
-        switch(param)
-        {
-        case 's':
-            shuffle = true;
-            continue;
-        case 'i':
-            interrupted = true;
-            continue;
-        case 'v':
-            verbose = true;
-            continue;
-        case 'h':
-            print_usage(stdout);
-            return 0;
-        }
-
-        // Now check for options that require parameters
-        if (!value)
-        {
-            print_usage(stderr);
-            return 1;
-        }
-        if (arg[0] != '-')
-        {
-            i++;
-        }
-
-        switch(param)
-        {
-        case 'l':
-            limit = (uint32_t)strtol(value, &value, 10);
-            if (value[0] != '\0')
-            {
-                skip = (uint32_t)strtol(value + 1, NULL, 10);
-            }
-            break;
-        case 'p':
-            ctx.n_pixels = (uint32_t)atoi(value);
-            break;
-        case 't':
-            ctx.n_t = (uint32_t)atoi(value);
-            break;
-        case 'r':
-            ctx.t_range = strtof(value, NULL);
-            break;
-        case 'c':
-            ctx.n_uv = (uint32_t)atoi(value);
-            break;
-        case 'u':
-            ctx.uv_range = strtof(value, NULL);
-            break;
-        case 'd':
-            ctx.max_depth = (uint8_t)atoi(value);
-            break;
-        case 'b':
-            bg_label = (uint8_t)atoi(value);
-            break;
-        case 'm':
-            n_threads = (uint32_t)atoi(value);
-            break;
-        case 'n':
-            seed = (uint32_t)atoi(value);
-            break;
-
-        default:
-            print_usage(stderr);
-            return 1;
-        }
-    }
-
-    printf("Scanning training directories...\n");
+    gm_info(ctx->log, "Scanning training directories...\n");
     gather_train_data(data_dir,
                       index_name,
-                      NULL, // no joint map
-                      limit, skip, shuffle,
-                      &ctx.n_images, NULL, &ctx.width, &ctx.height,
-                      &ctx.depth_images, &ctx.label_images, NULL,
-                      &ctx.n_labels,
-                      &ctx.fov);
+                      NULL,     // no joint map
+                      &ctx->n_images, NULL, &ctx->width, &ctx->height,
+                      &ctx->depth_images, &ctx->label_images, NULL,
+                      &ctx->n_labels,
+                      &ctx->fov);
 
     // Work out pixels per meter and adjust uv range accordingly
-    float ppm = (ctx.height / 2.f) / tanf(ctx.fov / 2.f);
-    ctx.uv_range *= ppm;
+    float ppm = (ctx->height / 2.f) / tanf(ctx->fov / 2.f);
+    ctx->uv_range *= ppm;
 
     // Calculate the u,v,t parameters that we're going to test
-    printf("Preparing training metadata...\n");
-    ctx.uvs = (UVPair*)xmalloc(ctx.n_uv * sizeof(UVPair));
+    gm_info(ctx->log, "Preparing training metadata...\n");
+    ctx->uvs = (UVPair*)xmalloc(ctx->n_uv * sizeof(UVPair));
     //std::random_device rd;
-    std::mt19937 rng(seed);
-    std::uniform_real_distribution<float> rand_uv(-ctx.uv_range / 2.f,
-                                                  ctx.uv_range / 2.f);
-    for (uint32_t i = 0; i < ctx.n_uv; i++)
-    {
-        ctx.uvs[i][0] = rand_uv(rng);
-        ctx.uvs[i][1] = rand_uv(rng);
-        ctx.uvs[i][2] = rand_uv(rng);
-        ctx.uvs[i][3] = rand_uv(rng);
+    std::mt19937 rng(ctx->seed);
+    std::uniform_real_distribution<float> rand_uv(-ctx->uv_range / 2.f,
+                                                  ctx->uv_range / 2.f);
+    for (int i = 0; i < ctx->n_uv; i++) {
+        ctx->uvs[i][0] = rand_uv(rng);
+        ctx->uvs[i][1] = rand_uv(rng);
+        ctx->uvs[i][2] = rand_uv(rng);
+        ctx->uvs[i][3] = rand_uv(rng);
     }
-    ctx.ts = (float*)xmalloc(ctx.n_t * sizeof(float));
-    for (uint32_t i = 0; i < ctx.n_t; i++)
-    {
-        ctx.ts[i] = -ctx.t_range / 2.f + (i * ctx.t_range / (float)(ctx.n_t - 1));
+    ctx->ts = (float*)xmalloc(ctx->n_t * sizeof(float));
+    for (int i = 0; i < ctx->n_t; i++) {
+        ctx->ts[i] = -ctx->t_range / 2.f + (i * ctx->t_range / (float)(ctx->n_t - 1));
     }
 
     // Allocate memory for the normalised histogram of the currently training node
-    float* root_nhistogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
+    float* root_nhistogram = (float*)xmalloc(ctx->n_labels * sizeof(float));
 
     NodeTrainData* node_data = NULL;
-    printf("Initialising %u threads...\n", n_threads);
+    gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
     pthread_barrier_t ready_barrier, finished_barrier;
     if (pthread_barrier_init(&ready_barrier, NULL, n_threads + 1) != 0 ||
         pthread_barrier_init(&finished_barrier, NULL, n_threads + 1) != 0)
     {
-        fprintf(stderr, "Error initialising thread barriers\n");
-        return 1;
+        gm_throw(ctx->log, err, "Error initialising thread barriers\n");
+        return false;
     }
-    uint32_t n_c = ctx.n_uv / n_threads;
+    int n_c = ctx->n_uv / n_threads;
     float* best_gains = (float*)malloc(n_threads * sizeof(float));
-    uint32_t* best_uvs = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
-    uint32_t* best_ts = (uint32_t*)malloc(n_threads * sizeof(uint32_t));
-    uint32_t* all_n_lr_pixels = (uint32_t*)
-        malloc(n_threads * 2 * sizeof(uint32_t));
+    int* best_uvs = (int*)malloc(n_threads * sizeof(int));
+    int* best_ts = (int*)malloc(n_threads * sizeof(int));
+    int* all_n_lr_pixels = (int*)malloc(n_threads * 2 * sizeof(int));
     pthread_t threads[n_threads];
-    for (uint32_t i = 0; i < n_threads; i++)
+    for (int i = 0; i < n_threads; i++)
     {
         TrainThreadData* thread_data = (TrainThreadData*)
             xmalloc(sizeof(TrainThreadData));
-        thread_data->ctx = &ctx;
+        thread_data->ctx = ctx;
         thread_data->data = &node_data;
         thread_data->c_start = i * n_c;
-        thread_data->c_end = (i == n_threads - 1) ? ctx.n_uv : (i + 1) * n_c;
+        thread_data->c_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_c;
         thread_data->root_nhistogram = (i == 0) ? root_nhistogram : NULL;
         thread_data->best_gain = &best_gains[i];
         thread_data->best_uv = &best_uvs[i];
@@ -737,55 +710,54 @@ main(int argc, char **argv)
         if (pthread_create(&threads[i], NULL, thread_body,
                            (void*)thread_data) != 0)
         {
-            fprintf(stderr, "Error creating thread\n");
-            return 1;
+            gm_throw(ctx->log, err, "Error creating thread\n");
+            return false;
         }
     }
 
     // Allocate memory to store the decision tree.
-    uint32_t n_nodes = (uint32_t)roundf(powf(2.f, ctx.max_depth)) - 1;
+    int n_nodes = roundf(powf(2.f, ctx->max_depth)) - 1;
     Node* tree = (Node*)xcalloc(n_nodes, sizeof(Node));
 
     // Initialise root node training data and add it to the queue
-    LList* train_queue = llist_new(create_node_train_data(&ctx, 0, 0, 0, NULL));
+    LList* train_queue = llist_new(create_node_train_data(ctx, 0, 0, 0, NULL));
 
     // Initialise histogram count
-    uint32_t n_histograms = 0;
+    int n_histograms = 0;
     LList* tree_histograms = NULL;
 
-    // If -i was passed, try to load the partial tree and repopulate the training
-    // queue and tree histogram list
+    // If asked to reload then try to load the partial tree and repopulate the
+    // training queue and tree histogram list
     RDTree* checkpoint;
-    if (interrupted && (checkpoint = read_tree(out_filename)))
+    if (ctx->reload && (checkpoint = read_tree(out_filename)))
     {
-        printf("Restoring checkpoint...\n");
+        gm_info(ctx->log, "Restoring checkpoint...\n");
 
         // Do some basic validation
-        if (checkpoint->header.n_labels != ctx.n_labels)
+        if (checkpoint->header.n_labels != ctx->n_labels)
         {
-            fprintf(stderr, "Checkpoint has %d labels, expected %d\n",
-                    (int)checkpoint->header.n_labels, (int)ctx.n_labels);
-            return 1;
+            gm_throw(ctx->log, err, "Checkpoint has %d labels, expected %d\n",
+                     (int)checkpoint->header.n_labels, ctx->n_labels);
+            return false;
         }
 
-        if (fabs(checkpoint->header.fov - ctx.fov) > 1e-6)
+        if (fabs(checkpoint->header.fov - ctx->fov) > 1e-6)
         {
-            fprintf(stderr, "Checkpoint has FOV %.2f, expected %.2f\n",
-                    checkpoint->header.fov, ctx.fov);
-            return 1;
+            gm_throw(ctx->log, err, "Checkpoint has FOV %.2f, expected %.2f\n",
+                     checkpoint->header.fov, ctx->fov);
+            return false;
         }
 
-        if (checkpoint->header.depth > ctx.max_depth)
+        if (checkpoint->header.depth > ctx->max_depth)
         {
-            fprintf(stderr,
-                    "Can't train with a lower depth than checkpoint (%d < %d)\n",
-                    (int)ctx.max_depth, (int)checkpoint->header.depth);
-            return 1;
+            gm_throw(ctx->log, err,
+                     "Can't train with a lower depth than checkpoint (%d < %d)\n",
+                     ctx->max_depth, (int)checkpoint->header.depth);
+            return false;
         }
 
         // Restore nodes
-        uint32_t n_checkpoint_nodes = (uint32_t)
-            roundf(powf(2.f, checkpoint->header.depth)) - 1;
+        int n_checkpoint_nodes = roundf(powf(2.f, checkpoint->header.depth)) - 1;
         memcpy(tree, checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
 
         // Navigate the tree to determine any unfinished nodes and the last
@@ -802,12 +774,12 @@ main(int argc, char **argv)
             // the list if so. Given the order in which we iterate over the tree,
             // we can just append to the list. Note that the code expects
             // tree_histograms to point to the end of the list.
-            if (node->label_pr_idx != 0 && node->label_pr_idx != UINT32_MAX)
+            if (node->label_pr_idx != 0 && node->label_pr_idx != INT_MAX)
             {
                 float* pr_table = &checkpoint->
-                    label_pr_tables[ctx.n_labels * (node->label_pr_idx - 1)];
-                float* pr_copy = (float*)xmalloc(ctx.n_labels * sizeof(float));
-                memcpy(pr_copy, pr_table, ctx.n_labels * sizeof(float));
+                    label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
+                float* pr_copy = (float*)xmalloc(ctx->n_labels * sizeof(float));
+                memcpy(pr_copy, pr_table, ctx->n_labels * sizeof(float));
                 tree_histograms = llist_insert_after(tree_histograms,
                                                      llist_new(pr_copy));
                 ++n_histograms;
@@ -815,9 +787,9 @@ main(int argc, char **argv)
 
             // Check if the node is either marked as incomplete, or it sits on
             // the last depth of the tree and we're trying to train deeper.
-            if (node->label_pr_idx == UINT32_MAX ||
-                (data->depth == (uint32_t)(checkpoint->header.depth - 1) &&
-                 ctx.max_depth > checkpoint->header.depth))
+            if (node->label_pr_idx == INT_MAX ||
+                (data->depth == (checkpoint->header.depth - 1) &&
+                 ctx->max_depth > checkpoint->header.depth))
             {
                 // This node is referenced and incomplete, add it to the training
                 // queue.
@@ -833,16 +805,16 @@ main(int argc, char **argv)
             {
                 Int3D* l_pixels;
                 Int3D* r_pixels;
-                uint32_t n_lr_pixels[] = { 0, 0 };
-                collect_pixels(&ctx, data, node->uv, node->t, &l_pixels, &r_pixels,
+                int n_lr_pixels[] = { 0, 0 };
+                collect_pixels(ctx, data, node->uv, node->t, &l_pixels, &r_pixels,
                                n_lr_pixels);
 
-                uint32_t id = (2 * data->id) + 1;
-                uint32_t depth = data->depth + 1;
+                int id = (2 * data->id) + 1;
+                int depth = data->depth + 1;
                 NodeTrainData* ldata = create_node_train_data(
-                    &ctx, id, depth, n_lr_pixels[0], l_pixels);
+                    ctx, id, depth, n_lr_pixels[0], l_pixels);
                 NodeTrainData* rdata = create_node_train_data(
-                    &ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
+                    ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
 
                 checkpoint_queue =
                     llist_first(
@@ -857,33 +829,31 @@ main(int argc, char **argv)
         }
 
         free_tree(checkpoint);
-        interrupted = false;
 
         if (!train_queue)
         {
-            fprintf(stderr, "Tree already fully trained.\n");
-            return 1;
+            gm_throw(ctx->log, err, "Tree already fully trained.\n");
+            return false;
         }
     }
     else
     {
         // Mark nodes in tree as unfinished, for checkpoint restoration
-        for (uint32_t i = 0; i < n_nodes; i++)
-        {
-            tree[i].label_pr_idx = UINT32_MAX;
+        for (int i = 0; i < n_nodes; i++) {
+            tree[i].label_pr_idx = INT_MAX;
         }
     }
 
-    printf("Beginning training...\n");
+    gm_info(ctx->log, "Beginning training...\n");
     signal(SIGINT, sigint_handler);
     clock_gettime(CLOCK_MONOTONIC, &begin);
     last = begin;
-    uint32_t last_depth = UINT32_MAX;
+    int last_depth = INT_MAX;
     while (train_queue != NULL)
     {
-        uint32_t best_uv = 0;
-        uint32_t best_t = 0;
-        uint32_t *n_lr_pixels = NULL;
+        int best_uv = 0;
+        int best_t = 0;
+        int *n_lr_pixels = NULL;
         float best_gain = 0.0;
 
         LList* current = train_queue;
@@ -896,10 +866,11 @@ main(int argc, char **argv)
             since_last = get_time_for_display(&last, &now);
             last = now;
             last_depth = node_data->depth;
-            printf("(%02d:%02d:%02d / %02d:%02d:%02d) Training depth %u (%u nodes)\n",
-                   since_begin.hours, since_begin.minutes, since_begin.seconds,
-                   since_last.hours, since_last.minutes, since_last.seconds,
-                   last_depth + 1, llist_length(train_queue));
+            gm_info(ctx->log,
+                    "(%02d:%02d:%02d / %02d:%02d:%02d) Training depth %u (%u nodes)\n",
+                    since_begin.hours, since_begin.minutes, since_begin.seconds,
+                    since_last.hours, since_last.minutes, since_last.seconds,
+                    last_depth + 1, llist_length(train_queue));
         }
 
         // Signal threads to start work
@@ -908,19 +879,14 @@ main(int argc, char **argv)
         // Wait for threads to finish
         pthread_barrier_wait(&finished_barrier);
 
-
-        if (interrupted)
-        {
-            break;
-        }
         // Quit if we've been interrupted
-        if (interrupted)
-        {
+        if (interrupted) {
+            gm_warn(ctx->log, "Stopping training due to user-triggered interrupt");
             break;
         }
 
         // See which thread got the best uvt combination
-        for (uint32_t i = 0; i < n_threads; i++)
+        for (int i = 0; i < n_threads; i++)
         {
             if (best_gains[i] > best_gain)
             {
@@ -934,35 +900,36 @@ main(int argc, char **argv)
         // Add this node to the tree and possible add left/ride nodes to the
         // training queue.
         Node* node = &tree[node_data->id];
-        if (best_gain > 0.f && (node_data->depth + 1) < ctx.max_depth)
+        if (best_gain > 0.f && (node_data->depth + 1) < ctx->max_depth)
         {
-            node->uv = ctx.uvs[best_uv];
-            node->t = ctx.ts[best_t];
-            if (verbose)
+            node->uv = ctx->uvs[best_uv];
+            node->t = ctx->ts[best_t];
+            if (ctx->verbose)
             {
-                printf("  Node (%u)\n"
-                       "    Gain: %f\n"
-                       "    U: (%f, %f)\n"
-                       "    V: (%f, %f)\n"
-                       "    T: %f\n",
-                       node_data->id, best_gain,
-                       node->uv[0], node->uv[1],
-                       node->uv[2], node->uv[3],
-                       node->t);
+                gm_info(ctx->log,
+                        "  Node (%u)\n"
+                        "    Gain: %f\n"
+                        "    U: (%f, %f)\n"
+                        "    V: (%f, %f)\n"
+                        "    T: %f\n",
+                        node_data->id, best_gain,
+                        node->uv[0], node->uv[1],
+                        node->uv[2], node->uv[3],
+                        node->t);
             }
 
             Int3D* l_pixels;
             Int3D* r_pixels;
 
-            collect_pixels(&ctx, node_data, node->uv, node->t,
+            collect_pixels(ctx, node_data, node->uv, node->t,
                            &l_pixels, &r_pixels, n_lr_pixels);
 
-            uint32_t id = (2 * node_data->id) + 1;
-            uint32_t depth = node_data->depth + 1;
+            int id = (2 * node_data->id) + 1;
+            int depth = node_data->depth + 1;
             NodeTrainData* ldata = create_node_train_data(
-                &ctx, id, depth, n_lr_pixels[0], l_pixels);
+                ctx, id, depth, n_lr_pixels[0], l_pixels);
             NodeTrainData* rdata = create_node_train_data(
-                &ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
+                ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
 
             // Insert nodes into the training queue
             llist_insert_after(
@@ -974,21 +941,19 @@ main(int argc, char **argv)
         }
         else
         {
-            if (verbose)
+            if (ctx->verbose)
             {
-                printf("  Leaf node (%u)\n", (uint32_t)node_data->id);
-                for (int i = 0; i < ctx.n_labels; i++)
-                {
-                    if (root_nhistogram[i] > 0.f)
-                    {
-                        printf("    %02d - %f\n", i, root_nhistogram[i]);
+                gm_info(ctx->log, "  Leaf node (%d)\n", node_data->id);
+                for (int i = 0; i < ctx->n_labels; i++) {
+                    if (root_nhistogram[i] > 0.f) {
+                        gm_info(ctx->log, "    %02d - %f\n", i, root_nhistogram[i]);
                     }
                 }
             }
 
             node->label_pr_idx = ++n_histograms;
-            float* node_histogram = (float*)xmalloc(ctx.n_labels * sizeof(float));
-            memcpy(node_histogram, root_nhistogram, ctx.n_labels * sizeof(float));
+            float* node_histogram = (float*)xmalloc(ctx->n_labels * sizeof(float));
+            memcpy(node_histogram, root_nhistogram, ctx->n_labels * sizeof(float));
             tree_histograms = llist_insert_after(tree_histograms,
                                                  llist_new(node_histogram));
         }
@@ -1005,20 +970,20 @@ main(int argc, char **argv)
     node_data = NULL;
     pthread_barrier_wait(&ready_barrier);
 
-    for (uint32_t i = 0; i < n_threads; i++)
+    for (int i = 0; i < n_threads; i++)
     {
         if (pthread_join(threads[i], NULL) != 0)
         {
-            fprintf(stderr, "Error joining thread, trying to continue...\n");
+            gm_error(ctx->log, "Error joining thread, trying to continue...\n");
         }
     }
 
     // Free memory that isn't needed anymore
     xfree(root_nhistogram);
-    xfree(ctx.uvs);
-    xfree(ctx.ts);
-    xfree(ctx.label_images);
-    xfree(ctx.depth_images);
+    xfree(ctx->uvs);
+    xfree(ctx->ts);
+    xfree(ctx->label_images);
+    xfree(ctx->depth_images);
     xfree(best_gains);
     xfree(best_uvs);
     xfree(best_ts);
@@ -1032,20 +997,27 @@ main(int argc, char **argv)
     since_begin = get_time_for_display(&begin, &now);
     since_last = get_time_for_display(&last, &now);
     last = now;
-    printf("(%02d:%02d:%02d / %02d:%02d:%02d) Writing output to '%s'...\n",
-           since_begin.hours, since_begin.minutes, since_begin.seconds,
-           since_last.hours, since_last.minutes, since_last.seconds,
-           out_filename);
+    gm_info(ctx->log,
+            "(%02d:%02d:%02d / %02d:%02d:%02d) Writing output to '%s'...\n",
+            since_begin.hours, since_begin.minutes, since_begin.seconds,
+            since_last.hours, since_last.minutes, since_last.seconds,
+            out_filename);
 
-    RDTHeader header = { { 'R', 'D', 'T' }, RDT_VERSION, ctx.max_depth, \
-        ctx.n_labels, bg_label, ctx.fov };
+    RDTHeader header = {
+        { 'R', 'D', 'T' },
+        RDT_VERSION,
+        (uint8_t)ctx->max_depth,
+        (uint8_t)ctx->n_labels,
+        (uint8_t)ctx->bg_label,
+        ctx->fov
+    };
     RDTree rdtree = { header, tree, llist_length(tree_histograms), NULL };
     rdtree.label_pr_tables = (float*)
-        xmalloc(ctx.n_labels * rdtree.n_pr_tables * sizeof(float));
+        xmalloc(ctx->n_labels * rdtree.n_pr_tables * sizeof(float));
     float* pr_table = rdtree.label_pr_tables;
-    for (LList* l = tree_histograms; l; l = l->next, pr_table += ctx.n_labels)
+    for (LList* l = tree_histograms; l; l = l->next, pr_table += ctx->n_labels)
     {
-        memcpy(pr_table, l->data, sizeof(float) * ctx.n_labels);
+        memcpy(pr_table, l->data, sizeof(float) * ctx->n_labels);
     }
 
     save_tree(&rdtree, out_filename);
@@ -1066,10 +1038,11 @@ main(int argc, char **argv)
     since_begin = get_time_for_display(&begin, &now);
     since_last = get_time_for_display(&last, &now);
     last = now;
-    printf("(%02d:%02d:%02d / %02d:%02d:%02d) %s\n",
-           since_begin.hours, since_begin.minutes, since_begin.seconds,
-           since_last.hours, since_last.minutes, since_last.seconds,
-           interrupted ? "Interrupted!" : "Done!");
+    gm_info(ctx->log,
+            "(%02d:%02d:%02d / %02d:%02d:%02d) %s\n",
+            since_begin.hours, since_begin.minutes, since_begin.seconds,
+            since_last.hours, since_last.minutes, since_last.seconds,
+            interrupted ? "Interrupted!" : "Done!");
 
-    return 0;
+    return true;
 }
