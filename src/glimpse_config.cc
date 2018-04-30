@@ -70,7 +70,12 @@ gm_config_load(struct gm_logger *log, const char *json_buf,
                 gm_prop_set_vec3(prop, vec3);
                 break;
             }
-
+            case GM_PROPERTY_SWITCH:
+                // SKIP
+                break;
+            case GM_PROPERTY_STRING:
+                gm_prop_set_string(prop, json_value_get_string(value));
+                break;
             }
         }
     }
@@ -124,7 +129,12 @@ gm_config_save(struct gm_logger *log, struct gm_ui_properties *props)
             json_object_set_value(config, prop->name, array_val);
             break;
         }
-
+        case GM_PROPERTY_SWITCH:
+            // SKIP
+            break;
+        case GM_PROPERTY_STRING:
+            json_object_set_string(config, prop->name, gm_prop_get_string(prop));
+            break;
         }
     }
 

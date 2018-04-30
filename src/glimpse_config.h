@@ -44,6 +44,7 @@ enum gm_property_type {
     GM_PROPERTY_SWITCH,
     GM_PROPERTY_FLOAT,
     GM_PROPERTY_FLOAT_VEC3,
+    GM_PROPERTY_STRING,
 };
 
 struct gm_ui_enumerant {
@@ -96,37 +97,60 @@ struct gm_ui_property {
             void (*get)(struct gm_ui_property *prop, float *out);
             void (*set)(struct gm_ui_property *prop, float *val);
         } vec3_state;
+        struct {
+            /* XXX: note that there's currently no locking so there's
+             * a risk we'll get into trouble racing between
+             * getting/setting at some point...
+             */
+            char **ptr;
+            const char *(*get)(struct gm_ui_property *prop);
+            void (*set)(struct gm_ui_property *prop, const char *string);
+        } string_state;
     };
     bool read_only;
 };
 
-#define GM_DECLARE_SCALAR_GETTER(NAME, CTYPE) \
-inline CTYPE gm_prop_get_##NAME(struct gm_ui_property *prop) \
+struct gm_ui_properties {
+    pthread_mutex_t lock;
+    int n_properties;
+    struct gm_ui_property *properties;
+};
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define GM_DECLARE_SCALAR_PROP_GETTER(NAME, CTYPE) \
+static inline CTYPE \
+gm_prop_get_##NAME(struct gm_ui_property *prop) \
 { \
     if (prop->NAME##_state.get) \
         return prop->NAME##_state.get(prop); \
     else \
         return *prop->NAME##_state.ptr; \
 }
-GM_DECLARE_SCALAR_GETTER(int, int)
-GM_DECLARE_SCALAR_GETTER(bool, bool)
-GM_DECLARE_SCALAR_GETTER(enum, int)
-GM_DECLARE_SCALAR_GETTER(float, float)
+GM_DECLARE_SCALAR_PROP_GETTER(int, int)
+GM_DECLARE_SCALAR_PROP_GETTER(bool, bool)
+GM_DECLARE_SCALAR_PROP_GETTER(enum, int)
+GM_DECLARE_SCALAR_PROP_GETTER(float, float)
 
-#define GM_DECLARE_SCALAR_SETTER(NAME, CTYPE) \
-inline void gm_prop_set_##NAME(struct gm_ui_property *prop, CTYPE val) \
+#define GM_DECLARE_SCALAR_PROP_SETTER(NAME, CTYPE) \
+static inline void \
+gm_prop_set_##NAME(struct gm_ui_property *prop, CTYPE val) \
 { \
     if (prop->NAME##_state.set) \
         prop->NAME##_state.set(prop, val); \
     else \
         *(prop->NAME##_state.ptr) = val; \
 }
-GM_DECLARE_SCALAR_SETTER(int, int)
-GM_DECLARE_SCALAR_SETTER(bool, bool)
-GM_DECLARE_SCALAR_SETTER(enum, int)
-GM_DECLARE_SCALAR_SETTER(float, float)
+GM_DECLARE_SCALAR_PROP_SETTER(int, int)
+GM_DECLARE_SCALAR_PROP_SETTER(bool, bool)
+GM_DECLARE_SCALAR_PROP_SETTER(enum, int)
+GM_DECLARE_SCALAR_PROP_SETTER(float, float)
 
-inline void gm_prop_get_vec3(struct gm_ui_property *prop, float *out)
+static inline void
+gm_prop_get_vec3(struct gm_ui_property *prop, float *out)
 {
     if (prop->vec3_state.get)
         prop->vec3_state.get(prop, out);
@@ -134,7 +158,8 @@ inline void gm_prop_get_vec3(struct gm_ui_property *prop, float *out)
         memcpy(out, prop->vec3_state.ptr, sizeof(float) * 3);
 }
 
-inline void gm_prop_set_vec3(struct gm_ui_property *prop, float *vec3)
+static inline void
+gm_prop_set_vec3(struct gm_ui_property *prop, float *vec3)
 {
     if (prop->vec3_state.set)
         prop->vec3_state.set(prop, vec3);
@@ -142,7 +167,30 @@ inline void gm_prop_set_vec3(struct gm_ui_property *prop, float *vec3)
         memcpy(prop->vec3_state.ptr, vec3, sizeof(float) * 3);
 }
 
-inline void gm_prop_set_switch(struct gm_ui_property *prop)
+static inline const char *
+gm_prop_get_string(struct gm_ui_property *prop)
+{
+    if (prop->string_state.get)
+        return prop->string_state.get(prop);
+    else
+        return *prop->string_state.ptr;
+}
+
+static inline void
+gm_prop_set_string(struct gm_ui_property *prop, const char *string)
+{
+    if (prop->string_state.set)
+        prop->string_state.set(prop, string);
+    else {
+        free(*prop->string_state.ptr);
+        *prop->string_state.ptr = NULL;
+        if (string)
+            *prop->string_state.ptr = strdup(string);
+    }
+}
+
+static inline void
+gm_prop_set_switch(struct gm_ui_property *prop)
 {
     if (prop->switch_state.set)
         prop->switch_state.set(prop);
@@ -150,7 +198,8 @@ inline void gm_prop_set_switch(struct gm_ui_property *prop)
         *(prop->switch_state.ptr) = true;
 }
 
-inline void gm_prop_set_enum_by_name(struct gm_ui_property *prop, const char *name)
+static inline void
+gm_prop_set_enum_by_name(struct gm_ui_property *prop, const char *name)
 {
     for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
         const struct gm_ui_enumerant *enumerant =
@@ -162,7 +211,8 @@ inline void gm_prop_set_enum_by_name(struct gm_ui_property *prop, const char *na
     }
 }
 
-inline const char *gm_prop_set_enum_name(struct gm_ui_property *prop, int val)
+static inline const char *
+gm_prop_set_enum_name(struct gm_ui_property *prop, int val)
 {
     for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
         const struct gm_ui_enumerant *enumerant =
@@ -173,18 +223,108 @@ inline const char *gm_prop_set_enum_name(struct gm_ui_property *prop, int val)
     return NULL;
 }
 
-/* During development and testing it's convenient to have direct tuneables
- * we can play with at runtime...
- */
-struct gm_ui_properties {
-    pthread_mutex_t lock;
-    int n_properties;
-    struct gm_ui_property *properties;
-};
+static inline int
+gm_props_lookup_id(struct gm_ui_properties *props, const char *name)
+{
+    for (int i = 0; i < props->n_properties; i++) {
+        if (strcmp(props->properties[i].name, name) == 0)
+            return i;
+    }
+    return -1;
+}
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+static inline struct gm_ui_property *
+gm_props_lookup(struct gm_ui_properties *props, const char *name)
+{
+    int id = gm_props_lookup_id(props, name);
+    if (id >= 0)
+        return &props->properties[id];
+    else
+        return NULL;
+}
+
+#define GM_DECLARE_SCALAR_PROPS_GETTER(NAME, CTYPE) \
+static inline CTYPE \
+gm_props_get_##NAME(struct gm_ui_properties *props, \
+                    const char *name) \
+{ \
+    struct gm_ui_property *prop = gm_props_lookup(props, name); \
+    if (prop) \
+        return gm_prop_get_##NAME(prop); \
+    else \
+        return 0; \
+}
+GM_DECLARE_SCALAR_PROPS_GETTER(int, int)
+GM_DECLARE_SCALAR_PROPS_GETTER(bool, bool)
+GM_DECLARE_SCALAR_PROPS_GETTER(enum, int)
+GM_DECLARE_SCALAR_PROPS_GETTER(float, float)
+
+#define GM_DECLARE_SCALAR_PROPS_SETTER(NAME, CTYPE) \
+static inline void \
+gm_props_set_##NAME(struct gm_ui_properties *props, \
+                    const char *name, \
+                    CTYPE val) \
+{ \
+    struct gm_ui_property *prop = gm_props_lookup(props, name); \
+    if (prop) \
+        gm_prop_set_##NAME(prop, val); \
+}
+GM_DECLARE_SCALAR_PROPS_SETTER(int, int)
+GM_DECLARE_SCALAR_PROPS_SETTER(bool, bool)
+GM_DECLARE_SCALAR_PROPS_SETTER(enum, int)
+GM_DECLARE_SCALAR_PROPS_SETTER(float, float)
+
+static inline void
+gm_props_get_vec3(struct gm_ui_properties *props,
+                  const char *name,
+                  float *out)
+{
+    struct gm_ui_property *prop = gm_props_lookup(props, name);
+    if (prop)
+        gm_prop_get_vec3(prop, out);
+    else
+        out[0] = out[1] = out[2] = 0;
+}
+
+static inline void
+gm_props_set_vec3(struct gm_ui_properties *props,
+                  const char *name,
+                  float *vec3)
+{
+    struct gm_ui_property *prop = gm_props_lookup(props, name);
+    if (prop)
+        gm_prop_set_vec3(prop, vec3);
+}
+
+static inline const char *
+gm_props_get_string(struct gm_ui_properties *props,
+                    const char *name)
+{
+    struct gm_ui_property *prop = gm_props_lookup(props, name);
+    if (prop)
+        return gm_prop_get_string(prop);
+    else
+        return NULL;
+}
+
+static inline void
+gm_props_set_string(struct gm_ui_properties *props,
+                    const char *name,
+                    const char *string)
+{
+    struct gm_ui_property *prop = gm_props_lookup(props, name);
+    if (prop)
+        gm_prop_set_string(prop, string);
+}
+
+static inline void
+gm_props_set_switch(struct gm_ui_properties *props,
+                    const char *name)
+{
+    struct gm_ui_property *prop = gm_props_lookup(props, name);
+    if (prop)
+        gm_prop_set_switch(prop);
+}
 
 void gm_config_load(struct gm_logger *log,
                     const char *json_buf,
