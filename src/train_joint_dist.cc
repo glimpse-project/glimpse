@@ -108,8 +108,6 @@ print_usage(FILE* stream)
             "Determine the min, mean and max distances between each joint over a set of\n"
             "motion capture data and output a JSON file with the data.\n"
             "\n"
-            "  -l, --limit=NUMBER[,NUMBER] Limit training data to this many images.\n"
-            "                              Optionally, skip the first N images.\n"
             "  -m, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
             "  -p, --pretty                Output prettified JSON\n"
             "  -v, --verbose               Verbose output\n"
@@ -126,16 +124,13 @@ main(int argc, char** argv)
     const char* joint_map_path;
     const char* out_file;
 
-    uint32_t limit = UINT32_MAX;
-    uint32_t skip = 0;
     bool pretty = false;
 
     TrainContext ctx = { 0, };
     ctx.n_threads = std::thread::hardware_concurrency();
 
-    const char *short_opts="+l:mpvh";
+    const char *short_opts="+mpvh";
     const struct option long_opts[] = {
-        {"limit",           required_argument,  0, 'l'},
         {"threads",         required_argument,  0, 'm'},
         {"pretty",          no_argument,        0, 'p'},
         {"verbose",         no_argument,        0, 'v'},
@@ -149,35 +144,22 @@ main(int argc, char** argv)
 
         switch (opt)
         {
-        case 'l':
-            value = optarg;
-            limit = (uint32_t)strtol(value, &value, 10);
-            if (value[0] != '\0')
-            {
-                skip = (uint32_t)strtol(value + 1, NULL, 10);
-            }
-            break;
-
         case 'm':
             ctx.n_threads = (uint32_t)atoi(optarg);
             break;
-
         case 'p':
             pretty = true;
             break;
-
         case 'v':
             ctx.verbose = true;
             break;
-
         case 'h':
             print_usage(stdout);
             return 0;
         }
     }
 
-    if ((argc - optind) < 4)
-    {
+    if ((argc - optind) < 4) {
         print_usage(stderr);
         return 1;
     }
