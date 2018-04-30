@@ -140,8 +140,6 @@ main(int argc, char** argv)
 
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, NULL)) != -1)
     {
-        char* value;
-
         switch (opt)
         {
         case 'm':
