@@ -41,8 +41,8 @@ typedef struct {
   bool        verbose;       // Verbose output
   uint32_t    n_threads;     // Number of threads to use for work
 
-  uint8_t     n_joints;      // Number of joints
-  uint32_t    n_sets;        // Number of joint position sets
+  int         n_joints;      // Number of joints
+  int         n_sets;        // Number of joint position sets
   float*      joints;        // List of joint positions
 } TrainContext;
 
@@ -191,7 +191,6 @@ main (int argc, char** argv)
   gather_train_data(data_dir,
                     index_name,
                     joint_map_path,
-                    limit, skip, false,
                     &ctx.n_sets,
                     &ctx.n_joints,
                     NULL, NULL, // width, height

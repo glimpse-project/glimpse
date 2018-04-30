@@ -54,36 +54,36 @@ static bool verbose = false;
 typedef struct {
   float    fov;           // Camera field of view
 
-  unsigned n_trees;       // Number of decision trees
+  int      n_trees;       // Number of decision trees
   RDTree** forest;        // Decision trees
 
-  uint32_t n_images;      // Number of training images
-  int32_t  width;         // Width of training images
-  int32_t  height;        // Height of training images
+  int      n_images;      // Number of training images
+  int      width;         // Width of training images
+  int      height;        // Height of training images
   uint8_t* label_images;  // Label images (row-major)
   half*    depth_images;  // Depth images (row-major)
   float**  inferred;      // Inferred label probabilities
   float*   weights;       // Pixel weighting for joint label groups
 
-  uint8_t  n_joints;      // Number of joints
+  int      n_joints;      // Number of joints
   JSON_Value* joint_map;  // Map between joints and labels
   float*   joints;        // List of joint positions for each image
 
-  uint32_t n_bandwidths;  // Number of bandwidth values
+  int      n_bandwidths;  // Number of bandwidth values
   float*   bandwidths;    // Bandwidth values to test
-  uint32_t n_thresholds;  // Number of probability thresholds
+  int      n_thresholds;  // Number of probability thresholds
   float*   thresholds;    // Probability thresholds to test
-  uint32_t n_offsets;     // Number of Z offsets
+  int      n_offsets;     // Number of Z offsets
   float*   offsets;       // Z offsets to test
 
-  uint32_t n_threads;     // Number of threads to use for work
+  int      n_threads;     // Number of threads to use for work
 
   bool check_accuracy;    // Test the accuracy of joint inferrence
 } TrainContext;
 
 typedef struct {
   TrainContext*      ctx;              // Training context
-  uint32_t           thread;           // Thread number
+  int                thread;           // Thread number
   float*             best_dist;        // Best mean distance from each joint
   float*             best_bandwidth;   // Best bandwidth per joint
   float*             best_threshold;   // Best threshold per joint
@@ -104,9 +104,6 @@ print_usage(FILE* stream)
 "                          -- <tree file 1> [tree file 2] ...\n"
 "Given a trained decision tree, train parameters for joint position proposal.\n"
 "\n"
-"  -l, --limit=NUMBER[,NUMBER] Limit training data to this many images.\n"
-"                              Optionally, skip the first N images.\n"
-"  -s, --shuffle               Shuffle order of training images\n"
 "  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
 "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
 "  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
@@ -148,17 +145,17 @@ thread_body(void* userdata)
   TrainThreadData* data = (TrainThreadData*)userdata;
   TrainContext* ctx = data->ctx;
 
-  uint8_t n_labels = ctx->forest[0]->header.n_labels;
+  int n_labels = ctx->forest[0]->header.n_labels;
 
   // Generate probability tables and pixel weights, and possibly calculate
   // inference accuracy
-  uint32_t images_per_thread =
-    std::max((uint32_t)1, ctx->n_images / ctx->n_threads);
-  uint32_t i_start = images_per_thread * data->thread;
-  uint32_t i_end = std::min(ctx->n_images,
-                            (data->thread == ctx->n_threads - 1) ?
-                              ctx->n_images : i_start + images_per_thread);
-  for (uint32_t i = i_start, idx = ctx->width * ctx->height * i_start;
+  int images_per_thread =
+    std::max(1, ctx->n_images / ctx->n_threads);
+  int i_start = images_per_thread * data->thread;
+  int i_end = std::min(ctx->n_images,
+                       (data->thread == ctx->n_threads - 1) ?
+                       ctx->n_images : i_start + images_per_thread);
+  for (int i = i_start, idx = ctx->width * ctx->height * i_start;
        i < i_end; i++, idx += ctx->width * ctx->height)
     {
       ctx->inferred[i] = infer_labels<half>(ctx->forest, ctx->n_trees,
@@ -166,7 +163,7 @@ thread_body(void* userdata)
                                             ctx->width, ctx->height);
 
       // Calculate pixel weight
-      uint32_t weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
+      int weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
       calc_pixel_weights<half>(&ctx->depth_images[idx], ctx->inferred[i],
                                ctx->width, ctx->height, n_labels,
                                ctx->joint_map,
@@ -175,9 +172,9 @@ thread_body(void* userdata)
       // Calculate inference accuracy if label images were specified
       if (ctx->check_accuracy)
         {
-          uint32_t label_incidence[n_labels];
-          uint32_t correct_label_incidence[n_labels];
-          uint32_t label_idx = idx;
+          int label_incidence[n_labels];
+          int correct_label_incidence[n_labels];
+          int label_idx = idx;
 
           /* NB: clang doesn't allow using an = {0} initializer with dynamic
            * sized arrays...
@@ -186,15 +183,15 @@ thread_body(void* userdata)
           memset(correct_label_incidence, 0,
                  n_labels * sizeof(correct_label_incidence[0]));
 
-          for (int32_t y = 0; y < ctx->height; y++)
+          for (int y = 0; y < ctx->height; y++)
             {
-              for (int32_t x = 0; x < ctx->width; x++, label_idx++)
+              for (int x = 0; x < ctx->width; x++, label_idx++)
                 {
-                  uint8_t actual_label = ctx->label_images[label_idx];
+                  int actual_label = (int)ctx->label_images[label_idx];
 
                   float best_pr = 0.f;
-                  uint8_t inferred_label = 0;
-                  for (uint8_t l = 0; l < n_labels; l++)
+                  int inferred_label = 0;
+                  for (int l = 0; l < n_labels; l++)
                     {
                       float pr =
                         ctx->inferred[i][((label_idx - idx) * n_labels) + l];
@@ -213,9 +210,9 @@ thread_body(void* userdata)
                 }
             }
 
-          uint8_t present_labels = 0;
+          int present_labels = 0;
           float accuracy = 0.f;
-          for (uint8_t l = 0; l < n_labels; l++)
+          for (int l = 0; l < n_labels; l++)
             {
               if (label_incidence[l] > 0)
                 {
@@ -243,24 +240,24 @@ thread_body(void* userdata)
 
   // Loop over each bandwidth/threshold/offset combination and test to see
   // which combination gives the best results for inference on each joint.
-  uint32_t n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
-  uint32_t combos_per_thread = std::max((uint32_t)1, n_combos / ctx->n_threads);
-  uint32_t c_start = combos_per_thread * data->thread;
-  uint32_t c_end = std::min(n_combos,
-                            (data->thread == ctx->n_threads - 1) ?
-                              n_combos : c_start + combos_per_thread);
+  int n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
+  int combos_per_thread = std::max(1, n_combos / ctx->n_threads);
+  int c_start = combos_per_thread * data->thread;
+  int c_end = std::min(n_combos,
+                       (data->thread == ctx->n_threads - 1) ?
+                       n_combos : c_start + combos_per_thread);
 
-  uint32_t bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
+  int bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
 
   float output_acc = 0;
   float output_freq = (c_end - c_start) /
     (PROGRESS_WIDTH / (float)ctx->n_threads);
 
-  for (uint32_t c = c_start; c < c_end; c++)
+  for (int c = c_start; c < c_end; c++)
     {
-      uint32_t bandwidth_idx = c / bandwidth_stride;
-      uint32_t threshold_idx = (c / ctx->n_offsets) % ctx->n_thresholds;
-      uint32_t offset_idx = c % ctx->n_offsets;
+      int bandwidth_idx = c / bandwidth_stride;
+      int threshold_idx = (c / ctx->n_offsets) % ctx->n_thresholds;
+      int offset_idx = c % ctx->n_offsets;
 
       float bandwidth = ctx->bandwidths[bandwidth_idx];
       float threshold = ctx->thresholds[threshold_idx];
@@ -280,10 +277,10 @@ thread_body(void* userdata)
       float acc_distance[ctx->n_joints];
       memset(acc_distance, 0, ctx->n_joints * sizeof(acc_distance[0]));
 
-      for (uint32_t i = 0; i < ctx->n_images; i++)
+      for (int i = 0; i < ctx->n_images; i++)
         {
-          uint32_t depth_idx = i * ctx->width * ctx->height;
-          uint32_t weight_idx = depth_idx * ctx->n_joints;
+          int depth_idx = i * ctx->width * ctx->height;
+          int weight_idx = depth_idx * ctx->n_joints;
 
           half* depth_image = &ctx->depth_images[depth_idx];
           float* pr_table = ctx->inferred[i];
@@ -298,7 +295,7 @@ thread_body(void* userdata)
                                params);
 
           // Calculate distance from expected joint position and accumulate
-          for (uint8_t j = 0; j < ctx->n_joints; j++)
+          for (int j = 0; j < ctx->n_joints; j++)
             {
               if (!result->joints[j])
                 {
@@ -329,7 +326,7 @@ thread_body(void* userdata)
 
       // See if this combination is better than the current best for any
       // particular joint
-      for (uint8_t j = 0; j < ctx->n_joints; j++)
+      for (int j = 0; j < ctx->n_joints; j++)
         {
           if (acc_distance[j] < data->best_dist[j])
             {
@@ -353,7 +350,7 @@ thread_body(void* userdata)
 }
 
 static bool
-read_three(char* string, float* value1, float* value2, uint32_t* value3)
+read_three(char* string, float* value1, float* value2, int* value3)
 {
   char* old_string = string;
   *value1 = strtof(old_string, &string);
@@ -370,7 +367,7 @@ read_three(char* string, float* value1, float* value2, uint32_t* value3)
     }
 
   old_string = string + 1;
-  *value3 = (uint32_t)strtol(old_string, &string, 10);
+  *value3 = (int)strtol(old_string, &string, 10);
   if (string == old_string || string[0] != '\0')
     {
       return false;
@@ -380,7 +377,7 @@ read_three(char* string, float* value1, float* value2, uint32_t* value3)
 }
 
 void
-gen_range(float** data, float min, float max, uint32_t n)
+gen_range(float** data, float min, float max, int n)
 {
   *data = (float*)xmalloc(n * sizeof(float));
   if (n == 1)
@@ -389,7 +386,7 @@ gen_range(float** data, float min, float max, uint32_t n)
       return;
     }
 
-  for (uint32_t i = 0; i < n; i++)
+  for (int i = 0; i < n; i++)
     {
       (*data)[i] = min + ((max - min) * i) / (float)(n - 1);
     }
@@ -412,9 +409,6 @@ main (int argc, char** argv)
 
   // Set default parameters
   TrainContext ctx = { 0, };
-  uint32_t limit = UINT32_MAX;
-  uint32_t skip = 0;
-  bool shuffle = false;
   ctx.n_bandwidths = 10;
   float min_bandwidth = 0.02f;
   float max_bandwidth = 0.08f;
@@ -467,15 +461,7 @@ main (int argc, char** argv)
 
           // Check argument
           arg++;
-          if (strstr(arg, "limit="))
-            {
-              param = 'l';
-            }
-          else if (strcmp(arg, "shuffle") == 0)
-            {
-              param = 's';
-            }
-          else if (strstr(arg, "bandwidths="))
+          if (strstr(arg, "bandwidths="))
             {
               param = 'b';
             }
@@ -521,9 +507,6 @@ main (int argc, char** argv)
       // Check for parameter-less options
       switch(param)
         {
-        case 's':
-          shuffle = true;
-          continue;
         case 'v':
           verbose = true;
           continue;
@@ -545,13 +528,6 @@ main (int argc, char** argv)
 
       switch(param)
         {
-        case 'l':
-          limit = (uint32_t)strtol(value, &value, 10);
-          if (value[0] != '\0')
-            {
-              skip = (uint32_t)strtol(value + 1, NULL, 10);
-            }
-          break;
         case 'b':
           read_three(value, &min_bandwidth, &max_bandwidth, &ctx.n_bandwidths);
           break;
@@ -565,7 +541,7 @@ main (int argc, char** argv)
           ctx.check_accuracy = true;
           break;
         case 'm':
-          ctx.n_threads = (uint32_t)atoi(value);
+          ctx.n_threads = atoi(value);
           break;
 
         default:
@@ -587,7 +563,6 @@ main (int argc, char** argv)
   gather_train_data(data_dir,
                     index_name,
                     joint_map_path,
-                    limit, skip, shuffle,
                     &ctx.n_images,
                     &ctx.n_joints,
                     &ctx.width, &ctx.height,
@@ -602,8 +577,8 @@ main (int argc, char** argv)
   // though, so just warn about it.
   if (ctx.n_joints >= ctx.forest[0]->header.n_labels)
     {
-      fprintf(stderr, "WARNING: Joints exceeds labels (%u >= %u)\n",
-              (uint32_t)ctx.n_joints, (uint32_t)ctx.forest[0]->header.n_labels);
+      fprintf(stderr, "WARNING: Joints exceeds labels (%d >= %u)\n",
+              ctx.n_joints, (int)ctx.forest[0]->header.n_labels);
     }
 
   printf("Loading joint map...\n");
@@ -657,7 +632,7 @@ main (int argc, char** argv)
   float* accuracies = (float*)xcalloc(ctx.n_threads, sizeof(float));
   pthread_t threads[ctx.n_threads];
 
-  for (uint32_t i = 0; i < ctx.n_threads; i++)
+  for (int i = 0; i < ctx.n_threads; i++)
     {
       TrainThreadData* thread_data = (TrainThreadData*)
         xcalloc(1, sizeof(TrainThreadData));
@@ -687,8 +662,8 @@ main (int argc, char** argv)
 
       // Calculate accuracy
       float accuracy = 0.f;
-      uint32_t n_accuracies = std::min(ctx.n_threads, ctx.n_images);
-      for (uint32_t i = 0; i < n_accuracies; i++)
+      int n_accuracies = std::min(ctx.n_threads, ctx.n_images);
+      for (int i = 0; i < n_accuracies; i++)
         {
           accuracy += accuracies[i];
         }
@@ -706,7 +681,7 @@ main (int argc, char** argv)
          since_begin.hours, since_begin.minutes, since_begin.seconds,
          since_last.hours, since_last.minutes, since_last.seconds);
 
-  for (uint32_t i = 0; i < PROGRESS_WIDTH; i++)
+  for (int i = 0; i < PROGRESS_WIDTH; i++)
     {
       printf("-");
     }
@@ -719,7 +694,7 @@ main (int argc, char** argv)
   pthread_barrier_destroy(&barrier);
 
   // Wait for threads to finish
-  for (uint32_t i = 0; i < ctx.n_threads; i++)
+  for (int i = 0; i < ctx.n_threads; i++)
     {
       if (pthread_join(threads[i], NULL) != 0)
         {
@@ -731,7 +706,7 @@ main (int argc, char** argv)
   // Free memory we no longer need
   xfree(ctx.depth_images);
   xfree(ctx.weights);
-  for (uint32_t i = 0; i < ctx.n_images; i++)
+  for (int i = 0; i < ctx.n_images; i++)
     {
       xfree(ctx.inferred[i]);
     }
@@ -747,11 +722,11 @@ main (int argc, char** argv)
       json_object_set_number(json_object(js_root), "n_joints", ctx.n_joints);
       JSON_Value* js_params = json_value_init_array();
 
-      for (uint32_t j = 0; j < ctx.n_joints; j++)
+      for (int j = 0; j < ctx.n_joints; j++)
         {
-          for (uint32_t i = 1; i < ctx.n_threads; i++)
+          for (int i = 1; i < ctx.n_threads; i++)
             {
-              uint32_t idx = ctx.n_joints * i + j;
+              int idx = ctx.n_joints * i + j;
               if (best_dists[idx] < best_dists[j])
                 {
                   best_dists[j] = best_dists[idx];
@@ -798,11 +773,11 @@ main (int argc, char** argv)
         }
 
       // Find the best parameter combination and write to output file
-      for (uint32_t j = 0; j < ctx.n_joints; j++)
+      for (int j = 0; j < ctx.n_joints; j++)
         {
-          for (uint32_t i = 1; i < ctx.n_threads; i++)
+          for (int i = 1; i < ctx.n_threads; i++)
             {
-              uint32_t idx = ctx.n_joints * i + j;
+              int idx = ctx.n_joints * i + j;
               if (best_dists[idx] < best_dists[j])
                 {
                   best_dists[j] = best_dists[idx];

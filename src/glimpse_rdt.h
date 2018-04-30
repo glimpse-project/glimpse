@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Glimp IP Ltd
+ * Copyright (C) 2018 Glimp IP Ltd
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -22,24 +22,55 @@
  * SOFTWARE.
  */
 
-
 #pragma once
 
-#include <stdint.h>
-#include <stdbool.h>
+#include <glimpse_log.h>
+#include <glimpse_config.h>
 
-#include "half.hpp"
+struct gm_rdt_context;
 
-void gather_train_data(const char* data_dir,
-                       const char* index_name,
-                       const char* joint_map_path,
-                       int* out_n_images,
-                       int* out_n_joints,
-                       int* out_width,
-                       int* out_height,
-                       half_float::half** out_depth_images,
-                       uint8_t**   out_label_images,
-                       float**     out_joints,
-                       int*        out_n_labels,
-                       float*      out_fov);
+struct gm_rdt_context_vtable
+{
+    void (*free)(struct gm_rdt_context *self);
+};
 
+struct gm_rdt_context
+{
+    int ref;
+    struct gm_rdt_context_vtable *api;
+};
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+inline struct gm_rdt_context *
+gm_rdt_context_ref(struct gm_rdt_context *rdt_context)
+{
+    rdt_context->ref++;
+    return rdt_context;
+}
+
+inline void
+gm_rdt_context_unref(struct gm_rdt_context *rdt_context)
+{
+    if (__builtin_expect(--(rdt_context->ref) < 1, 0))
+        rdt_context->api->free(rdt_context);
+}
+
+struct gm_rdt_context *
+gm_rdt_context_new(struct gm_logger *log);
+
+struct gm_ui_properties *
+gm_rdt_context_get_ui_properties(struct gm_rdt_context *ctx);
+
+bool
+gm_rdt_context_train(struct gm_rdt_context *ctx, char **err);
+
+void
+gm_rdt_context_destroy(struct gm_rdt_context *ctx);
+
+#ifdef __cplusplus
+}
+#endif

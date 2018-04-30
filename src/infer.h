@@ -47,19 +47,19 @@ typedef struct {
 
 template<typename FloatT>
 float* infer_labels(RDTree** forest,
-                    uint8_t n_trees,
+                    int n_trees,
                     FloatT* depth_image,
-                    uint32_t width,
-                    uint32_t height,
+                    int width,
+                    int height,
                     float* out_labels = NULL,
                     bool use_threads = false);
 
 template<typename FloatT>
 float* calc_pixel_weights(FloatT* depth_image,
                           float* pr_table,
-                          int32_t width,
-                          int32_t height,
-                          uint8_t n_labels,
+                          int width,
+                          int height,
+                          int n_labels,
                           JSON_Value* joint_map,
                           float* out_weights = NULL);
 
@@ -67,9 +67,9 @@ template<typename FloatT>
 InferredJoints* infer_joints_fast(FloatT* depth_image,
                                   float* pr_table,
                                   float* weights,
-                                  int32_t width,
-                                  int32_t height,
-                                  uint8_t n_labels,
+                                  int width,
+                                  int height,
+                                  int n_labels,
                                   JSON_Value* joint_map,
                                   float vfov,
                                   JIParam* params);
@@ -78,9 +78,9 @@ template<typename FloatT>
 InferredJoints* infer_joints(FloatT* depth_image,
                              float* pr_table,
                              float* weights,
-                             int32_t width,
-                             int32_t height,
-                             uint8_t n_labels,
+                             int width,
+                             int height,
+                             int n_labels,
                              JSON_Value* joint_map,
                              float vfov,
                              JIParam* params);
@@ -89,18 +89,18 @@ void free_joints(InferredJoints* joints);
 
 template<typename FloatT>
 float* reproject(FloatT* depth_image,
-                 int32_t width,
-                 int32_t height,
+                 int width,
+                 int height,
                  float vfov,
                  float threshold,
-                 uint32_t* n_points,
+                 int* n_points,
                  float* out_points = NULL);
 
 template<typename FloatT>
 FloatT* project(float* point_cloud,
-                uint32_t n_points,
-                int32_t width,
-                int32_t height,
+                int n_points,
+                int width,
+                int height,
                 float vfov,
                 float background = 0.f,
                 FloatT* out_depth = NULL);
