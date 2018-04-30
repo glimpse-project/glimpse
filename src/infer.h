@@ -34,15 +34,15 @@
 #define HUGE_DEPTH 1000.f
 
 typedef struct {
-  float x;
-  float y;
-  float z;
-  float confidence;
+    float x;
+    float y;
+    float z;
+    float confidence;
 } Joint;
 
 typedef struct {
-  int     n_joints;
-  LList** joints;
+    int     n_joints;
+    LList** joints;
 } InferredJoints;
 
 template<typename FloatT>
