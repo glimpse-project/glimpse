@@ -39,7 +39,7 @@
 
 typedef struct {
     bool        verbose;       // Verbose output
-    uint32_t    n_threads;     // Number of threads to use for work
+    int         n_threads;     // Number of threads to use for work
 
     int         n_joints;      // Number of joints
     int         n_sets;        // Number of joint position sets
@@ -48,8 +48,8 @@ typedef struct {
 
 typedef struct {
     TrainContext* ctx;
-    uint32_t      start;       // Index to start analysing
-    uint32_t      end;         // Index to end analysing
+    int           start;       // Index to start analysing
+    int           end;         // Index to end analysing
     float*        min_dists;   // Minimum distance between each pair of joints
     float*        mean_dists;  // Mean distance between each pair of joints
     float*        max_dists;   // Maximum distance between each pair of joints
@@ -60,15 +60,15 @@ thread_body(void* userdata)
 {
     ThreadContext* ctx = (ThreadContext*)userdata;
 
-    for (uint32_t i = ctx->start; i < ctx->end; i++)
+    for (int i = ctx->start; i < ctx->end; i++)
     {
         int joint_idx = i * ctx->ctx->n_joints * 3;
         float* joints = &ctx->ctx->joints[joint_idx];
 
-        for (uint8_t j = 0; j < ctx->ctx->n_joints; j++)
+        for (int j = 0; j < ctx->ctx->n_joints; j++)
         {
             float* joint1 = &joints[j * 3];
-            for (uint8_t k = 0; k < ctx->ctx->n_joints; k++)
+            for (int k = 0; k < ctx->ctx->n_joints; k++)
             {
                 int result_idx = j * ctx->ctx->n_joints + k;
                 float* joint2 = &joints[k * 3];
@@ -145,7 +145,7 @@ main(int argc, char** argv)
         switch (opt)
         {
         case 'm':
-            ctx.n_threads = (uint32_t)atoi(optarg);
+            ctx.n_threads = atoi(optarg);
             break;
         case 'p':
             pretty = true;
@@ -188,17 +188,16 @@ main(int argc, char** argv)
 
     float sets_per_thread = ctx.n_sets / (float)ctx.n_threads;
     float error = 0.f;
-    uint32_t start = 0;
+    int start = 0;
     size_t array_size = ctx.n_joints * ctx.n_joints;
 
-    for (uint32_t i = 0; i < ctx.n_threads; i++)
-    {
+    for (int i = 0; i < ctx.n_threads; i++) {
         thread_ctx[i].ctx = &ctx;
 
         thread_ctx[i].start = start;
         if (i < ctx.n_threads - 1)
         {
-            thread_ctx[i].end = (uint32_t)(start + sets_per_thread + error);
+            thread_ctx[i].end = (int)(start + sets_per_thread + error);
             error += sets_per_thread - (thread_ctx[i].end - thread_ctx[i].start);
             start = thread_ctx[i].end;
         }
@@ -220,7 +219,7 @@ main(int argc, char** argv)
     }
 
     // Wait for threads to finish and collate the data
-    for (uint32_t i = 0; i < ctx.n_threads; i++)
+    for (int i = 0; i < ctx.n_threads; i++)
     {
         if (pthread_join(threads[i], NULL) != 0)
         {
@@ -231,9 +230,9 @@ main(int argc, char** argv)
             continue;
         }
 
-        for (uint8_t j = 0; j < ctx.n_joints; j++)
+        for (int j = 0; j < ctx.n_joints; j++)
         {
-            for (uint8_t k = 0; k < ctx.n_joints; k++)
+            for (int k = 0; k < ctx.n_joints; k++)
             {
                 int result_idx = j * ctx.n_joints + k;
                 if (thread_ctx[i].min_dists[result_idx] <
@@ -257,7 +256,7 @@ main(int argc, char** argv)
     // Output to file
     JSON_Value* root = json_value_init_array();
 
-    for (uint8_t j = 0; j < ctx.n_joints; j++)
+    for (int j = 0; j < ctx.n_joints; j++)
     {
         JSON_Value* joint_array = json_value_init_array();
 
@@ -267,7 +266,7 @@ main(int argc, char** argv)
                    "-------\n", (int)j);
         }
 
-        for (uint8_t k = 0; k < ctx.n_joints; k++)
+        for (int k = 0; k < ctx.n_joints; k++)
         {
             int idx = j * ctx.n_joints + k;
 
@@ -308,7 +307,7 @@ main(int argc, char** argv)
 
     // Free data
     json_value_free(root);
-    for (uint32_t i = 0; i < ctx.n_threads; i++)
+    for (int i = 0; i < ctx.n_threads; i++)
     {
         xfree(thread_ctx[i].min_dists);
         xfree(thread_ctx[i].mean_dists);
