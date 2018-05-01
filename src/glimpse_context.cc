@@ -523,7 +523,6 @@ struct gm_context
 
     bool depth_gap_fill;
     bool apply_depth_distortion;
-    int gap_dist;
 
     float min_depth;
     float max_depth;
@@ -4601,18 +4600,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                           1.f / ARRAY_LEN(heat_map_rainbow)); // step
 
     struct gm_ui_property prop;
-
-    ctx->gap_dist = 1;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "gap_dist";
-    prop.desc = "The distance in 2d pixels at which to look at neighbouring "
-                "pixels to fill in gaps when input data is a point cloud.";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->gap_dist;
-    prop.int_state.min = 0;
-    prop.int_state.max = 5;
-    ctx->properties.push_back(prop);
 
     ctx->depth_gap_fill = true;
     prop = gm_ui_property();
