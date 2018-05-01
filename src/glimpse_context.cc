@@ -2539,113 +2539,116 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     unsigned depth_class_size = tracking->depth_class->points.size();
 
-    glm::mat4 to_start, start_to_codebook;
+    // Classify depth pixels
+    start = get_time();
+
     bool reset_pose = false;
-    if (ctx->motion_detection) {
-        // Classify depth pixels
-        start = get_time();
+    bool motion_detection = ctx->motion_detection;
 
-        if (ctx->depth_seg.size() != depth_class_size ||
-            (!ctx->depth_pose.valid && tracking->frame->pose.valid))
-        {
-            gm_debug(ctx->log, "XXX: Resetting pose");
+    if (ctx->depth_seg.size() != depth_class_size ||
+        (!ctx->depth_pose.valid && tracking->frame->pose.valid))
+    {
+        gm_debug(ctx->log, "XXX: Resetting pose");
+        reset_pose = true;
+    } else if (tracking->frame->pose.valid) {
+        // Check if the angle or distance between the current frame and the
+        // reference frame exceeds a certain threshold, and in that case,
+        // reset motion tracking.
+        float angle = glm::degrees(glm::angle(
+            glm::normalize(glm::quat(ctx->depth_pose.orientation[3],
+                                     ctx->depth_pose.orientation[0],
+                                     ctx->depth_pose.orientation[1],
+                                     ctx->depth_pose.orientation[2])) *
+            glm::inverse(glm::normalize(glm::quat(
+                tracking->frame->pose.orientation[3],
+                tracking->frame->pose.orientation[0],
+                tracking->frame->pose.orientation[1],
+                tracking->frame->pose.orientation[2])))));
+        while (angle > 180.f) angle -= 360.f;
+
+        float distance = glm::distance(
+            glm::vec3(ctx->depth_pose.translation[0],
+                      ctx->depth_pose.translation[1],
+                      ctx->depth_pose.translation[2]),
+            glm::vec3(tracking->frame->pose.translation[0],
+                      tracking->frame->pose.translation[1],
+                      tracking->frame->pose.translation[2]));
+
+        gm_debug(ctx->log, "XXX: Angle: %.2f, "
+                 "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
+                 tracking->frame->pose.translation[0] -
+                 ctx->depth_pose.translation[0],
+                 tracking->frame->pose.translation[1] -
+                 ctx->depth_pose.translation[1],
+                 tracking->frame->pose.translation[2] -
+                 ctx->depth_pose.translation[2]);
+        if (angle > 10.f || distance > 0.3f) {
+            // We've strayed too far from the initial pose, reset
+            // segmentation and use this as the home pose.
+            gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
             reset_pose = true;
-        } else if (tracking->frame->pose.valid) {
-            // Check if the angle or distance between the current frame and the
-            // reference frame exceeds a certain threshold, and in that case,
-            // reset motion tracking.
-            float angle = glm::degrees(glm::angle(
-                glm::normalize(glm::quat(ctx->depth_pose.orientation[3],
-                                         ctx->depth_pose.orientation[0],
-                                         ctx->depth_pose.orientation[1],
-                                         ctx->depth_pose.orientation[2])) *
-                glm::inverse(glm::normalize(glm::quat(
-                    tracking->frame->pose.orientation[3],
-                    tracking->frame->pose.orientation[0],
-                    tracking->frame->pose.orientation[1],
-                    tracking->frame->pose.orientation[2])))));
-            while (angle > 180.f) angle -= 360.f;
+        }
+    }
 
-            float distance = glm::distance(
-                glm::vec3(ctx->depth_pose.translation[0],
-                          ctx->depth_pose.translation[1],
-                          ctx->depth_pose.translation[2]),
-                glm::vec3(tracking->frame->pose.translation[0],
-                          tracking->frame->pose.translation[1],
-                          tracking->frame->pose.translation[2]));
+    glm::mat4 to_start;
+    if (tracking->frame->pose.valid) {
+        to_start = pose_to_matrix(tracking->frame->pose);
+    } else {
+        to_start = glm::mat4(1.0);
+    }
 
-            gm_debug(ctx->log, "XXX: Angle: %.2f, "
-                     "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
-                     tracking->frame->pose.translation[0] -
-                     ctx->depth_pose.translation[0],
-                     tracking->frame->pose.translation[1] -
-                     ctx->depth_pose.translation[1],
-                     tracking->frame->pose.translation[2] -
-                     ctx->depth_pose.translation[2]);
-            if (angle > 10.f || distance > 0.3f) {
-                // We've strayed too far from the initial pose, reset
-                // segmentation and use this as the home pose.
-                gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
-                reset_pose = true;
+    if (reset_pose) {
+        ctx->depth_seg.clear();
+        ctx->depth_seg.resize(depth_class_size);
+        ctx->depth_seg_bg.resize(depth_class_size);
+        ctx->depth_pose = tracking->frame->pose;
+        ctx->start_to_depth_pose = glm::inverse(to_start);
+
+        if (!tracking->frame->pose.valid)
+            gm_debug(ctx->log, "XXX: No tracking pose");
+    }
+
+    // Transform the cloud into ground-aligned space if we have a valid pose
+    if (!tracking->ground_cloud) {
+        tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
+            new pcl::PointCloud<pcl::PointXYZL>);
+    }
+    if (ctx->depth_pose.valid) {
+        tracking->ground_cloud->width = tracking->depth_class->width;
+        tracking->ground_cloud->height = tracking->depth_class->height;
+        tracking->ground_cloud->points.resize(depth_class_size);
+        tracking->ground_cloud->is_dense = false;
+
+        foreach_xy_off(tracking->depth_class->width,
+                       tracking->depth_class->height) {
+            pcl::PointXYZL &point =
+                tracking->depth_class->points[off];
+            if (std::isnan(point.z)) {
+                tracking->ground_cloud->points[off] = invalid_pt;
+                continue;
             }
+
+            glm::vec4 pt(point.x, point.y, point.z, 1.f);
+            pt = (to_start * pt);
+
+            tracking->ground_cloud->points[off].x = pt.x;
+            tracking->ground_cloud->points[off].y = pt.y;
+            tracking->ground_cloud->points[off].z = pt.z;
         }
+    } else {
+        tracking->ground_cloud->resize(0);
+    }
 
-        if (tracking->frame->pose.valid) {
-            to_start = pose_to_matrix(tracking->frame->pose);
-        } else {
-            to_start = glm::mat4(1.0);
-        }
+    if (ctx->debug_cloud_stage == TRACKING_STAGE_GROUND_SPACE &&
+        ctx->debug_cloud_mode)
+    {
+        // XXX: ignore colour modes in this case
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking,
+                                          tracking->ground_cloud);
+    }
 
-        if (reset_pose) {
-            ctx->depth_seg.clear();
-            ctx->depth_seg.resize(depth_class_size);
-            ctx->depth_seg_bg.resize(depth_class_size);
-            ctx->depth_pose = tracking->frame->pose;
-            ctx->start_to_depth_pose = glm::inverse(to_start);
-
-            if (!tracking->frame->pose.valid)
-                gm_debug(ctx->log, "XXX: No tracking pose");
-        }
-
-        // Transform the cloud into ground-aligned space if we have a valid pose
-        if (!tracking->ground_cloud) {
-            tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
-                new pcl::PointCloud<pcl::PointXYZL>);
-        }
-        if (ctx->depth_pose.valid) {
-            tracking->ground_cloud->width = tracking->depth_class->width;
-            tracking->ground_cloud->height = tracking->depth_class->height;
-            tracking->ground_cloud->points.resize(depth_class_size);
-            tracking->ground_cloud->is_dense = false;
-
-            foreach_xy_off(tracking->depth_class->width,
-                           tracking->depth_class->height) {
-                pcl::PointXYZL &point =
-                    tracking->depth_class->points[off];
-                if (std::isnan(point.z)) {
-                    tracking->ground_cloud->points[off] = invalid_pt;
-                    continue;
-                }
-
-                glm::vec4 pt(point.x, point.y, point.z, 1.f);
-                pt = (to_start * pt);
-
-                tracking->ground_cloud->points[off].x = pt.x;
-                tracking->ground_cloud->points[off].y = pt.y;
-                tracking->ground_cloud->points[off].z = pt.z;
-            }
-        } else {
-            tracking->ground_cloud->resize(0);
-        }
-
-        if (ctx->debug_cloud_stage == TRACKING_STAGE_GROUND_SPACE &&
-            ctx->debug_cloud_mode)
-        {
-            // XXX: ignore colour modes in this case
-            add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking,
-                                              tracking->ground_cloud);
-        }
-
+    glm::mat4 start_to_codebook;
+    if (motion_detection) {
         start_to_codebook = ctx->start_to_depth_pose;
 
         if (ctx->debug_cloud_stage == TRACKING_STAGE_CODEBOOK_SPACE &&
@@ -2767,18 +2770,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 }
             }
         }
-
-        end = get_time();
-        duration = end - start;
-        LOGI("Depth value classification took %.3f%s",
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
     }
+
+    end = get_time();
+    duration = end - start;
+    LOGI("Pose reprojection + Depth value classification took %.3f%s",
+         get_duration_ns_print_scale(duration),
+         get_duration_ns_print_scale_suffix(duration));
 
     start = get_time();
 
     std::vector<pcl::PointIndices> cluster_indices;
-    if (!ctx->motion_detection || !ctx->latest_tracking ||
+    if (!motion_detection || !ctx->latest_tracking ||
         !ctx->latest_tracking->success || reset_pose) {
         // If we've not tracked a human yet, the depth classification may not
         // be reliable - just use a simple clustering technique to find a
@@ -3022,7 +3025,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        if (ctx->motion_detection) {
+        if (motion_detection) {
             update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
                                   seg_res);
         }
@@ -3229,7 +3232,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // but the furthest-away codewords. This is in the hope that if there
         // was an untracked human in the codebook that at some point we saw
         // background behind them.
-        if (!ctx->latest_tracking || !ctx->latest_tracking->success) {
+        if (motion_detection &&
+            (!ctx->latest_tracking || !ctx->latest_tracking->success)) {
 #if 0
             foreach_xy_off(tracking->depth_class->width,
                            tracking->depth_class->height) {
@@ -3282,7 +3286,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
-        if (ctx->motion_detection) {
+        if (motion_detection) {
             update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
                                   seg_res);
         }
