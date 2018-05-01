@@ -1173,8 +1173,8 @@ tracking_draw_line(struct gm_tracking_impl *tracking,
                    float x1, float y1, float z1,
                    uint32_t rgba)
 {
-    struct gm_point_rgba p0 = { x0, y0, z0, rgba };
-    struct gm_point_rgba p1 = { x1, y1, z1, rgba };
+    struct gm_point_rgba p0 = { x0, -y0, z0, rgba };
+    struct gm_point_rgba p1 = { x1, -y1, z1, rgba };
     tracking->debug_lines.push_back(p0);
     tracking->debug_lines.push_back(p1);
 }
