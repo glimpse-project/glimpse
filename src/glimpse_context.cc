@@ -3038,10 +3038,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
             tracking->ground_cloud->points[fidx].y :
             tracking->depth_class->points[fidx].y;
 
-        // First, fill downwards and count the cumulative number of points we
+        // First, fill outwards and count the cumulative number of points we
         // have, dividing them by their ground-aligned Y value. We do this to
         // see if this cloud is colliding with the floor, and where that floor
-        // would be if they are.
+        // would be if it is.
         while (!flood_fill.empty()) {
             struct PointCmp point = flood_fill.front();
             flood_fill.pop();
@@ -3058,7 +3058,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 tracking->depth_class->points[idx];
 
             // TODO: Make these values configurable?
-            if (fabsf(focus_pt.x - pcl_pt.x) > 0.5f ||
+            if (std::isnan(pcl_pt.z) ||
+                fabsf(focus_pt.x - pcl_pt.x) > 0.5f ||
                 fabsf(focus_pt.y - pcl_pt.y) > 2.0f ||
                 fabsf(focus_pt.z - pcl_pt.z) > 0.75f) {
                 continue;
@@ -3072,8 +3073,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             float aligned_y = ctx->depth_pose.valid ?
-                tracking->ground_cloud->points[idx].y :
-                tracking->depth_class->points[idx].y;
+                tracking->ground_cloud->points[idx].y : pcl_pt.y;
             int strata = (int)((aligned_y - focus_aligned_y) /
                                ctx->cluster_tolerance);
             if (strata >= 0) {
@@ -3116,15 +3116,35 @@ gm_context_track_skeleton(struct gm_context *ctx,
         // use that as a cut-off.
         float floor = FLT_MAX;
         if (y_accumulation.size()) {
+            gm_debug(ctx->log, "YYY Floor strata");
+            gm_debug(ctx->log, "YYY ----|-------");
+            for (unsigned i = 0; i < y_accumulation.size(); ++i) {
+                float y = (i * ctx->cluster_tolerance) + focus_aligned_y;
+                gm_debug(ctx->log, "YYY %.02f|  %05d",
+                         y, y_accumulation[i]);
+            }
+            bool floor_found = false;
             for (unsigned i = (unsigned)y_accumulation.size() - 1; i > 1; --i) {
                 if ((float)y_accumulation[i] > y_accumulation[i - 1] *
                     ctx->floor_threshold) {
-                    floor = (i * ctx->cluster_tolerance) + focus_aligned_y;
-                    gm_debug(ctx->log, "XXX: Floor detected maybe at %.2f",
-                             floor);
+                    floor_found = true;
+                    floor = (i * ctx->cluster_tolerance) +
+                            focus_aligned_y;
+                    if (ctx->debug_cloud_mode) {
+                        tracking_draw_line(tracking,
+                                           focus_pt.x, focus_pt.y, focus_pt.z,
+                                           focus_pt.x, floor, focus_pt.z,
+                                           0xff0000ff);
+                    }
+                } else if (floor_found) {
                     break;
                 }
             }
+            if (floor_found) {
+                gm_debug(ctx->log, "YYY: Floor detected maybe at %.2f", floor);
+            }
+        } else {
+            gm_debug(ctx->log, "YYY: Empty floor strata histogram!");
         }
 
         pcl::PointIndices person_indices;
@@ -5034,7 +5054,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->floor_threshold = 1.75f;
+    ctx->floor_threshold = 2.0f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "floor_threshold";
