@@ -2881,8 +2881,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 tracking->depth_class->points[idx];
 
             // TODO: Make these values configurable?
-            if (fabsf(focus_pt.x - pcl_pt.x) > 0.25f ||
-                fabsf(focus_pt.z - pcl_pt.z) > 0.5f) {
+            if (fabsf(focus_pt.x - pcl_pt.x) > 0.5f ||
+                fabsf(focus_pt.z - pcl_pt.z) > 0.75f) {
                 continue;
             }
 
@@ -2899,8 +2899,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 done_mask[idx] = true;
                 flood_fill.push({ point.x - 1, point.y, point.x, point.y });
                 flood_fill.push({ point.x + 1, point.y, point.x, point.y });
-                // We're looking for the floor, don't fill upwards
-                //flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+                flood_fill.push({ point.x, point.y - 1, point.x, point.y });
                 flood_fill.push({ point.x, point.y + 1, point.x, point.y });
             }
         }
