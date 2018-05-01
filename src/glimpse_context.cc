@@ -4763,7 +4763,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 0.3f;
     ctx->properties.push_back(prop);
 
-    ctx->cluster_tolerance = 0.05f;
+    ctx->cluster_tolerance = 0.10f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "cluster_tolerance";
@@ -4771,7 +4771,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_FLOAT;
     prop.float_state.ptr = &ctx->cluster_tolerance;
     prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.2f;
+    prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
     ctx->joint_refinement = true;
