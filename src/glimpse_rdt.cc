@@ -640,13 +640,18 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     }
 
     gm_info(ctx->log, "Scanning training directories...\n");
-    gather_train_data(data_dir,
-                      index_name,
-                      NULL,     // no joint map
-                      &ctx->n_images, NULL, &ctx->width, &ctx->height,
-                      &ctx->depth_images, &ctx->label_images, NULL,
-                      &ctx->n_labels,
-                      &ctx->fov);
+    if (!gather_train_data(ctx->log,
+                           data_dir,
+                           index_name,
+                           NULL,     // no joint map
+                           &ctx->n_images, NULL, &ctx->width, &ctx->height,
+                           &ctx->depth_images, &ctx->label_images, NULL,
+                           &ctx->n_labels,
+                           &ctx->fov,
+                           err))
+    {
+        return false;
+    }
 
     // Work out pixels per meter and adjust uv range accordingly
     float ppm = (ctx->height / 2.f) / tanf(ctx->fov / 2.f);

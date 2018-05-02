@@ -28,12 +28,16 @@
 #include <sys/stat.h>
 #include <dirent.h>
 
+#include <vector>
+
 #include "half.hpp"
 #include "train_utils.h"
 #include "image_utils.h"
 #include "xalloc.h"
 #include "llist.h"
 #include "parson.h"
+
+#include "glimpse_log.h"
 
 using half_float::half;
 
@@ -43,13 +47,17 @@ using half_float::half;
     } while(0)
 
 typedef struct {
+    char *labels_path;
+    char *depth_path;
+    char *joints_path;
+} FramePaths;
+
+typedef struct {
+    struct gm_logger *log;
     double   vertical_fov;  // Field of view used to render depth images
-    uint32_t n_images;      // Number of training images
-    uint8_t  n_joints;      // Number of joints
-    uint32_t limit;         // Limit to number of training images
-    uint32_t skip;          // Number of images to skip
-    bool     shuffle;       // Whether to shuffle images
-    LList*   paths;         // List of label, depth and joint file paths
+    int      n_images;      // Number of training images
+    int      n_joints;      // Number of joints
+    std::vector<FramePaths> paths; // Array of label, depth and joint file paths
     IUImageSpec label_spec; // Label image specification
     IUImageSpec depth_spec; // Depth image specification
     half*    depth_images;  // Depth image data
@@ -61,24 +69,10 @@ typedef struct {
 } TrainData;
 
 static bool
-index_cb(const char* label_path, const char* depth_path,
-         const char* joint_path, TrainData* data)
-{
-    if (data->n_images >= data->skip) {
-        char** paths = (char**)xmalloc(3 * sizeof(char*));
-        paths[0] = label_path ? strdup(label_path) : NULL;
-        paths[1] = depth_path ? strdup(depth_path) : NULL;
-        paths[2] = joint_path ? strdup(joint_path) : NULL;
-        data->paths = llist_insert_after(data->paths, llist_new(paths));
-    }
-    ++data->n_images;
-    return data->shuffle || (data->n_images < data->limit + data->skip);
-}
-
-static bool
 load_training_index(const char* top_src_dir,
                     const char* index_name,
-                    TrainData* data)
+                    TrainData* data,
+                    char **err)
 {
     char index_filename[1024];
     bool cont = true;
@@ -87,8 +81,8 @@ load_training_index(const char* top_src_dir,
 
     FILE* fp = fopen(index_filename, "r");
     if (!fp) {
-        fprintf(stderr, "Failed to open index %s\n", index_filename);
-        exit(1);
+        gm_throw(data->log, err, "Failed to open index %s\n", index_filename);
+        return false;
     }
 
     char* line = NULL;
@@ -96,55 +90,33 @@ load_training_index(const char* top_src_dir,
     int line_len;
     while (cont && (line_len = getline(&line, &line_buf_len, fp)) != -1)
     {
-        char next_labels_path[1024];
-        char next_depth_path[1024];
-        char next_jnt_path[1024];
-
         if (line_len <= 1)
             continue;
 
         /* remove the trailing newline from the line */
         line[line_len - 1] = '\0';
 
-        xsnprintf(next_labels_path, "%s/labels/%s.png", top_src_dir, line);
-        xsnprintf(next_depth_path, "%s/depth/%s.exr", top_src_dir, line);
-        xsnprintf(next_jnt_path, "%s/labels/%s.jnt", top_src_dir, line);
-
-        cont = index_cb(next_labels_path, next_depth_path, next_jnt_path, data);
+        FramePaths paths;
+        xasprintf(&paths.labels_path, "%s/labels/%s.png", top_src_dir, line);
+        xasprintf(&paths.depth_path, "%s/depth/%s.exr", top_src_dir, line);
+        xasprintf(&paths.joints_path, "%s/labels/%s.jnt", top_src_dir, line);
+        data->paths.push_back(paths);
+        data->n_images++;
     }
 
     free(line);
 
     fclose(fp);
 
-    return cont;
-}
-
-static bool
-free_train_data_cb(LList* node, uint32_t index, void* userdata)
-{
-    char** paths = (char**)node->data;
-    if (paths[0]) {
-        xfree(paths[0]);
-    }
-    if (paths[1]) {
-        xfree(paths[1]);
-    }
-    if (paths[2]) {
-        xfree(paths[2]);
-    }
-    xfree(paths);
     return true;
 }
 
 static bool
-train_data_cb(LList* node, uint32_t index, void* userdata)
+load_frame(TrainData *data, int index, char **err)
 {
-    char** paths = (char**)node->data;
-    char* label_path = paths[0];
-    char* depth_path = paths[1];
-    char* joint_path = paths[2];
-    TrainData *data = (TrainData*)userdata;
+    char* label_path = data->paths[index].labels_path;
+    char* depth_path = data->paths[index].depth_path;
+    char* joint_path = data->paths[index].joints_path;
 
     // Read label image
     if (label_path && data->gather_label)
@@ -156,8 +128,8 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
                                   NULL) // palette size
             != SUCCESS)
         {
-            fprintf(stderr, "Failed to read image '%s'\n", label_path);
-            exit(1);
+            gm_throw(data->log, err, "Failed to read image '%s'\n", label_path);
+            return false;
         }
     }
 
@@ -169,8 +141,8 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
         if (iu_read_exr_from_file(depth_path, &data->depth_spec, &output) !=
             SUCCESS)
         {
-            fprintf(stderr, "Failed to read image '%s'\n", depth_path);
-            exit(1);
+            gm_throw(data->log, err, "Failed to read image '%s'\n", depth_path);
+            return false;
         }
     }
 
@@ -180,15 +152,15 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
         FILE* fp;
         if (!(fp = fopen(joint_path, "rb")))
         {
-            fprintf(stderr, "Error opening joint file '%s'\n", joint_path);
-            exit(1);
+            gm_throw(data->log, err, "Error opening joint file '%s'\n", joint_path);
+            return false;
         }
 
         if (fseek(fp, 0, SEEK_END) == -1)
         {
-            fprintf(stderr, "Error seeking to end of joint file '%s'\n",
+            gm_throw(data->log, err, "Error seeking to end of joint file '%s'\n",
                     joint_path);
-            exit(1);
+            return false;
         }
 
         long n_bytes = ftell(fp);
@@ -196,48 +168,47 @@ train_data_cb(LList* node, uint32_t index, void* userdata)
             n_bytes % sizeof(float) != 0 ||
             (n_bytes % sizeof(float)) % 3 != 0)
         {
-            fprintf(stderr, "Unexpected joint file size in '%s'\n",
+            gm_throw(data->log, err, "Unexpected joint file size in '%s'\n",
                     joint_path);
-            exit(1);
+            return false;
         }
 
         uint8_t n_joints = (uint8_t)((n_bytes / sizeof(float)) / 3);
         if (n_joints != data->n_joints)
         {
-            fprintf(stderr, "Unexpected number of joints %u (expected %u)\n",
-                    n_joints, data->n_joints);
-            exit(1);
+            gm_throw(data->log, err,
+                     "Unexpected number of joints %u (expected %u)\n",
+                     n_joints, data->n_joints);
+            return false;
         }
 
         if (fseek(fp, 0, SEEK_SET) == -1)
         {
-            fprintf(stderr, "Error seeking to start of joint file '%s'\n",
-                    joint_path);
-            exit(1);
+            gm_throw(data->log, err,
+                     "Error seeking to start of joint file '%s'\n", joint_path);
+            return false;
         }
 
         float* joints = &data->joint_data[index * n_joints * 3];
         if (fread(joints, sizeof(float) * 3, n_joints, fp) != n_joints)
         {
-            fprintf(stderr, "%s: Error reading joints\n", joint_path);
-            exit(1);
+            gm_throw(data->log, err, "%s: Error reading joints\n", joint_path);
+            return false;
         }
 
         if (fclose(fp) != 0)
         {
-            fprintf(stderr, "Error closing joint file '%s'\n", joint_path);
-            exit(1);
+            gm_throw(data->log, err, "Error closing joint file '%s'\n", joint_path);
+            return false;
         }
     }
-
-    // Free file path copies
-    free_train_data_cb(node, index, userdata);
 
     return true;
 }
 
-void
-gather_train_data(const char* data_dir,
+bool
+gather_train_data(struct gm_logger* log,
+                  const char* data_dir,
                   const char* index_name,
                   const char* joint_map_path,
                   int* out_n_images,
@@ -248,18 +219,17 @@ gather_train_data(const char* data_dir,
                   uint8_t** out_label_images,
                   float** out_joints,
                   int* out_n_labels,
-                  float* out_fov)
+                  float* out_fov,
+                  char** err)
 {
     char meta_filename[1024];
 
     TrainData data = {
+        log,
         0,                                    // Field of view used to render depth
         0,                                    // Number of training images
         0,                                    // Number of joints
-        INT_MAX,                              // Limit to number of training images
-        0,                                    // Number of images to skip
-        false,                                // Whether to shuffle images
-        NULL,                                 // Image paths
+        {},                                   // Image paths vector
         {0,0,IU_FORMAT_U8},                   // Label image specification
         {0,0,IU_FORMAT_HALF},                 // Depth image specification
         NULL,                                 // Depth image data
@@ -273,6 +243,10 @@ gather_train_data(const char* data_dir,
     xsnprintf(meta_filename, "%s/meta.json", data_dir);
 
     JSON_Value* meta = json_parse_file(meta_filename);
+    if (!meta) {
+        gm_throw(log, err, "Failed to parse %s", meta_filename);
+        return false;
+    }
 
     int n_labels = json_object_get_number(json_object(meta), "n_labels");
     JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
@@ -282,6 +256,7 @@ gather_train_data(const char* data_dir,
     int height = json_object_get_number(camera, "height");
 
     json_value_free(meta);
+    meta = NULL;
 
     data.label_spec.width = width;
     data.label_spec.height = height;
@@ -292,8 +267,8 @@ gather_train_data(const char* data_dir,
     {
         JSON_Value *map = json_parse_file(joint_map_path);
         if (!map) {
-            fprintf(stderr, "Failed to parse joint map %s\n", joint_map_path);
-            exit(1);
+            gm_throw(log, err, "Failed to parse joint map %s\n", joint_map_path);
+            return false;
         }
 
         /* For now we just care about how many joints there are but maybe
@@ -301,11 +276,11 @@ gather_train_data(const char* data_dir,
          */
         data.n_joints = json_array_get_count(json_array(map));
         json_value_free(map);
+        map = NULL;
     }
 
-    load_training_index(data_dir, index_name, &data);
-
-    data.n_images = (data.n_images > data.skip) ? data.n_images - data.skip : 0;
+    if (!load_training_index(data_dir, index_name, &data, err))
+        return false;
 
     size_t n_pixels = width * height * data.n_images;
 
@@ -320,16 +295,25 @@ gather_train_data(const char* data_dir,
                                           3 * sizeof(float));
     }
 
-    *out_n_images = (data.n_images < data.limit) ? data.n_images : data.limit;
-    printf("Processing %d training images...\n", *out_n_images);
+    *out_n_images = data.n_images;
+    gm_info(log, "Processing %d training images...\n", *out_n_images);
 
-    data.paths = llist_first(data.paths);
-    if (data.shuffle) {
-        data.paths = llist_slice(llist_shuffle(data.paths),
-                                 0, data.limit, free_train_data_cb, NULL);
+    bool load_ok = true;
+    for (int i = 0; load_ok == true && i < data.paths.size(); i++) {
+        load_ok = load_frame(&data, i, err);
     }
-    llist_foreach(data.paths, train_data_cb, (void*)&data);
-    llist_free(data.paths, NULL, NULL);
+    for (int i = 0; i < data.paths.size(); i++) {
+        xfree(data.paths[i].labels_path);
+        xfree(data.paths[i].depth_path);
+        xfree(data.paths[i].joints_path);
+    }
+    data.paths.resize(0);
+    if (!load_ok) {
+        xfree(data.label_images);
+        xfree(data.depth_images);
+        xfree(data.joint_data);
+        return false;
+    }
 
     if (out_width) {
         *out_width = data.gather_label ?
@@ -357,5 +341,7 @@ gather_train_data(const char* data_dir,
     if (out_fov) {
         *out_fov = data.vertical_fov;
     }
+
+    return true;
 }
 

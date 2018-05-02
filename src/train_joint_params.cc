@@ -41,6 +41,7 @@
 
 #include "half.hpp"
 
+#include "glimpse_log.h"
 
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.001f
@@ -52,6 +53,9 @@ using half_float::half;
 static bool verbose = false;
 
 typedef struct {
+    FILE       *log_fp;
+    struct gm_logger *log;
+
     float    fov;           // Camera field of view
 
     int      n_trees;       // Number of decision trees
@@ -91,6 +95,68 @@ typedef struct {
     float*             accuracy;         // Accuracy of inference
     pthread_barrier_t* barrier ;         // Barrier to synchronise dependent work
 } TrainThreadData;
+
+static void
+logger_cb(struct gm_logger* logger,
+          enum gm_log_level level,
+          const char* context,
+          struct gm_backtrace *backtrace,
+          const char* format,
+          va_list ap,
+          void* user_data)
+{
+    TrainContext* ctx = (TrainContext*)user_data;
+    char* msg = NULL;
+
+    if (vasprintf(&msg, format, ap) > 0) {
+        if (ctx->log_fp) {
+            switch (level) {
+            case GM_LOG_ERROR:
+                fprintf(ctx->log_fp, "%s: ERROR: ", context);
+                break;
+            case GM_LOG_WARN:
+                fprintf(ctx->log_fp, "%s: WARN: ", context);
+                break;
+            default:
+                fprintf(ctx->log_fp, "%s: ", context);
+            }
+
+            fprintf(ctx->log_fp, "%s\n", msg);
+
+            if (backtrace) {
+                int line_len = 100;
+                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+                gm_logger_get_backtrace_strings(logger, backtrace,
+                                                line_len, (char *)formatted);
+                for (int i = 0; i < backtrace->n_frames; i++) {
+                    char *line = formatted + line_len * i;
+                    fprintf(ctx->log_fp, "> %s\n", line);
+                }
+            }
+
+            fflush(ctx->log_fp);
+            fflush(stdout);
+        }
+
+        free(msg);
+    }
+}
+
+static void
+logger_abort_cb(struct gm_logger* logger, void* user_data)
+{
+    TrainContext *ctx = (TrainContext*)user_data;
+
+    if (ctx->log_fp) {
+        fprintf(ctx->log_fp, "ABORT\n");
+        fflush(ctx->log_fp);
+        fclose(ctx->log_fp);
+    }
+
+    abort();
+}
+
 
 static void
 print_usage(FILE* stream)
@@ -408,6 +474,11 @@ main(int argc, char** argv)
 
     // Set default parameters
     TrainContext ctx = { 0, };
+
+    ctx.log_fp = stderr;
+    ctx.log = gm_logger_new(logger_cb, &ctx);
+    gm_logger_set_abort_callback(ctx.log, logger_abort_cb, &ctx);
+
     ctx.n_bandwidths = 10;
     float min_bandwidth = 0.02f;
     float max_bandwidth = 0.08f;
@@ -559,7 +630,8 @@ main(int argc, char** argv)
     ctx.forest = read_forest((const char**)tree_paths, ctx.n_trees);
 
     printf("Scanning training directories...\n");
-    gather_train_data(data_dir,
+    gather_train_data(ctx.log,
+                      data_dir,
                       index_name,
                       joint_map_path,
                       &ctx.n_images,
@@ -569,7 +641,8 @@ main(int argc, char** argv)
                       ctx.check_accuracy ? &ctx.label_images : NULL,
                       &ctx.joints,
                       NULL, // n labels
-                      &ctx.fov);
+                      &ctx.fov,
+                      NULL); // simply abort on error
 
     // Note, there's a background label, so there ought to always be fewer joints
     // than labels. Maybe there are some situations where this might be desired

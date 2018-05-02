@@ -30,16 +30,19 @@
 
 #include "half.hpp"
 
-void gather_train_data(const char* data_dir,
-                       const char* index_name,
-                       const char* joint_map_path,
-                       int* out_n_images,
-                       int* out_n_joints,
-                       int* out_width,
-                       int* out_height,
-                       half_float::half** out_depth_images,
-                       uint8_t**   out_label_images,
-                       float**     out_joints,
-                       int*        out_n_labels,
-                       float*      out_fov);
+bool
+gather_train_data(struct gm_logger *log,
+                  const char* data_dir,
+                  const char* index_name,
+                  const char* joint_map_path,
+                  int* out_n_images,
+                  int* out_n_joints,
+                  int* out_width,
+                  int* out_height,
+                  half_float::half** out_depth_images,
+                  uint8_t**   out_label_images,
+                  float**     out_joints,
+                  int*        out_n_labels,
+                  float*      out_fov,
+                  char**      err);
 
