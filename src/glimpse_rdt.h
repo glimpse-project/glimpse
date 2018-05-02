@@ -29,35 +29,9 @@
 
 struct gm_rdt_context;
 
-struct gm_rdt_context_vtable
-{
-    void (*free)(struct gm_rdt_context *self);
-};
-
-struct gm_rdt_context
-{
-    int ref;
-    struct gm_rdt_context_vtable *api;
-};
-
-
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-inline struct gm_rdt_context *
-gm_rdt_context_ref(struct gm_rdt_context *rdt_context)
-{
-    rdt_context->ref++;
-    return rdt_context;
-}
-
-inline void
-gm_rdt_context_unref(struct gm_rdt_context *rdt_context)
-{
-    if (__builtin_expect(--(rdt_context->ref) < 1, 0))
-        rdt_context->api->free(rdt_context);
-}
 
 struct gm_rdt_context *
 gm_rdt_context_new(struct gm_logger *log);
