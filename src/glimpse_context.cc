@@ -2084,6 +2084,18 @@ gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
     if (std::isnan(d1) || std::isnan(d2)) {
         return false;
     }
+
+    /* We assume that there's nothing between the camera and the person
+     * we're trying to segment/detect and considering that their can be
+     * quite large jumps in depth when arms cross the body we have no
+     * threshold moving towards the camera...
+     *
+     * NB: d2 corresponds to a point that we've already decided is inside
+     * the cluster/body
+     */
+    if (d1 < d2)
+        return true;
+
     return fabsf(d1 - d2) <= tolerance;
 }
 
