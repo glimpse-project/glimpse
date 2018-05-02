@@ -1396,14 +1396,21 @@ gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_context_get_prediction(intptr_t plugin_handle, uint64_t timestamp)
+gm_unity_context_get_prediction(intptr_t plugin_handle, int delay)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    uint64_t timestamp;
+
+    if (data->last_video_frame)
+        timestamp = data->last_video_frame->timestamp - delay;
+    else
+        timestamp = get_time();
+
     struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
                                                                  timestamp);
 
-    gm_debug(data->log, "Get Prediction(%" PRIu64 ") %p",
-             timestamp, prediction);
+    gm_debug(data->log, "Get Prediction: delay=%dns, ts=%" PRIu64 "ns: %p",
+             delay, timestamp, prediction);
 
     return (intptr_t)prediction;
 }
