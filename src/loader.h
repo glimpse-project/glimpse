@@ -85,19 +85,19 @@ extern "C" {
 bool save_tree(RDTree* tree, const char* filename);
 bool save_tree_json(RDTree* tree, const char* filename, bool pretty);
 
-RDTree* load_json_tree(uint8_t* json_tree_buf, uint32_t len);
+RDTree* load_json_tree(uint8_t* json_tree_buf, int len);
 RDTree* read_json_tree(const char* filename);
 
-RDTree* load_tree(uint8_t* tree, uint32_t len);
+RDTree* load_tree(uint8_t* tree, int len);
 RDTree* read_tree(const char* filename);
 
 void free_tree(RDTree* tree);
 
-RDTree** load_json_forest(uint8_t** json_tree_bufs, uint32_t* json_tree_buf_lengths, uint32_t n_trees);
-RDTree** read_json_forest(const char** files, uint32_t n_files);
+RDTree** load_json_forest(uint8_t** json_tree_bufs, int* json_tree_buf_lengths, int n_trees);
+RDTree** read_json_forest(const char** files, int n_files);
 
-RDTree** load_forest(uint8_t** tree_bufs, uint32_t* tree_buf_lengths, uint32_t n_trees);
-RDTree** read_forest(const char** files, uint32_t n_files);
+RDTree** load_forest(uint8_t** tree_bufs, int* tree_buf_lengths, int n_trees);
+RDTree** read_forest(const char** files, int n_files);
 
 void free_forest(RDTree** forest, int n_trees);
 
