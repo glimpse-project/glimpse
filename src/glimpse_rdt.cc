@@ -54,10 +54,7 @@ using half_float::half;
 
 static bool interrupted = false;
 
-typedef struct gm_rdt_context_impl {
-
-    struct gm_rdt_context base;
-
+struct gm_rdt_context_impl {
     struct gm_logger* log;
 
     bool     reload;        // Reload and continue training with pre-existing tree
@@ -607,7 +604,7 @@ gm_rdt_context_new(struct gm_logger *log)
     pthread_mutex_init(&ctx->properties_state.lock, NULL);
     ctx->properties_state.properties = &ctx->properties[0];
 
-    return &ctx->base;
+    return (struct gm_rdt_context *)ctx;
 }
 
 void
