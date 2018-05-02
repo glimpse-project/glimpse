@@ -14,7 +14,7 @@ python3 --version
 pip3 --version
 ninja --version
 
-pip3 install meson
+pip3 install git+https://github.com/glimpse-project/meson
 export PATH=$HOME/.local/bin:$PATH
 
 # Actually we rely on the cached, rendered, training images so we don't
