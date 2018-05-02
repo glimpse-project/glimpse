@@ -61,4 +61,4 @@ image-pre-processor rendered-training-data/generated/test-render \
 
 indexer.py rendered-training-data/pre-processed/test-render
 
-train_rdt rendered-training-data/pre-processed/test-render full full.rdt -d 3 -p 1000 -t 25 -c 1000
+train_rdt -d 3 -p 1000 -t 25 -c 1000 rendered-training-data/pre-processed/test-render full full.rdt
