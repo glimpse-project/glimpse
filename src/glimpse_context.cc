@@ -2953,9 +2953,16 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int fh = height / 8;
 
         float fz = FLT_MAX;
-        float line_x = 0;
-        float line_y = 0;
-#if 1
+        //float line_x = 0;
+        //float line_y = 0;
+
+        int fr_i = 0;
+        struct focal_point {
+            float fz;
+            int idx;
+        } focal_region[fw * fh];
+
+
         int x0 = fx - fw / 2;
         int y0 = fy - fh / 2;
         for (int y = y0; y < (y0 + fh); y++) {
@@ -2963,26 +2970,34 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 int idx = y * width + x;
                 pcl::PointXYZL &point =
                     tracking->depth_class->points[idx];
-                float depth = point.z;
-                if (depth < fz) {
-                    line_x = point.x;
-                    line_y = point.y;
-                    fx = x;
-                    fy = y;
-                    fz = depth;
-                }
+                if (!std::isnan(point.z))
+                    focal_region[fr_i++] = { point.z, idx };
             }
         }
-#else // Just start from center pixel...
-        int idx = fy * width + fx;
-        float depth = tracking->depth_class->points[fy * width + fx].z;
-        if (depth < fz)
-            fz = depth;
-#endif
+
+        //gm_assert(ctx->log, fr_i == fw * fh, "Flibble");
+        // Use the median point as our focal point
+        //
+        // XXX: We tried a simpler approach of selecting the nearest point
+        // previously but with noisy data we would somtimes select a
+        // disconnected point that then wouldn't cluster with anything
+        //
+        // XXX: we could calculate the median more optimally if this
+        // shows up in any profiling...
+        std::sort(focal_region, focal_region + fr_i,
+                  [](focal_point a, focal_point b) { return a.fz < b.fz; });
+        fr_i /= 2;
+
+        int idx = focal_region[fr_i].idx;
+        fx = idx % width;
+        fy = idx / width;
+        fz = focal_region[fr_i].fz;
 
         if (ctx->debug_cloud_mode) {
             // Draw the lines of focus...
             if (fz != FLT_MAX) {
+                float line_x = tracking->depth_class->points[focal_region[fr_i].idx].x;
+                float line_y = tracking->depth_class->points[focal_region[fr_i].idx].y;
                 tracking_draw_line(tracking,
                                    0, 0, 0,
                                    0, 0, 4,
