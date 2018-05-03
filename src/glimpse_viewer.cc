@@ -335,10 +335,8 @@ static bool permissions_check_failed;
 static bool permissions_check_passed;
 #endif
 
-#ifdef USE_GLFW
 static enum gm_device_type device_type_opt = GM_DEVICE_KINECT;
 static char *device_recording_opt;
-#endif
 
 static void viewer_init(Data *data);
 
