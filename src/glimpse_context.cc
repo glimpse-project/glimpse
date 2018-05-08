@@ -2846,8 +2846,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
         }
 
-        // Flood-fill from the focal point, with a limit on the x and z
-        // axes for how far a point can be from the focus. This will allow
+        // Flood-fill downwards from the focal point, with a limit on the x and
+        // z axes for how far a point can be from the focus. This will allow
         // us to hopefully find the floor level and establish a y limit before
         // then flood-filling again without the x and z limits.
 
@@ -2871,7 +2871,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
             int idx = point.y * width + point.x;
 
-            if (point.x < 0 || point.y < 0 ||
+            if (point.x < 0 || point.y < fy ||
                 point.x >= width || point.y >= height ||
                 done_mask[idx]) {
                 continue;
