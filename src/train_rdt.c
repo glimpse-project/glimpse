@@ -197,10 +197,10 @@ main(int argc, char **argv)
             gm_props_set_int(ctx_props, "seed", atoi(optarg));
             break;
         case 'i':
-            gm_props_set_int(ctx_props, "reload", true);
+            gm_props_set_bool(ctx_props, "reload", true);
             break;
         case 'v':
-            gm_props_set_int(ctx_props, "verbose", true);
+            gm_props_set_bool(ctx_props, "verbose", true);
             break;
         case 'h':
             usage();
