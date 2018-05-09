@@ -28,6 +28,9 @@
 #include <string.h>
 #include <thread>
 #include <pthread.h>
+#ifdef __APPLE__
+#include "pthread_barrier/pthread_barrier.h"
+#endif
 
 #include <cmath>
 

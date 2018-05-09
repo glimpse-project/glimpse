@@ -57,7 +57,7 @@
 #    include <jni.h>
 #endif
 
-#ifdef __APPLE__
+#ifdef __IOS__
 #include "ios_utils.h"
 #endif
 
@@ -2577,7 +2577,7 @@ logger_cb(struct gm_logger *logger,
             }
 
             fprintf(data->log_fp, "%s\n", msg);
-#ifdef __APPLE__
+#ifdef __IOS__
             ios_log(msg);
 #endif
 
@@ -2933,7 +2933,7 @@ main(int argc, char **argv)
 {
     Data *data = new Data();
     const char *recordings_path = NULL;
-#ifdef __APPLE__
+#ifdef __IOS__
     char *assets_root = ios_util_get_documents_path();
     char log_filename_tmp[PATH_MAX];
     snprintf(log_filename_tmp, sizeof(log_filename_tmp),

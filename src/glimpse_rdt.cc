@@ -35,6 +35,9 @@
 #include <random>
 #include <thread>
 #include <pthread.h>
+#ifdef __APPLE__
+#include "pthread_barrier/pthread_barrier.h"
+#endif
 #include <time.h>
 #include <signal.h>
 

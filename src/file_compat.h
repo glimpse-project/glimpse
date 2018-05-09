@@ -60,7 +60,7 @@
 #  include <unistd.h>
 #  include <limits.h> /* PATH_MAX */
 #endif
-#if defined(__APPLE__)
+#if defined(__IOS__)
 #  include <CoreFoundation/CoreFoundation.h>
 #endif
 
@@ -105,7 +105,7 @@ static int fc_resdir(char *path, size_t path_max) {
     }
     path[0] = 0;
     return -1;
-#elif defined(__APPLE__)
+#elif defined(__IOS__)
     CFBundleRef bundle = CFBundleGetMainBundle();
     if (bundle) {
         CFURLRef resourcesURL = CFBundleCopyResourcesDirectoryURL(bundle);

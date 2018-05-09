@@ -1386,18 +1386,7 @@ static_assert(BACKGROUND_ID == 33, "");
 
     while (true) {
         uint64_t target_frame_count;
-        bool finished = true;
-
-        for (int i = 0; i < n_threads; i++) {
-            void *thread_ret;
-
-            pthread_t tid = workers[i].thread;
-            if (tid && pthread_tryjoin_np(tid, &thread_ret) == 0)
-                workers[i].thread = 0;
-            else if (tid)
-                finished = false;
-        }
-        if (finished)
+        if (work_queue.empty())
             break;
 
         if (max_frame_count != UINT64_MAX)
@@ -1410,6 +1399,14 @@ static_assert(BACKGROUND_ID == 33, "");
                progress, (uint64_t)frame_count, (uint64_t)target_frame_count);
 
         sleep(1);
+    }
+
+    for (int i = 0; i < n_threads; ++i) {
+        void *thread_ret;
+        pthread_t tid = workers[i].thread;
+        if (pthread_join(tid, &thread_ret) != 0) {
+            fprintf(stderr, "Error joining thread, continuing...\n");
+        }
     }
 
     end = get_time();

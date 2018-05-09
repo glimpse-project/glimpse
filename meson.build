@@ -10,6 +10,10 @@ endif
 compiler = meson.get_compiler('c')
 python3 = import('python3').find_python()
 
+client_api_defines = [
+    '-DGLM_ENABLE_EXPERIMENTAL'
+]
+
 if compiler.get_define('__ANDROID__') != ''
     add_languages('java')
 
@@ -44,10 +48,10 @@ endif
 if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
     add_languages('objc')
     platform_ios = true
+    client_api_defines += [ '__IOS__' ]
 else
     platform_ios = false
 endif
-
 
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
@@ -56,10 +60,6 @@ inc = include_directories(
 	'src',
 	'src/imgui',
 	'src/UnityPluginAPI')
-
-client_api_defines = [
-    '-DGLM_ENABLE_EXPERIMENTAL'
-]
 
 dlib_sp = subproject('dlib')
 dlib_dep = dlib_sp.get_variable('dlib_dep')
@@ -357,9 +357,11 @@ executable('train_rdt',
              'src/tinyexr.cc',
              'src/parson.c',
              'src/llist.c',
-             'src/xalloc.c' ],
+             'src/xalloc.c',
+             'src/pthread_barrier/pthread_barrier.c' ],
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
+
 
 executable('train_joint_dist',
            [ 'src/train_joint_dist.cc',
@@ -383,7 +385,8 @@ executable('train_joint_params',
              'src/tinyexr.cc',
              'src/parson.c',
              'src/llist.c',
-             'src/xalloc.c' ],
+             'src/xalloc.c',
+             'src/pthread_barrier/pthread_barrier.c' ],
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
