@@ -33,6 +33,14 @@ import struct
 parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=textwrap.dedent("""\
+        This tool converts the JSON representation of the randomised decision trees
+        output by the train_rdt tool to a binary representation which can be
+        convenient for fast loading of trees and more compact representation when
+        compressed.
+
+        Note: A packed RDT file only needs to contain the minimum information for
+              efficient runtime inference so the conversion is lossy.
+
         This reads a JSON description of a randomized decision tree with the
         following schema:
 
@@ -62,6 +70,7 @@ parser = argparse.ArgumentParser(
               }
             }
           }
+
         """))
 parser.add_argument("json_file", nargs=1, help="Input JSON Decision Tree")
 parser.add_argument("rdt_file", nargs=1, help="Output RDT Decision Tree")
