@@ -145,10 +145,7 @@ main(int argc, char **argv)
         gm_rdt_context_get_ui_properties(data->ctx);
     int opt;
 
-    /* N.B. The initial '+' means that getopt will stop looking for options
-     * after the first non-option argument...
-     */
-    const char *short_options="+p:t:r:c:u:d:m:b:n:ivh";
+    const char *short_options="p:t:r:c:u:d:m:b:n:ivh";
     const struct option long_options[] = {
         {"pixels",          required_argument,  0, 'p'},
         {"thresholds",      required_argument,  0, 't'},
