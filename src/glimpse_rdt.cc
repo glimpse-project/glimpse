@@ -103,12 +103,12 @@ typedef struct {
 typedef struct {
     struct gm_rdt_context_impl* ctx;       // The context to use
     NodeTrainData**    data;               // The node data to use and modify
-    int                c_start;            // The uv combination to start on
-    int                c_end;              // The uv combination to end on
+    int                uv_start;           // The uv combination to start on
+    int                uv_end;             // The uv combination to end on
     float*             root_nhistogram;    // Normalised histogram of labels
     float*             best_gain;          // Best gain achieved
     int*               best_uv;            // Index of the best uv combination
-    int*               best_t;             // Index of the best threshold
+    int*               best_threshold;     // Index of the best threshold
     int*               n_lr_pixels;        // Number of pixels in each branch
     pthread_barrier_t* ready_barrier;      // Barrier to wait on to start work
     pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
@@ -213,10 +213,11 @@ calculate_gain(float entropy, int n_pixels,
 }
 
 static void
-accumulate_histograms(struct gm_rdt_context_impl* ctx,
-                      NodeTrainData* data,
-                      int c_start, int c_end,
-                      int* root_histogram, int* lr_histograms)
+accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
+                             NodeTrainData* data,
+                             int uv_start, int uv_end,
+                             int* root_histogram,
+                             int* uvt_lr_histograms)
 {
     for (int p = 0; p < data->n_pixels && !interrupted; p++)
     {
@@ -246,17 +247,17 @@ accumulate_histograms(struct gm_rdt_context_impl* ctx,
         // Accumulate LR branch histograms
 
         // Sample pixels
-        float samples[c_end - c_start];
-        for (int c = c_start; c < c_end; c++)
+        float samples[uv_end - uv_start];
+        for (int c = uv_start; c < uv_end; c++)
         {
             UVPair uv = ctx->uvs[c];
-            samples[c - c_start] = sample_uv(depth_image,
+            samples[c - uv_start] = sample_uv(depth_image,
                                              ctx->width, ctx->height,
                                              pixel, depth, uv);
         }
 
         // Partition on thresholds
-        for (int c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
+        for (int c = 0, lr_histogram_idx = 0; c < uv_end - uv_start; c++)
         {
             for (int t = 0; t < ctx->n_thresholds;
                  t++, lr_histogram_idx += ctx->n_labels * 2)
@@ -264,7 +265,7 @@ accumulate_histograms(struct gm_rdt_context_impl* ctx,
                 // Accumulate histogram for this particular uvt combination
                 // on both theoretical branches
                 float threshold = ctx->thresholds[t];
-                ++lr_histograms[samples[c] < threshold ?
+                ++uvt_lr_histograms[samples[c] < threshold ?
                     lr_histogram_idx + label :
                     lr_histogram_idx + ctx->n_labels + label];
             }
@@ -282,8 +283,8 @@ thread_body(void* userdata)
         malloc(data->ctx->n_labels * sizeof(int));
 
     // Histograms for each uvt combination being tested
-    int* lr_histograms = (int*)
-        malloc(data->ctx->n_labels * (data->c_end - data->c_start) *
+    int* uvt_lr_histograms = (int*)
+        malloc(data->ctx->n_labels * (data->uv_end - data->uv_start) *
                data->ctx->n_thresholds * 2 * sizeof(int));
 
     float* nhistogram = (float*)xmalloc(data->ctx->n_labels * sizeof(float));
@@ -303,13 +304,16 @@ thread_body(void* userdata)
 
         // Clear histogram accumulators
         memset(root_histogram, 0, data->ctx->n_labels * sizeof(int));
-        memset(lr_histograms, 0, data->ctx->n_labels *
-               (data->c_end - data->c_start) * data->ctx->n_thresholds * 2 *
+        memset(uvt_lr_histograms, 0, data->ctx->n_labels *
+               (data->uv_end - data->uv_start) * data->ctx->n_thresholds * 2 *
                sizeof(int));
 
         // Accumulate histograms
-        accumulate_histograms(data->ctx, *data->data, data->c_start, data->c_end,
-                              root_histogram, lr_histograms);
+        accumulate_uvt_lr_histograms(data->ctx,
+                                     *data->data,
+                                     data->uv_start, data->uv_end,
+                                     root_histogram,
+                                     uvt_lr_histograms);
 
         // Calculate the normalised label histogram and get the number of pixels
         // and the number of labels in the root histogram.
@@ -329,8 +333,8 @@ thread_body(void* userdata)
                                                       data->ctx->n_labels);
 
             // Calculate the gain for each combination of u,v,t and store the best
-            for (int i = data->c_start, lr_histo_base = 0;
-                 i < data->c_end && !interrupted; i++)
+            for (int i = data->uv_start, lr_histo_base = 0;
+                 i < data->uv_end && !interrupted; i++)
             {
                 for (int j = 0; j < data->ctx->n_thresholds && !interrupted;
                      j++, lr_histo_base += data->ctx->n_labels * 2)
@@ -338,7 +342,7 @@ thread_body(void* userdata)
                     float l_entropy, r_entropy, gain;
 
                     Int2D l_n_pixels =
-                        normalize_histogram(&lr_histograms[lr_histo_base],
+                        normalize_histogram(&uvt_lr_histograms[lr_histo_base],
                                             data->ctx->n_labels, nhistogram);
                     if (l_n_pixels[0] == 0 || l_n_pixels[0] == root_n_pixels[0])
                     {
@@ -349,7 +353,7 @@ thread_body(void* userdata)
 
                     Int2D r_n_pixels =
                         normalize_histogram(
-                            &lr_histograms[lr_histo_base + data->ctx->n_labels],
+                            &uvt_lr_histograms[lr_histo_base + data->ctx->n_labels],
                             data->ctx->n_labels, nhistogram);
                     r_entropy = calculate_shannon_entropy(nhistogram,
                                                           data->ctx->n_labels);
@@ -362,7 +366,7 @@ thread_body(void* userdata)
                     {
                         *data->best_gain = gain;
                         *data->best_uv = i;
-                        *data->best_t = j;
+                        *data->best_threshold = j;
                         data->n_lr_pixels[0] = l_n_pixels[0];
                         data->n_lr_pixels[1] = r_n_pixels[0];
                     }
@@ -375,7 +379,7 @@ thread_body(void* userdata)
     }
 
     xfree(root_histogram);
-    xfree(lr_histograms);
+    xfree(uvt_lr_histograms);
     if (!data->root_nhistogram)
     {
         xfree(root_nhistogram);
@@ -691,10 +695,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         gm_throw(ctx->log, err, "Error initialising thread barriers\n");
         return false;
     }
-    int n_c = ctx->n_uv / n_threads;
+    int n_uvs_per_thread = ctx->n_uv / n_threads;
     float* best_gains = (float*)malloc(n_threads * sizeof(float));
     int* best_uvs = (int*)malloc(n_threads * sizeof(int));
-    int* best_threshold = (int*)malloc(n_threads * sizeof(int));
+    int* best_thresholds = (int*)malloc(n_threads * sizeof(int));
     int* all_n_lr_pixels = (int*)malloc(n_threads * 2 * sizeof(int));
     pthread_t threads[n_threads];
     for (int i = 0; i < n_threads; i++)
@@ -703,12 +707,12 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             xmalloc(sizeof(TrainThreadData));
         thread_data->ctx = ctx;
         thread_data->data = &node_data;
-        thread_data->c_start = i * n_c;
-        thread_data->c_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_c;
+        thread_data->uv_start = i * n_uvs_per_thread;
+        thread_data->uv_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_uvs_per_thread;
         thread_data->root_nhistogram = (i == 0) ? root_nhistogram : NULL;
         thread_data->best_gain = &best_gains[i];
         thread_data->best_uv = &best_uvs[i];
-        thread_data->best_t = &best_threshold[i];
+        thread_data->best_threshold = &best_thresholds[i];
         thread_data->n_lr_pixels = &all_n_lr_pixels[i * 2];
         thread_data->ready_barrier = &ready_barrier;
         thread_data->finished_barrier = &finished_barrier;
@@ -858,7 +862,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     while (train_queue != NULL)
     {
         int best_uv = 0;
-        int best_t = 0;
+        int best_threshold = 0;
         int *n_lr_pixels = NULL;
         float best_gain = 0.0;
 
@@ -898,7 +902,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             {
                 best_gain = best_gains[i];
                 best_uv = best_uvs[i];
-                best_t = best_threshold[i];
+                best_threshold = best_thresholds[i];
                 n_lr_pixels = &all_n_lr_pixels[i * 2];
             }
         }
@@ -909,7 +913,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         if (best_gain > 0.f && (node_data->depth + 1) < ctx->max_depth)
         {
             node->uv = ctx->uvs[best_uv];
-            node->t = ctx->thresholds[best_t];
+            node->t = ctx->thresholds[best_threshold];
             if (ctx->verbose)
             {
                 gm_info(ctx->log,
@@ -992,7 +996,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     xfree(ctx->depth_images);
     xfree(best_gains);
     xfree(best_uvs);
-    xfree(best_threshold);
+    xfree(best_thresholds);
     xfree(all_n_lr_pixels);
 
     // Restore tree histograms list pointer
