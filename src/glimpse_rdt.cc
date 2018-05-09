@@ -87,7 +87,11 @@ struct gm_rdt_context_impl {
     float*   thresholds;    // A list of thresholds to test
 
     int      n_threads;     // How many threads to spawn for training
-    int      bg_label;      // label that represents the background
+
+    // label that represents the background. Unlike other labels we aren't
+    // trying to learn how to classify the background and we avoid picking
+    // sampling points outside the body.
+    int      bg_label;
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -114,6 +118,91 @@ typedef struct {
     pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
 } TrainThreadData;
 
+
+/* For every image, pick N (ctx->n_pixels) random points within the silhoette
+ * of the example pose for that frame.
+ */
+static Int3D*
+generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
+                                  int* total_count)
+{
+    //std::random_device rd;
+    std::mt19937 rng(ctx->seed);
+    //std::default_random_engine rng(ctx->seed);
+    std::uniform_real_distribution<float> rand_0_1(0.0, 1.0);
+
+    int n_image_pixels = ctx->width * ctx->height;
+    std::vector<int> in_body_pixels(n_image_pixels);
+    std::vector<int> indices(n_image_pixels);
+
+    int n_pixels = ctx->n_images * ctx->n_pixels;
+    Int3D* pixels = (Int3D*)xmalloc(n_pixels * sizeof(Int3D));
+
+    for (int i = 0; i < ctx->n_images; i++)
+    {
+        int image_idx = i * n_image_pixels;
+        uint8_t* label_image = &ctx->label_images[image_idx];
+
+        /* Our tracking system assumes that the body has been segmented
+         * from the background before we try and label the different parts
+         * of the body and so we're only interested in sampling points
+         * inside the body...
+         */
+        in_body_pixels.clear();
+        for (int y = 0; y < ctx->height; y++) {
+            for (int x = 0; x < ctx->width; x++) {
+                int off = y * ctx->width + x;
+                int label = (int)label_image[off];
+
+                gm_assert(ctx->log, label < ctx->n_labels,
+                          "Label '%d' is bigger than expected (max %d)\n",
+                          label, ctx->n_labels - 1);
+
+                if (label != ctx->bg_label) {
+                    in_body_pixels.push_back(off);
+                }
+            }
+        }
+
+        /* Note: we don't do anything to filter out duplicates which could
+         * be fairly likely for frames where the body is relatively small.
+         *
+         * It seems best to not bias how many samples we consider across
+         * the body based on the in-frame size, so our training expends
+         * approximately the same amount of energy training on each pose
+         * regardless of body size or distance from the camera.
+         */
+        int n_body_points = in_body_pixels.size();
+        indices.clear();
+        for (int j = 0; j < ctx->n_pixels; j++) {
+            int off = rand_0_1(rng) * n_body_points;
+            indices.push_back(off);
+        }
+
+        /* May slightly improve cache access patterns if we can process
+         * our samples in memory order, even though the UV sampling
+         * is somewhat randomized relative to these pixels...
+         */
+        std::sort(indices.begin(), indices.end());
+
+        for (int j = 0; j < ctx->n_pixels; j++) {
+            int off = indices[j];
+            int x = off % ctx->width;
+            int y = off / ctx->width;
+
+            Int3D pixel;
+            pixel.xy[0] = x;
+            pixel.xy[1] = y;
+            pixel.i = i;
+
+            pixels[i * ctx->n_pixels + j] = pixel;
+        }
+    }
+
+    *total_count = n_pixels;
+    return pixels;
+}
+
 static NodeTrainData*
 create_node_train_data(struct gm_rdt_context_impl* ctx, int id, int depth,
                        int n_pixels, Int3D* pixels)
@@ -122,32 +211,8 @@ create_node_train_data(struct gm_rdt_context_impl* ctx, int id, int depth,
 
     data->id = id;
     data->depth = depth;
-
-    if (pixels)
-    {
-        data->pixels = pixels;
-        data->n_pixels = n_pixels;
-    }
-    else
-    {
-        // Assume this is the root node and generate random coordinates
-        data->n_pixels = ctx->n_images * ctx->n_pixels;
-        data->pixels = (Int3D*)xmalloc(data->n_pixels * sizeof(Int3D));
-
-        //std::random_device rd;
-        std::mt19937 rng(ctx->seed);
-        std::uniform_int_distribution<int> rand_x(0, ctx->width - 1);
-        std::uniform_int_distribution<int> rand_y(0, ctx->height - 1);
-        for (int i = 0, idx = 0; i < ctx->n_images; i++)
-        {
-            for (int j = 0; j < ctx->n_pixels; j++, idx++)
-            {
-                data->pixels[idx].xy[0] = rand_x(rng);
-                data->pixels[idx].xy[1] = rand_y(rng);
-                data->pixels[idx].i = i;
-            }
-        }
-    }
+    data->pixels = pixels;
+    data->n_pixels = n_pixels;
 
     return data;
 }
@@ -252,8 +317,8 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         {
             UVPair uv = ctx->uvs[c];
             samples[c - uv_start] = sample_uv(depth_image,
-                                             ctx->width, ctx->height,
-                                             pixel, depth, uv);
+                                              ctx->width, ctx->height,
+                                              pixel, depth, uv);
         }
 
         // Partition on thresholds
@@ -729,8 +794,19 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     int n_nodes = roundf(powf(2.f, ctx->max_depth)) - 1;
     Node* tree = (Node*)xcalloc(n_nodes, sizeof(Node));
 
+    // Create the randomized sample points across all images that the decision
+    // tree is going to learn to classify.
+    //
+    // The training recursively splits this vector at each node of the tree,
+    // either terminating when a branch runs out of pixels to differentiate
+    // or after reaching the maximum training depth.
+    int total_pixel_count = 0;
+    Int3D *all_pixels = generate_randomized_sample_points(ctx, &total_pixel_count);
+
     // Initialise root node training data and add it to the queue
-    LList* train_queue = llist_new(create_node_train_data(ctx, 0, 0, 0, NULL));
+    LList* train_queue = llist_new(create_node_train_data(ctx, 0, 0,
+                                                          total_pixel_count,
+                                                          all_pixels));
 
     // Initialise histogram count
     int n_histograms = 0;
