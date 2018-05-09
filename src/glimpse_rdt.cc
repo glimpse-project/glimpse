@@ -79,12 +79,12 @@ struct gm_rdt_context_impl {
 
     int      n_uv;          // Number of combinations of u,v pairs
     float    uv_range;      // Range of u,v combinations to generate
-    int      n_t;           // The number of thresholds
-    float    t_range;       // Range of thresholds to test
+    int      n_thresholds;  // The number of thresholds
+    float    threshold_range;       // Range of thresholds to test
     int      max_depth;     // Maximum depth to train to
     int      n_pixels;      // Number of pixels to sample
     UVPair*  uvs;           // A list of uv pairs to test
-    float*   ts;            // A list of thresholds to test
+    float*   thresholds;    // A list of thresholds to test
 
     int      n_threads;     // How many threads to spawn for training
     int      bg_label;      // label that represents the background
@@ -258,12 +258,12 @@ accumulate_histograms(struct gm_rdt_context_impl* ctx,
         // Partition on thresholds
         for (int c = 0, lr_histogram_idx = 0; c < c_end - c_start; c++)
         {
-            for (int t = 0; t < ctx->n_t;
+            for (int t = 0; t < ctx->n_thresholds;
                  t++, lr_histogram_idx += ctx->n_labels * 2)
             {
                 // Accumulate histogram for this particular uvt combination
                 // on both theoretical branches
-                float threshold = ctx->ts[t];
+                float threshold = ctx->thresholds[t];
                 ++lr_histograms[samples[c] < threshold ?
                     lr_histogram_idx + label :
                     lr_histogram_idx + ctx->n_labels + label];
@@ -284,7 +284,7 @@ thread_body(void* userdata)
     // Histograms for each uvt combination being tested
     int* lr_histograms = (int*)
         malloc(data->ctx->n_labels * (data->c_end - data->c_start) *
-               data->ctx->n_t * 2 * sizeof(int));
+               data->ctx->n_thresholds * 2 * sizeof(int));
 
     float* nhistogram = (float*)xmalloc(data->ctx->n_labels * sizeof(float));
     float* root_nhistogram = data->root_nhistogram ? data->root_nhistogram :
@@ -304,7 +304,7 @@ thread_body(void* userdata)
         // Clear histogram accumulators
         memset(root_histogram, 0, data->ctx->n_labels * sizeof(int));
         memset(lr_histograms, 0, data->ctx->n_labels *
-               (data->c_end - data->c_start) * data->ctx->n_t * 2 *
+               (data->c_end - data->c_start) * data->ctx->n_thresholds * 2 *
                sizeof(int));
 
         // Accumulate histograms
@@ -332,7 +332,7 @@ thread_body(void* userdata)
             for (int i = data->c_start, lr_histo_base = 0;
                  i < data->c_end && !interrupted; i++)
             {
-                for (int j = 0; j < data->ctx->n_t && !interrupted;
+                for (int j = 0; j < data->ctx->n_thresholds && !interrupted;
                      j++, lr_histo_base += data->ctx->n_labels * 2)
                 {
                     float l_entropy, r_entropy, gain;
@@ -506,24 +506,24 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = INT_MAX;
     ctx->properties.push_back(prop);
 
-    ctx->n_t = 50;
+    ctx->n_thresholds = 50;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "n_t";
+    prop.name = "n_thresholds";
     prop.desc = "Number of thresholds to test";
     prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->n_t;
+    prop.int_state.ptr = &ctx->n_thresholds;
     prop.int_state.min = 1;
     prop.int_state.max = INT_MAX;
     ctx->properties.push_back(prop);
 
-    ctx->t_range = 1.29;
+    ctx->threshold_range = 1.29;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "t_range";
+    prop.name = "threshold_range";
     prop.desc = "Range of thresholds to test";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->t_range;
+    prop.float_state.ptr = &ctx->threshold_range;
     prop.float_state.min = 0;
     prop.float_state.max = 10;
     ctx->properties.push_back(prop);
@@ -673,9 +673,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         ctx->uvs[i][2] = rand_uv(rng);
         ctx->uvs[i][3] = rand_uv(rng);
     }
-    ctx->ts = (float*)xmalloc(ctx->n_t * sizeof(float));
-    for (int i = 0; i < ctx->n_t; i++) {
-        ctx->ts[i] = -ctx->t_range / 2.f + (i * ctx->t_range / (float)(ctx->n_t - 1));
+    ctx->thresholds = (float*)xmalloc(ctx->n_thresholds * sizeof(float));
+    for (int i = 0; i < ctx->n_thresholds; i++) {
+        ctx->thresholds[i] = -ctx->threshold_range / 2.f +
+            (i * ctx->threshold_range / (float)(ctx->n_thresholds - 1));
     }
 
     // Allocate memory for the normalised histogram of the currently training node
@@ -693,7 +694,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     int n_c = ctx->n_uv / n_threads;
     float* best_gains = (float*)malloc(n_threads * sizeof(float));
     int* best_uvs = (int*)malloc(n_threads * sizeof(int));
-    int* best_ts = (int*)malloc(n_threads * sizeof(int));
+    int* best_threshold = (int*)malloc(n_threads * sizeof(int));
     int* all_n_lr_pixels = (int*)malloc(n_threads * 2 * sizeof(int));
     pthread_t threads[n_threads];
     for (int i = 0; i < n_threads; i++)
@@ -707,7 +708,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         thread_data->root_nhistogram = (i == 0) ? root_nhistogram : NULL;
         thread_data->best_gain = &best_gains[i];
         thread_data->best_uv = &best_uvs[i];
-        thread_data->best_t = &best_ts[i];
+        thread_data->best_t = &best_threshold[i];
         thread_data->n_lr_pixels = &all_n_lr_pixels[i * 2];
         thread_data->ready_barrier = &ready_barrier;
         thread_data->finished_barrier = &finished_barrier;
@@ -897,7 +898,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             {
                 best_gain = best_gains[i];
                 best_uv = best_uvs[i];
-                best_t = best_ts[i];
+                best_t = best_threshold[i];
                 n_lr_pixels = &all_n_lr_pixels[i * 2];
             }
         }
@@ -908,7 +909,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         if (best_gain > 0.f && (node_data->depth + 1) < ctx->max_depth)
         {
             node->uv = ctx->uvs[best_uv];
-            node->t = ctx->ts[best_t];
+            node->t = ctx->thresholds[best_t];
             if (ctx->verbose)
             {
                 gm_info(ctx->log,
@@ -986,12 +987,12 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     // Free memory that isn't needed anymore
     xfree(root_nhistogram);
     xfree(ctx->uvs);
-    xfree(ctx->ts);
+    xfree(ctx->thresholds);
     xfree(ctx->label_images);
     xfree(ctx->depth_images);
     xfree(best_gains);
     xfree(best_uvs);
-    xfree(best_ts);
+    xfree(best_threshold);
     xfree(all_n_lr_pixels);
 
     // Restore tree histograms list pointer
