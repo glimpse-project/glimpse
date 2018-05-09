@@ -173,10 +173,10 @@ main(int argc, char **argv)
             gm_props_set_int(ctx_props, "n_pixels", atoi(optarg));
             break;
         case 't':
-            gm_props_set_int(ctx_props, "n_t", atoi(optarg));
+            gm_props_set_int(ctx_props, "n_thresholds", atoi(optarg));
             break;
         case 'r':
-            gm_props_set_float(ctx_props, "t_range", strtof(optarg, NULL));
+            gm_props_set_float(ctx_props, "threshold_range", strtof(optarg, NULL));
             break;
         case 'c':
             gm_props_set_int(ctx_props, "n_uv", atoi(optarg));
