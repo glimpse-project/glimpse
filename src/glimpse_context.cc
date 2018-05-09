@@ -289,6 +289,40 @@ struct gm_skeleton {
       distance(0.f) {}
 };
 
+struct gm_pipeline_stage {
+    char *name;
+
+    uint64_t total_time_ns;
+
+    /* rolling average based on total_time_ns and ctx->pipeline_stats_n_frames */
+    float average_duration;
+
+    /* For min/max/median stats we keep a one second history... */
+    std::vector<uint64_t> duration_history;
+    float min_duration;
+    float max_duration;
+    float median_duration;
+
+    struct gm_ui_properties properties_state;
+    std::vector<struct gm_ui_property> properties;
+};
+
+struct gm_debug_image {
+    int width;
+    int height;
+    std::vector<uint8_t> pixels;
+};
+
+/* A pipeline_stage maintains global information about a stage while
+ * _stage_data can track information about a specific tracking run
+ */
+struct gm_pipeline_stage_data {
+    uint64_t duration_ns;
+
+    std::vector<struct gm_point_rgba> debug_point_cloud;
+    std::vector<struct gm_point_rgba> debug_lines;
+};
+
 struct gm_prediction_impl
 {
     struct gm_prediction base;
@@ -413,6 +447,11 @@ struct gm_context
      */
     struct gm_extrinsics basis_depth_to_video_extrinsics;
     bool basis_extrinsics_set;
+
+    /* These stages represent the processing pipeline for skeletal tracking
+     * and let us group statistics and UI properties
+     */
+    std::vector<struct gm_pipeline_stage> stages;
 
     struct gm_pose depth_pose;
     glm::mat4 start_to_depth_pose;
