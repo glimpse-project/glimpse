@@ -83,7 +83,6 @@ extern "C" {
 #endif
 
 bool save_tree(RDTree* tree, const char* filename);
-bool save_tree_json(RDTree* tree, const char* filename, bool pretty);
 
 RDTree* load_json_tree(uint8_t* json_tree_buf, int len);
 RDTree* read_json_tree(const char* filename);

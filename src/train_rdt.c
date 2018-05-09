@@ -100,7 +100,7 @@ static void
 usage(void)
 {
     fprintf(stderr,
-"Usage: train_rdt [OPTIONS] <data dir> <index name> <out file>\n"
+"Usage: train_rdt [OPTIONS] <data dir> <index name> <out file.json>\n"
 "\n"
 "Train a randomised decision tree to infer body part labels from a data set of\n"
 "depth and label images.\n"
@@ -214,6 +214,21 @@ main(int argc, char **argv)
     gm_props_set_string(ctx_props, "data_dir", argv[optind]);
     gm_props_set_string(ctx_props, "index_name", argv[optind + 1]);
     gm_props_set_string(ctx_props, "out_file", argv[optind + 2]);
+
+
+    char *ext = strstr(argv[optind + 2], ".rdt");
+    if (ext && strlen(ext) == 4) {
+        fprintf(stderr,
+"ERROR: Saving to a .rdt file is no longer supported because an RDT file only\n"
+"       needs to support the minimum necessary for efficient runtime inference\n"
+"       which limits our ability to preserve arbitrary ancillary meta data in\n"
+"       our results\n"
+"\n"
+"Note: A packed RDT file can be created afterwards with json-to-rdt\n"
+"\n"
+                );
+        usage();
+    }
 
     char *err = NULL;
     if (!gm_rdt_context_train(data->ctx, &err)) {
