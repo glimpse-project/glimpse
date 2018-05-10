@@ -140,7 +140,7 @@ generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
 
     for (int i = 0; i < ctx->n_images; i++)
     {
-        int image_idx = i * n_image_pixels;
+        int64_t image_idx = i * n_image_pixels;
         uint8_t* label_image = &ctx->label_images[image_idx];
 
         /* Our tracking system assumes that the body has been segmented
@@ -288,7 +288,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
     {
         Int2D pixel = data->pixels[p].xy;
         int i = data->pixels[p].i;
-        int image_idx = i * ctx->width * ctx->height;
+        int64_t image_idx = (int64_t)i * ctx->width * ctx->height;
 
         half* depth_image = &ctx->depth_images[image_idx];
         uint8_t* label_image = &ctx->label_images[image_idx];
@@ -473,7 +473,7 @@ collect_pixels(struct gm_rdt_context_impl* ctx,
     for (int p = 0; p < data->n_pixels; p++)
     {
         Int3D* pixel = &data->pixels[p];
-        int image_idx = pixel->i * ctx->width * ctx->height;
+        int64_t image_idx = (int64_t)pixel->i * ctx->width * ctx->height;
         half* depth_image = &ctx->depth_images[image_idx];
 
         float depth = depth_image[(pixel->xy[1] * ctx->width) + pixel->xy[0]];
