@@ -12,7 +12,12 @@
 #include "imgui_impl_glfw_gles3.h"
 
 #include <epoxy/gl.h>
+#if defined(__APPLE__) && !defined(__IOS__)
+#define GLSL_SHADER_VERSION "#version 400\n"
+#else
 #include <epoxy/egl.h>
+#define GLSL_SHADER_VERSION "#version 300 es\n"
+#endif
 
 #define GLFW_INCLUDE_NONE
 #include <GLFW/glfw3.h>
@@ -220,7 +225,7 @@ bool ImGui_ImplGlfwGLES3_CreateDeviceObjects()
     glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &last_vertex_array);
 
     const GLchar *vertex_shader =
-        "#version 300 es\n"
+        GLSL_SHADER_VERSION
         "precision mediump float;\n"
         "precision mediump int;\n"
         "uniform mat4 ProjMtx;\n"
@@ -231,13 +236,13 @@ bool ImGui_ImplGlfwGLES3_CreateDeviceObjects()
         "out vec4 Frag_Color;\n"
         "void main()\n"
         "{\n"
-        "	Frag_UV = UV;\n"
-        "	Frag_Color = Color;\n"
-        "	gl_Position = ProjMtx * vec4(Position.xy,0,1);\n"
+        "    Frag_UV = UV;\n"
+        "    Frag_Color = Color;\n"
+        "    gl_Position = ProjMtx * vec4(Position.xy,0,1);\n"
         "}\n";
 
     const GLchar* fragment_shader =
-        "#version 300 es\n"
+        GLSL_SHADER_VERSION
         "precision mediump float;\n"
         "precision mediump int;\n"
         "uniform sampler2D Texture;\n"
@@ -246,7 +251,7 @@ bool ImGui_ImplGlfwGLES3_CreateDeviceObjects()
         "out vec4 Out_Color;\n"
         "void main()\n"
         "{\n"
-        "	Out_Color = Frag_Color * texture( Texture, Frag_UV.st);\n"
+        "    Out_Color = Frag_Color * texture( Texture, Frag_UV.st);\n"
         "}\n";
 
     g_ShaderHandle = glCreateProgram();

@@ -72,7 +72,11 @@
 #    include <getopt.h>
 #endif
 
+#if defined(__APPLE__) && !defined(__IOS__)
+#define GLSL_SHADER_VERSION "#version 400\n"
+#else
 #define GLSL_SHADER_VERSION "#version 300 es\n"
+#endif
 
 #ifdef USE_TANGO
 #include <tango_client_api.h>
@@ -2348,6 +2352,13 @@ init_basic_opengl(Data *data)
     glEnable(GL_DEBUG_OUTPUT);
     glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
 #endif
+
+#if defined(__APPLE__) && !defined(__IOS__)
+    // In the forwards-compatible context, there's no default vertex array.
+    GLuint vertex_array;
+    glGenVertexArrays(1, &vertex_array);
+    glBindVertexArray(vertex_array);
+#endif
 }
 
 static void
@@ -2357,7 +2368,7 @@ init_viewer_opengl(Data *data)
         return;
 
     static const char *cloud_vert_shader =
-        "#version 300 es\n"
+        GLSL_SHADER_VERSION
         "precision mediump float;\n"
         "uniform mat4 mvp;\n"
         "uniform float size;\n"
@@ -2372,7 +2383,7 @@ init_viewer_opengl(Data *data)
         "}\n";
 
     static const char *cloud_frag_shader =
-        "#version 300 es\n"
+        GLSL_SHADER_VERSION
         "precision mediump float;\n"
         "in vec4 v_color;\n"
         "layout(location = 0) out vec4 color;\n"
@@ -2654,9 +2665,16 @@ init_winsys_glfw(Data *data)
     data->win_width = 1280;
     data->win_height = 720;
 
+#if defined(__APPLE__) && !defined(__IOS__)
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  2) ;
+#else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  0) ;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+#endif
 
     data->window = glfwCreateWindow(data->win_width,
                                     data->win_height,
