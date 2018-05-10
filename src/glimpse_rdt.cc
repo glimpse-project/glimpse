@@ -630,17 +630,6 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = 30;
     ctx->properties.push_back(prop);
 
-    ctx->bg_label = 0;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "bg_label";
-    prop.desc = "Index of the background label";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->bg_label;
-    prop.int_state.min = 0;
-    prop.int_state.max = 255;
-    ctx->properties.push_back(prop);
-
     ctx->seed = 0;
     prop = gm_ui_property();
     prop.object = ctx;

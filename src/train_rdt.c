@@ -119,8 +119,6 @@ usage(void)
 "                                  (default: 20)\n"
 "  -m, --threads=NUMBER          Number of threads to use.\n"
 "                                  (default: autodetect)\n"
-"  -b, --background=NUMBER       Index of the background label\n"
-"                                  (default: 0)\n"
 "  -n, --seed=NUMBER             Seed to use for RNG.\n"
 "                                  (default: 0)\n"
 "  -i, --continue                Continue training from an interrupted run.\n"
@@ -154,7 +152,6 @@ main(int argc, char **argv)
         {"uv-range",        required_argument,  0, 'u'},
         {"depth",           required_argument,  0, 'd'},
         {"threads",         required_argument,  0, 'm'},
-        {"background",      required_argument,  0, 'b'},
         {"seed",            required_argument,  0, 'n'},
         {"continue",        no_argument,        0, 'i'},
         {"verbose",         no_argument,        0, 'v'},
@@ -186,9 +183,6 @@ main(int argc, char **argv)
             break;
         case 'm':
             gm_props_set_int(ctx_props, "n_threads", atoi(optarg));
-            break;
-        case 'b':
-            gm_props_set_int(ctx_props, "bg_label", atoi(optarg));
             break;
         case 'n':
             gm_props_set_int(ctx_props, "seed", atoi(optarg));
