@@ -200,14 +200,15 @@ main(int argc, char **argv)
     all_accuracies.reserve(n_images);
 
     for (int i = 0; i < n_images; i++) {
+        int64_t off = i * width * height;
         infer_labels<half>(forest,
                            n_trees,
-                           &depth_images[i * width * height],
+                           &depth_images[off],
                            width,
                            height,
                            probs);
 
-        uint8_t *labels = &label_images[i * width * height];
+        uint8_t *labels = &label_images[off];
 
         memset(label_incidence, 0, sizeof(label_incidence));
         memset(correct_label_inference, 0, sizeof(correct_label_inference));
