@@ -1386,7 +1386,13 @@ static_assert(BACKGROUND_ID == 33, "");
 
     while (true) {
         uint64_t target_frame_count;
+
+        bool finished = false;
+        pthread_mutex_lock(&work_queue_lock);
         if (work_queue.empty())
+            finished = true;
+        pthread_mutex_unlock(&work_queue_lock);
+        if (finished)
             break;
 
         if (max_frame_count != UINT64_MAX)
