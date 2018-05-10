@@ -121,8 +121,9 @@ load_frame(TrainData *data, int index, char **err)
     // Read label image
     if (label_path && data->gather_label)
     {
-        uint8_t* output = &data->label_images[
-            index * data->label_spec.width * data->label_spec.height];
+        int64_t off = (int64_t)index *
+            data->label_spec.width * data->label_spec.height;
+        uint8_t* output = &data->label_images[off];
         if (iu_read_png_from_file(label_path, &data->label_spec, &output,
                                   NULL, // palette output
                                   NULL) // palette size
@@ -136,8 +137,9 @@ load_frame(TrainData *data, int index, char **err)
     // Read depth image
     if (depth_path && data->gather_depth)
     {
-        void* output = &data->depth_images[
-            index * data->depth_spec.width * data->depth_spec.height];
+        int64_t off = (int64_t)index *
+            data->depth_spec.width * data->depth_spec.height;
+        void* output = &data->depth_images[off];
         if (iu_read_exr_from_file(depth_path, &data->depth_spec, &output) !=
             SUCCESS)
         {
@@ -189,7 +191,8 @@ load_frame(TrainData *data, int index, char **err)
             return false;
         }
 
-        float* joints = &data->joint_data[index * n_joints * 3];
+        int64_t off = (int64_t)index * n_joints * 3;
+        float* joints = &data->joint_data[off];
         if (fread(joints, sizeof(float) * 3, n_joints, fp) != n_joints)
         {
             gm_throw(data->log, err, "%s: Error reading joints\n", joint_path);
@@ -282,7 +285,7 @@ gather_train_data(struct gm_logger* log,
     if (!load_training_index(data_dir, index_name, &data, err))
         return false;
 
-    size_t n_pixels = width * height * data.n_images;
+    size_t n_pixels = (size_t)width * height * data.n_images;
 
     if (data.gather_label)
         data.label_images = (uint8_t*)xmalloc(n_pixels * sizeof(uint8_t));
@@ -299,10 +302,10 @@ gather_train_data(struct gm_logger* log,
     gm_info(log, "Processing %d training images...\n", *out_n_images);
 
     bool load_ok = true;
-    for (int i = 0; load_ok == true && i < data.paths.size(); i++) {
+    for (int i = 0; load_ok == true && i < (int)data.paths.size(); i++) {
         load_ok = load_frame(&data, i, err);
     }
-    for (int i = 0; i < data.paths.size(); i++) {
+    for (int i = 0; i < (int)data.paths.size(); i++) {
         xfree(data.paths[i].labels_path);
         xfree(data.paths[i].depth_path);
         xfree(data.paths[i].joints_path);
