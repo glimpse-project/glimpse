@@ -362,6 +362,21 @@ executable('train_rdt',
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
+executable('test_rdt',
+           [ 'src/test_rdt.cc',
+             'src/glimpse_rdt.cc',
+             'src/glimpse_log.c',
+             'src/glimpse_config.cc',
+             'src/train_utils.cc',
+             'src/image_utils.cc',
+             'src/loader.cc',
+             'src/infer.cc',
+             'src/tinyexr.cc',
+             'src/parson.c',
+             'src/llist.c',
+             'src/xalloc.c' ],
+           include_directories: inc,
+           dependencies: [ libpng_dep, threads_dep ])
 
 executable('train_joint_dist',
            [ 'src/train_joint_dist.cc',
