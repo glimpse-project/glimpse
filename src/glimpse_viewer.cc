@@ -94,6 +94,12 @@
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
 
+#undef GM_LOG_CONTEXT
+#ifdef __ANDROID__
+#define GM_LOG_CONTEXT "Glimpse Viewer"
+#else
+#define GM_LOG_CONTEXT "viewer"
+#endif
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 #define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
