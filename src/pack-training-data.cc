@@ -918,7 +918,7 @@ usage(void)
 "    -a,--append                Append frames to existing pack file\n"
 "    -f,--full                  Store full-float channel depth images (otherwise\n"
 "                               stores half-float)\n"
-"    -t,--threads=<n>           Override how many decoder threads are run\n"
+"    -j,--threads=<n>           Override how many decoder threads are run\n"
 "\n"
 "    -h,--help                  Display this help\n\n"
 "\n");
@@ -934,12 +934,12 @@ main(int argc, char **argv)
     /* N.B. The initial '+' means that getopt will stop looking for options
      * after the first non-option argument...
      */
-    const char *short_options="+haft:";
+    const char *short_options="+hafj:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"append",          no_argument,        0, 'a'},
         {"full",            no_argument,        0, 'f'},
-        {"threads",         required_argument,  0, 't'},
+        {"threads",         required_argument,  0, 'j'},
         {0, 0, 0, 0}
     };
 
@@ -958,7 +958,7 @@ main(int argc, char **argv)
             case 'f':
                 write_half_float = false;
                 break;
-            case 't':
+            case 'j':
                 n_threads_override = strtoul(optarg, &end, 10);
                 if (*optarg == '\0' || *end != '\0')
                     usage();

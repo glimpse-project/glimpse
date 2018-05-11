@@ -174,7 +174,7 @@ print_usage(FILE* stream)
             "Determine the min, mean and max distances between each joint over a set of\n"
             "motion capture data and output a JSON file with the data.\n"
             "\n"
-            "  -m, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
+            "  -j, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
             "  -p, --pretty                Output prettified JSON\n"
             "  -v, --verbose               Verbose output\n"
             "  -h, --help                  Display this message\n");
@@ -199,9 +199,9 @@ main(int argc, char** argv)
     ctx.log = gm_logger_new(logger_cb, &ctx);
     gm_logger_set_abort_callback(ctx.log, logger_abort_cb, &ctx);
 
-    const char *short_opts="+mpvh";
+    const char *short_opts="+jpvh";
     const struct option long_opts[] = {
-        {"threads",         required_argument,  0, 'm'},
+        {"threads",         required_argument,  0, 'j'},
         {"pretty",          no_argument,        0, 'p'},
         {"verbose",         no_argument,        0, 'v'},
         {"help",            no_argument,        0, 'h'},
@@ -212,7 +212,7 @@ main(int argc, char** argv)
     {
         switch (opt)
         {
-        case 'm':
+        case 'j':
             ctx.n_threads = atoi(optarg);
             break;
         case 'p':

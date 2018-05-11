@@ -1137,7 +1137,7 @@ usage(void)
 "    --min-body-change=<%%>      Minimum percentage of changed body pixels\n"
 "                               between sequential frames\n"
 "                               (default = %.3f%%)\n"
-"    -t,--threads=<n>           Override how many worker threads are run\n"
+"    -j,--threads=<n>           Override how many worker threads are run\n"
 "    -m,--max-frames=<n>        Don't pre-process more than this many frames\n"
 "\n"
 "    -h,--help                  Display this help\n\n"
@@ -1163,7 +1163,7 @@ main(int argc, char **argv)
     /* N.B. The initial '+' means that getopt will stop looking for options
      * after the first non-option argument...
      */
-    const char *short_options="+hfgpv:b:t:m:";
+    const char *short_options="+hfgpv:b:j:m:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
@@ -1173,7 +1173,7 @@ main(int argc, char **argv)
         {"background",      required_argument,  0, 'b'},
         {"min-body-size",   required_argument,  0, MIN_BODY_PX_OPT},
         {"min-body-change", required_argument,  0, MIN_BODY_CHNG_PC_OPT},
-        {"threads",         required_argument,  0, 't'},
+        {"threads",         required_argument,  0, 'j'},
         {"max-frames",      required_argument,  0, 'm'},
         {0, 0, 0, 0}
     };
@@ -1216,7 +1216,7 @@ main(int argc, char **argv)
                 if (*optarg == '\0' || *end != '\0')
                     usage();
                 break;
-            case 't':
+            case 'j':
                 n_threads_override = strtoul(optarg, &end, 10);
                 if (*optarg == '\0' || *end != '\0')
                     usage();

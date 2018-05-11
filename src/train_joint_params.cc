@@ -176,7 +176,7 @@ print_usage(FILE* stream)
             "  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
             "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
             "  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
-            "  -m, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
+            "  -j, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
             "  -a, --accuracy              Report accuracy of joint inference\n"
             "  -v, --verbose               Verbose output\n"
             "  -h, --help                  Display this message\n");
@@ -552,7 +552,7 @@ main(int argc, char** argv)
             }
             else if (strstr(arg, "threads="))
             {
-                param = 'm';
+                param = 'j';
             }
             else if (strcmp(arg, "verbose") == 0)
             {
@@ -613,7 +613,7 @@ main(int argc, char** argv)
         case 'a':
             ctx.check_accuracy = true;
             break;
-        case 'm':
+        case 'j':
             ctx.n_threads = atoi(value);
             break;
 

@@ -117,7 +117,7 @@ usage(void)
 "                                  (default 1.29)\n"
 "  -d, --depth=NUMBER            Depth to train tree to.\n"
 "                                  (default: 20)\n"
-"  -m, --threads=NUMBER          Number of threads to use.\n"
+"  -j, --threads=NUMBER          Number of threads to use.\n"
 "                                  (default: autodetect)\n"
 "  -s, --seed=NUMBER             Seed to use for RNG.\n"
 "                                  (default: 0)\n"
@@ -143,7 +143,7 @@ main(int argc, char **argv)
         gm_rdt_context_get_ui_properties(data->ctx);
     int opt;
 
-    const char *short_options="p:t:r:c:u:d:m:b:s:ivh";
+    const char *short_options="p:t:r:c:u:d:j:b:s:ivh";
     const struct option long_options[] = {
         {"pixels",          required_argument,  0, 'p'},
         {"thresholds",      required_argument,  0, 't'},
@@ -151,7 +151,7 @@ main(int argc, char **argv)
         {"combos",          required_argument,  0, 'c'},
         {"uv-range",        required_argument,  0, 'u'},
         {"depth",           required_argument,  0, 'd'},
-        {"threads",         required_argument,  0, 'm'},
+        {"threads",         required_argument,  0, 'j'},
         {"seed",            required_argument,  0, 's'},
         {"continue",        no_argument,        0, 'i'},
         {"verbose",         no_argument,        0, 'v'},
@@ -181,7 +181,7 @@ main(int argc, char **argv)
         case 'd':
             gm_props_set_int(ctx_props, "max_depth", atoi(optarg));
             break;
-        case 'm':
+        case 'j':
             gm_props_set_int(ctx_props, "n_threads", atoi(optarg));
             break;
         case 's':
