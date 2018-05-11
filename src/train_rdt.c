@@ -143,7 +143,7 @@ main(int argc, char **argv)
         gm_rdt_context_get_ui_properties(data->ctx);
     int opt;
 
-    const char *short_options="p:t:r:c:u:d:j:b:s:ivh";
+    const char *short_options="p:t:r:c:u:d:j:s:ivh";
     const struct option long_options[] = {
         {"pixels",          required_argument,  0, 'p'},
         {"thresholds",      required_argument,  0, 't'},
