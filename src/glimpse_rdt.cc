@@ -534,6 +534,10 @@ gm_rdt_context_new(struct gm_logger *log)
 
     struct gm_ui_property prop;
 
+    char cwd[PATH_MAX];
+    getcwd(cwd, sizeof(cwd));
+
+    ctx->data_dir = strdup(cwd);
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "data_dir";
