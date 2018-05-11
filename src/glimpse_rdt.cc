@@ -1206,13 +1206,9 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         memcpy(pr_table, l->data, sizeof(float) * ctx->n_labels);
     }
 
-    char* out_filename_json = (char*)xmalloc(strlen(out_filename) + 6);
-    strcpy(out_filename_json, out_filename);
-    strcat(out_filename_json, ".json");
-    save_tree_json(&rdtree, out_filename_json, false);
+    save_tree_json(&rdtree, out_filename, true);
 
     xfree(rdtree.label_pr_tables);
-    xfree(out_filename_json);
 
     // Free the last data
     xfree(tree);
