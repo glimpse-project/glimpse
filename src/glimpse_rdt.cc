@@ -53,6 +53,9 @@
 #include "glimpse_log.h"
 #include "glimpse_properties.h"
 
+#undef GM_LOG_CONTEXT
+#define GM_LOG_CONTEXT "rdt"
+
 using half_float::half;
 
 static bool interrupted = false;
