@@ -37,7 +37,43 @@
 
 using half_float::half;
 
+static bool threaded_opt = false;
 static bool verbose_opt = false;
+
+static uint64_t
+get_time(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static float
+get_format_duration(uint64_t duration_ns)
+{
+    if (duration_ns > 1000000000)
+        return duration_ns / 1e9;
+    else if (duration_ns > 1000000)
+        return duration_ns / 1e6;
+    else if (duration_ns > 1000)
+        return duration_ns / 1e3;
+    else
+        return duration_ns;
+}
+
+static char *
+get_format_duration_suffix(uint64_t duration_ns)
+{
+    if (duration_ns > 1000000000)
+        return (char *)"s";
+    else if (duration_ns > 1000000)
+        return (char *)"ms";
+    else if (duration_ns > 1000)
+        return (char *)"us";
+    else
+        return (char *)"ns";
+}
 
 static void
 logger_cb(struct gm_logger *logger,
@@ -105,6 +141,7 @@ usage(void)
 "Tests the performance of one or more randomized decision trees across a\n"
 "given index of images.\n"
 "\n"
+"  -t, --threaded                Use multi-threaded inference.\n"
 "  -v, --verbose                 Verbose output.\n"
 "  -h, --help                    Display this message.\n"
     );
@@ -114,11 +151,14 @@ usage(void)
 int
 main(int argc, char **argv)
 {
+    uint64_t start, end;
+
     struct gm_logger *log = gm_logger_new(logger_cb, NULL);
     gm_logger_set_abort_callback(log, logger_abort_cb, NULL);
 
-    const char *short_options="vh";
+    const char *short_options="vht";
     const struct option long_options[] = {
+        {"threaded",        no_argument,        0, 't'},
         {"verbose",         no_argument,        0, 'v'},
         {"help",            no_argument,        0, 'h'},
         {0, 0, 0, 0}
@@ -129,6 +169,9 @@ main(int argc, char **argv)
            != -1)
     {
         switch (opt) {
+        case 't':
+            threaded_opt = true;
+            break;
         case 'v':
             verbose_opt = true;
             break;
@@ -153,7 +196,10 @@ main(int argc, char **argv)
         tree_paths[i] = argv[optind + 2 + i];
     }
 
+    start = get_time();
     RDTree **forest = read_forest((const char**)tree_paths, n_trees);
+    end = get_time();
+    uint64_t load_forest_duration = end - start;
     if (!forest) {
         fprintf(stderr, "Failed to load decision tree[s]\n");
         exit(1);
@@ -169,6 +215,7 @@ main(int argc, char **argv)
 
     char *err = NULL;
 
+    start = get_time();
     if (!gather_train_data(log,
                            data_dir,
                            index_name,
@@ -186,27 +233,32 @@ main(int argc, char **argv)
     {
         return false;
     }
+    end = get_time();
+    uint64_t load_data_duration = end - start;
 
     float *probs = (float*)xmalloc(width * height * sizeof(float) * n_labels);
 
     int label_incidence[n_labels];
     int correct_label_inference[n_labels];
 
-    float best_accuracy = 0;
-    float worst_accuracy = 1.0;
-    float average_accuracy = 0;
-
     std::vector<float> all_accuracies;
     all_accuracies.reserve(n_images);
 
+    std::vector<uint64_t> inference_timings;
+    inference_timings.reserve(n_images);
+
     for (int i = 0; i < n_images; i++) {
         int64_t off = i * width * height;
+        start = get_time();
         infer_labels<half>(forest,
                            n_trees,
                            &depth_images[off],
                            width,
                            height,
-                           probs);
+                           probs,
+                           threaded_opt);
+        end = get_time();
+        inference_timings.push_back(end - start);
 
         uint8_t *labels = &label_images[off];
 
@@ -247,39 +299,106 @@ main(int argc, char **argv)
         }
         accuracy /= (float)present_labels;
 
+        all_accuracies.push_back(accuracy);
+    }
+
+
+    /*
+     * Post-processing of metrics...
+     */
+
+    std::sort(all_accuracies.begin(), all_accuracies.end());
+    float best_accuracy = 0;
+    float worst_accuracy = 1.0;
+    float average_accuracy = 0;
+
+    int histogram_len = 30; // height in terminal rows
+    int histogram[histogram_len];
+    int max_entries = 0; // which bucket has the most entries
+    memset(histogram, 0, sizeof(histogram));
+
+    for (int i = 0; i < (int)all_accuracies.size(); i++) {
+        float accuracy = all_accuracies[i];
+
         if (accuracy < worst_accuracy)
             worst_accuracy = accuracy;
         if (accuracy > best_accuracy)
             best_accuracy = accuracy;
-        all_accuracies.push_back(accuracy);
 
         average_accuracy += accuracy;
-    }
 
-    average_accuracy /= n_images;
-    std::sort(all_accuracies.begin(), all_accuracies.end());
-
-    printf("Accuracy across '%s' index of %d images:\n",
-           index_name, (int)all_accuracies.size());
-    printf("Average: %.2f\n", average_accuracy);
-    printf("Median:  %.2f\n", all_accuracies[all_accuracies.size() / 2]);
-    printf("Worst:   %.2f\n", worst_accuracy);
-    printf("Best:    %.2f\n", best_accuracy);
-
-    printf("Histogram:\n");
-    int histogram_len = 30;
-    int histogram[histogram_len];
-    memset(histogram, 0, sizeof(histogram));
-
-    int max_entries = 0;
-    for (int i = 0; i < (int)all_accuracies.size(); i++) {
-        int bucket = all_accuracies[i] * histogram_len;
+        int bucket = accuracy * histogram_len;
         histogram[bucket]++;
         if (histogram[bucket] > max_entries) {
             max_entries = histogram[bucket];
         }
     }
 
+    average_accuracy /= n_images;
+
+    std::sort(inference_timings.begin(), inference_timings.end());
+    float best_inference_timing = UINT64_MAX;
+    float worst_inference_timing = 0;
+    float average_inference_timing = 0;
+
+    for (int i = 0; i < (int)inference_timings.size(); i++) {
+        uint64_t timing = inference_timings[i];
+
+        if (timing > worst_inference_timing)
+            worst_inference_timing = timing;
+        if (timing < best_inference_timing)
+            best_inference_timing = timing;
+        average_inference_timing += timing;
+    }
+
+    average_inference_timing /= n_images;
+
+    gm_assert(log, (int)all_accuracies.size() == n_images,
+              "Number of accuracy timings (%d) doesn't match number of images (%d)",
+              (int)all_accuracies.size(),
+              n_images);
+    gm_assert(log, (int)inference_timings.size() == n_images,
+              "Number of inference timings (%d) doesn't match number of images (%d)",
+              (int)inference_timings.size(),
+              n_images);
+
+    /*
+     * Reporting of metrics...
+     */
+
+    printf("Loaded %d decision trees in %.2f%s\n",
+           n_trees,
+           get_format_duration(load_forest_duration),
+           get_format_duration_suffix(load_forest_duration));
+
+    printf("Loaded %d images from '%s' index in %.2f%s\n",
+           n_images,
+           index_name,
+           get_format_duration(load_data_duration),
+           get_format_duration_suffix(load_data_duration));
+
+    printf("Inference timings across all images:\n");
+    printf("  • Average: %.2f%s\n",
+           get_format_duration(average_inference_timing),
+           get_format_duration_suffix(average_inference_timing));
+    uint64_t median_timing = inference_timings[inference_timings.size() / 2];
+    printf("  • Median:  %.2f%s\n",
+           get_format_duration(median_timing),
+           get_format_duration_suffix(median_timing));
+    printf("  • Worst:   %.2f%s\n",
+           get_format_duration(worst_inference_timing),
+           get_format_duration_suffix(worst_inference_timing));
+    printf("  • Best:    %.2f%s\n",
+           get_format_duration(best_inference_timing),
+           get_format_duration_suffix(best_inference_timing));
+
+    printf("Accuracy across all images:\n");
+    printf("  • Average: %.2f\n", average_accuracy);
+    printf("  • Median:  %.2f\n", all_accuracies[all_accuracies.size() / 2]);
+    printf("  • Worst:   %.2f\n", worst_accuracy);
+    printf("  • Best:    %.2f\n", best_accuracy);
+
+    printf("Histogram of accuracies:\n");
     static const char *bars[] = {
         " ",
         "▏",
