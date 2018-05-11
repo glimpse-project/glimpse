@@ -61,6 +61,13 @@
 #include "glimpse_mem_pool.h"
 #include "glimpse_device.h"
 
+#undef GM_LOG_CONTEXT
+#ifdef __ANDROID__
+#define GM_LOG_CONTEXT "Glimpse Device"
+#else
+#define GM_LOG_CONTEXT "device"
+#endif
+
 #define xsnprintf(dest, n, fmt, ...) do { \
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
             exit(1); \
