@@ -25,7 +25,7 @@
 #pragma once
 
 #include <glimpse_log.h>
-#include <glimpse_config.h>
+#include <glimpse_properties.h>
 
 struct gm_rdt_context;
 

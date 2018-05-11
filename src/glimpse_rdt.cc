@@ -51,7 +51,7 @@
 
 #include "glimpse_rdt.h"
 #include "glimpse_log.h"
-#include "glimpse_config.h"
+#include "glimpse_properties.h"
 
 using half_float::half;
 

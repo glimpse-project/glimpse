@@ -27,7 +27,7 @@
 #include <getopt.h>
 
 #include <glimpse_rdt.h>
-#include <glimpse_config.h>
+#include <glimpse_properties.h>
 
 struct training_data {
     FILE *log_fp;

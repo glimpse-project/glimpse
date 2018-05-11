@@ -731,7 +731,12 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
 
     if (ImGui::Button("Save config")) {
-        char *json = gm_config_save(data->log, ctx_props);
+        JSON_Value *props_object = json_value_init_object();
+        gm_props_to_json(data->log, ctx_props, props_object);
+        char *json = json_serialize_to_string_pretty(props_object);
+        json_value_free(props_object);
+        props_object = NULL;
+
         const char *assets_root = gm_get_assets_root();
         char filename[512];
 
@@ -2846,7 +2851,11 @@ viewer_init(Data *data)
                       "glimpse-config.json", GM_ASSET_MODE_BUFFER, &open_err);
     if (config_asset) {
         const char *buf = (const char *)gm_asset_get_buffer(config_asset);
-        gm_config_load(data->log, buf, gm_context_get_ui_properties(data->ctx));
+        JSON_Value *json_props = json_parse_string(buf);
+        gm_props_from_json(data->log,
+                           gm_context_get_ui_properties(data->ctx),
+                           json_props);
+        json_value_free(json_props);
         gm_asset_close(config_asset);
     } else {
         gm_warn(data->log, "Failed to open glimpse-config.json: %s", open_err);

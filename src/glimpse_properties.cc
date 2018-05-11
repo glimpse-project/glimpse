@@ -22,15 +22,15 @@
  * SOFTWARE.
  */
 
-#include "glimpse_config.h"
+#include "glimpse_properties.h"
 #include "parson.h"
 
 void
-gm_config_load(struct gm_logger *log, const char *json_buf,
-               struct gm_ui_properties *props)
+gm_props_from_json(struct gm_logger *log,
+                   struct gm_ui_properties *props,
+                   JSON_Value *props_object)
 {
-    JSON_Value *json = json_parse_string(json_buf);
-    JSON_Object *config = json_object(json);
+    JSON_Object *config = json_object(props_object);
 
     for (size_t i = 0; i < json_object_get_count(config); ++i) {
         const char *name = json_object_get_name(config, i);
@@ -79,15 +79,14 @@ gm_config_load(struct gm_logger *log, const char *json_buf,
             }
         }
     }
-
-    json_value_free(json);
 }
 
-char *
-gm_config_save(struct gm_logger *log, struct gm_ui_properties *props)
+void
+gm_props_to_json(struct gm_logger *log,
+                 struct gm_ui_properties *props,
+                 JSON_Value *props_object)
 {
-    JSON_Value *json = json_value_init_object();
-    JSON_Object *config = json_object(json);
+    JSON_Object *config = json_object(props_object);
 
     for (int p = 0; p < props->n_properties; ++p) {
         struct gm_ui_property *prop = &props->properties[p];
@@ -137,8 +136,4 @@ gm_config_save(struct gm_logger *log, struct gm_ui_properties *props)
             break;
         }
     }
-
-    char *retval = json_serialize_to_string_pretty(json);
-    json_value_free(json);
-    return retval;
 }

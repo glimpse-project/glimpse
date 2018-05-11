@@ -27,8 +27,10 @@
 #include <pthread.h>
 #include <stdbool.h>
 #include <string.h>
-#include "glimpse_log.h"
 
+#include "parson.h"
+
+#include "glimpse_log.h"
 
 enum gm_rotation {
   GM_ROTATION_0 = 0,
@@ -326,11 +328,15 @@ gm_props_set_switch(struct gm_ui_properties *props,
         gm_prop_set_switch(prop);
 }
 
-void gm_config_load(struct gm_logger *log,
-                    const char *json_buf,
-                    struct gm_ui_properties *props);
-char *gm_config_save(struct gm_logger *log,
-                     struct gm_ui_properties *props);
+void
+gm_props_from_json(struct gm_logger *log,
+                   struct gm_ui_properties *props,
+                   JSON_Value *props_object);
+
+void
+gm_props_to_json(struct gm_logger *log,
+                 struct gm_ui_properties *props,
+                 JSON_Value *props_object);
 
 #ifdef __cplusplus
 }

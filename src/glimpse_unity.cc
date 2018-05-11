@@ -488,7 +488,11 @@ handle_device_ready(struct glimpse_data *data)
                           GM_ASSET_MODE_BUFFER, &open_err);
         if (config_asset) {
             const char *buf = (const char *)gm_asset_get_buffer(config_asset);
-            gm_config_load(data->log, buf, gm_device_get_ui_properties(data->device));
+            JSON_Value *json_props = json_parse_string(buf);
+            gm_props_from_json(data->log,
+                               gm_device_get_ui_properties(data->device),
+                               json_props);
+            json_value_free(json_props);
             gm_asset_close(config_asset);
         } else {
             gm_warn(data->log, "Failed to open %s: %s", config_name, open_err);
@@ -1296,7 +1300,11 @@ gm_unity_init(char *config_json)
                           GM_ASSET_MODE_BUFFER, &open_err);
         if (config_asset) {
             const char *buf = (const char *)gm_asset_get_buffer(config_asset);
-            gm_config_load(data->log, buf, gm_context_get_ui_properties(data->ctx));
+            JSON_Value *json_props = json_parse_string(buf);
+            gm_props_from_json(data->log,
+                               gm_context_get_ui_properties(data->ctx),
+                               json_props);
+            json_value_free(json_props);
             gm_asset_close(config_asset);
         } else {
             gm_warn(data->log, "Failed to open %s: %s", config_name, open_err);

@@ -26,7 +26,7 @@
 
 #include <assert.h>
 
-#include "glimpse_config.h"
+#include "glimpse_properties.h"
 #include "glimpse_log.h"
 #include "loader.h"
 
