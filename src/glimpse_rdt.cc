@@ -679,7 +679,6 @@ void
 gm_rdt_context_destroy(struct gm_rdt_context *_ctx)
 {
     struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
-    gm_logger_destroy(ctx->log);
     delete ctx;
 }
 
