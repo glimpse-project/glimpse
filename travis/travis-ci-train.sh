@@ -61,4 +61,16 @@ image-pre-processor rendered-training-data/generated/test-render \
 
 indexer.py rendered-training-data/pre-processed/test-render
 
-train_rdt -d 3 -p 1000 -t 25 -c 1000 rendered-training-data/pre-processed/test-render full full-tree.json
+JOBS=$(cat<<'EOF'
+[
+    {
+        "max_depth": 3,
+        "n_pixels": 500,
+        "n_thresholds": 25,
+        "n_uv": 500
+    }
+]
+EOF
+)
+
+train_rdt -q "$JOBS" -d rendered-training-data/pre-processed/test-render full full-tree.json
