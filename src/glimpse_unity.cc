@@ -52,7 +52,10 @@
 
 #undef GM_LOG_CONTEXT
 
-#ifdef __ANDROID__
+#if defined(__APPLE__) && !defined(__IOS__)
+#define GM_LOG_CONTEXT "unity_plugin"
+#define GLSL_SHADER_VERSION "#version 400\n"
+#elif __ANDROID__
 #define GM_LOG_CONTEXT "Glimpse Plugin"
 #define GLSL_SHADER_VERSION "#version 300 es\n"
 #include <android/log.h>
@@ -737,7 +740,10 @@ draw_video(struct glimpse_data *data,
 
     GLuint ar_video_tex = get_oldest_ar_video_tex(data);
     GLenum target = GL_TEXTURE_2D;
-#ifdef __ANDROID__
+
+#if defined(__APPLE__) && !defined(__IOS__)
+    glBindTexture(target, ar_video_tex);
+#elif __ANDROID__
     if (data->device_type == GM_DEVICE_TANGO)
         target = GL_TEXTURE_EXTERNAL_OES;
     glBindTexture(target, ar_video_tex);
@@ -999,11 +1005,12 @@ on_render_event_cb(int event)
     }
 
     gm_debug(plugin_data->log, "Render Event %d DEBUG\n", event);
-
+#if 0
     /* We just assume Unity isn't registering a GL debug callback and
      * cross our fingers...
      */
     if (!plugin_data->registered_gl_debug_callback) {
+
         glDebugMessageControl(GL_DONT_CARE, /* source */
                               GL_DONT_CARE, /* type */
                               GL_DONT_CARE, /* severity */
@@ -1020,9 +1027,10 @@ on_render_event_cb(int event)
 
         glEnable(GL_DEBUG_OUTPUT);
         glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, plugin_data);
+
         plugin_data->registered_gl_debug_callback = true;
     }
-
+#endif
     switch (event) {
     case 0:
         gm_context_render_thread_hook(plugin_data->ctx);
