@@ -48,7 +48,7 @@ endif
 if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
     add_languages('objc')
     platform_ios = true
-    client_api_defines += [ '__IOS__' ]
+    client_api_defines += [ '-D__IOS__' ]
 else
     platform_ios = false
 endif
@@ -324,8 +324,8 @@ if platform_ios == true
                ] + imgui_src,
                include_directories: inc,
                dependencies: [ glfm_dep, epoxy_dep ],
-               c_args: [],
-               cpp_args: [],
+               c_args: ['-D__IOS__'],
+               cpp_args: ['-D__IOS__'],
                link_args: [
                     '-framework', 'Foundation',
                     '-framework', 'OpenGLES',

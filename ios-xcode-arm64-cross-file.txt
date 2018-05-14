@@ -5,7 +5,6 @@ cpp = 'clang++'
 ar = 'ar'
 ld = 'ld'
 strip = 'strip'
-pkgconfig = 'pkg-config'
 
 [host_machine]
 system = 'darwin'
