@@ -1010,7 +1010,6 @@ on_render_event_cb(int event)
      * cross our fingers...
      */
     if (!plugin_data->registered_gl_debug_callback) {
-
         glDebugMessageControl(GL_DONT_CARE, /* source */
                               GL_DONT_CARE, /* type */
                               GL_DONT_CARE, /* severity */
@@ -1027,7 +1026,6 @@ on_render_event_cb(int event)
 
         glEnable(GL_DEBUG_OUTPUT);
         glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, plugin_data);
-
         plugin_data->registered_gl_debug_callback = true;
     }
 #endif
