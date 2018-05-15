@@ -78,6 +78,25 @@ struct result {
     int best_threshold;
     int n_lr_pixels[2];
     float nhistogram[MAX_LABELS];
+    uint64_t duration;
+};
+
+struct thread_state {
+    struct gm_rdt_context_impl* ctx;
+    int idx;
+
+    pthread_t thread;
+
+    uint64_t last_metrics_log;
+
+    uint64_t run_duration;
+    uint64_t idle_duration;
+
+    uint64_t accumulation_time;
+    uint64_t n_pixels_accumulated;
+    uint64_t n_images_accumulated;
+
+    uint64_t gain_ranking_time;
 };
 
 struct gm_rdt_context_impl {
@@ -122,6 +141,8 @@ struct gm_rdt_context_impl {
 
     std::queue<NodeTrainData> train_queue;
 
+    std::vector<thread_state> thread_pool;
+
     // Queue of work for thread pool
     pthread_mutex_t     work_queue_lock;
     pthread_cond_t      work_queue_changed;
@@ -140,6 +161,50 @@ struct gm_rdt_context_impl {
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 };
+
+
+static uint64_t
+get_time(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+
+    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static float
+get_format_duration(uint64_t duration_ns)
+{
+    if (duration_ns > 1000000000ULL*60*60)
+        return duration_ns / (1e9 * 60.0 * 60.0);
+    else if (duration_ns > 1000000000ULL*60)
+        return duration_ns / (1e9 * 60.0);
+    else if (duration_ns > 1000000000)
+        return duration_ns / 1e9;
+    else if (duration_ns > 1000000)
+        return duration_ns / 1e6;
+    else if (duration_ns > 1000)
+        return duration_ns / 1e3;
+    else
+        return duration_ns;
+}
+
+static char *
+get_format_duration_suffix(uint64_t duration_ns)
+{
+    if (duration_ns > 1000000000ULL*60*60)
+        return (char *)"hr";
+    else if (duration_ns > 1000000000ULL*60)
+        return (char *)"min";
+    else if (duration_ns > 1000000000)
+        return (char *)"s";
+    else if (duration_ns > 1000000)
+        return (char *)"ms";
+    else if (duration_ns > 1000)
+        return (char *)"us";
+    else
+        return (char *)"ns";
+}
 
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
  * of the example pose for that frame.
@@ -280,15 +345,26 @@ calculate_gain(float entropy, int n_pixels,
 
 static void
 accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
+                             struct thread_state *state,
                              NodeTrainData* data,
                              int uv_start, int uv_end,
                              int* root_histogram,
                              int* uvt_lr_histograms)
 {
-    for (int p = 0; p < data->n_pixels && !interrupted; p++)
+    int p;
+    int last_i = -1;
+    int n_images = 0;
+
+    for (p = 0; p < data->n_pixels && !interrupted; p++)
     {
         Int2D pixel = data->pixels[p].xy;
         int i = data->pixels[p].i;
+
+        if (i != last_i) {
+            n_images++;
+            last_i = i;
+        }
+
         int64_t image_idx = (int64_t)i * ctx->width * ctx->height;
 
         half* depth_image = &ctx->depth_images[image_idx];
@@ -337,12 +413,18 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             }
         }
     }
+
+    state->n_pixels_accumulated += p;
+    state->n_images_accumulated += n_images;
 }
 
 static void*
 worker_thread_cb(void* userdata)
 {
-    struct gm_rdt_context_impl* ctx = (struct gm_rdt_context_impl *)userdata;
+    struct thread_state *state = (struct thread_state *)userdata;
+    struct gm_rdt_context_impl* ctx = state->ctx;
+
+    uint64_t run_start = get_time();
 
     // Histogram for the node being processed
     int node_histogram[ctx->n_labels];
@@ -361,6 +443,8 @@ worker_thread_cb(void* userdata)
         struct result result = {};
         NodeTrainData *node_data = NULL;
 
+        uint64_t idle_start = get_time();
+
         pthread_mutex_lock(&ctx->work_queue_lock);
         if (!ctx->work_queue.empty()) {
             work = ctx->work_queue.front();
@@ -377,6 +461,9 @@ worker_thread_cb(void* userdata)
         }
         pthread_mutex_unlock(&ctx->work_queue_lock);
 
+        uint64_t idle_end = get_time();
+        state->idle_duration += (idle_end - idle_start);
+
         if (interrupted)
             break;
 
@@ -391,11 +478,15 @@ worker_thread_cb(void* userdata)
                                  ctx->n_thresholds * 2);
 
         // Accumulate histograms
+        uint64_t accu_start = get_time();
         accumulate_uvt_lr_histograms(ctx,
+                                     state,
                                      node_data,
                                      work.uv_start, work.uv_end,
                                      node_histogram,
                                      uvt_lr_histograms.data());
+        uint64_t accu_end = get_time();
+        state->accumulation_time += accu_end - accu_start;
 
         // Calculate the normalised label histogram and get the number of pixels
         // and the number of labels in the root histogram.
@@ -409,6 +500,8 @@ worker_thread_cb(void* userdata)
         // If there's only 1 label, skip all this, gain is zero
         if (root_n_pixels[1] > 1 && node_data->depth < ctx->max_depth - 1)
         {
+            uint64_t rank_start = get_time();
+
             // Calculate the shannon entropy for the normalised label histogram
             float entropy = calculate_shannon_entropy(result.nhistogram,
                                                       ctx->n_labels);
@@ -453,13 +546,21 @@ worker_thread_cb(void* userdata)
                     }
                 }
             }
+            uint64_t rank_end = get_time();
+            state->gain_ranking_time += rank_end - rank_start;
         }
+
+        uint64_t work_end = get_time();
+        result.duration = work_end - idle_end;
+        state->run_duration = work_end - run_start;
 
         pthread_mutex_lock(&ctx->results_lock);
         ctx->results.push_back(result);
         pthread_cond_signal(&ctx->results_changed);
         pthread_mutex_unlock(&ctx->results_lock);
     }
+
+    state->run_duration = get_time() - run_start;
 
     return NULL;
 }
@@ -810,6 +911,46 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     return true;
 }
 
+static void
+maybe_log_thread_metrics(struct gm_rdt_context_impl *ctx,
+                         struct thread_state *state,
+                         uint64_t current_time)
+{
+    if (current_time - state->last_metrics_log < 1000000000)
+        return;
+
+    double idle_percent = ((double)state->idle_duration /
+        state->run_duration) * 100.0;
+    double accu_percent = ((double)state->accumulation_time /
+        state->run_duration) * 100.0;
+    double rank_percent = ((double)state->gain_ranking_time /
+        state->run_duration) * 100.0;
+
+    double run_time_sec = state->run_duration / 1e9;
+    double images_per_sec = (double)state->n_images_accumulated /
+        run_time_sec;
+    double px_per_sec = (double)state->n_pixels_accumulated /
+        run_time_sec;
+
+    gm_info(ctx->log, "%02d: over %.2f%s: idle %.4f%%, acc %.2f%% (%6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %.2f%%",
+            state->idx,
+            get_format_duration(state->run_duration),
+            get_format_duration_suffix(state->run_duration),
+
+            idle_percent,
+            accu_percent,
+
+            (int)images_per_sec,
+            (int)px_per_sec,
+            (int)px_per_sec * ctx->n_uv,
+            (int)px_per_sec * ctx->n_thresholds,
+
+            rank_percent
+            );
+
+    state->last_metrics_log = current_time;
+}
+
 bool
 gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 {
@@ -876,10 +1017,15 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     }
 
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
-    pthread_t threads[n_threads];
+    ctx->thread_pool.resize(n_threads);
     for (int i = 0; i < n_threads; i++)
     {
-        if (pthread_create(&threads[i], NULL, worker_thread_cb, (void*)ctx) != 0)
+        struct thread_state *state = &ctx->thread_pool[i];
+        state->idx = i;
+        state->ctx = ctx;
+
+        if (pthread_create(&state->thread, NULL,
+                           worker_thread_cb, (void*)state) != 0)
         {
             gm_throw(ctx->log, err, "Error creating thread\n");
             return false;
@@ -1027,6 +1173,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     signal(SIGINT, sigint_handler);
     clock_gettime(CLOCK_MONOTONIC, &begin);
     last = begin;
+    uint64_t last_metrics = get_time();
     int last_depth = INT_MAX;
     while (ctx->train_queue.size())
     {
@@ -1080,6 +1227,15 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         if (interrupted) {
             gm_warn(ctx->log, "Stopping training due to user-triggered interrupt");
             break;
+        }
+
+        uint64_t current = get_time();
+        if (current - last_metrics > 1000000000) {
+            for (int i = 0; i < ctx->n_threads; i++) {
+                struct thread_state *state = &ctx->thread_pool[i];
+                maybe_log_thread_metrics(ctx, state, current);
+            }
+            last_metrics = current;
         }
 
         // See which thread got the best uvt combination
@@ -1182,10 +1338,13 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     pthread_cond_broadcast(&ctx->work_queue_changed);
     for (int i = 0; i < n_threads; i++)
     {
-        if (pthread_join(threads[i], NULL) != 0)
+        struct thread_state *state = &ctx->thread_pool[i];
+
+        if (pthread_join(state->thread, NULL) != 0)
         {
             gm_error(ctx->log, "Error joining thread, trying to continue...\n");
         }
+        maybe_log_thread_metrics(ctx, state, get_time());
     }
 
     // Free memory that isn't needed anymore
