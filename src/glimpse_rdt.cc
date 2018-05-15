@@ -102,7 +102,7 @@ struct thread_state {
 struct gm_rdt_context_impl {
     struct gm_logger* log;
 
-    bool     reload;        // Reload and continue training with pre-existing tree
+    char*    reload;        // Reload and continue training with pre-existing tree
     bool     verbose;       // Verbose logging
     int      seed;          // Seed for RNG
 
@@ -662,13 +662,12 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.string_state.ptr = &ctx->out_filename;
     ctx->properties.push_back(prop);
 
-    ctx->reload = false;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "reload";
-    prop.desc = "Reload and continue training pre-existing tree";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->reload;
+    prop.desc = "Filename of pre-existing tree to reload";
+    prop.type = GM_PROPERTY_STRING;
+    prop.string_state.ptr = &ctx->reload;
     ctx->properties.push_back(prop);
 
     ctx->n_pixels = 2000;
@@ -1050,22 +1049,28 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
     // If asked to reload then try to load the partial tree and repopulate the
     // training queue and tree histogram list
-    RDTree* checkpoint;
-    if (ctx->reload && (checkpoint = read_tree(out_filename)))
+    RDTree* checkpoint = NULL;
+    if (ctx->reload) {
+        gm_info(ctx->log, "Reloading %s...\n", ctx->reload);
+        checkpoint = read_tree(ctx->reload);
+        if (!checkpoint)
+            checkpoint = read_json_tree(ctx->reload);
+    }
+    if (checkpoint)
     {
-        gm_info(ctx->log, "Restoring checkpoint...\n");
-
         // Do some basic validation
         if (checkpoint->header.n_labels != ctx->n_labels)
         {
-            gm_throw(ctx->log, err, "Checkpoint has %d labels, expected %d\n",
+            gm_throw(ctx->log, err, "%s has %d labels, expected %d\n",
+                     ctx->reload,
                      (int)checkpoint->header.n_labels, ctx->n_labels);
             return false;
         }
 
         if (fabs(checkpoint->header.fov - ctx->fov) > 1e-6)
         {
-            gm_throw(ctx->log, err, "Checkpoint has FOV %.2f, expected %.2f\n",
+            gm_throw(ctx->log, err, "%s has FOV %.2f, expected %.2f\n",
+                     ctx->reload,
                      checkpoint->header.fov, ctx->fov);
             return false;
         }
@@ -1073,7 +1078,8 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         if (checkpoint->header.depth > ctx->max_depth)
         {
             gm_throw(ctx->log, err,
-                     "Can't train with a lower depth than checkpoint (%d < %d)\n",
+                     "Can't train with a lower depth than %s (%d < %d)\n",
+                     ctx->reload,
                      ctx->max_depth, (int)checkpoint->header.depth);
             return false;
         }
