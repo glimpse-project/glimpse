@@ -42,7 +42,6 @@
 #include "half.hpp"
 
 #include "xalloc.h"
-#include "llist.h"
 #include "utils.h"
 #include "loader.h"
 #include "train_utils.h"
@@ -134,6 +133,8 @@ struct gm_rdt_context_impl {
     pthread_mutex_t         results_lock;
     pthread_cond_t          results_changed;
     std::vector<result>     results;
+
+    std::vector<float>  tree_histograms; // label histograms in node->id order
 };
 
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
@@ -507,13 +508,6 @@ collect_pixels(struct gm_rdt_context_impl* ctx,
     }
 }
 
-static bool
-list_free_cb(LList* node, uint32_t index, void* userdata)
-{
-    xfree(node->data);
-    return true;
-}
-
 void
 sigint_handler(int signum)
 {
@@ -768,7 +762,7 @@ recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
 static bool
 save_tree_json(struct gm_rdt_context_impl *ctx,
                Node* tree,
-               LList* tree_histograms,
+               std::vector<float> &tree_histograms,
                const char* filename)
 {
     RDTHeader header = {
@@ -779,14 +773,9 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
         (uint8_t)ctx->bg_label,
         ctx->fov
     };
-    RDTree rdtree = { header, tree, llist_length(tree_histograms), NULL };
-    rdtree.label_pr_tables = (float*)
-        xmalloc(ctx->n_labels * rdtree.n_pr_tables * sizeof(float));
-    float* pr_table = rdtree.label_pr_tables;
-    for (LList* l = tree_histograms; l; l = l->next, pr_table += ctx->n_labels)
-    {
-        memcpy(pr_table, l->data, sizeof(float) * ctx->n_labels);
-    }
+    int n_histograms = tree_histograms.size() / ctx->n_labels;
+    RDTree rdtree = { header, tree, (uint32_t)n_histograms, NULL };
+    rdtree.label_pr_tables = tree_histograms.data();
 
     JSON_Value *root = json_value_init_object();
 
@@ -813,7 +802,6 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     json_object_set_number(json_object(root), "bg_label", ctx->bg_label);
 
     JSON_Value *nodes = recursive_build_tree(&rdtree, tree, 0, 0);
-    xfree(rdtree.label_pr_tables);
 
     json_object_set_value(json_object(root), "root", nodes);
 
@@ -920,10 +908,6 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
     ctx->train_queue.push(root_node);
 
-    // Initialise histogram count
-    int n_histograms = 0;
-    LList* tree_histograms = NULL;
-
     // If asked to reload then try to load the partial tree and repopulate the
     // training queue and tree histogram list
     RDTree* checkpoint;
@@ -977,11 +961,9 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             {
                 float* pr_table = &checkpoint->
                     label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
-                float* pr_copy = (float*)xmalloc(ctx->n_labels * sizeof(float));
-                memcpy(pr_copy, pr_table, ctx->n_labels * sizeof(float));
-                tree_histograms = llist_insert_after(tree_histograms,
-                                                     llist_new(pr_copy));
-                ++n_histograms;
+                int len = ctx->tree_histograms.size();
+                ctx->tree_histograms.resize(len + ctx->n_labels);
+                memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_labels * sizeof(float));
             }
 
             // Check if the node is either marked as incomplete, or it sits on
@@ -1183,11 +1165,11 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
                 }
             }
 
-            node->label_pr_idx = ++n_histograms;
-            float* node_histogram = (float*)xmalloc(ctx->n_labels * sizeof(float));
-            memcpy(node_histogram, nhistogram, ctx->n_labels * sizeof(float));
-            tree_histograms = llist_insert_after(tree_histograms,
-                                                 llist_new(node_histogram));
+            // NB: 0 is reserved for non-leaf nodes
+            node->label_pr_idx = (ctx->tree_histograms.size() / ctx->n_labels) + 1;
+            int len = ctx->tree_histograms.size();
+            ctx->tree_histograms.resize(len + ctx->n_labels);
+            memcpy(&ctx->tree_histograms[len], nhistogram, ctx->n_labels * sizeof(float));
         }
 
         // We no longer need the node's pixel data
@@ -1218,9 +1200,6 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     xfree(ctx->label_images);
     xfree(ctx->depth_images);
 
-    // Restore tree histograms list pointer
-    tree_histograms = llist_first(tree_histograms);
-
     // Write to file
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);
@@ -1232,11 +1211,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             since_last.hours, since_last.minutes, since_last.seconds,
             out_filename);
 
-    save_tree_json(ctx, tree, tree_histograms, out_filename);
+    save_tree_json(ctx, tree, ctx->tree_histograms, out_filename);
 
     // Free the last data
     xfree(tree);
-    llist_free(tree_histograms, list_free_cb, NULL);
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);
