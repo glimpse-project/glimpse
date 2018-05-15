@@ -85,6 +85,8 @@ struct gm_rdt_context_impl {
     int      n_thresholds;  // The number of thresholds
     float    threshold_range;       // Range of thresholds to test
     int      max_depth;     // Maximum depth to train to
+    int      max_nodes;     // Maximum number of nodes to train - used for debug
+                            // and testing to trigger an early exit.
     int      n_pixels;      // Number of pixels to sample
     UVPair*  uvs;           // A list of uv pairs to test
     float*   thresholds;    // A list of thresholds to test
@@ -95,6 +97,8 @@ struct gm_rdt_context_impl {
     // trying to learn how to classify the background and we avoid picking
     // sampling points outside the body.
     int      bg_label;
+
+    int      n_nodes;       // The number of nodes trained so far
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -637,6 +641,17 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = 30;
     ctx->properties.push_back(prop);
 
+    ctx->max_nodes = 0;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "max_nodes";
+    prop.desc = "Maximum number of nodes to train (for debug)";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->max_nodes;
+    prop.int_state.min = 0;
+    prop.int_state.max = INT_MAX;
+    ctx->properties.push_back(prop);
+
     ctx->seed = 0;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -1156,6 +1171,11 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         // We no longer need the train data, free it
         destroy_node_train_data(node_data);
+
+        ctx->n_nodes++;
+        if (ctx->max_nodes && ctx->n_nodes > ctx->max_nodes) {
+            interrupted = true;
+        }
     }
 
     // Signal threads to free memory and quit
