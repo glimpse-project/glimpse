@@ -1190,9 +1190,13 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
     // Free memory that isn't needed anymore
     xfree(ctx->uvs);
+    ctx->uvs = NULL;
     xfree(ctx->thresholds);
+    ctx->thresholds = NULL;
     xfree(ctx->label_images);
+    ctx->label_images = NULL;
     xfree(ctx->depth_images);
+    ctx->depth_images = NULL;
 
     // Write to file
     clock_gettime(CLOCK_MONOTONIC, &now);
