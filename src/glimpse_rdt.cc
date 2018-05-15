@@ -118,7 +118,7 @@ struct gm_rdt_context_impl {
     // sampling points outside the body.
     int      bg_label;
 
-    int      n_nodes;       // The number of nodes trained so far
+    int      n_nodes_trained;   // The number of nodes trained so far
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -1175,8 +1175,8 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         // We no longer need the node's pixel data
         xfree(node_data.pixels);
 
-        ctx->n_nodes++;
-        if (ctx->max_nodes && ctx->n_nodes > ctx->max_nodes) {
+        ctx->n_nodes_trained++;
+        if (ctx->max_nodes && ctx->n_nodes_trained > ctx->max_nodes) {
             if (ctx->verbose)
                 gm_debug(ctx->log, "Maximum number of nodes reached");
             interrupted = true;
