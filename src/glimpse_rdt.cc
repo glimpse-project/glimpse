@@ -120,9 +120,6 @@ struct gm_rdt_context_impl {
 
     int      n_nodes_trained;   // The number of nodes trained so far
 
-    struct gm_ui_properties properties_state;
-    std::vector<struct gm_ui_property> properties;
-
     std::queue<NodeTrainData> train_queue;
 
     // Queue of work for thread pool
@@ -130,11 +127,18 @@ struct gm_rdt_context_impl {
     pthread_cond_t      work_queue_changed;
     std::queue<work>    work_queue;
 
-    pthread_mutex_t         results_lock;
-    pthread_cond_t          results_changed;
-    std::vector<result>     results;
+    // Results computed by the worker threads
+    pthread_mutex_t     results_lock;
+    pthread_cond_t      results_changed;
+    std::vector<result> results;
 
-    std::vector<float>  tree_histograms; // label histograms in node->id order
+    std::vector<Node>   tree; // The decision tree being built
+    std::vector<float>  tree_histograms; // label histograms for leaf nodes
+                                         // in node->id order
+
+
+    struct gm_ui_properties properties_state;
+    std::vector<struct gm_ui_property> properties;
 };
 
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
@@ -689,7 +693,10 @@ gm_rdt_context_destroy(struct gm_rdt_context *_ctx)
 }
 
 static JSON_Value*
-recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
+recursive_build_tree(struct gm_rdt_context_impl* ctx,
+                     Node* node,
+                     int depth,
+                     int id)
 {
     JSON_Value* json_node_val = json_value_init_object();
     JSON_Object* json_node = json_object(json_node_val);
@@ -710,7 +717,7 @@ recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
         json_array_append_number(v, node->uv[3]);
         json_object_set_value(json_node, "v", v_val);
 
-        if (depth < (tree->header.depth - 1))
+        if (depth < (ctx->max_depth - 1))
         {
             /* NB: The nodes in .rdt files are in a packed array arranged in
              * breadth-first, left then right child order with the root node at
@@ -721,14 +728,14 @@ recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
              * 2 * id + 2 is the index for the right child...
              */
             int left_id = id * 2 + 1;
-            Node* left_node = tree->nodes + left_id;
+            Node* left_node = &ctx->tree[left_id];
             int right_id = id * 2 + 2;
-            Node* right_node = tree->nodes + right_id;
+            Node* right_node = &ctx->tree[right_id];
 
-            JSON_Value* left_json = recursive_build_tree(tree, left_node,
+            JSON_Value* left_json = recursive_build_tree(ctx, left_node,
                                                          depth + 1, left_id);
             json_object_set_value(json_node, "l", left_json);
-            JSON_Value* right_json = recursive_build_tree(tree, right_node,
+            JSON_Value* right_json = recursive_build_tree(ctx, right_node,
                                                           depth + 1, right_id);
             json_object_set_value(json_node, "r", right_json);
         }
@@ -741,10 +748,10 @@ recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
         /* NB: node->label_pr_idx is a base-one index since index zero is
          * reserved to indicate that the node is not a leaf node
          */
-        float* pr_table = &tree->label_pr_tables[(node->label_pr_idx - 1) *
-            tree->header.n_labels];
+        float* pr_table = &ctx->tree_histograms[(node->label_pr_idx - 1) *
+            ctx->n_labels];
 
-        for (int i = 0; i < tree->header.n_labels; i++)
+        for (int i = 0; i < ctx->n_labels; i++)
         {
             json_array_append_number(probs, pr_table[i]);
         }
@@ -761,22 +768,10 @@ recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
  */
 static bool
 save_tree_json(struct gm_rdt_context_impl *ctx,
-               Node* tree,
+               std::vector<Node> &tree,
                std::vector<float> &tree_histograms,
                const char* filename)
 {
-    RDTHeader header = {
-        { 'R', 'D', 'T' },
-        RDT_VERSION,
-        (uint8_t)ctx->max_depth,
-        (uint8_t)ctx->n_labels,
-        (uint8_t)ctx->bg_label,
-        ctx->fov
-    };
-    int n_histograms = tree_histograms.size() / ctx->n_labels;
-    RDTree rdtree = { header, tree, (uint32_t)n_histograms, NULL };
-    rdtree.label_pr_tables = tree_histograms.data();
-
     JSON_Value *root = json_value_init_object();
 
     JSON_Value *meta_val = json_value_init_object();
@@ -801,7 +796,7 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     json_object_set_number(json_object(root), "n_labels", ctx->n_labels);
     json_object_set_number(json_object(root), "bg_label", ctx->bg_label);
 
-    JSON_Value *nodes = recursive_build_tree(&rdtree, tree, 0, 0);
+    JSON_Value *nodes = recursive_build_tree(ctx, &tree[0], 0, 0);
 
     json_object_set_value(json_object(root), "root", nodes);
 
@@ -892,8 +887,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     }
 
     // Allocate memory to store the decision tree.
-    int n_nodes = roundf(powf(2.f, ctx->max_depth)) - 1;
-    Node* tree = (Node*)xcalloc(n_nodes, sizeof(Node));
+    ctx->tree.resize(roundf(powf(2.f, ctx->max_depth)) - 1);
 
     // Create the randomized sample points across all images that the decision
     // tree is going to learn to classify, and associate with a root node...
@@ -940,7 +934,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         // Restore nodes
         int n_checkpoint_nodes = roundf(powf(2.f, checkpoint->header.depth)) - 1;
-        memcpy(tree, checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
+        memcpy(ctx->tree.data(), checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
 
         // Navigate the tree to determine any unfinished nodes and the last
         // trained depth
@@ -951,7 +945,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         {
             NodeTrainData node_data = checkpoint_queue.front();
             checkpoint_queue.pop();
-            Node* node = &tree[node_data.id];
+            Node* node = &ctx->tree[node_data.id];
 
             // Check if the node has a valid probability table and copy it to
             // the list if so. Given the order in which we iterate over the tree,
@@ -1024,8 +1018,8 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     else
     {
         // Mark nodes in tree as unfinished, for checkpoint restoration
-        for (int i = 0; i < n_nodes; i++) {
-            tree[i].label_pr_idx = INT_MAX;
+        for (int i = 0; i < (int)ctx->tree.size(); i++) {
+            ctx->tree[i].label_pr_idx = INT_MAX;
         }
     }
 
@@ -1102,7 +1096,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         // Add this node to the tree and possible add left/ride nodes to the
         // training queue.
-        Node* node = &tree[node_data.id];
+        Node* node = &ctx->tree[node_data.id];
         if (best_gain > 0.f && (node_data.depth + 1) < ctx->max_depth)
         {
             node->uv = ctx->uvs[best_uv];
@@ -1211,10 +1205,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             since_last.hours, since_last.minutes, since_last.seconds,
             out_filename);
 
-    save_tree_json(ctx, tree, ctx->tree_histograms, out_filename);
-
-    // Free the last data
-    xfree(tree);
+    save_tree_json(ctx,
+                   ctx->tree,
+                   ctx->tree_histograms,
+                   out_filename);
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);
