@@ -124,6 +124,8 @@ struct gm_rdt_context_impl {
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 
+    std::queue<NodeTrainData> train_queue;
+
     // Queue of work for thread pool
     pthread_mutex_t     work_queue_lock;
     pthread_cond_t      work_queue_changed;
@@ -216,27 +218,6 @@ generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
 
     *total_count = n_pixels;
     return pixels;
-}
-
-static NodeTrainData*
-create_node_train_data(struct gm_rdt_context_impl* ctx, int id, int depth,
-                       int n_pixels, Int3D* pixels)
-{
-    NodeTrainData* data = (NodeTrainData*)xcalloc(1, sizeof(NodeTrainData));
-
-    data->id = id;
-    data->depth = depth;
-    data->pixels = pixels;
-    data->n_pixels = n_pixels;
-
-    return data;
-}
-
-static void
-destroy_node_train_data(NodeTrainData* data)
-{
-    xfree(data->pixels);
-    xfree(data);
 }
 
 static inline Int2D
@@ -911,7 +892,6 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             (i * ctx->threshold_range / (float)(ctx->n_thresholds - 1));
     }
 
-    NodeTrainData* node_data = NULL;
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
     pthread_t threads[n_threads];
     for (int i = 0; i < n_threads; i++)
@@ -928,18 +908,17 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     Node* tree = (Node*)xcalloc(n_nodes, sizeof(Node));
 
     // Create the randomized sample points across all images that the decision
-    // tree is going to learn to classify.
+    // tree is going to learn to classify, and associate with a root node...
     //
-    // The training recursively splits this vector at each node of the tree,
+    // The training recursively splits the pixels at each node of the tree,
     // either terminating when a branch runs out of pixels to differentiate
     // or after reaching the maximum training depth.
-    int total_pixel_count = 0;
-    Int3D *all_pixels = generate_randomized_sample_points(ctx, &total_pixel_count);
-
-    // Initialise root node training data and add it to the queue
-    LList* train_queue = llist_new(create_node_train_data(ctx, 0, 0,
-                                                          total_pixel_count,
-                                                          all_pixels));
+    //
+    NodeTrainData root_node;
+    root_node.id = 0;
+    root_node.depth = 0;
+    root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
+    ctx->train_queue.push(root_node);
 
     // Initialise histogram count
     int n_histograms = 0;
@@ -981,13 +960,14 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         // Navigate the tree to determine any unfinished nodes and the last
         // trained depth
-        LList* checkpoint_queue = train_queue;
-        train_queue = NULL;
-        while (checkpoint_queue)
+        std::queue<NodeTrainData> checkpoint_queue;
+        checkpoint_queue.swap(ctx->train_queue);
+
+        while (checkpoint_queue.size())
         {
-            NodeTrainData* data = (NodeTrainData*)
-                llist_pop(&checkpoint_queue, NULL, NULL);
-            Node* node = &tree[data->id];
+            NodeTrainData node_data = checkpoint_queue.front();
+            checkpoint_queue.pop();
+            Node* node = &tree[node_data.id];
 
             // Check if the node has a valid probability table and copy it to
             // the list if so. Given the order in which we iterate over the tree,
@@ -1007,49 +987,53 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             // Check if the node is either marked as incomplete, or it sits on
             // the last depth of the tree and we're trying to train deeper.
             if (node->label_pr_idx == INT_MAX ||
-                (data->depth == (checkpoint->header.depth - 1) &&
+                (node_data.depth == (checkpoint->header.depth - 1) &&
                  ctx->max_depth > checkpoint->header.depth))
             {
                 // This node is referenced and incomplete, add it to the training
                 // queue.
-                train_queue ?
-                    llist_insert_after(train_queue, llist_new(data)) :
-                    train_queue = llist_new(data);
-                continue;
+                ctx->train_queue.push(node_data);
+            } else {
+                // If the node isn't a leaf-node, calculate which pixels should go
+                // to the next two nodes and add them to the checkpoint queue
+                if (node->label_pr_idx == 0)
+                {
+                    Int3D* l_pixels;
+                    Int3D* r_pixels;
+                    int n_lr_pixels[] = { 0, 0 };
+                    collect_pixels(ctx, &node_data,
+                                   node->uv, node->t,
+                                   &l_pixels, &r_pixels,
+                                   n_lr_pixels);
+
+                    int id = (2 * node_data.id) + 1;
+                    int depth = node_data.depth + 1;
+
+                    NodeTrainData ldata;
+                    ldata.id = id;
+                    ldata.depth = depth;
+                    ldata.n_pixels = n_lr_pixels[0];
+                    ldata.pixels = l_pixels;
+
+                    NodeTrainData rdata;
+                    rdata.id = id + 1;
+                    rdata.depth = depth;
+                    rdata.n_pixels = n_lr_pixels[1];
+                    rdata.pixels = r_pixels;
+
+                    checkpoint_queue.push(ldata);
+                    checkpoint_queue.push(rdata);
+                }
+
+                // Since we didn't add the node to the training queue we
+                // no longer need the associated pixel data for this node...
+                xfree(node_data.pixels);
             }
-
-            // If the node isn't a leaf-node, calculate which pixels should go
-            // to the next two nodes and add them to the checkpoint queue
-            if (node->label_pr_idx == 0)
-            {
-                Int3D* l_pixels;
-                Int3D* r_pixels;
-                int n_lr_pixels[] = { 0, 0 };
-                collect_pixels(ctx, data, node->uv, node->t, &l_pixels, &r_pixels,
-                               n_lr_pixels);
-
-                int id = (2 * data->id) + 1;
-                int depth = data->depth + 1;
-                NodeTrainData* ldata = create_node_train_data(
-                    ctx, id, depth, n_lr_pixels[0], l_pixels);
-                NodeTrainData* rdata = create_node_train_data(
-                    ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
-
-                checkpoint_queue =
-                    llist_first(
-                        llist_insert_after(
-                            llist_insert_after(llist_last(checkpoint_queue),
-                                               llist_new(ldata)),
-                            llist_new(rdata)));
-            }
-
-            // Free the unused training data
-            destroy_node_train_data(data);
         }
 
         free_tree(checkpoint);
 
-        if (!train_queue)
+        if (!ctx->train_queue.size())
         {
             gm_throw(ctx->log, err, "Tree already fully trained.\n");
             return false;
@@ -1068,28 +1052,28 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     clock_gettime(CLOCK_MONOTONIC, &begin);
     last = begin;
     int last_depth = INT_MAX;
-    while (train_queue != NULL)
+    while (ctx->train_queue.size())
     {
         int best_uv = 0;
         int best_threshold = 0;
         int *n_lr_pixels = NULL;
         float best_gain = 0.0;
 
-        LList* current = train_queue;
-        node_data = (NodeTrainData*)current->data;
+        NodeTrainData node_data = ctx->train_queue.front();
+        ctx->train_queue.pop();
 
-        if (node_data->depth != last_depth)
+        if (node_data.depth != last_depth)
         {
             clock_gettime(CLOCK_MONOTONIC, &now);
             since_begin = get_time_for_display(&begin, &now);
             since_last = get_time_for_display(&last, &now);
             last = now;
-            last_depth = node_data->depth;
+            last_depth = node_data.depth;
             gm_info(ctx->log,
-                    "(%02d:%02d:%02d / %02d:%02d:%02d) Training depth %u (%u nodes)\n",
+                    "(%02d:%02d:%02d / %02d:%02d:%02d) Training depth %d (%d nodes)\n",
                     since_begin.hours, since_begin.minutes, since_begin.seconds,
                     since_last.hours, since_last.minutes, since_last.seconds,
-                    last_depth + 1, llist_length(train_queue));
+                    last_depth + 1, (int)ctx->train_queue.size());
         }
 
         /* XXX: note we don't need to take the work_queue_lock here since the
@@ -1103,7 +1087,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         int n_uvs_per_work = ctx->n_uv / n_threads;
         for (int i = 0; i < n_threads; i++) {
             struct work work;
-            work.node = node_data;
+            work.node = &node_data;
             work.uv_start = i * n_uvs_per_work;
             work.uv_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_uvs_per_work;
             ctx->work_queue.push(work);
@@ -1136,8 +1120,8 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         // Add this node to the tree and possible add left/ride nodes to the
         // training queue.
-        Node* node = &tree[node_data->id];
-        if (best_gain > 0.f && (node_data->depth + 1) < ctx->max_depth)
+        Node* node = &tree[node_data.id];
+        if (best_gain > 0.f && (node_data.depth + 1) < ctx->max_depth)
         {
             node->uv = ctx->uvs[best_uv];
             node->t = ctx->thresholds[best_threshold];
@@ -1149,7 +1133,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
                         "    U: (%f, %f)\n"
                         "    V: (%f, %f)\n"
                         "    T: %f\n",
-                        node_data->id, best_gain,
+                        node_data.id, best_gain,
                         node->uv[0], node->uv[1],
                         node->uv[2], node->uv[3],
                         node->t);
@@ -1158,20 +1142,25 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             Int3D* l_pixels;
             Int3D* r_pixels;
 
-            collect_pixels(ctx, node_data, node->uv, node->t,
+            collect_pixels(ctx, &node_data, node->uv, node->t,
                            &l_pixels, &r_pixels, n_lr_pixels);
 
-            int id = (2 * node_data->id) + 1;
-            int depth = node_data->depth + 1;
-            NodeTrainData* ldata = create_node_train_data(
-                ctx, id, depth, n_lr_pixels[0], l_pixels);
-            NodeTrainData* rdata = create_node_train_data(
-                ctx, id + 1, depth, n_lr_pixels[1], r_pixels);
+            int id = (2 * node_data.id) + 1;
+            int depth = node_data.depth + 1;
+            NodeTrainData ldata;
+            ldata.id = id;
+            ldata.depth = depth;
+            ldata.n_pixels = n_lr_pixels[0];
+            ldata.pixels = l_pixels;
 
-            // Insert nodes into the training queue
-            llist_insert_after(
-                llist_insert_after(llist_last(train_queue), llist_new(ldata)),
-                llist_new(rdata));
+            NodeTrainData rdata;
+            rdata.id = id + 1;
+            rdata.depth = depth;
+            rdata.n_pixels = n_lr_pixels[1];
+            rdata.pixels = r_pixels;
+
+            ctx->train_queue.push(ldata);
+            ctx->train_queue.push(rdata);
 
             // Mark the node as a continuing node
             node->label_pr_idx = 0;
@@ -1186,7 +1175,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
             if (ctx->verbose)
             {
-                gm_info(ctx->log, "  Leaf node (%d)\n", node_data->id);
+                gm_info(ctx->log, "  Leaf node (%d)\n", node_data.id);
                 for (int i = 0; i < ctx->n_labels; i++) {
                     if (nhistogram[i] > 0.f) {
                         gm_info(ctx->log, "    %02d - %f\n", i, nhistogram[i]);
@@ -1201,12 +1190,8 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
                                                  llist_new(node_histogram));
         }
 
-        // Remove this node from the queue
-        train_queue = train_queue->next;
-        llist_free(llist_remove(current), NULL, NULL);
-
-        // We no longer need the train data, free it
-        destroy_node_train_data(node_data);
+        // We no longer need the node's pixel data
+        xfree(node_data.pixels);
 
         ctx->n_nodes++;
         if (ctx->max_nodes && ctx->n_nodes > ctx->max_nodes) {
