@@ -769,13 +769,33 @@ recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
  * etc
  */
 static bool
-save_tree_json(RDTree* tree, const char* filename, bool pretty)
+save_tree_json(struct gm_rdt_context_impl *ctx,
+               Node* tree,
+               LList* tree_histograms,
+               const char* filename)
 {
+    RDTHeader header = {
+        { 'R', 'D', 'T' },
+        RDT_VERSION,
+        (uint8_t)ctx->max_depth,
+        (uint8_t)ctx->n_labels,
+        (uint8_t)ctx->bg_label,
+        ctx->fov
+    };
+    RDTree rdtree = { header, tree, llist_length(tree_histograms), NULL };
+    rdtree.label_pr_tables = (float*)
+        xmalloc(ctx->n_labels * rdtree.n_pr_tables * sizeof(float));
+    float* pr_table = rdtree.label_pr_tables;
+    for (LList* l = tree_histograms; l; l = l->next, pr_table += ctx->n_labels)
+    {
+        memcpy(pr_table, l->data, sizeof(float) * ctx->n_labels);
+    }
+
     JSON_Value *root = json_value_init_object();
 
-    json_object_set_number(json_object(root), "_rdt_version_was", tree->header.version);
-    json_object_set_number(json_object(root), "depth", tree->header.depth);
-    json_object_set_number(json_object(root), "vertical_fov", tree->header.fov);
+    json_object_set_number(json_object(root), "_rdt_version_was", RDT_VERSION);
+    json_object_set_number(json_object(root), "depth", ctx->max_depth);
+    json_object_set_number(json_object(root), "vertical_fov", ctx->fov);
 
     /* TODO: we could remove the background label
      *
@@ -788,17 +808,15 @@ save_tree_json(RDTree* tree, const char* filename, bool pretty)
      * probabilities for a background label, or perhaps assume the caller
      * knows to ignore background pixels.
      */
-    json_object_set_number(json_object(root), "n_labels", tree->header.n_labels);
-    json_object_set_number(json_object(root), "bg_label", tree->header.bg_label);
+    json_object_set_number(json_object(root), "n_labels", ctx->n_labels);
+    json_object_set_number(json_object(root), "bg_label", ctx->bg_label);
 
-    JSON_Value *nodes = recursive_build_tree(tree, tree->nodes, 0, 0);
+    JSON_Value *nodes = recursive_build_tree(&rdtree, tree, 0, 0);
+    xfree(rdtree.label_pr_tables);
 
     json_object_set_value(json_object(root), "root", nodes);
 
-    JSON_Status status = pretty ?
-        json_serialize_to_file_pretty(root, filename) :
-        json_serialize_to_file(root, filename);
-
+    JSON_Status status = json_serialize_to_file_pretty(root, filename);
     if (status != JSONSuccess)
     {
         fprintf(stderr, "Failed to serialize output to JSON\n");
@@ -1215,26 +1233,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             since_last.hours, since_last.minutes, since_last.seconds,
             out_filename);
 
-    RDTHeader header = {
-        { 'R', 'D', 'T' },
-        RDT_VERSION,
-        (uint8_t)ctx->max_depth,
-        (uint8_t)ctx->n_labels,
-        (uint8_t)ctx->bg_label,
-        ctx->fov
-    };
-    RDTree rdtree = { header, tree, llist_length(tree_histograms), NULL };
-    rdtree.label_pr_tables = (float*)
-        xmalloc(ctx->n_labels * rdtree.n_pr_tables * sizeof(float));
-    float* pr_table = rdtree.label_pr_tables;
-    for (LList* l = tree_histograms; l; l = l->next, pr_table += ctx->n_labels)
-    {
-        memcpy(pr_table, l->data, sizeof(float) * ctx->n_labels);
-    }
-
-    save_tree_json(&rdtree, out_filename, true);
-
-    xfree(rdtree.label_pr_tables);
+    save_tree_json(ctx, tree, tree_histograms, out_filename);
 
     // Free the last data
     xfree(tree);
