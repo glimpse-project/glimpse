@@ -34,10 +34,8 @@
 #include <math.h>
 #include <random>
 #include <thread>
+#include <queue>
 #include <pthread.h>
-#ifdef __APPLE__
-#include "pthread_barrier/pthread_barrier.h"
-#endif
 #include <time.h>
 #include <signal.h>
 
@@ -59,6 +57,29 @@
 using half_float::half;
 
 static bool interrupted = false;
+
+typedef struct {
+    int       id;              // Unique id to place the node a tree.
+    int       depth;           // Tree depth at which this node sits.
+    int       n_pixels;        // Number of pixels that have reached this node.
+    Int3D*    pixels;          // A list of pixel pairs and image indices.
+} NodeTrainData;
+
+/* Work submitted for the thread pool to process... */
+struct work {
+    NodeTrainData *node;
+    int            uv_start;
+    int            uv_end;
+};
+
+#define MAX_LABELS 40
+struct result {
+    float best_gain;
+    int best_uv;
+    int best_threshold;
+    int n_lr_pixels[2];
+    float nhistogram[MAX_LABELS];
+};
 
 struct gm_rdt_context_impl {
     struct gm_logger* log;
@@ -102,29 +123,16 @@ struct gm_rdt_context_impl {
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
+
+    // Queue of work for thread pool
+    pthread_mutex_t     work_queue_lock;
+    pthread_cond_t      work_queue_changed;
+    std::queue<work>    work_queue;
+
+    pthread_mutex_t         results_lock;
+    pthread_cond_t          results_changed;
+    std::vector<result>     results;
 };
-
-typedef struct {
-    int       id;              // Unique id to place the node a tree.
-    int       depth;           // Tree depth at which this node sits.
-    int       n_pixels;        // Number of pixels that have reached this node.
-    Int3D*    pixels;          // A list of pixel pairs and image indices.
-} NodeTrainData;
-
-typedef struct {
-    struct gm_rdt_context_impl* ctx;       // The context to use
-    NodeTrainData**    data;               // The node data to use and modify
-    int                uv_start;           // The uv combination to start on
-    int                uv_end;             // The uv combination to end on
-    float*             root_nhistogram;    // Normalised histogram of labels
-    float*             best_gain;          // Best gain achieved
-    int*               best_uv;            // Index of the best uv combination
-    int*               best_threshold;     // Index of the best threshold
-    int*               n_lr_pixels;        // Number of pixels in each branch
-    pthread_barrier_t* ready_barrier;      // Barrier to wait on to start work
-    pthread_barrier_t* finished_barrier;   // Barrier to wait on when finished
-} TrainThreadData;
-
 
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
  * of the example pose for that frame.
@@ -346,120 +354,128 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 }
 
 static void*
-thread_body(void* userdata)
+worker_thread_cb(void* userdata)
 {
-    TrainThreadData* data = (TrainThreadData*)userdata;
+    struct gm_rdt_context_impl* ctx = (struct gm_rdt_context_impl *)userdata;
 
     // Histogram for the node being processed
-    int* root_histogram = (int*)
-        malloc(data->ctx->n_labels * sizeof(int));
+    int node_histogram[ctx->n_labels];
 
     // Histograms for each uvt combination being tested
-    int* uvt_lr_histograms = (int*)
-        malloc(data->ctx->n_labels * (data->uv_end - data->uv_start) *
-               data->ctx->n_thresholds * 2 * sizeof(int));
+    std::vector<int> uvt_lr_histograms;
 
-    float* nhistogram = (float*)xmalloc(data->ctx->n_labels * sizeof(float));
-    float* root_nhistogram = data->root_nhistogram ? data->root_nhistogram :
-        (float*)xmalloc(data->ctx->n_labels * sizeof(float));
+    // We don't expect to be asked to process more than this many uvt
+    // combos at a time so we can allocate the memory up front...
+    int max_uvt_combos_per_thread = (ctx->n_uv + ctx->n_threads/2) / ctx->n_threads;
+    uvt_lr_histograms.reserve(max_uvt_combos_per_thread);
 
     while (1)
     {
-        // Wait for everything to be ready to start processing
-        pthread_barrier_wait(data->ready_barrier);
+        struct work work;
+        struct result result = {};
+        NodeTrainData *node_data = NULL;
 
-        // Quit out if we've nothing left to process or we've been interrupted
-        if (!(*data->data) || interrupted)
-        {
-            break;
+        pthread_mutex_lock(&ctx->work_queue_lock);
+        if (!ctx->work_queue.empty()) {
+            work = ctx->work_queue.front();
+            ctx->work_queue.pop();
+        } else {
+            while (!interrupted) {
+                pthread_cond_wait(&ctx->work_queue_changed, &ctx->work_queue_lock);
+                if (!ctx->work_queue.empty()) {
+                    work = ctx->work_queue.front();
+                    ctx->work_queue.pop();
+                    break;
+                }
+            }
         }
+        pthread_mutex_unlock(&ctx->work_queue_lock);
+
+        if (interrupted)
+            break;
+
+        gm_assert(ctx->log, work.node != NULL, "Spurious NULL work node");
+        node_data = work.node;
 
         // Clear histogram accumulators
-        memset(root_histogram, 0, data->ctx->n_labels * sizeof(int));
-        memset(uvt_lr_histograms, 0, data->ctx->n_labels *
-               (data->uv_end - data->uv_start) * data->ctx->n_thresholds * 2 *
-               sizeof(int));
+        memset(node_histogram, 0, sizeof(node_histogram));
+        uvt_lr_histograms.clear();
+        uvt_lr_histograms.resize(ctx->n_labels *
+                                 (work.uv_end - work.uv_start) *
+                                 ctx->n_thresholds * 2);
 
         // Accumulate histograms
-        accumulate_uvt_lr_histograms(data->ctx,
-                                     *data->data,
-                                     data->uv_start, data->uv_end,
-                                     root_histogram,
-                                     uvt_lr_histograms);
+        accumulate_uvt_lr_histograms(ctx,
+                                     node_data,
+                                     work.uv_start, work.uv_end,
+                                     node_histogram,
+                                     uvt_lr_histograms.data());
 
         // Calculate the normalised label histogram and get the number of pixels
         // and the number of labels in the root histogram.
-        Int2D root_n_pixels = normalize_histogram(root_histogram,
-                                                  data->ctx->n_labels,
-                                                  root_nhistogram);
+        Int2D root_n_pixels = normalize_histogram(node_histogram,
+                                                  ctx->n_labels,
+                                                  result.nhistogram);
 
         // Determine the best u,v,t combination
-        *data->best_gain = 0.f;
+        result.best_gain = 0.f;
 
         // If there's only 1 label, skip all this, gain is zero
-        if (root_n_pixels[1] > 1 &&
-            (*data->data)->depth < data->ctx->max_depth - 1)
+        if (root_n_pixels[1] > 1 && node_data->depth < ctx->max_depth - 1)
         {
             // Calculate the shannon entropy for the normalised label histogram
-            float entropy = calculate_shannon_entropy(root_nhistogram,
-                                                      data->ctx->n_labels);
+            float entropy = calculate_shannon_entropy(result.nhistogram,
+                                                      ctx->n_labels);
 
             // Calculate the gain for each combination of u,v,t and store the best
-            for (int i = data->uv_start, lr_histo_base = 0;
-                 i < data->uv_end && !interrupted; i++)
+            for (int i = work.uv_start, lr_histo_base = 0;
+                 i < work.uv_end && !interrupted; i++)
             {
-                for (int j = 0; j < data->ctx->n_thresholds && !interrupted;
-                     j++, lr_histo_base += data->ctx->n_labels * 2)
+                for (int j = 0; j < ctx->n_thresholds && !interrupted;
+                     j++, lr_histo_base += ctx->n_labels * 2)
                 {
+                    float nhistogram[ctx->n_labels];
                     float l_entropy, r_entropy, gain;
 
                     Int2D l_n_pixels =
                         normalize_histogram(&uvt_lr_histograms[lr_histo_base],
-                                            data->ctx->n_labels, nhistogram);
+                                            ctx->n_labels, nhistogram);
                     if (l_n_pixels[0] == 0 || l_n_pixels[0] == root_n_pixels[0])
                     {
                         continue;
                     }
                     l_entropy = calculate_shannon_entropy(nhistogram,
-                                                          data->ctx->n_labels);
+                                                          ctx->n_labels);
 
                     Int2D r_n_pixels =
                         normalize_histogram(
-                            &uvt_lr_histograms[lr_histo_base + data->ctx->n_labels],
-                            data->ctx->n_labels, nhistogram);
+                            &uvt_lr_histograms[lr_histo_base + ctx->n_labels],
+                            ctx->n_labels, nhistogram);
                     r_entropy = calculate_shannon_entropy(nhistogram,
-                                                          data->ctx->n_labels);
+                                                          ctx->n_labels);
 
                     gain = calculate_gain(entropy, root_n_pixels[0],
                                           l_entropy, l_n_pixels[0],
                                           r_entropy, r_n_pixels[0]);
 
-                    if (gain > *data->best_gain)
-                    {
-                        *data->best_gain = gain;
-                        *data->best_uv = i;
-                        *data->best_threshold = j;
-                        data->n_lr_pixels[0] = l_n_pixels[0];
-                        data->n_lr_pixels[1] = r_n_pixels[0];
+                    if (gain > result.best_gain) {
+                        result.best_gain = gain;
+                        result.best_uv = i;
+                        result.best_threshold = j;
+                        result.n_lr_pixels[0] = l_n_pixels[0];
+                        result.n_lr_pixels[1] = r_n_pixels[0];
                     }
                 }
             }
         }
 
-        // Signal work is finished
-        pthread_barrier_wait(data->finished_barrier);
+        pthread_mutex_lock(&ctx->results_lock);
+        ctx->results.push_back(result);
+        pthread_cond_signal(&ctx->results_changed);
+        pthread_mutex_unlock(&ctx->results_lock);
     }
 
-    xfree(root_histogram);
-    xfree(uvt_lr_histograms);
-    if (!data->root_nhistogram)
-    {
-        xfree(root_nhistogram);
-    }
-    xfree(nhistogram);
-    xfree(data);
-
-    pthread_exit(NULL);
+    return NULL;
 }
 
 static void
@@ -793,7 +809,11 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
 
     JSON_Value *root = json_value_init_object();
 
-    json_object_set_number(json_object(root), "_rdt_version_was", RDT_VERSION);
+    JSON_Value *meta_val = json_value_init_object();
+    json_object_set_value(json_object(root), "meta", meta_val);
+
+    gm_props_to_json(ctx->log, &ctx->properties_state, meta_val);
+
     json_object_set_number(json_object(root), "depth", ctx->max_depth);
     json_object_set_number(json_object(root), "vertical_fov", ctx->fov);
 
@@ -864,6 +884,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         return false;
     }
 
+    gm_assert(ctx->log, ctx->n_labels <= MAX_LABELS,
+              "Can't handle training with more than %d labels",
+              MAX_LABELS);
+
     // Work out pixels per meter and adjust uv range accordingly
     float ppm = (ctx->height / 2.f) / tanf(ctx->fov / 2.f);
     ctx->uv_range *= ppm;
@@ -887,42 +911,12 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             (i * ctx->threshold_range / (float)(ctx->n_thresholds - 1));
     }
 
-    // Allocate memory for the normalised histogram of the currently training node
-    float* root_nhistogram = (float*)xmalloc(ctx->n_labels * sizeof(float));
-
     NodeTrainData* node_data = NULL;
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
-    pthread_barrier_t ready_barrier, finished_barrier;
-    if (pthread_barrier_init(&ready_barrier, NULL, n_threads + 1) != 0 ||
-        pthread_barrier_init(&finished_barrier, NULL, n_threads + 1) != 0)
-    {
-        gm_throw(ctx->log, err, "Error initialising thread barriers\n");
-        return false;
-    }
-    int n_uvs_per_thread = ctx->n_uv / n_threads;
-    float* best_gains = (float*)malloc(n_threads * sizeof(float));
-    int* best_uvs = (int*)malloc(n_threads * sizeof(int));
-    int* best_thresholds = (int*)malloc(n_threads * sizeof(int));
-    int* all_n_lr_pixels = (int*)malloc(n_threads * 2 * sizeof(int));
     pthread_t threads[n_threads];
     for (int i = 0; i < n_threads; i++)
     {
-        TrainThreadData* thread_data = (TrainThreadData*)
-            xmalloc(sizeof(TrainThreadData));
-        thread_data->ctx = ctx;
-        thread_data->data = &node_data;
-        thread_data->uv_start = i * n_uvs_per_thread;
-        thread_data->uv_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_uvs_per_thread;
-        thread_data->root_nhistogram = (i == 0) ? root_nhistogram : NULL;
-        thread_data->best_gain = &best_gains[i];
-        thread_data->best_uv = &best_uvs[i];
-        thread_data->best_threshold = &best_thresholds[i];
-        thread_data->n_lr_pixels = &all_n_lr_pixels[i * 2];
-        thread_data->ready_barrier = &ready_barrier;
-        thread_data->finished_barrier = &finished_barrier;
-
-        if (pthread_create(&threads[i], NULL, thread_body,
-                           (void*)thread_data) != 0)
+        if (pthread_create(&threads[i], NULL, worker_thread_cb, (void*)ctx) != 0)
         {
             gm_throw(ctx->log, err, "Error creating thread\n");
             return false;
@@ -1098,11 +1092,29 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
                     last_depth + 1, llist_length(train_queue));
         }
 
-        // Signal threads to start work
-        pthread_barrier_wait(&ready_barrier);
+        /* XXX: note we don't need to take the work_queue_lock here since the
+         * currently scheduling model implies there's no work being processed
+         * by any of the threads at this point...
+         */
 
-        // Wait for threads to finish
-        pthread_barrier_wait(&finished_barrier);
+        ctx->results.clear();
+        int n_pending_results = 0;
+
+        int n_uvs_per_work = ctx->n_uv / n_threads;
+        for (int i = 0; i < n_threads; i++) {
+            struct work work;
+            work.node = node_data;
+            work.uv_start = i * n_uvs_per_work;
+            work.uv_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_uvs_per_work;
+            ctx->work_queue.push(work);
+            n_pending_results++;
+        }
+        pthread_cond_broadcast(&ctx->work_queue_changed);
+
+        pthread_mutex_lock(&ctx->results_lock);
+        while (!interrupted && (int)ctx->results.size() < n_pending_results)
+            pthread_cond_wait(&ctx->results_changed, &ctx->results_lock);
+        pthread_mutex_unlock(&ctx->results_lock);
 
         // Quit if we've been interrupted
         if (interrupted) {
@@ -1111,14 +1123,14 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         }
 
         // See which thread got the best uvt combination
-        for (int i = 0; i < n_threads; i++)
-        {
-            if (best_gains[i] > best_gain)
+        for (int i = 0; i < (int)ctx->results.size(); i++) {
+            struct result *result = &ctx->results[i];
+            if (result->best_gain > best_gain)
             {
-                best_gain = best_gains[i];
-                best_uv = best_uvs[i];
-                best_threshold = best_thresholds[i];
-                n_lr_pixels = &all_n_lr_pixels[i * 2];
+                best_gain = result->best_gain;
+                best_uv = result->best_uv;
+                best_threshold = result->best_threshold;
+                n_lr_pixels = result->n_lr_pixels;
             }
         }
 
@@ -1166,19 +1178,25 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         }
         else
         {
+            /* Each result will include a normalized histogram of pixel labels
+             * for the last node that was processed. They should all be
+             * identical so we just refer to the first result...
+             */
+            float *nhistogram = ctx->results[0].nhistogram;
+
             if (ctx->verbose)
             {
                 gm_info(ctx->log, "  Leaf node (%d)\n", node_data->id);
                 for (int i = 0; i < ctx->n_labels; i++) {
-                    if (root_nhistogram[i] > 0.f) {
-                        gm_info(ctx->log, "    %02d - %f\n", i, root_nhistogram[i]);
+                    if (nhistogram[i] > 0.f) {
+                        gm_info(ctx->log, "    %02d - %f\n", i, nhistogram[i]);
                     }
                 }
             }
 
             node->label_pr_idx = ++n_histograms;
             float* node_histogram = (float*)xmalloc(ctx->n_labels * sizeof(float));
-            memcpy(node_histogram, root_nhistogram, ctx->n_labels * sizeof(float));
+            memcpy(node_histogram, nhistogram, ctx->n_labels * sizeof(float));
             tree_histograms = llist_insert_after(tree_histograms,
                                                  llist_new(node_histogram));
         }
@@ -1192,14 +1210,15 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         ctx->n_nodes++;
         if (ctx->max_nodes && ctx->n_nodes > ctx->max_nodes) {
+            if (ctx->verbose)
+                gm_debug(ctx->log, "Maximum number of nodes reached");
             interrupted = true;
         }
     }
 
     // Signal threads to free memory and quit
-    node_data = NULL;
-    pthread_barrier_wait(&ready_barrier);
-
+    interrupted = true;
+    pthread_cond_broadcast(&ctx->work_queue_changed);
     for (int i = 0; i < n_threads; i++)
     {
         if (pthread_join(threads[i], NULL) != 0)
@@ -1209,15 +1228,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     }
 
     // Free memory that isn't needed anymore
-    xfree(root_nhistogram);
     xfree(ctx->uvs);
     xfree(ctx->thresholds);
     xfree(ctx->label_images);
     xfree(ctx->depth_images);
-    xfree(best_gains);
-    xfree(best_uvs);
-    xfree(best_thresholds);
-    xfree(all_n_lr_pixels);
 
     // Restore tree histograms list pointer
     tree_histograms = llist_first(tree_histograms);
