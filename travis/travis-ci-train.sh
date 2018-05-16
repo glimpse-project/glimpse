@@ -67,7 +67,7 @@ JOBS=$(cat<<'EOF'
         "max_depth": 3,
         "n_pixels": 500,
         "n_thresholds": 25,
-        "n_uv": 500
+        "n_uvs": 500
     }
 ]
 EOF

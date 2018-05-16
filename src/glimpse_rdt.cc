@@ -119,7 +119,7 @@ struct gm_rdt_context_impl {
     uint8_t* label_images;  // Label images (row-major)
     half*    depth_images;  // Depth images (row-major)
 
-    int      n_uv;          // Number of combinations of u,v pairs
+    int      n_uvs;         // Number of combinations of u,v pairs
     float    uv_range;      // Range of u,v combinations to generate
     int      n_thresholds;  // The number of thresholds
     float    threshold_range;       // Range of thresholds to test
@@ -434,7 +434,7 @@ worker_thread_cb(void* userdata)
 
     // We don't expect to be asked to process more than this many uvt
     // combos at a time so we can allocate the memory up front...
-    int max_uvt_combos_per_thread = (ctx->n_uv + ctx->n_threads/2) / ctx->n_threads;
+    int max_uvt_combos_per_thread = (ctx->n_uvs + ctx->n_threads/2) / ctx->n_threads;
     uvt_lr_histograms.reserve(max_uvt_combos_per_thread);
 
     while (1)
@@ -703,13 +703,13 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.float_state.max = 10;
     ctx->properties.push_back(prop);
 
-    ctx->n_uv = 2000;
+    ctx->n_uvs = 2000;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "n_uv";
+    prop.name = "n_uvs";
     prop.desc = "Number of UV combinations to test";
     prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->n_uv;
+    prop.int_state.ptr = &ctx->n_uvs;
     prop.int_state.min = 1;
     prop.int_state.max = INT_MAX;
     ctx->properties.push_back(prop);
@@ -941,7 +941,7 @@ maybe_log_thread_metrics(struct gm_rdt_context_impl *ctx,
 
             (int)images_per_sec,
             (int)px_per_sec,
-            (int)px_per_sec * ctx->n_uv,
+            (int)px_per_sec * ctx->n_uvs,
             (int)px_per_sec * ctx->n_thresholds,
 
             rank_percent
@@ -998,12 +998,12 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
     // Calculate the u,v,t parameters that we're going to test
     gm_info(ctx->log, "Preparing training metadata...\n");
-    ctx->uvs = (UVPair*)xmalloc(ctx->n_uv * sizeof(UVPair));
+    ctx->uvs = (UVPair*)xmalloc(ctx->n_uvs * sizeof(UVPair));
     //std::random_device rd;
     std::mt19937 rng(ctx->seed);
     std::uniform_real_distribution<float> rand_uv(-ctx->uv_range / 2.f,
                                                   ctx->uv_range / 2.f);
-    for (int i = 0; i < ctx->n_uv; i++) {
+    for (int i = 0; i < ctx->n_uvs; i++) {
         ctx->uvs[i][0] = rand_uv(rng);
         ctx->uvs[i][1] = rand_uv(rng);
         ctx->uvs[i][2] = rand_uv(rng);
@@ -1215,12 +1215,12 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         ctx->results.clear();
         int n_pending_results = 0;
 
-        int n_uvs_per_work = ctx->n_uv / n_threads;
+        int n_uvs_per_work = ctx->n_uvs / n_threads;
         for (int i = 0; i < n_threads; i++) {
             struct work work;
             work.node = &node_data;
             work.uv_start = i * n_uvs_per_work;
-            work.uv_end = (i == n_threads - 1) ? ctx->n_uv : (i + 1) * n_uvs_per_work;
+            work.uv_end = (i == n_threads - 1) ? ctx->n_uvs : (i + 1) * n_uvs_per_work;
             ctx->work_queue.push(work);
             n_pending_results++;
         }
