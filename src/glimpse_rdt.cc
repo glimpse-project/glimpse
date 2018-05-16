@@ -439,7 +439,7 @@ worker_thread_cb(void* userdata)
 
     while (1)
     {
-        struct work work;
+        struct work work = {};
         struct result result = {};
         NodeTrainData *node_data = NULL;
 
