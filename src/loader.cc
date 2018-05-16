@@ -25,6 +25,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 
+#include <limits.h>
 #include <unistd.h>
 #include <string.h>
 #include <math.h>
@@ -124,6 +125,10 @@ unpack_json_tree(JSON_Object* jnode, Node* nodes, int node_index,
     JSON_Array* u = json_object_get_array(jnode, "u");
     JSON_Array* v = json_object_get_array(jnode, "v");
 
+    if (u == NULL || v == NULL) {
+        return;
+    }
+
     node->uv[0] = json_array_get_number(u, 0);
     node->uv[1] = json_array_get_number(u, 1);
     node->uv[2] = json_array_get_number(v, 0);
@@ -190,6 +195,13 @@ load_json_tree(uint8_t* json_tree_buf, int len)
     // Allocate tree structure
     int n_nodes = roundf(powf(2.f, tree->header.depth)) - 1;
     tree->nodes = (Node*)xmalloc(n_nodes * sizeof(Node));
+
+    /* In case we don't have a complete tree we need to initialize label_pr_idx
+     * to imply that the node has not been trained yet
+     */
+    for (int i = 0; i < n_nodes; i++)
+        tree->nodes[i].label_pr_idx = INT_MAX;
+
     tree->label_pr_tables = (float*)
         xmalloc(n_pr_tables * tree->header.n_labels * sizeof(float));
 
