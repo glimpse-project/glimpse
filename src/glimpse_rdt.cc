@@ -81,6 +81,19 @@ struct result {
     uint64_t duration;
 };
 
+struct thread_metrics {
+    uint64_t duration;
+
+    float idle_percent;
+    float accumulation_percent;
+    float ranking_percent;
+
+    int images_per_second;
+    int pixels_per_second;
+    int uvs_per_second;
+    int thresholds_per_second;
+};
+
 struct thread_state {
     struct gm_rdt_context_impl* ctx;
     int idx;
@@ -89,14 +102,18 @@ struct thread_state {
 
     uint64_t last_metrics_log;
 
-    uint64_t run_duration;
-    uint64_t idle_duration;
+    /* Note: These metrics are reset at the start of each tree level */
+    struct {
+        uint64_t start;
 
-    uint64_t accumulation_time;
-    uint64_t n_pixels_accumulated;
-    uint64_t n_images_accumulated;
+        uint64_t idle_duration;
 
-    uint64_t gain_ranking_time;
+        uint64_t accumulation_time;
+        uint64_t n_pixels_accumulated;
+        uint64_t n_images_accumulated;
+
+        uint64_t gain_ranking_time;
+    } metrics;
 };
 
 struct gm_rdt_context_impl {
@@ -104,6 +121,7 @@ struct gm_rdt_context_impl {
 
     char*    reload;        // Reload and continue training with pre-existing tree
     bool     verbose;       // Verbose logging
+    bool     profile;       // Verbose profiling
     int      seed;          // Seed for RNG
 
     char*    data_dir;      // Location of training data
@@ -204,6 +222,69 @@ get_format_duration_suffix(uint64_t duration_ns)
         return (char *)"us";
     else
         return (char *)"ns";
+}
+
+static void
+calculate_thread_metrics(struct gm_rdt_context_impl *ctx,
+                         struct thread_state *state,
+                         uint64_t current_time,
+                         struct thread_metrics *metrics)
+{
+    uint64_t run_duration = current_time - state->metrics.start;
+
+    double idle_percent = ((double)state->metrics.idle_duration /
+        run_duration) * 100.0;
+    double accu_percent = ((double)state->metrics.accumulation_time /
+        run_duration) * 100.0;
+    double rank_percent = ((double)state->metrics.gain_ranking_time /
+        run_duration) * 100.0;
+
+    double run_time_sec = run_duration / 1e9;
+    double images_per_sec = (double)state->metrics.n_images_accumulated /
+        run_time_sec;
+    double px_per_sec = (double)state->metrics.n_pixels_accumulated /
+        run_time_sec;
+
+    metrics->duration = run_duration;
+
+    metrics->idle_percent = idle_percent;
+    metrics->accumulation_percent = accu_percent;
+    metrics->ranking_percent = rank_percent;
+
+    metrics->images_per_second = images_per_sec;
+    metrics->pixels_per_second = px_per_sec;
+    metrics->uvs_per_second = px_per_sec * ctx->n_uvs;
+    metrics->thresholds_per_second = px_per_sec * ctx->n_thresholds;
+}
+
+static void
+maybe_log_thread_metrics(struct gm_rdt_context_impl *ctx,
+                         struct thread_state *state,
+                         uint64_t current_time)
+{
+    if (current_time - state->last_metrics_log < 1000000000)
+        return;
+
+    struct thread_metrics metrics;
+    calculate_thread_metrics(ctx, state, current_time, &metrics);
+
+    gm_info(ctx->log, "%02d: over %.2f%s: idle %5.2f%%, acc %5.2f%% (%6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %5.2f%%",
+            state->idx,
+            get_format_duration(metrics.duration),
+            get_format_duration_suffix(metrics.duration),
+
+            metrics.idle_percent,
+            metrics.accumulation_percent,
+
+            metrics.images_per_second,
+            metrics.pixels_per_second,
+            metrics.uvs_per_second,
+            metrics.thresholds_per_second,
+
+            metrics.ranking_percent
+            );
+
+    state->last_metrics_log = current_time;
 }
 
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
@@ -353,7 +434,6 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 {
     int p;
     int last_i = -1;
-    int n_images = 0;
 
     for (p = 0; p < data->n_pixels && !interrupted; p++)
     {
@@ -361,8 +441,12 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         int i = data->pixels[p].i;
 
         if (i != last_i) {
-            n_images++;
+            state->metrics.n_images_accumulated++;
             last_i = i;
+        }
+
+        if (p % 10000 == 0 && ctx->profile) {
+                maybe_log_thread_metrics(ctx, state, get_time());
         }
 
         int64_t image_idx = (int64_t)i * ctx->width * ctx->height;
@@ -412,10 +496,9 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                     lr_histogram_idx + ctx->n_labels + label];
             }
         }
-    }
 
-    state->n_pixels_accumulated += p;
-    state->n_images_accumulated += n_images;
+        state->metrics.n_pixels_accumulated++;
+    }
 }
 
 static void*
@@ -423,8 +506,6 @@ worker_thread_cb(void* userdata)
 {
     struct thread_state *state = (struct thread_state *)userdata;
     struct gm_rdt_context_impl* ctx = state->ctx;
-
-    uint64_t run_start = get_time();
 
     // Histogram for the node being processed
     int node_histogram[ctx->n_labels];
@@ -462,7 +543,7 @@ worker_thread_cb(void* userdata)
         pthread_mutex_unlock(&ctx->work_queue_lock);
 
         uint64_t idle_end = get_time();
-        state->idle_duration += (idle_end - idle_start);
+        state->metrics.idle_duration += (idle_end - idle_start);
 
         if (interrupted)
             break;
@@ -486,7 +567,7 @@ worker_thread_cb(void* userdata)
                                      node_histogram,
                                      uvt_lr_histograms.data());
         uint64_t accu_end = get_time();
-        state->accumulation_time += accu_end - accu_start;
+        state->metrics.accumulation_time += accu_end - accu_start;
 
         // Calculate the normalised label histogram and get the number of pixels
         // and the number of labels in the root histogram.
@@ -547,20 +628,17 @@ worker_thread_cb(void* userdata)
                 }
             }
             uint64_t rank_end = get_time();
-            state->gain_ranking_time += rank_end - rank_start;
+            state->metrics.gain_ranking_time += rank_end - rank_start;
         }
 
         uint64_t work_end = get_time();
         result.duration = work_end - idle_end;
-        state->run_duration = work_end - run_start;
 
         pthread_mutex_lock(&ctx->results_lock);
         ctx->results.push_back(result);
         pthread_cond_signal(&ctx->results_changed);
         pthread_mutex_unlock(&ctx->results_lock);
     }
-
-    state->run_duration = get_time() - run_start;
 
     return NULL;
 }
@@ -767,6 +845,15 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.bool_state.ptr = &ctx->verbose;
     ctx->properties.push_back(prop);
 
+    ctx->profile = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "profile";
+    prop.desc = "Verbose profiling output";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->profile;
+    ctx->properties.push_back(prop);
+
     ctx->n_threads = std::thread::hardware_concurrency();
     prop = gm_ui_property();
     prop.object = ctx;
@@ -840,7 +927,7 @@ recursive_build_tree(struct gm_rdt_context_impl* ctx,
             json_object_set_value(json_node, "r", right_json);
         }
     }
-    else
+    else if (node->label_pr_idx != INT_MAX) // Return empty obj for untrained nodes
     {
         JSON_Value* probs_val = json_value_init_array();
         JSON_Array* probs = json_array(probs_val);
@@ -910,44 +997,135 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     return true;
 }
 
-static void
-maybe_log_thread_metrics(struct gm_rdt_context_impl *ctx,
-                         struct thread_state *state,
-                         uint64_t current_time)
+static bool
+reload_tree(struct gm_rdt_context_impl *ctx,
+            const char *filename,
+            NodeTrainData &root_node,
+            char **err)
 {
-    if (current_time - state->last_metrics_log < 1000000000)
-        return;
+    gm_info(ctx->log, "Reloading %s...\n", filename);
 
-    double idle_percent = ((double)state->idle_duration /
-        state->run_duration) * 100.0;
-    double accu_percent = ((double)state->accumulation_time /
-        state->run_duration) * 100.0;
-    double rank_percent = ((double)state->gain_ranking_time /
-        state->run_duration) * 100.0;
+    RDTree* checkpoint = read_tree(filename);
+    if (!checkpoint)
+        checkpoint = read_json_tree(filename);
+    if (!checkpoint) {
+        gm_throw(ctx->log, err, "Failed to reload %s", filename);
+        return false;
+    }
 
-    double run_time_sec = state->run_duration / 1e9;
-    double images_per_sec = (double)state->n_images_accumulated /
-        run_time_sec;
-    double px_per_sec = (double)state->n_pixels_accumulated /
-        run_time_sec;
+    // Do some basic validation
+    if (checkpoint->header.n_labels != ctx->n_labels)
+    {
+        gm_throw(ctx->log, err, "%s has %d labels, expected %d\n",
+                 filename,
+                 (int)checkpoint->header.n_labels, ctx->n_labels);
+        return false;
+    }
 
-    gm_info(ctx->log, "%02d: over %.2f%s: idle %.4f%%, acc %.2f%% (%6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %.2f%%",
-            state->idx,
-            get_format_duration(state->run_duration),
-            get_format_duration_suffix(state->run_duration),
+    if (fabs(checkpoint->header.fov - ctx->fov) > 1e-6)
+    {
+        gm_throw(ctx->log, err, "%s has FOV %.2f, expected %.2f\n",
+                 filename,
+                 checkpoint->header.fov, ctx->fov);
+        return false;
+    }
 
-            idle_percent,
-            accu_percent,
+    gm_info(ctx->log, "Reloading %d levels", checkpoint->header.depth);
+    if (checkpoint->header.depth > ctx->max_depth)
+    {
+        gm_throw(ctx->log, err,
+                 "Can't train with a lower depth than %s (%d < %d)\n",
+                 filename,
+                 ctx->max_depth, (int)checkpoint->header.depth);
+        return false;
+    }
 
-            (int)images_per_sec,
-            (int)px_per_sec,
-            (int)px_per_sec * ctx->n_uvs,
-            (int)px_per_sec * ctx->n_thresholds,
+    // Restore nodes
+    int n_checkpoint_nodes = roundf(powf(2.f, checkpoint->header.depth)) - 1;
+    gm_info(ctx->log, "Reloading %d nodes", n_checkpoint_nodes);
+    memcpy(ctx->tree.data(), checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
 
-            rank_percent
-            );
+    // Navigate the tree to determine any unfinished nodes and the last
+    // trained depth
+    std::queue<NodeTrainData> checkpoint_queue;
 
-    state->last_metrics_log = current_time;
+    checkpoint_queue.push(root_node);
+
+    while (checkpoint_queue.size())
+    {
+        NodeTrainData node_data = checkpoint_queue.front();
+        checkpoint_queue.pop();
+        Node* node = &ctx->tree[node_data.id];
+
+        // Check if the node has a valid probability table and copy it to
+        // the list if so. Given the order in which we iterate over the tree,
+        // we can just append to the list. Note that the code expects
+        // tree_histograms to point to the end of the list.
+        if (node->label_pr_idx != 0 && node->label_pr_idx != INT_MAX)
+        {
+            float* pr_table = &checkpoint->
+                label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
+            int len = ctx->tree_histograms.size();
+            ctx->tree_histograms.resize(len + ctx->n_labels);
+            memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_labels * sizeof(float));
+        }
+
+        // Check if the node is either marked as incomplete, or it sits on
+        // the last depth of the tree and we're trying to train deeper.
+        if (node->label_pr_idx == INT_MAX ||
+            (node_data.depth == (checkpoint->header.depth - 1) &&
+             ctx->max_depth > checkpoint->header.depth))
+        {
+            // This node is referenced and incomplete, add it to the training
+            // queue.
+            ctx->train_queue.push(node_data);
+        } else {
+            // If the node isn't a leaf-node, calculate which pixels should go
+            // to the next two nodes and add them to the checkpoint queue
+            if (node->label_pr_idx == 0)
+            {
+                Int3D* l_pixels;
+                Int3D* r_pixels;
+                int n_lr_pixels[] = { 0, 0 };
+                collect_pixels(ctx, &node_data,
+                               node->uv, node->t,
+                               &l_pixels, &r_pixels,
+                               n_lr_pixels);
+
+                int id = (2 * node_data.id) + 1;
+                int depth = node_data.depth + 1;
+
+                NodeTrainData ldata;
+                ldata.id = id;
+                ldata.depth = depth;
+                ldata.n_pixels = n_lr_pixels[0];
+                ldata.pixels = l_pixels;
+
+                NodeTrainData rdata;
+                rdata.id = id + 1;
+                rdata.depth = depth;
+                rdata.n_pixels = n_lr_pixels[1];
+                rdata.pixels = r_pixels;
+
+                checkpoint_queue.push(ldata);
+                checkpoint_queue.push(rdata);
+            }
+
+            // Since we didn't add the node to the training queue we
+            // no longer need the associated pixel data for this node...
+            xfree(node_data.pixels);
+        }
+    }
+
+    free_tree(checkpoint);
+
+    if (!ctx->train_queue.size())
+    {
+        gm_throw(ctx->log, err, "Tree already fully trained.\n");
+        return false;
+    }
+
+    return true;
 }
 
 bool
@@ -1029,137 +1207,20 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     root_node.id = 0;
     root_node.depth = 0;
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
-    ctx->train_queue.push(root_node);
 
-    // If asked to reload then try to load the partial tree and repopulate the
-    // training queue and tree histogram list
-    RDTree* checkpoint = NULL;
     if (ctx->reload) {
-        gm_info(ctx->log, "Reloading %s...\n", ctx->reload);
-        checkpoint = read_tree(ctx->reload);
-        if (!checkpoint)
-            checkpoint = read_json_tree(ctx->reload);
-    }
-    if (checkpoint)
-    {
-        // Do some basic validation
-        if (checkpoint->header.n_labels != ctx->n_labels)
-        {
-            gm_throw(ctx->log, err, "%s has %d labels, expected %d\n",
-                     ctx->reload,
-                     (int)checkpoint->header.n_labels, ctx->n_labels);
+        if (!reload_tree(ctx, ctx->reload, root_node, err))
             return false;
-        }
+    } else {
+        ctx->train_queue.push(root_node);
 
-        if (fabs(checkpoint->header.fov - ctx->fov) > 1e-6)
-        {
-            gm_throw(ctx->log, err, "%s has FOV %.2f, expected %.2f\n",
-                     ctx->reload,
-                     checkpoint->header.fov, ctx->fov);
-            return false;
-        }
-
-        gm_info(ctx->log, "Reloading %d levels", checkpoint->header.depth);
-        if (checkpoint->header.depth > ctx->max_depth)
-        {
-            gm_throw(ctx->log, err,
-                     "Can't train with a lower depth than %s (%d < %d)\n",
-                     ctx->reload,
-                     ctx->max_depth, (int)checkpoint->header.depth);
-            return false;
-        }
-
-        // Restore nodes
-        int n_checkpoint_nodes = roundf(powf(2.f, checkpoint->header.depth)) - 1;
-        gm_info(ctx->log, "Reloading %d nodes", n_checkpoint_nodes);
-        memcpy(ctx->tree.data(), checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
-
-        // Navigate the tree to determine any unfinished nodes and the last
-        // trained depth
-        std::queue<NodeTrainData> checkpoint_queue;
-        checkpoint_queue.swap(ctx->train_queue);
-
-        while (checkpoint_queue.size())
-        {
-            NodeTrainData node_data = checkpoint_queue.front();
-            checkpoint_queue.pop();
-            Node* node = &ctx->tree[node_data.id];
-
-            // Check if the node has a valid probability table and copy it to
-            // the list if so. Given the order in which we iterate over the tree,
-            // we can just append to the list. Note that the code expects
-            // tree_histograms to point to the end of the list.
-            if (node->label_pr_idx != 0 && node->label_pr_idx != INT_MAX)
-            {
-                float* pr_table = &checkpoint->
-                    label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
-                int len = ctx->tree_histograms.size();
-                ctx->tree_histograms.resize(len + ctx->n_labels);
-                memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_labels * sizeof(float));
-            }
-
-            // Check if the node is either marked as incomplete, or it sits on
-            // the last depth of the tree and we're trying to train deeper.
-            if (node->label_pr_idx == INT_MAX ||
-                (node_data.depth == (checkpoint->header.depth - 1) &&
-                 ctx->max_depth > checkpoint->header.depth))
-            {
-                // This node is referenced and incomplete, add it to the training
-                // queue.
-                ctx->train_queue.push(node_data);
-            } else {
-                // If the node isn't a leaf-node, calculate which pixels should go
-                // to the next two nodes and add them to the checkpoint queue
-                if (node->label_pr_idx == 0)
-                {
-                    Int3D* l_pixels;
-                    Int3D* r_pixels;
-                    int n_lr_pixels[] = { 0, 0 };
-                    collect_pixels(ctx, &node_data,
-                                   node->uv, node->t,
-                                   &l_pixels, &r_pixels,
-                                   n_lr_pixels);
-
-                    int id = (2 * node_data.id) + 1;
-                    int depth = node_data.depth + 1;
-
-                    NodeTrainData ldata;
-                    ldata.id = id;
-                    ldata.depth = depth;
-                    ldata.n_pixels = n_lr_pixels[0];
-                    ldata.pixels = l_pixels;
-
-                    NodeTrainData rdata;
-                    rdata.id = id + 1;
-                    rdata.depth = depth;
-                    rdata.n_pixels = n_lr_pixels[1];
-                    rdata.pixels = r_pixels;
-
-                    checkpoint_queue.push(ldata);
-                    checkpoint_queue.push(rdata);
-                }
-
-                // Since we didn't add the node to the training queue we
-                // no longer need the associated pixel data for this node...
-                xfree(node_data.pixels);
-            }
-        }
-
-        free_tree(checkpoint);
-
-        if (!ctx->train_queue.size())
-        {
-            gm_throw(ctx->log, err, "Tree already fully trained.\n");
-            return false;
-        }
-    }
-    else
-    {
         // Mark nodes in tree as unfinished, for checkpoint restoration
         for (int i = 0; i < (int)ctx->tree.size(); i++) {
             ctx->tree[i].label_pr_idx = INT_MAX;
         }
     }
+
+    std::vector<thread_metrics> level_metrics(ctx->max_depth);
 
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
     ctx->thread_pool.resize(n_threads);
@@ -1182,7 +1243,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     clock_gettime(CLOCK_MONOTONIC, &begin);
     last = begin;
     uint64_t last_metrics = get_time();
-    int last_depth = INT_MAX;
+    int last_depth = -1;
     while (ctx->train_queue.size())
     {
         int best_uv = 0;
@@ -1200,11 +1261,22 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             since_last = get_time_for_display(&last, &now);
             last = now;
             last_depth = node_data.depth;
+
+            uint64_t current = get_time();
+            for (int i = 0; i < ctx->n_threads; i++) {
+                struct thread_state *state = &ctx->thread_pool[i];
+
+                calculate_thread_metrics(ctx, state, current,
+                                         &level_metrics[last_depth]);
+                memset(&state->metrics, 0, sizeof(state->metrics));
+                state->metrics.start = current;
+            }
+
             gm_info(ctx->log,
                     "(%02d:%02d:%02d / %02d:%02d:%02d) Training depth %d (%d nodes)\n",
                     since_begin.hours, since_begin.minutes, since_begin.seconds,
                     since_last.hours, since_last.minutes, since_last.seconds,
-                    last_depth + 1, (int)ctx->train_queue.size());
+                    last_depth + 1, (int)ctx->train_queue.size() + 1);
         }
 
         /* XXX: note we don't need to take the work_queue_lock here since the
@@ -1237,13 +1309,15 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             break;
         }
 
-        uint64_t current = get_time();
-        if (current - last_metrics > 1000000000) {
-            for (int i = 0; i < ctx->n_threads; i++) {
-                struct thread_state *state = &ctx->thread_pool[i];
-                maybe_log_thread_metrics(ctx, state, current);
+        if (ctx->profile) {
+            uint64_t current = get_time();
+            if (current - last_metrics > 1000000000) {
+                for (int i = 0; i < ctx->n_threads; i++) {
+                    struct thread_state *state = &ctx->thread_pool[i];
+                    maybe_log_thread_metrics(ctx, state, current);
+                }
+                last_metrics = current;
             }
-            last_metrics = current;
         }
 
         // See which thread got the best uvt combination
@@ -1348,11 +1422,11 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     {
         struct thread_state *state = &ctx->thread_pool[i];
 
-        if (pthread_join(state->thread, NULL) != 0)
-        {
+        if (pthread_join(state->thread, NULL) != 0) {
             gm_error(ctx->log, "Error joining thread, trying to continue...\n");
         }
-        maybe_log_thread_metrics(ctx, state, get_time());
+        if (ctx->profile)
+            maybe_log_thread_metrics(ctx, state, get_time());
     }
 
     // Free memory that isn't needed anymore
