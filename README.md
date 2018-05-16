@@ -82,8 +82,8 @@ above.
 
 # Building
 
-Currently we only support building and running Glimpse on Linux and/or
-cross-compiling for Android. If someone wants to help port to Windows or OSX,
+Currently we support building and running Glimpse on Linux, OSX and
+cross-compiling for Android and iOS. If someone wants to help port to Windows,
 that would be greatly appreciated and probably wouldn't be too tricky.
 
 We're using [Meson](https://mesonbuild.com) and [Ninja](https://ninja-build.org/)
@@ -106,6 +106,17 @@ $ meson --version
 0.45.0.glimpse-dev1
 ```
 
+For cross-compiling to iOS, you may need to use [this branch of
+meson](https://github.com/glimpse-project/meson/tree/wip/rib/ios):
+
+```
+pip3 install --user --upgrade git+https://github.com/glimpse-project/meson@wip/rib/ios
+```
+The version should have `glimpse` in the suffix like:
+```
+$ meson --version
+0.46.0.glimpse-dev1
+```
 
 ## Debug
 
@@ -174,3 +185,36 @@ cd build-android-release
 meson --cross-file ../android-armeabi-v7a-cross-file.txt --buildtype=release ..
 ninja
 ```
+
+## Common issues
+
+* Android commands fail
+
+Make sure the platform tools are in the path and make sure the build-tools and platform are installed. They can be installed with the following commands:
+```
+sdkmanager "platforms;android-23"
+sdkmanager "build-tools;26.0.2"
+```
+
+* Java commands fail
+
+Make sure that Java SDK 8 is installed and not a more recent version.
+
+* debug.keystore not found when creating APKs
+
+This will be created by Android Studio, but can be created manually with the following command:
+```
+keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+```
+
+# Building for iOS
+
+This is mostly the same as building for Android, except XCode needs to be
+installed rather than the Android SDK/NDK, and the iOS cross file
+(`ios-xcode-arm64-cross-file.txt`) should be used.
+
+When configuring, append the option `--default-library=static`, as dynamic
+libraries are not supported on iOS.
+
+Building will produce binaries that can be imported into an XCode project and
+run on device.
