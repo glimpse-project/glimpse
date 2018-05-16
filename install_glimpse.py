@@ -70,8 +70,13 @@ def install_shared_lib_targets(dst, blacklist):
 
         if target['type'] == 'shared library':
             basename = os.path.basename(target['filename'])
-            parts = basename.split('.')
 
+            if os.path.splitext(basename)[1] == ".dylib":
+                do_install(os.path.join(build_dir, target['filename']),
+                           os.path.join(dst, os.path.splitext(basename)[0] + '.bundle'))
+                continue
+
+            parts = basename.split('.')
             do_install(os.path.join(build_dir, target['filename']),
                        os.path.join(dst, parts[0] + '.so'), lib_strip_args)
 
@@ -111,13 +116,18 @@ def install_unity_plugin(unity_project):
                 do_install(os.path.join(args.tango_libs, 'lib', args.android_ndk_arch, lib),
                            unity_plugin_libs_dir)
 
-    # To avoid needing to set LD_LIBRARY_PATH for the plugin to load its
-    # dependencies we update the RPATH to look in the same directory as
-    # the plugin itself...
-    os.chdir(unity_plugin_libs_dir)
-    chrpath_cmd = [ 'chrpath', '-r', '$ORIGIN', 'libglimpse-unity-plugin.so' ]
-    print(" ".join(chrpath_cmd))
-    subprocess.check_call(chrpath_cmd)
+    lib_glimpse_bundle_file = os.path.join(unity_plugin_libs_dir, 'libglimpse-unity-plugin.bundle')
+    if os.path.isfile(lib_glimpse_bundle_file):
+        os.rename(lib_glimpse_bundle_file,
+                  os.path.join(unity_plugin_libs_dir, 'glimpse-unity-plugin.bundle'))
+    else:
+        # To avoid needing to set LD_LIBRARY_PATH for the plugin to load its
+        # dependencies we update the RPATH to look in the same directory as
+        # the plugin itself...
+        os.chdir(unity_plugin_libs_dir)
+        chrpath_cmd = ['chrpath', '-r', '$ORIGIN', 'libglimpse-unity-plugin.so']
+        print(" ".join(chrpath_cmd))
+        subprocess.check_call(chrpath_cmd)
 
 
 install_unity_plugin(args.unity_project)
