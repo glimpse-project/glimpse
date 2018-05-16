@@ -1075,6 +1075,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             return false;
         }
 
+        gm_info(ctx->log, "Reloading %d levels", checkpoint->header.depth);
         if (checkpoint->header.depth > ctx->max_depth)
         {
             gm_throw(ctx->log, err,
@@ -1086,6 +1087,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
 
         // Restore nodes
         int n_checkpoint_nodes = roundf(powf(2.f, checkpoint->header.depth)) - 1;
+        gm_info(ctx->log, "Reloading %d nodes", n_checkpoint_nodes);
         memcpy(ctx->tree.data(), checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
 
         // Navigate the tree to determine any unfinished nodes and the last
