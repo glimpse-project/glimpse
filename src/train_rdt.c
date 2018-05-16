@@ -372,6 +372,7 @@ main(int argc, char **argv)
 
         char *err = NULL;
         struct stat sb;
+        int len;
 
         switch (opt) {
         case 'd':
@@ -381,10 +382,19 @@ main(int argc, char **argv)
             index_name_opt = strdup(optarg);
             break;
         case 'q':
-            if (stat(optarg, &sb) < 0) {
-                work_queue = json_parse_string_with_comments(optarg);
-            } else {
+            len = strlen(optarg);
+            if (len > 5 && strcmp(&optarg[len-5], ".json") == 0) {
+                if (stat(optarg, &sb) < 0) {
+                    fprintf(stderr, "%s not found\n", optarg);
+                    exit(1);
+                }
                 work_queue = json_parse_file_with_comments(optarg);
+            } else {
+                work_queue = json_parse_string_with_comments(optarg);
+            }
+            if (!work_queue || json_value_get_type(work_queue) != JSONArray) {
+                fprintf(stderr, "Expected --queue,-q to be passed a JSON Array of jobs\n");
+                exit(1);
             }
             break;
         case 'p':
