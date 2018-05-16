@@ -75,7 +75,7 @@ if 'MESONINTROSPECT' in os.environ:
 else:
     introspect_cmd = [ 'meson', 'introspect' ]
 
-targets_json = subprocess.check_output(introspect_cmd + [ '--targets' ])
+targets_json = subprocess.check_output(introspect_cmd + [ '--targets' ] + [build_dir])
 
 targets = json.loads(targets_json)
 libs_blacklist = {
