@@ -324,6 +324,40 @@ add_name_value_prop_to_json(struct gm_logger *log,
     return false;
 }
 
+static void
+warn_about_unknown_properties(struct gm_logger *log,
+                              struct gm_ui_properties *props,
+                              JSON_Value *work_queue)
+{
+    JSON_Array *runs = json_array(work_queue);
+    for (int r = 0; r < json_array_get_count(runs); r++) {
+        JSON_Value *run = json_array_get_value(runs, r);
+        JSON_Object *config = json_object(run);
+
+        for (size_t i = 0; i < json_object_get_count(config); ++i) {
+            const char *name = json_object_get_name(config, i);
+            bool found = false;
+
+            for (int p = 0; p < props->n_properties; ++p) {
+                struct gm_ui_property *prop = &props->properties[p];
+
+                if (prop->read_only)
+                    continue;
+
+                if (strcmp(name, prop->name) == 0) {
+                    found = true;
+                    break;
+                }
+            }
+
+            if (!found) {
+                gm_warn(log, "Training Run %d: Ignoring unknown config property \"%s\"",
+                        r, name);
+            }
+        }
+    }
+}
+
 int
 main(int argc, char **argv)
 {
@@ -393,9 +427,10 @@ main(int argc, char **argv)
                 work_queue = json_parse_string_with_comments(optarg);
             }
             if (!work_queue || json_value_get_type(work_queue) != JSONArray) {
-                fprintf(stderr, "Expected --queue,-q to be passed a JSON Array of jobs\n");
+                fprintf(stderr, "Expected --queue,-q to be passed a JSON Array of training runs\n");
                 exit(1);
             }
+            warn_about_unknown_properties(data->log, ctx_props, work_queue);
             break;
         case 'p':
             prop_name = optarg;
