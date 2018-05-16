@@ -92,10 +92,7 @@ RDTree* read_tree(const char* filename);
 
 void free_tree(RDTree* tree);
 
-RDTree** load_json_forest(uint8_t** json_tree_bufs, int* json_tree_buf_lengths, int n_trees);
 RDTree** read_json_forest(const char** files, int n_files);
-
-RDTree** load_forest(uint8_t** tree_bufs, int* tree_buf_lengths, int n_trees);
 RDTree** read_forest(const char** files, int n_files);
 
 void free_forest(RDTree** forest, int n_trees);

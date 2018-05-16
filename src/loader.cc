@@ -382,18 +382,6 @@ load_any_forest(uint8_t** tree_bufs, int* tree_buf_lengths,
     return trees;
 }
 
-RDTree**
-load_json_forest(uint8_t** tree_bufs, int* tree_buf_lengths, int n_trees)
-{
-    return load_any_forest(tree_bufs, tree_buf_lengths, n_trees, true);
-}
-
-RDTree**
-load_forest(uint8_t** tree_bufs, int* tree_buf_lengths, int n_trees)
-{
-    return load_any_forest(tree_bufs, tree_buf_lengths, n_trees, false);
-}
-
 static RDTree**
 read_any_forest(const char** files, int n_files, bool is_json)
 {
