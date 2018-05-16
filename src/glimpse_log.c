@@ -25,6 +25,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdbool.h>
 #include <pthread.h>
 #include <limits.h>
 
@@ -56,6 +57,61 @@ struct gm_logger {
     int backtrace_size;
 };
 
+static void
+default_stderr_logger_cb(struct gm_logger *logger,
+                         enum gm_log_level level,
+                         const char *context,
+                         struct gm_backtrace *backtrace,
+                         const char *format,
+                         va_list ap,
+                         void *user_data)
+{
+    bool verbose = user_data ? false : *(bool *)user_data;
+    FILE *log_fp = stderr;
+
+    if (verbose == false && level < GM_LOG_ERROR)
+        return;
+
+    switch (level) {
+    case GM_LOG_ERROR:
+        fprintf(log_fp, "%s: ERROR: ", context);
+        break;
+    case GM_LOG_WARN:
+        fprintf(log_fp, "%s: WARN: ", context);
+        break;
+    default:
+        fprintf(log_fp, "%s: ", context);
+    }
+
+    vfprintf(log_fp, format, ap);
+    fprintf(log_fp, "\n");
+
+    if (backtrace) {
+        int line_len = 100;
+        char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+        gm_logger_get_backtrace_strings(logger, backtrace,
+                                        line_len, (char *)formatted);
+        for (int i = 0; i < backtrace->n_frames; i++) {
+            char *line = formatted + line_len * i;
+            fprintf(log_fp, "> %s\n", line);
+        }
+    }
+
+    fflush(log_fp);
+}
+
+static void
+default_stderr_logger_abort_cb(struct gm_logger *logger, void *user_data)
+{
+    FILE *log_fp = stderr;
+
+    fprintf(log_fp, "ABORT\n");
+    fflush(log_fp);
+
+    abort();
+}
+
 struct gm_logger *
 gm_logger_new(void (*log_cb)(struct gm_logger *logger,
                              enum gm_log_level level,
@@ -69,11 +125,16 @@ gm_logger_new(void (*log_cb)(struct gm_logger *logger,
     struct gm_logger *logger = (struct gm_logger *)xcalloc(sizeof(*logger), 1);
 
     pthread_mutex_init(&logger->lock, NULL);
-    logger->callback = log_cb;
+    if (log_cb)
+        logger->callback = log_cb;
+    else
+        logger->callback = default_stderr_logger_cb;
     logger->callback_data = user_data;
 
     logger->backtrace_level = GM_LOG_ERROR;
     logger->backtrace_size = 10;
+
+    logger->abort_cb = default_stderr_logger_abort_cb;
 
     return logger;
 }
