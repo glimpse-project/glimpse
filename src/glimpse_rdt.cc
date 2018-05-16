@@ -1015,22 +1015,6 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             (i * ctx->threshold_range / (float)(ctx->n_thresholds - 1));
     }
 
-    gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
-    ctx->thread_pool.resize(n_threads);
-    for (int i = 0; i < n_threads; i++)
-    {
-        struct thread_state *state = &ctx->thread_pool[i];
-        state->idx = i;
-        state->ctx = ctx;
-
-        if (pthread_create(&state->thread, NULL,
-                           worker_thread_cb, (void*)state) != 0)
-        {
-            gm_throw(ctx->log, err, "Error creating thread\n");
-            return false;
-        }
-    }
-
     // Allocate memory to store the decision tree.
     ctx->tree.resize(roundf(powf(2.f, ctx->max_depth)) - 1);
 
@@ -1174,6 +1158,22 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         // Mark nodes in tree as unfinished, for checkpoint restoration
         for (int i = 0; i < (int)ctx->tree.size(); i++) {
             ctx->tree[i].label_pr_idx = INT_MAX;
+        }
+    }
+
+    gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
+    ctx->thread_pool.resize(n_threads);
+    for (int i = 0; i < n_threads; i++)
+    {
+        struct thread_state *state = &ctx->thread_pool[i];
+        state->idx = i;
+        state->ctx = ctx;
+
+        if (pthread_create(&state->thread, NULL,
+                           worker_thread_cb, (void*)state) != 0)
+        {
+            gm_throw(ctx->log, err, "Error creating thread\n");
+            return false;
         }
     }
 
