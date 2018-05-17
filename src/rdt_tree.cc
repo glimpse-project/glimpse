@@ -263,20 +263,39 @@ rdt_tree_load_from_buf(struct gm_logger* log,
 }
 
 RDTree*
-rdt_tree_load_from_file(struct gm_logger *log,
+rdt_tree_load_from_file(struct gm_logger* log,
                         const char* filename,
                         char** err)
 {
-    RDTree** forest = rdt_forest_load_from_files(log, &filename, 1, err);
-
-    if (forest)
+    FILE* tree_fp;
+    if (!(tree_fp = fopen(filename, "r")))
     {
-        RDTree* tree = forest[0];
-        xfree(forest);
-        return tree;
+        gm_throw(log, err, "Failed to open decision tree: %s\n", filename);
+        return NULL;
     }
 
-    return NULL;
+    struct stat sb;
+    if (fstat(fileno(tree_fp), &sb) < 0)
+    {
+        gm_throw(log, err, "Failed to stat decision tree: %s\n", filename);
+        fclose(tree_fp);
+        return NULL;
+    }
+
+    uint8_t* tree_buf = (uint8_t*)xcalloc(1, sb.st_size);
+    if (fread(tree_buf, sb.st_size, 1, tree_fp) != 1)
+    {
+        gm_throw(log, err, "Failed to read decision tree: %s\n", filename);
+        xfree(tree_buf);
+        fclose(tree_fp);
+        return NULL;
+    }
+
+    RDTree* tree = rdt_tree_load_from_buf(log, tree_buf, sb.st_size, err);
+    xfree(tree_buf);
+    fclose(tree_fp);
+
+    return tree;
 }
 
 bool
@@ -325,59 +344,26 @@ save_tree_close:
     return success;
 }
 
-
-static RDTree**
-forest_load_from_bufs(struct gm_logger* log,
-                      uint8_t** tree_bufs,
-                      int* tree_buf_lengths,
-                      int n_trees,
-                      char** err)
+static bool
+check_forest_consistency(struct gm_logger* log,
+                         RDTree** forest,
+                         int n_trees,
+                         char** err)
 {
-    bool error = false;
-    int n_labels = 0;
-    RDTree** trees = (RDTree**)xcalloc(n_trees, sizeof(RDTree*));
+    int n_labels = forest[0]->header.n_labels;
 
-    for (int i = 0; i < n_trees; i++)
-    {
-        RDTree *tree = trees[i] = rdt_tree_load_from_buf(log,
-                                                         tree_bufs[i],
-                                                         tree_buf_lengths[i],
-                                                         err);
-        if (!tree)
-        {
-            error = true;
-            break;
-        }
+    for (int i = 0; i < n_trees; i++) {
+        RDTree* tree = forest[i];
 
-        if (n_labels == 0)
-        {
-            n_labels = tree->header.n_labels;
-        }
-        if (tree->header.n_labels != n_labels)
-        {
+        if (tree->header.n_labels != n_labels) {
             gm_throw(log, err, "Tree %d has %d labels, expected %d\n",
                      i, tree->header.n_labels,
                      n_labels);
-            error = true;
-            break;
+            return false;
         }
     }
 
-    if (error)
-    {
-        for (int i = 0; i < n_trees; i++)
-        {
-            if (trees[i])
-            {
-                rdt_tree_destroy(trees[i]);
-            }
-        }
-        free(trees);
-
-        return NULL;
-    }
-
-    return trees;
+    return true;
 }
 
 RDTree**
@@ -386,65 +372,30 @@ rdt_forest_load_from_files(struct gm_logger* log,
                            int n_files,
                            char** err)
 {
-    uint8_t* tree_bufs[n_files];
-    int tree_buf_lengths[n_files];
-    int n_trees = 0;
-    bool error = false;
+    RDTree** trees = (RDTree**)xcalloc(n_files, sizeof(RDTree*));
 
-    for (int i = 0; i < n_files; i++)
-    {
-        const char* tree_file = files[i];
-
-        FILE* tree_fp;
-        if (!(tree_fp = fopen(tree_file, "r")))
-        {
-            gm_throw(log, err, "Failed to open decision tree: %s\n", tree_file);
-            error = true;
-            break;
+    for (int i = 0; i < n_files; i++) {
+        trees[i] = rdt_tree_load_from_file(log, files[i], err);
+        if (!trees[i]) {
+            rdt_forest_destroy(trees, n_files);
+            return NULL;
         }
-
-        struct stat sb;
-        if (fstat(fileno(tree_fp), &sb) < 0)
-        {
-            gm_throw(log, err, "Failed to stat decision tree: %s\n", tree_file);
-            error = true;
-            break;
-        }
-
-        tree_bufs[i] = (uint8_t*)xcalloc(1, sb.st_size);
-        n_trees++;
-        if (fread(tree_bufs[i], sb.st_size, 1, tree_fp) != 1)
-        {
-            gm_throw(log, err, "Failed to read decision tree: %s\n", tree_file);
-            error = true;
-            break;
-        }
-        tree_buf_lengths[i] = sb.st_size;
-
-        fclose(tree_fp);
     }
 
-    RDTree** forest = NULL;
-    if (!error) {
-        forest = forest_load_from_bufs(log,
-                                       tree_bufs, tree_buf_lengths, n_trees,
-                                       err);
+    if (!check_forest_consistency(log, trees, n_files, err)) {
+        rdt_forest_destroy(trees, n_files);
+        return NULL;
     }
 
-    for (int i = 0; i < n_trees; i++)
-    {
-        xfree(tree_bufs[i]);
-    }
-
-    return forest;
+    return trees;
 }
 
 void
 rdt_forest_destroy(RDTree** forest, int n_trees)
 {
-    for (int i = 0; i < n_trees; i++)
-    {
-        rdt_tree_destroy(forest[i]);
+    for (int i = 0; i < n_trees; i++) {
+        if (forest[i])
+            rdt_tree_destroy(forest[i]);
     }
     xfree(forest);
 }
