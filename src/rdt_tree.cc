@@ -166,9 +166,6 @@ rdt_tree_load_from_json(struct gm_logger* log,
     unpack_json_tree(root, tree->nodes, 0, tree->label_pr_tables, &table_index,
                      tree->header.n_labels);
 
-    // Free data and return tree
-    json_value_free(json_tree_value);
-
     return tree;
 }
 
