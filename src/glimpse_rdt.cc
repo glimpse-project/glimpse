@@ -43,7 +43,7 @@
 
 #include "xalloc.h"
 #include "utils.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "train_utils.h"
 
 #include "glimpse_rdt.h"
@@ -1006,11 +1006,11 @@ reload_tree(struct gm_rdt_context_impl *ctx,
     gm_info(ctx->log, "Reloading %s...\n", filename);
 
     char *catch_err = NULL;
-    RDTree* checkpoint = read_tree(ctx->log, filename, &catch_err);
+    RDTree* checkpoint = rdt_tree_load_from_file(ctx->log, filename, &catch_err);
     if (!checkpoint) {
         xfree(catch_err);
         catch_err = NULL;
-        checkpoint = read_json_tree(ctx->log, filename, err);
+        checkpoint = rdt_tree_load_from_json_file(ctx->log, filename, err);
         if (!checkpoint)
             return false;
     }
@@ -1119,7 +1119,7 @@ reload_tree(struct gm_rdt_context_impl *ctx,
         }
     }
 
-    free_tree(checkpoint);
+    rdt_tree_destroy(checkpoint);
 
     if (!ctx->train_queue.size())
     {

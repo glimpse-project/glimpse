@@ -78,7 +78,7 @@
 #include "xalloc.h"
 #include "wrapper_image.h"
 #include "infer.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "image_utils.h"
 
 #include "glimpse_log.h"
@@ -4523,7 +4523,7 @@ gm_context_destroy(struct gm_context *ctx)
     free(ctx->heat_color_stops);
 
     for (int i = 0; i < ctx->n_decision_trees; i++)
-        free_tree(ctx->decision_trees[i]);
+        rdt_tree_destroy(ctx->decision_trees[i]);
     xfree(ctx->decision_trees);
 
     if (ctx->joint_params)
@@ -4593,10 +4593,10 @@ gm_context_new(struct gm_logger *logger, char **err)
         if (tree_asset) {
             name = rdt_name;
             ctx->decision_trees[i] =
-                load_tree(logger,
-                          (uint8_t *)gm_asset_get_buffer(tree_asset),
-                          gm_asset_get_length(tree_asset),
-                          &catch_err);
+                rdt_tree_load_from_buf(logger,
+                                       (uint8_t *)gm_asset_get_buffer(tree_asset),
+                                       gm_asset_get_length(tree_asset),
+                                       &catch_err);
             if (!ctx->decision_trees[i]) {
                 gm_warn(ctx->log,
                         "Failed to open binary decision tree '%s': %s",
@@ -4627,7 +4627,8 @@ gm_context_new(struct gm_logger *logger, char **err)
              */
             JSON_Value *js = json_parse_string((const char *)gm_asset_get_buffer(tree_asset));
             if (js) {
-                ctx->decision_trees[i] = load_json_tree(ctx->log, js, &catch_err);
+                ctx->decision_trees[i] =
+                    rdt_tree_load_from_json(ctx->log, js, &catch_err);
                 if (!ctx->decision_trees[i]) {
                     gm_warn(ctx->log,
                             "Failed to open JSON decision tree '%s': %s",

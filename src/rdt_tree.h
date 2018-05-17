@@ -84,33 +84,41 @@ typedef struct {
 extern "C" {
 #endif
 
-bool save_tree(RDTree* tree, const char* filename);
+RDTree*
+rdt_tree_load_from_json(struct gm_logger* log,
+                        JSON_Value* json_tree_value,
+                        char** err);
+RDTree*
+rdt_tree_load_from_json_file(struct gm_logger* log,
+                             const char* filename,
+                             char** err);
 
 RDTree*
-load_json_tree(struct gm_logger* log,
-               JSON_Value* json_tree_value,
-               char** err);
-RDTree* read_json_tree(struct gm_logger* log,
-                       const char* filename,
+rdt_tree_load_from_buf(struct gm_logger* log,
+                       uint8_t* tree,
+                       int len,
                        char** err);
+RDTree*
+rdt_tree_load_from_file(struct gm_logger* log,
+                        const char* filename,
+                        char** err);
 
-RDTree* load_tree(struct gm_logger* log,
-                  uint8_t* tree,
-                  int len,
-                  char** err);
-RDTree* read_tree(struct gm_logger* log,
-                  const char* filename,
-                  char** err);
+void
+rdt_tree_destroy(RDTree* tree);
 
-void free_tree(RDTree* tree);
+bool
+rdt_tree_save(RDTree* tree, const char* filename);
 
-RDTree** read_forest(struct gm_logger* log,
-                     const char** files,
-                     int n_files,
-                     char **err);
+RDTree**
+rdt_forest_load_from_files(struct gm_logger* log,
+                           const char** files,
+                           int n_files,
+                           char **err);
 
-void free_forest(RDTree** forest, int n_trees);
+void
+rdt_forest_destroy(RDTree** forest, int n_trees);
 
+/* TODO: split out */
 JIParams *joint_params_from_json(JSON_Value *root);
 JIParams* read_jip(const char* filename);
 void free_jip(JIParams* jip);

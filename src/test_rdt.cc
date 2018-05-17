@@ -30,7 +30,7 @@
 #include "half.hpp"
 
 #include "train_utils.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "infer.h"
 
 #include <glimpse_rdt.h>
@@ -198,7 +198,10 @@ main(int argc, char **argv)
 
     char *err = NULL;
     start = get_time();
-    RDTree **forest = read_forest(log, (const char**)tree_paths, n_trees, &err);
+    RDTree **forest = rdt_forest_load_from_files(log,
+                                                 (const char**)tree_paths,
+                                                 n_trees,
+                                                 &err);
     end = get_time();
     uint64_t load_forest_duration = end - start;
     if (!forest) {

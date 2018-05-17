@@ -36,7 +36,7 @@
 #include "infer.h"
 #include "xalloc.h"
 #include "utils.h"
-#include "loader.h"
+#include "rdt_tree.h"
 
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.01f

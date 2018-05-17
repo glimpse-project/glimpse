@@ -32,7 +32,7 @@
 #include <getopt.h>
 
 #include "xalloc.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "parson.h"
 
 

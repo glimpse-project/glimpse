@@ -33,7 +33,7 @@
 
 #include <glimpse_log.h>
 
-#include "loader.h"
+#include "rdt_tree.h"
 
 static JSON_Value*
 recursive_build_tree(RDTree* tree, Node* node, int depth, int id)
@@ -211,7 +211,7 @@ main(int argc, char **argv)
         return 1;
     }
 
-    RDTree *tree = read_tree(log, argv[optind], NULL);
+    RDTree *tree = rdt_tree_load_from_file(log, argv[optind], NULL);
     if (!tree)
         return 1;
 

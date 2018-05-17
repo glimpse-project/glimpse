@@ -28,7 +28,7 @@
 
 #include "glimpse_properties.h"
 #include "glimpse_log.h"
-#include "loader.h"
+#include "rdt_tree.h"
 
 /* XXX: Disturbing the order of this enum will break recordings */
 enum gm_format {

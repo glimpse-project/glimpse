@@ -31,7 +31,7 @@
 #include <math.h>
 #include <cstddef>
 
-#include "loader.h"
+#include "rdt_tree.h"
 #include "parson.h"
 #include "xalloc.h"
 
@@ -41,52 +41,6 @@ assert_rdt_abi()
     static_assert(sizeof(RDTHeader) == 11, "RDT ABI Breakage");
     static_assert(sizeof(Node) == 32,      "RDT ABI Breakage");
     static_assert(offsetof(Node, t) == 16, "RDT ABI Breakage");
-}
-
-bool
-save_tree(RDTree* tree, const char* filename)
-{
-    int n_nodes;
-    bool success;
-    FILE* output;
-
-    if (!(output = fopen(filename, "wb")))
-    {
-        fprintf(stderr, "Failed to open output file '%s'\n", filename);
-        return false;
-    }
-
-    success = false;
-    if (fwrite(&tree->header, sizeof(RDTHeader), 1, output) != 1)
-    {
-        fprintf(stderr, "Error writing header\n");
-        goto save_tree_close;
-    }
-
-    n_nodes = roundf(powf(2.f, tree->header.depth)) - 1;
-    if (fwrite(tree->nodes, sizeof(Node), n_nodes, output) != (size_t)n_nodes)
-    {
-        fprintf(stderr, "Error writing tree nodes\n");
-        goto save_tree_close;
-    }
-
-    if (fwrite(tree->label_pr_tables, sizeof(float) * tree->header.n_labels,
-               tree->n_pr_tables, output) != (size_t)tree->n_pr_tables)
-    {
-        fprintf(stderr, "Error writing tree probability tables\n");
-        goto save_tree_close;
-    }
-
-    success = true;
-
-save_tree_close:
-    if (fclose(output) != 0)
-    {
-        fprintf(stderr, "Error closing output file\n");
-        return false;
-    }
-
-    return success;
 }
 
 static int
@@ -142,10 +96,24 @@ unpack_json_tree(JSON_Object* jnode, Node* nodes, int node_index,
                      node_index * 2 + 2, pr_tables, table_index, n_labels);
 }
 
+void
+rdt_tree_destroy(RDTree* tree)
+{
+    if (tree->nodes)
+    {
+        xfree(tree->nodes);
+    }
+    if (tree->label_pr_tables)
+    {
+        xfree(tree->label_pr_tables);
+    }
+    xfree(tree);
+}
+
 RDTree*
-load_json_tree(struct gm_logger* log,
-               JSON_Value* json_tree_value,
-               char** err)
+rdt_tree_load_from_json(struct gm_logger* log,
+                        JSON_Value* json_tree_value,
+                        char** err)
 {
     assert_rdt_abi();
 
@@ -205,9 +173,9 @@ load_json_tree(struct gm_logger* log,
 }
 
 RDTree*
-read_json_tree(struct gm_logger* log,
-               const char* filename,
-               char** err)
+rdt_tree_load_from_json_file(struct gm_logger* log,
+                             const char* filename,
+                             char** err)
 {
     JSON_Value *js = json_parse_file(filename);
     if (!js) {
@@ -215,17 +183,17 @@ read_json_tree(struct gm_logger* log,
         return NULL;
     }
 
-    RDTree *tree = load_json_tree(log, js, err);
+    RDTree *tree = rdt_tree_load_from_json(log, js, err);
     json_value_free(js);
 
     return tree;
 }
 
 RDTree*
-load_tree(struct gm_logger* log,
-          uint8_t* tree_buf,
-          int len,
-          char** err)
+rdt_tree_load_from_buf(struct gm_logger* log,
+                       uint8_t* tree_buf,
+                       int len,
+                       char** err)
 {
     assert_rdt_abi();
 
@@ -234,7 +202,7 @@ load_tree(struct gm_logger* log,
     if ((size_t)len < sizeof(RDTHeader))
     {
         fprintf(stderr, "Buffer too small to contain tree\n");
-        free_tree(tree);
+        rdt_tree_destroy(tree);
         return NULL;
     }
     memcpy(&tree->header, tree_buf, sizeof(RDTHeader));
@@ -244,7 +212,7 @@ load_tree(struct gm_logger* log,
     if (strncmp(tree->header.tag, "RDT", 3) != 0)
     {
         fprintf(stderr, "File is not an RDT file\n");
-        free_tree(tree);
+        rdt_tree_destroy(tree);
         return NULL;
     }
 
@@ -252,7 +220,7 @@ load_tree(struct gm_logger* log,
     {
         fprintf(stderr, "Incompatible RDT version, expected %u, found %u\n",
                 RDT_VERSION, (unsigned)tree->header.version);
-        free_tree(tree);
+        rdt_tree_destroy(tree);
         return NULL;
     }
 
@@ -262,7 +230,7 @@ load_tree(struct gm_logger* log,
     if ((size_t)len < (sizeof(Node) * n_nodes))
     {
         fprintf(stderr, "Error parsing tree nodes\n");
-        free_tree(tree);
+        rdt_tree_destroy(tree);
         return NULL;
     }
     memcpy(tree->nodes, tree_buf, sizeof(Node) * n_nodes);
@@ -274,14 +242,14 @@ load_tree(struct gm_logger* log,
     if (label_bytes % sizeof(float) != 0)
     {
         fprintf(stderr, "Unexpected size of label probability tables\n");
-        free_tree(tree);
+        rdt_tree_destroy(tree);
         return NULL;
     }
     int n_prs = label_bytes / sizeof(float);
     if (n_prs % tree->header.n_labels != 0)
     {
         fprintf(stderr, "Unexpected number of label probabilities\n");
-        free_tree(tree);
+        rdt_tree_destroy(tree);
         return NULL;
     }
     int n_tables = n_prs / tree->header.n_labels;
@@ -295,11 +263,11 @@ load_tree(struct gm_logger* log,
 }
 
 RDTree*
-read_tree(struct gm_logger *log,
-          const char* filename,
-          char** err)
+rdt_tree_load_from_file(struct gm_logger *log,
+                        const char* filename,
+                        char** err)
 {
-    RDTree** forest = read_forest(log, &filename, 1, err);
+    RDTree** forest = rdt_forest_load_from_files(log, &filename, 1, err);
 
     if (forest)
     {
@@ -311,26 +279,59 @@ read_tree(struct gm_logger *log,
     return NULL;
 }
 
-void
-free_tree(RDTree* tree)
+bool
+rdt_tree_save(RDTree* tree, const char* filename)
 {
-    if (tree->nodes)
+    int n_nodes;
+    bool success;
+    FILE* output;
+
+    if (!(output = fopen(filename, "wb")))
     {
-        xfree(tree->nodes);
+        fprintf(stderr, "Failed to open output file '%s'\n", filename);
+        return false;
     }
-    if (tree->label_pr_tables)
+
+    success = false;
+    if (fwrite(&tree->header, sizeof(RDTHeader), 1, output) != 1)
     {
-        xfree(tree->label_pr_tables);
+        fprintf(stderr, "Error writing header\n");
+        goto save_tree_close;
     }
-    xfree(tree);
+
+    n_nodes = roundf(powf(2.f, tree->header.depth)) - 1;
+    if (fwrite(tree->nodes, sizeof(Node), n_nodes, output) != (size_t)n_nodes)
+    {
+        fprintf(stderr, "Error writing tree nodes\n");
+        goto save_tree_close;
+    }
+
+    if (fwrite(tree->label_pr_tables, sizeof(float) * tree->header.n_labels,
+               tree->n_pr_tables, output) != (size_t)tree->n_pr_tables)
+    {
+        fprintf(stderr, "Error writing tree probability tables\n");
+        goto save_tree_close;
+    }
+
+    success = true;
+
+save_tree_close:
+    if (fclose(output) != 0)
+    {
+        fprintf(stderr, "Error closing output file\n");
+        return false;
+    }
+
+    return success;
 }
 
+
 static RDTree**
-load_forest(struct gm_logger* log,
-            uint8_t** tree_bufs,
-            int* tree_buf_lengths,
-            int n_trees,
-            char** err)
+forest_load_from_bufs(struct gm_logger* log,
+                      uint8_t** tree_bufs,
+                      int* tree_buf_lengths,
+                      int n_trees,
+                      char** err)
 {
     bool error = false;
     int n_labels = 0;
@@ -338,10 +339,10 @@ load_forest(struct gm_logger* log,
 
     for (int i = 0; i < n_trees; i++)
     {
-        RDTree *tree = trees[i] = load_tree(log,
-                                            tree_bufs[i],
-                                            tree_buf_lengths[i],
-                                            err);
+        RDTree *tree = trees[i] = rdt_tree_load_from_buf(log,
+                                                         tree_bufs[i],
+                                                         tree_buf_lengths[i],
+                                                         err);
         if (!tree)
         {
             error = true;
@@ -368,7 +369,7 @@ load_forest(struct gm_logger* log,
         {
             if (trees[i])
             {
-                free_tree(trees[i]);
+                rdt_tree_destroy(trees[i]);
             }
         }
         free(trees);
@@ -380,10 +381,10 @@ load_forest(struct gm_logger* log,
 }
 
 RDTree**
-read_forest(struct gm_logger* log,
-            const char** files,
-            int n_files,
-            char** err)
+rdt_forest_load_from_files(struct gm_logger* log,
+                           const char** files,
+                           int n_files,
+                           char** err)
 {
     uint8_t* tree_bufs[n_files];
     int tree_buf_lengths[n_files];
@@ -424,8 +425,11 @@ read_forest(struct gm_logger* log,
     }
 
     RDTree** forest = NULL;
-    if (!error)
-        forest = load_forest(log, tree_bufs, tree_buf_lengths, n_trees, err);
+    if (!error) {
+        forest = forest_load_from_bufs(log,
+                                       tree_bufs, tree_buf_lengths, n_trees,
+                                       err);
+    }
 
     for (int i = 0; i < n_trees; i++)
     {
@@ -436,11 +440,11 @@ read_forest(struct gm_logger* log,
 }
 
 void
-free_forest(RDTree** forest, int n_trees)
+rdt_forest_destroy(RDTree** forest, int n_trees)
 {
     for (int i = 0; i < n_trees; i++)
     {
-        free_tree(forest[i]);
+        rdt_tree_destroy(forest[i]);
     }
     xfree(forest);
 }

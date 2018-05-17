@@ -27,5 +27,5 @@
 
 #include "utils.h"
 #include "image_utils.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "infer.h"

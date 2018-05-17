@@ -38,7 +38,7 @@
 #include "llist.h"
 #include "utils.h"
 #include "train_utils.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "infer.h"
 #include "parson.h"
 
@@ -632,7 +632,10 @@ main(int argc, char** argv)
     }
 
     printf("Loading decision forest...\n");
-    ctx.forest = read_forest(log, (const char**)tree_paths, ctx.n_trees, NULL);
+    ctx.forest = rdt_forest_load_from_files(log,
+                                            (const char**)tree_paths,
+                                            ctx.n_trees,
+                                            NULL);
 
     printf("Scanning training directories...\n");
     gather_train_data(ctx.log,
@@ -905,7 +908,7 @@ main(int argc, char** argv)
     xfree(best_offsets);
     json_value_free(ctx.joint_map);
     xfree(ctx.joints);
-    free_forest(ctx.forest, ctx.n_trees);
+    rdt_forest_destroy(ctx.forest, ctx.n_trees);
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);

@@ -33,7 +33,7 @@
 
 #include <glimpse_log.h>
 
-#include "loader.h"
+#include "rdt_tree.h"
 
 static void
 usage(void)
@@ -112,9 +112,9 @@ main(int argc, char **argv)
         return 1;
     }
 
-    RDTree *tree = read_json_tree(log, argv[optind], NULL);
+    RDTree *tree = rdt_tree_load_from_file(log, argv[optind], NULL);
     if (!tree)
         return 1;
 
-    return save_tree(tree, argv[optind+1]) ? 0 : 1;
+    return rdt_tree_save(tree, argv[optind+1]) ? 0 : 1;
 }

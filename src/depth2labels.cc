@@ -41,7 +41,7 @@
 #include "image_utils.h"
 #include "xalloc.h"
 #include "utils.h"
-#include "loader.h"
+#include "rdt_tree.h"
 #include "infer.h"
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
@@ -174,7 +174,9 @@ main(int argc, char **argv)
 
   // Do inference
   unsigned n_trees = argc - optind - 2;
-  RDTree** forest = read_forest(log, (const char**)&argv[optind+2], n_trees, NULL);
+  RDTree** forest = rdt_forest_load_from_files(log,
+                                               (const char**)&argv[optind+2],
+                                               n_trees, NULL);
   if (!forest)
     {
       return 1;
@@ -182,7 +184,7 @@ main(int argc, char **argv)
   float* output_pr = infer_labels<half>(forest, n_trees, depth_image,
                                         width, height);
   uint8_t n_labels = forest[0]->header.n_labels;
-  free_forest(forest, n_trees);
+  rdt_forest_destroy(forest, n_trees);
 
   // Write out png of most likely labels
   png_bytep out_labels = (png_bytep)xmalloc(width * height);
