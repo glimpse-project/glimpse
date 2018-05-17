@@ -1099,7 +1099,9 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
                           GL_TRUE, sizeof(XYZRGBA),
                           (void *)offsetof(XYZRGBA, rgba));
 
+    glEnable(GL_PROGRAM_POINT_SIZE);
     glDrawArrays(GL_POINTS, 0, n_joints);
+    glDisable(GL_PROGRAM_POINT_SIZE);
 
     glDisableVertexAttribArray(data->cloud_attr_pos);
     glDisableVertexAttribArray(data->cloud_attr_col);
@@ -1214,10 +1216,12 @@ draw_tracking_scene_to_texture(Data *data,
                               (void *)offsetof(struct gm_point_rgba, rgba));
 
         glEnable(GL_DEPTH_TEST);
+        glEnable(GL_PROGRAM_POINT_SIZE);
         glDepthFunc(GL_LESS);
 
         glDrawArrays(GL_POINTS, 0, data->n_cloud_points);
 
+        glDisable(GL_PROGRAM_POINT_SIZE);
         glDisable(GL_DEPTH_TEST);
 
         glDisableVertexAttribArray(data->cloud_attr_pos);
