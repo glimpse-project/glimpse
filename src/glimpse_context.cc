@@ -4739,7 +4739,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         JSON_Value *root = json_parse_string(js_string);
         if (root) {
-            ctx->joint_params = jip_load_from_json(root);
+            ctx->joint_params = jip_load_from_json(logger, root, err);
             json_value_free(root);
         }
 
@@ -4747,7 +4747,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_asset_close(joint_params_asset);
 
         if (!ctx->joint_params) {
-            gm_throw(logger, err, "Failed to laod joint params from json");
             gm_context_destroy(ctx);
             return NULL;
         }

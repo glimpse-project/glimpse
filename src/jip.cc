@@ -37,7 +37,9 @@
 #include "xalloc.h"
 
 JIParams *
-jip_load_from_json(JSON_Value *root)
+jip_load_from_json(struct gm_logger* log,
+                   JSON_Value *root,
+                   char** err)
 {
     JIParams* jip = (JIParams*)xcalloc(1, sizeof(JIParams));
 
@@ -53,7 +55,7 @@ jip_load_from_json(JSON_Value *root)
     int len = json_array_get_count(params);
     if (len != jip->header.n_joints)
     {
-        fprintf(stderr, "Inconsistency between \"n_joints\" and length of \"params\" array\n");
+        gm_throw(log, err, "Inconsistency between \"n_joints\" and length of \"params\" array\n");
         free(jip);
         return NULL;
     }
@@ -72,14 +74,20 @@ jip_load_from_json(JSON_Value *root)
 }
 
 JIParams*
-jip_load_from_file(const char* filename)
+jip_load_from_file(struct gm_logger* log,
+                   const char* filename,
+                   char** err)
 {
     const char* ext;
 
     if ((ext = strstr(filename, ".json")) && ext[5] == '\0')
     {
         JSON_Value *js = json_parse_file(filename);
-        JIParams *ret = jip_load_from_json(js);
+        if (!js) {
+            gm_throw(log, err, "Failed to parse JSON file %s", filename);
+            return NULL;
+        }
+        JIParams *ret = jip_load_from_json(log, js, err);
         json_value_free(js);
         return ret;
     }
@@ -87,14 +95,14 @@ jip_load_from_file(const char* filename)
     FILE* jip_file = fopen(filename, "r");
     if (!jip_file)
     {
-        fprintf(stderr, "Error opening JIP file\n");
+        gm_throw(log, err, "Error opening JIP file\n");
         return NULL;
     }
 
     JIParams* jip = (JIParams*)xcalloc(1, sizeof(JIParams));
     if (fread(&jip->header, sizeof(JIPHeader), 1, jip_file) != 1)
     {
-        fprintf(stderr, "Error reading header\n");
+        gm_throw(log, err, "Error reading header\n");
         goto read_jip_error;
     }
 
@@ -104,7 +112,7 @@ jip_load_from_file(const char* filename)
         float params[3];
         if (fread(params, sizeof(float), 3, jip_file) != 3)
         {
-            fprintf(stderr, "Error reading parameters\n");
+            gm_throw(log, err, "Error reading parameters\n");
             goto read_jip_error;
         }
 
@@ -113,10 +121,7 @@ jip_load_from_file(const char* filename)
         jip->joint_params[i].offset = params[2];
     }
 
-    if (fclose(jip_file) != 0)
-    {
-        fprintf(stderr, "Error closing JIP file\n");
-    }
+    fclose(jip_file);
 
     return jip;
 

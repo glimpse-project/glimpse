@@ -27,6 +27,8 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#include <glimpse_log.h>
+
 #include "parson.h"
 
 typedef struct {
@@ -50,8 +52,12 @@ typedef struct {
 extern "C" {
 #endif
 
-JIParams *jip_load_from_json(JSON_Value *root);
-JIParams* jip_load_from_file(const char* filename);
+JIParams *jip_load_from_json(struct gm_logger* log,
+                             JSON_Value* root,
+                             char** err);
+JIParams* jip_load_from_file(struct gm_logger* log,
+                             const char* filename,
+                             char** err);
 void jip_free(JIParams* jip);
 
 #ifdef __cplusplus

@@ -31,6 +31,8 @@
 
 #include <getopt.h>
 
+#include <glimpse_log.h>
+
 #include "xalloc.h"
 #include "jip.h"
 #include "parson.h"
@@ -60,6 +62,7 @@ usage(void)
 int
 main(int argc, char **argv)
 {
+    struct gm_logger *log = gm_logger_new(NULL, NULL);
     int opt;
     bool pretty = false;
 
@@ -89,7 +92,7 @@ main(int argc, char **argv)
     if (argc - optind != 2)
         usage();
 
-    JIParams *params = jip_load_from_file(argv[optind]);
+    JIParams *params = jip_load_from_file(log, argv[optind], NULL);
 
     JSON_Value *jip = json_value_init_object();
 
