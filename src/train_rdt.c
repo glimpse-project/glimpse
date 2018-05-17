@@ -44,6 +44,7 @@ struct training_data {
 };
 
 static bool verbose_opt = false;
+static bool profile_opt = false;
 static bool continue_opt = false;
 static char *data_dir_opt = NULL;
 static char *index_name_opt = NULL;
@@ -229,6 +230,7 @@ usage(struct gm_ui_properties *ctx_props)
 "      --log=FILE\n"
 "\n"
 "      --verbose              Verbose output.\n"
+"      --profile              Profiling output.\n"
 "  -h, --help                 Display this message.\n");
     exit(1);
 }
@@ -373,6 +375,7 @@ main(int argc, char **argv)
         gm_rdt_context_get_ui_properties(ctx);
 
 #define VERBOSE_OPT    (CHAR_MAX + 1) // no short opt
+#define PROFILE_OPT    (CHAR_MAX + 2) // no short opt
 
     const char *short_options="q:p:v:d:cj:s:l:vh";
     const struct option long_options[] = {
@@ -387,6 +390,7 @@ main(int argc, char **argv)
         {"log",          required_argument,  0, 'l'},
         {"log-file",     required_argument,  0, 'l'},
         {"verbose",      no_argument,        0, VERBOSE_OPT},
+        {"profile",      no_argument,        0, PROFILE_OPT},
         {"help",         no_argument,        0, 'h'},
         {0, 0, 0, 0}
     };
@@ -466,6 +470,9 @@ main(int argc, char **argv)
             break;
         case VERBOSE_OPT:
             verbose_opt = true;
+            break;
+        case PROFILE_OPT:
+            profile_opt = true;
             break;
         case 'c':
             continue_opt = true;
@@ -557,6 +564,8 @@ main(int argc, char **argv)
             gm_props_set_int(ctx_props, "seed", seed_opt);
         if (verbose_opt)
             gm_props_set_bool(ctx_props, "verbose", true);
+        if (profile_opt)
+            gm_props_set_bool(ctx_props, "profile", true);
 
         gm_props_from_json(data->log, ctx_props, run_props);
         gm_props_from_json(data->log, ctx_props, override_props_object);
