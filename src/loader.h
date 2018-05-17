@@ -28,6 +28,8 @@
 #include <stdio.h>
 #include <stdbool.h>
 
+#include <glimpse_log.h>
+
 #include "llist.h"
 #include "parson.h"
 
@@ -84,16 +86,28 @@ extern "C" {
 
 bool save_tree(RDTree* tree, const char* filename);
 
-RDTree* load_json_tree(uint8_t* json_tree_buf, int len);
-RDTree* read_json_tree(const char* filename);
+RDTree*
+load_json_tree(struct gm_logger* log,
+               JSON_Value* json_tree_value,
+               char** err);
+RDTree* read_json_tree(struct gm_logger* log,
+                       const char* filename,
+                       char** err);
 
-RDTree* load_tree(uint8_t* tree, int len);
-RDTree* read_tree(const char* filename);
+RDTree* load_tree(struct gm_logger* log,
+                  uint8_t* tree,
+                  int len,
+                  char** err);
+RDTree* read_tree(struct gm_logger* log,
+                  const char* filename,
+                  char** err);
 
 void free_tree(RDTree* tree);
 
-RDTree** read_json_forest(const char** files, int n_files);
-RDTree** read_forest(const char** files, int n_files);
+RDTree** read_forest(struct gm_logger* log,
+                     const char** files,
+                     int n_files,
+                     char **err);
 
 void free_forest(RDTree** forest, int n_trees);
 

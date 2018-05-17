@@ -1005,12 +1005,14 @@ reload_tree(struct gm_rdt_context_impl *ctx,
 {
     gm_info(ctx->log, "Reloading %s...\n", filename);
 
-    RDTree* checkpoint = read_tree(filename);
-    if (!checkpoint)
-        checkpoint = read_json_tree(filename);
+    char *catch_err = NULL;
+    RDTree* checkpoint = read_tree(ctx->log, filename, &catch_err);
     if (!checkpoint) {
-        gm_throw(ctx->log, err, "Failed to reload %s", filename);
-        return false;
+        xfree(catch_err);
+        catch_err = NULL;
+        checkpoint = read_json_tree(ctx->log, filename, err);
+        if (!checkpoint)
+            return false;
     }
 
     // Do some basic validation

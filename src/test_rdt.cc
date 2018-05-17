@@ -196,12 +196,13 @@ main(int argc, char **argv)
         tree_paths[i] = argv[optind + 2 + i];
     }
 
+    char *err = NULL;
     start = get_time();
-    RDTree **forest = read_forest((const char**)tree_paths, n_trees);
+    RDTree **forest = read_forest(log, (const char**)tree_paths, n_trees, &err);
     end = get_time();
     uint64_t load_forest_duration = end - start;
     if (!forest) {
-        fprintf(stderr, "Failed to load decision tree[s]\n");
+        fprintf(stderr, "Failed to load decision tree[s]: %s\n", err);
         exit(1);
     }
 
@@ -212,8 +213,6 @@ main(int argc, char **argv)
 
     half *depth_images;
     uint8_t *label_images;
-
-    char *err = NULL;
 
     start = get_time();
     if (!gather_train_data(log,

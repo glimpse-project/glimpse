@@ -4593,12 +4593,16 @@ gm_context_new(struct gm_logger *logger, char **err)
         if (tree_asset) {
             name = rdt_name;
             ctx->decision_trees[i] =
-                load_tree((uint8_t *)gm_asset_get_buffer(tree_asset),
-                          gm_asset_get_length(tree_asset));
+                load_tree(logger,
+                          (uint8_t *)gm_asset_get_buffer(tree_asset),
+                          gm_asset_get_length(tree_asset),
+                          &catch_err);
             if (!ctx->decision_trees[i]) {
                 gm_warn(ctx->log,
                         "Failed to open binary decision tree '%s': %s",
                         name, catch_err);
+                free(catch_err);
+                catch_err = NULL;
             }
         } else {
             free(catch_err);
@@ -4621,14 +4625,21 @@ gm_context_new(struct gm_logger *logger, char **err)
              * have to copy the asset into a larger buffer so we can
              * explicitly add the NUL.
              */
-            ctx->decision_trees[i] =
-                load_json_tree((uint8_t *)gm_asset_get_buffer(tree_asset),
-                               gm_asset_get_length(tree_asset));
-            if (!ctx->decision_trees[i]) {
-                gm_warn(ctx->log,
-                        "Failed to open JSON decision tree '%s': %s",
-                        name, catch_err);
+            JSON_Value *js = json_parse_string((const char *)gm_asset_get_buffer(tree_asset));
+            if (js) {
+                ctx->decision_trees[i] = load_json_tree(ctx->log, js, &catch_err);
+                if (!ctx->decision_trees[i]) {
+                    gm_warn(ctx->log,
+                            "Failed to open JSON decision tree '%s': %s",
+                            name, catch_err);
+                    xfree(catch_err);
+                    catch_err = NULL;
+                }
+            } else {
+                gm_warn(ctx->log, "Failed to parse JSON decision tree '%s'\n",
+                        name);
             }
+
         }
 
         gm_asset_close(tree_asset);

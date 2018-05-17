@@ -36,6 +36,8 @@
 
 #include "half.hpp"
 
+#include <glimpse_log.h>
+
 #include "image_utils.h"
 #include "xalloc.h"
 #include "utils.h"
@@ -103,6 +105,7 @@ print_usage(FILE* stream)
 int
 main(int argc, char **argv)
 {
+  struct gm_logger *log = gm_logger_new(NULL, NULL);
   bool write_palettized_pngs = true;
   const char *palette_file = NULL;
   int opt;
@@ -171,7 +174,7 @@ main(int argc, char **argv)
 
   // Do inference
   unsigned n_trees = argc - optind - 2;
-  RDTree** forest = read_forest((const char**)&argv[optind+2], n_trees);
+  RDTree** forest = read_forest(log, (const char**)&argv[optind+2], n_trees, NULL);
   if (!forest)
     {
       return 1;

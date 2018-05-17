@@ -143,28 +143,16 @@ unpack_json_tree(JSON_Object* jnode, Node* nodes, int node_index,
 }
 
 RDTree*
-load_json_tree(uint8_t* json_tree_buf, int len)
+load_json_tree(struct gm_logger* log,
+               JSON_Value* json_tree_value,
+               char** err)
 {
     assert_rdt_abi();
-
-    JSON_Value* json_tree_value = json_parse_string((const char *)json_tree_buf);
-    if (!json_tree_value)
-    {
-        fprintf(stderr, "Failed to parse JSON string\n");
-        return NULL;
-    }
 
     JSON_Object* json_tree = json_value_get_object(json_tree_value);
     if (!json_tree)
     {
-        fprintf(stderr, "Failed to find top-level tree object\n");
-        json_value_free(json_tree_value);
-        return NULL;
-    }
-
-    if ((int)json_object_get_number(json_tree, "_rdt_version_was") != RDT_VERSION)
-    {
-        fprintf(stderr, "Unexpected RDT version (expected %d)\n", RDT_VERSION);
+        gm_throw(log, err, "Failed to find top-level tree object\n");
         json_value_free(json_tree_value);
         return NULL;
     }
@@ -172,7 +160,7 @@ load_json_tree(uint8_t* json_tree_buf, int len)
     JSON_Object* root = json_object_get_object(json_tree, "root");
     if (!root)
     {
-        fprintf(stderr, "Failed to find tree root node\n");
+        gm_throw(log, err, "Failed to find tree root node\n");
         json_value_free(json_tree_value);
         return NULL;
     }
@@ -217,22 +205,27 @@ load_json_tree(uint8_t* json_tree_buf, int len)
 }
 
 RDTree*
-read_json_tree(const char* filename)
+read_json_tree(struct gm_logger* log,
+               const char* filename,
+               char** err)
 {
-    RDTree** forest = read_json_forest(&filename, 1);
-
-    if (forest)
-    {
-        RDTree* tree = forest[0];
-        xfree(forest);
-        return tree;
+    JSON_Value *js = json_parse_file(filename);
+    if (!js) {
+        gm_throw(log, err, "Failed to parse %s", filename);
+        return NULL;
     }
 
-    return NULL;
+    RDTree *tree = load_json_tree(log, js, err);
+    json_value_free(js);
+
+    return tree;
 }
 
 RDTree*
-load_tree(uint8_t* tree_buf, int len)
+load_tree(struct gm_logger* log,
+          uint8_t* tree_buf,
+          int len,
+          char** err)
 {
     assert_rdt_abi();
 
@@ -302,9 +295,11 @@ load_tree(uint8_t* tree_buf, int len)
 }
 
 RDTree*
-read_tree(const char* filename)
+read_tree(struct gm_logger *log,
+          const char* filename,
+          char** err)
 {
-    RDTree** forest = read_forest(&filename, 1);
+    RDTree** forest = read_forest(log, &filename, 1, err);
 
     if (forest)
     {
@@ -331,8 +326,11 @@ free_tree(RDTree* tree)
 }
 
 static RDTree**
-load_any_forest(uint8_t** tree_bufs, int* tree_buf_lengths,
-                int n_trees, bool is_json)
+load_forest(struct gm_logger* log,
+            uint8_t** tree_bufs,
+            int* tree_buf_lengths,
+            int n_trees,
+            char** err)
 {
     bool error = false;
     int n_labels = 0;
@@ -340,11 +338,10 @@ load_any_forest(uint8_t** tree_bufs, int* tree_buf_lengths,
 
     for (int i = 0; i < n_trees; i++)
     {
-        // Validate the decision tree
-        RDTree* tree = trees[i] = is_json ?
-            load_json_tree(tree_bufs[i], tree_buf_lengths[i]) :
-            load_tree(tree_bufs[i], tree_buf_lengths[i]);
-
+        RDTree *tree = trees[i] = load_tree(log,
+                                            tree_bufs[i],
+                                            tree_buf_lengths[i],
+                                            err);
         if (!tree)
         {
             error = true;
@@ -357,9 +354,9 @@ load_any_forest(uint8_t** tree_bufs, int* tree_buf_lengths,
         }
         if (tree->header.n_labels != n_labels)
         {
-            fprintf(stderr, "Tree %d has %d labels, expected %d\n",
-                    i, tree->header.n_labels,
-                    n_labels);
+            gm_throw(log, err, "Tree %d has %d labels, expected %d\n",
+                     i, tree->header.n_labels,
+                     n_labels);
             error = true;
             break;
         }
@@ -382,8 +379,11 @@ load_any_forest(uint8_t** tree_bufs, int* tree_buf_lengths,
     return trees;
 }
 
-static RDTree**
-read_any_forest(const char** files, int n_files, bool is_json)
+RDTree**
+read_forest(struct gm_logger* log,
+            const char** files,
+            int n_files,
+            char** err)
 {
     uint8_t* tree_bufs[n_files];
     int tree_buf_lengths[n_files];
@@ -397,7 +397,7 @@ read_any_forest(const char** files, int n_files, bool is_json)
         FILE* tree_fp;
         if (!(tree_fp = fopen(tree_file, "r")))
         {
-            fprintf(stderr, "Failed to open decision tree: %s\n", tree_file);
+            gm_throw(log, err, "Failed to open decision tree: %s\n", tree_file);
             error = true;
             break;
         }
@@ -405,7 +405,7 @@ read_any_forest(const char** files, int n_files, bool is_json)
         struct stat sb;
         if (fstat(fileno(tree_fp), &sb) < 0)
         {
-            fprintf(stderr, "Failed to stat decision tree: %s\n", tree_file);
+            gm_throw(log, err, "Failed to stat decision tree: %s\n", tree_file);
             error = true;
             break;
         }
@@ -414,20 +414,18 @@ read_any_forest(const char** files, int n_files, bool is_json)
         n_trees++;
         if (fread(tree_bufs[i], sb.st_size, 1, tree_fp) != 1)
         {
-            fprintf(stderr, "Failed to read decision tree: %s\n", tree_file);
+            gm_throw(log, err, "Failed to read decision tree: %s\n", tree_file);
             error = true;
             break;
         }
         tree_buf_lengths[i] = sb.st_size;
 
-        if (fclose(tree_fp) != 0)
-        {
-            fprintf(stderr, "Error closing tree file: %s\n", tree_file);
-        }
+        fclose(tree_fp);
     }
 
-    RDTree** forest = error ?
-        NULL : load_any_forest(tree_bufs, tree_buf_lengths, n_trees, is_json);
+    RDTree** forest = NULL;
+    if (!error)
+        forest = load_forest(log, tree_bufs, tree_buf_lengths, n_trees, err);
 
     for (int i = 0; i < n_trees; i++)
     {
@@ -435,18 +433,6 @@ read_any_forest(const char** files, int n_files, bool is_json)
     }
 
     return forest;
-}
-
-RDTree**
-read_json_forest(const char** files, int n_files)
-{
-    return read_any_forest(files, n_files, true);
-}
-
-RDTree**
-read_forest(const char** files, int n_files)
-{
-    return read_any_forest(files, n_files, false);
 }
 
 void

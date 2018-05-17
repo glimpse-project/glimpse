@@ -31,6 +31,8 @@
 
 #include <getopt.h>
 
+#include <glimpse_log.h>
+
 #include "loader.h"
 
 static JSON_Value*
@@ -177,6 +179,7 @@ usage(void)
 int
 main(int argc, char **argv)
 {
+    struct gm_logger *log = gm_logger_new(NULL, NULL);
     int opt;
     bool pretty = false;
 
@@ -208,8 +211,9 @@ main(int argc, char **argv)
         return 1;
     }
 
-    RDTree *tree = read_tree(argv[optind]);
-    if (!tree) return 1;
-    return save_tree_json(tree, argv[optind+1], pretty) ?
-      0 : 1;
+    RDTree *tree = read_tree(log, argv[optind], NULL);
+    if (!tree)
+        return 1;
+
+    return save_tree_json(tree, argv[optind+1], pretty) ? 0 : 1;
 }

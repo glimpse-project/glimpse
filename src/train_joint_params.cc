@@ -463,6 +463,8 @@ gen_range(float** data, float min, float max, int n)
 int
 main(int argc, char** argv)
 {
+    struct gm_logger *log = gm_logger_new(NULL, NULL);
+
     if (argc < 5)
     {
         print_usage(stderr);
@@ -630,7 +632,7 @@ main(int argc, char** argv)
     }
 
     printf("Loading decision forest...\n");
-    ctx.forest = read_forest((const char**)tree_paths, ctx.n_trees);
+    ctx.forest = read_forest(log, (const char**)tree_paths, ctx.n_trees, NULL);
 
     printf("Scanning training directories...\n");
     gather_train_data(ctx.log,

@@ -31,6 +31,8 @@
 
 #include <getopt.h>
 
+#include <glimpse_log.h>
+
 #include "loader.h"
 
 static void
@@ -84,6 +86,7 @@ usage(void)
 int
 main(int argc, char **argv)
 {
+    struct gm_logger *log = gm_logger_new(NULL, NULL);
     int opt;
     const char *short_options="+hp";
     const struct option long_options[] = {
@@ -109,8 +112,9 @@ main(int argc, char **argv)
         return 1;
     }
 
-    RDTree *tree = read_json_tree(argv[optind]);
-    if (!tree) return 1;
-    return save_tree(tree, argv[optind+1]) ?
-      0 : 1;
+    RDTree *tree = read_json_tree(log, argv[optind], NULL);
+    if (!tree)
+        return 1;
+
+    return save_tree(tree, argv[optind+1]) ? 0 : 1;
 }
