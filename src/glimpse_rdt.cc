@@ -1499,6 +1499,10 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     ctx->label_images = NULL;
     xfree(ctx->depth_images);
     ctx->depth_images = NULL;
+    if (ctx->history) {
+        json_value_free(ctx->history);
+        ctx->history = NULL;
+    }
 
     // Write to file
     clock_gettime(CLOCK_MONOTONIC, &now);
