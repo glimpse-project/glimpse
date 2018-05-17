@@ -119,6 +119,8 @@ struct thread_state {
 struct gm_rdt_context_impl {
     struct gm_logger* log;
 
+    JSON_Value* history;
+
     char*    reload;        // Reload and continue training with pre-existing tree
     bool     verbose;       // Verbose logging
     bool     profile;       // Verbose profiling
@@ -961,9 +963,33 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     JSON_Value *root = json_value_init_object();
 
     JSON_Value *meta_val = json_value_init_object();
-    json_object_set_value(json_object(root), "meta", meta_val);
+    JSON_Value *history = json_value_deep_copy(ctx->history);
+    if (!history) {
+        history = json_value_init_array();
+    }
+    json_array_append_value(json_array(history), meta_val);
+
+    time_t unix_time = time(NULL);
+    struct tm cur_time = *localtime(&unix_time);
+    asctime(&cur_time);
+
+    char date_str[256];
+    if (snprintf(date_str, sizeof(date_str), "%d-%d-%d-%d-%d-%d",
+                 (int)cur_time.tm_year + 1900,
+                 (int)cur_time.tm_mon + 1,
+                 (int)cur_time.tm_mday,
+                 (int)cur_time.tm_hour,
+                 (int)cur_time.tm_min,
+                 (int)cur_time.tm_sec) >= (int)sizeof(date_str))
+    {
+        gm_error(ctx->log, "Unable to format date string");
+    } else {
+        json_object_set_string(json_object(meta_val), "date", date_str);
+    }
 
     gm_props_to_json(ctx->log, &ctx->properties_state, meta_val);
+
+    json_object_set_value(json_object(root), "history", history);
 
     json_object_set_number(json_object(root), "depth", ctx->max_depth);
     json_object_set_number(json_object(root), "vertical_fov", ctx->fov);
@@ -1007,7 +1033,20 @@ reload_tree(struct gm_rdt_context_impl *ctx,
     int len = strlen(filename);
     RDTree* checkpoint = NULL;
     if (len > 5 && strcmp(filename + len - 5, ".json") == 0) {
-        checkpoint = rdt_tree_load_from_json_file(ctx->log, filename, err);
+        JSON_Value *js = json_parse_file(filename);
+        if (!js) {
+            gm_throw(ctx->log, err, "Failed to parse %s", filename);
+            return NULL;
+        }
+
+        checkpoint = rdt_tree_load_from_json(ctx->log, js, err);
+
+        JSON_Value *history = json_object_get_value(json_object(js), "history");
+        if (history) {
+            ctx->history = json_value_deep_copy(history);
+        }
+
+        json_value_free(js);
     } else {
         checkpoint = rdt_tree_load_from_file(ctx->log, filename, err);
     }
