@@ -1031,60 +1031,78 @@ reload_tree(struct gm_rdt_context_impl *ctx,
         return false;
     }
 
-    gm_info(ctx->log, "Reloading %d levels", checkpoint->header.depth);
-    if (checkpoint->header.depth > ctx->max_depth)
-    {
-        gm_throw(ctx->log, err,
-                 "Can't train with a lower depth than %s (%d < %d)\n",
-                 filename,
-                 ctx->max_depth, (int)checkpoint->header.depth);
-        return false;
-    }
+    if (ctx->max_depth < checkpoint->header.depth)
+        gm_warn(ctx->log, "Pruning tree with more levels that needed");
+
+    int reload_depth = std::min((int)checkpoint->header.depth, ctx->max_depth);
+    gm_info(ctx->log, "Reloading %d levels", reload_depth);
 
     // Restore nodes
-    int n_checkpoint_nodes = roundf(powf(2.f, checkpoint->header.depth)) - 1;
-    gm_info(ctx->log, "Reloading %d nodes", n_checkpoint_nodes);
-    memcpy(ctx->tree.data(), checkpoint->nodes, n_checkpoint_nodes * sizeof(Node));
+    int n_reload_nodes = (1<<reload_depth) - 1;
+    gm_info(ctx->log, "Reloading %d nodes", n_reload_nodes);
+    memcpy(ctx->tree.data(), checkpoint->nodes, n_reload_nodes * sizeof(Node));
 
     // Navigate the tree to determine any unfinished nodes and the last
     // trained depth
-    std::queue<NodeTrainData> checkpoint_queue;
+    std::queue<NodeTrainData> reload_queue;
 
-    checkpoint_queue.push(root_node);
+    reload_queue.push(root_node);
 
-    while (checkpoint_queue.size())
+    while (reload_queue.size())
     {
-        NodeTrainData node_data = checkpoint_queue.front();
-        checkpoint_queue.pop();
+        NodeTrainData node_data = reload_queue.front();
+        reload_queue.pop();
         Node* node = &ctx->tree[node_data.id];
 
-        // Check if the node has a valid probability table and copy it to
-        // the list if so. Given the order in which we iterate over the tree,
-        // we can just append to the list. Note that the code expects
-        // tree_histograms to point to the end of the list.
-        if (node->label_pr_idx != 0 && node->label_pr_idx != INT_MAX)
+        if (node->label_pr_idx == INT_MAX)
         {
-            float* pr_table = &checkpoint->
-                label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
-            int len = ctx->tree_histograms.size();
-            ctx->tree_histograms.resize(len + ctx->n_labels);
-            memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_labels * sizeof(float));
-        }
-
-        // Check if the node is either marked as incomplete, or it sits on
-        // the last depth of the tree and we're trying to train deeper.
-        if (node->label_pr_idx == INT_MAX ||
-            (node_data.depth == (checkpoint->header.depth - 1) &&
-             ctx->max_depth > checkpoint->header.depth))
-        {
-            // This node is referenced and incomplete, add it to the training
-            // queue.
+            // INT_MAX implies it wasn't trained yet..
             ctx->train_queue.push(node_data);
-        } else {
-            // If the node isn't a leaf-node, calculate which pixels should go
-            // to the next two nodes and add them to the checkpoint queue
-            if (node->label_pr_idx == 0)
+        }
+        else if (node->label_pr_idx != 0 && // leaf node
+                 node_data.depth == (checkpoint->header.depth - 1) &&
+                 ctx->max_depth > checkpoint->header.depth)
+        {
+            /* Also need to train leaf nodes in the last level of the reloaded
+             * tree if we're training deeper now...
+             */
+            node->label_pr_idx = INT_MAX;
+            ctx->train_queue.push(node_data);
+        }
+        else if (node_data.depth == (ctx->max_depth - 1) &&
+                 node->label_pr_idx == 0 && // wasn't previously a leaf node
+                 checkpoint->header.depth > ctx->max_depth)
+        {
+            /* If we're pruning an existing tree to a shallower depth then
+             * all nodes on the last level that weren't already leaf nodes
+             * need to be re-trained to calculate histograms...
+             */
+            node->label_pr_idx = INT_MAX;
+            ctx->train_queue.push(node_data);
+        }
+        else
+        {
+            // Leaf nodes are associated with a histogram which we need to
+            // copy across to tree_histograms...
+            if (node->label_pr_idx != 0)
             {
+                float* pr_table = &checkpoint->
+                    label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
+
+                /* Note: we make no assumption about the ordering of histograms
+                 * in the loaded tree, but the indices aren't necessarily
+                 * preserved as we copy them across to tree_histograms...
+                 */
+                int len = ctx->tree_histograms.size();
+                ctx->tree_histograms.resize(len + ctx->n_labels);
+                memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_labels * sizeof(float));
+
+                // NB: 0 is reserved for non-leaf nodes
+                node->label_pr_idx = (len / ctx->n_labels) + 1;
+            } else {
+                // If the node isn't a leaf-node, calculate which pixels should
+                // go to the next two nodes and add them to the reload
+                // queue
                 Int3D* l_pixels;
                 Int3D* r_pixels;
                 int n_lr_pixels[] = { 0, 0 };
@@ -1108,8 +1126,8 @@ reload_tree(struct gm_rdt_context_impl *ctx,
                 rdata.n_pixels = n_lr_pixels[1];
                 rdata.pixels = r_pixels;
 
-                checkpoint_queue.push(ldata);
-                checkpoint_queue.push(rdata);
+                reload_queue.push(ldata);
+                reload_queue.push(rdata);
             }
 
             // Since we didn't add the node to the training queue we
@@ -1195,7 +1213,15 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     }
 
     // Allocate memory to store the decision tree.
-    ctx->tree.resize(roundf(powf(2.f, ctx->max_depth)) - 1);
+    int n_tree_nodes = (1<<ctx->max_depth) - 1;
+    ctx->tree.resize(n_tree_nodes);
+
+    // Mark nodes in tree as unfinished, for checkpoint restoration
+    // Note: we still do this if we are reloading a tree, since it may
+    // be shallower than the total tree size.
+    for (int i = 0; i < (int)ctx->tree.size(); i++) {
+        ctx->tree[i].label_pr_idx = INT_MAX;
+    }
 
     // Create the randomized sample points across all images that the decision
     // tree is going to learn to classify, and associate with a root node...
@@ -1214,11 +1240,6 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             return false;
     } else {
         ctx->train_queue.push(root_node);
-
-        // Mark nodes in tree as unfinished, for checkpoint restoration
-        for (int i = 0; i < (int)ctx->tree.size(); i++) {
-            ctx->tree[i].label_pr_idx = INT_MAX;
-        }
     }
 
     std::vector<thread_metrics> level_metrics(ctx->max_depth);
