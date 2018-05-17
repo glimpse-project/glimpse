@@ -3569,6 +3569,13 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
                                                    video[off * 3 + 2]);
         }
         break;
+    case GM_FORMAT_BGR_U8:
+        foreach_xy_off(width, height) {
+            tracking->face_detect_buf[off] = RGB2Y(video[off * 3 + 2],
+                                                   video[off * 3 + 1],
+                                                   video[off * 3]);
+        }
+        break;
     case GM_FORMAT_RGBX_U8:
         foreach_xy_off(width, height) {
             uint8_t r = video[off * 4];
@@ -3577,11 +3584,27 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
             tracking->face_detect_buf[off] = RGB2Y(r, g, b);
         }
         break;
+    case GM_FORMAT_BGRX_U8:
+        foreach_xy_off(width, height) {
+            uint8_t r = video[off * 4 + 2];
+            uint8_t g = video[off * 4 + 1];
+            uint8_t b = video[off * 4];
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
     case GM_FORMAT_RGBA_U8:
         foreach_xy_off(width, height) {
             uint8_t r = video[off * 4];
             uint8_t g = video[off * 4 + 1];
             uint8_t b = video[off * 4 + 2];
+            tracking->face_detect_buf[off] = RGB2Y(r, g, b);
+        }
+        break;
+    case GM_FORMAT_BGRA_U8:
+        foreach_xy_off(width, height) {
+            uint8_t r = video[off * 4 + 2];
+            uint8_t g = video[off * 4 + 1];
+            uint8_t b = video[off * 4];
             tracking->face_detect_buf[off] = RGB2Y(r, g, b);
         }
         break;
@@ -3816,6 +3839,9 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     case GM_FORMAT_RGB_U8:
     case GM_FORMAT_RGBX_U8:
     case GM_FORMAT_RGBA_U8:
+    case GM_FORMAT_BGR_U8:
+    case GM_FORMAT_BGRX_U8:
+    case GM_FORMAT_BGRA_U8:
         gm_assert(ctx->log, 0, "Unexpected format for depth buffer");
         break;
     }
@@ -5470,6 +5496,17 @@ gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
                                     });
         }
         break;
+    case GM_FORMAT_BGR_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*3+2];
+                                        (*output)[roff*3+1] = video[off*3+1];
+                                        (*output)[roff*3+2] = video[off*3];
+                                    });
+        }
+        break;
     case GM_FORMAT_RGBX_U8:
     case GM_FORMAT_RGBA_U8:
         foreach_xy_off(*width, *height) {
@@ -5479,6 +5516,18 @@ gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
                                         (*output)[roff*3] = video[off*4];
                                         (*output)[roff*3+1] = video[off*4+1];
                                         (*output)[roff*3+2] = video[off*4+2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_BGRX_U8:
+    case GM_FORMAT_BGRA_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*4+2];
+                                        (*output)[roff*3+1] = video[off*4+1];
+                                        (*output)[roff*3+2] = video[off*4];
                                     });
         }
         break;

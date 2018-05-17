@@ -547,6 +547,7 @@ draw_properties(struct gm_ui_properties *props)
                                  prop->vec3_state.ptr[2]);
             } // else TODO
             break;
+        // FIXME: Handle GM_PROPERTY_STRING
         }
 
         if (prop->read_only) {
@@ -1760,12 +1761,23 @@ handle_device_frame_updates(Data *data)
                              video_width, video_height,
                              0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
                 break;
+            case GM_FORMAT_BGR_U8:
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                             video_width, video_height,
+                             0, GL_BGR, GL_UNSIGNED_BYTE, video_front);
+                break;
 
             case GM_FORMAT_RGBX_U8:
             case GM_FORMAT_RGBA_U8:
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                              video_width, video_height,
                              0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+                break;
+            case GM_FORMAT_BGRX_U8:
+            case GM_FORMAT_BGRA_U8:
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                             video_width, video_height,
+                             0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
                 break;
 
             case GM_FORMAT_UNKNOWN:

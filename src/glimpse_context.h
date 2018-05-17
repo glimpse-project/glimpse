@@ -30,6 +30,7 @@
 #include "glimpse_log.h"
 #include "loader.h"
 
+/* XXX: Disturbing the order of this enum will break recordings */
 enum gm_format {
     GM_FORMAT_UNKNOWN,
     GM_FORMAT_Z_U16_MM,
@@ -41,6 +42,10 @@ enum gm_format {
     GM_FORMAT_RGBA_U8,
 
     GM_FORMAT_POINTS_XYZC_F32_M, // points; not an image
+
+    GM_FORMAT_BGR_U8,
+    GM_FORMAT_BGRX_U8,
+    GM_FORMAT_BGRA_U8,
 };
 
 enum gm_distortion_model {

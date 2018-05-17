@@ -854,6 +854,12 @@ render_ar_video_background(struct glimpse_data *data)
                                  video_width, video_height,
                                  0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
                     break;
+                case GM_FORMAT_BGR_U8:
+                    gm_debug(data->log, "uploading BGR8 %dx%d", video_width, video_height);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_BGR,
+                                 video_width, video_height,
+                                 0, GL_BGR, GL_UNSIGNED_BYTE, video_front);
+                    break;
 
                 case GM_FORMAT_RGBX_U8:
                 case GM_FORMAT_RGBA_U8:
@@ -861,6 +867,13 @@ render_ar_video_background(struct glimpse_data *data)
                     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                                  video_width, video_height,
                                  0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+                    break;
+                case GM_FORMAT_BGRX_U8:
+                case GM_FORMAT_BGRA_U8:
+                    gm_debug(data->log, "uploading RGBA8 %dx%d", video_width, video_height);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA,
+                                 video_width, video_height,
+                                 0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
                     break;
 
                 case GM_FORMAT_UNKNOWN:

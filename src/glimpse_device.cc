@@ -2388,7 +2388,7 @@ avf_open(struct gm_device *dev, struct gm_device_config *config, char **err)
      * service has already been bound.
      */
 
-    dev->video_format = GM_FORMAT_RGBA_U8;
+    dev->video_format = GM_FORMAT_BGRA_U8;
     dev->max_video_pixels = 640 * 480;
 
     dev->depth_format = GM_FORMAT_Z_F32_M;
