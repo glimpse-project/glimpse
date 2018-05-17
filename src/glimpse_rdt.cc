@@ -1004,15 +1004,15 @@ reload_tree(struct gm_rdt_context_impl *ctx,
 {
     gm_info(ctx->log, "Reloading %s...\n", filename);
 
-    char *catch_err = NULL;
-    RDTree* checkpoint = rdt_tree_load_from_file(ctx->log, filename, &catch_err);
-    if (!checkpoint) {
-        xfree(catch_err);
-        catch_err = NULL;
+    int len = strlen(filename);
+    RDTree* checkpoint = NULL;
+    if (len > 5 && strcmp(filename + len - 5, ".json") == 0) {
         checkpoint = rdt_tree_load_from_json_file(ctx->log, filename, err);
-        if (!checkpoint)
-            return false;
+    } else {
+        checkpoint = rdt_tree_load_from_file(ctx->log, filename, err);
     }
+    if (!checkpoint)
+        return false;
 
     // Do some basic validation
     if (checkpoint->header.n_labels != ctx->n_labels)
