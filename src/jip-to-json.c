@@ -32,7 +32,7 @@
 #include <getopt.h>
 
 #include "xalloc.h"
-#include "rdt_tree.h"
+#include "jip.h"
 #include "parson.h"
 
 
@@ -89,7 +89,7 @@ main(int argc, char **argv)
     if (argc - optind != 2)
         usage();
 
-    JIParams *params = read_jip(argv[optind]);
+    JIParams *params = jip_load_from_file(argv[optind]);
 
     JSON_Value *jip = json_value_init_object();
 
@@ -115,7 +115,7 @@ main(int argc, char **argv)
     else
         json_serialize_to_file(jip, argv[optind+1]);
 
-    free_jip(params);
+    jip_free(params);
 
     return 0;
 }

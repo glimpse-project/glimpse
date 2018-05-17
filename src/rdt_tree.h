@@ -63,23 +63,6 @@ typedef struct {
     float* label_pr_tables;
 } RDTree;
 
-typedef struct {
-    float bandwidth;
-    float threshold;
-    float offset;
-} JIParam;
-
-typedef struct __attribute__((__packed__)) {
-    char    tag[3];
-    uint8_t version;
-    uint8_t n_joints;
-} JIPHeader;
-
-typedef struct {
-    JIPHeader header;
-    JIParam*  joint_params;
-} JIParams;
-
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -117,11 +100,6 @@ rdt_forest_load_from_files(struct gm_logger* log,
 
 void
 rdt_forest_destroy(RDTree** forest, int n_trees);
-
-/* TODO: split out */
-JIParams *joint_params_from_json(JSON_Value *root);
-JIParams* read_jip(const char* filename);
-void free_jip(JIParams* jip);
 
 #ifdef __cplusplus
 };

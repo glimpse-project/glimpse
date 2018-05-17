@@ -28,6 +28,7 @@
 #include <stdbool.h>
 
 #include "rdt_tree.h"
+#include "jip.h"
 #include "llist.h"
 #include "parson.h"
 

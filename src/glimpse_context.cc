@@ -79,6 +79,7 @@
 #include "wrapper_image.h"
 #include "infer.h"
 #include "rdt_tree.h"
+#include "jip.h"
 #include "image_utils.h"
 
 #include "glimpse_log.h"
@@ -4527,7 +4528,7 @@ gm_context_destroy(struct gm_context *ctx)
     xfree(ctx->decision_trees);
 
     if (ctx->joint_params)
-        free_jip(ctx->joint_params);
+        jip_free(ctx->joint_params);
 
     if (ctx->joint_map)
         json_value_free(ctx->joint_map);
@@ -4738,7 +4739,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         JSON_Value *root = json_parse_string(js_string);
         if (root) {
-            ctx->joint_params = joint_params_from_json(root);
+            ctx->joint_params = jip_load_from_json(root);
             json_value_free(root);
         }
 
