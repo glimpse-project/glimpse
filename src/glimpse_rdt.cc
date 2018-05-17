@@ -440,6 +440,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         Int2D pixel = data->pixels[p].xy;
         int i = data->pixels[p].i;
 
+        state->metrics.n_pixels_accumulated++;
         if (i != last_i) {
             state->metrics.n_images_accumulated++;
             last_i = i;
@@ -496,8 +497,6 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                     lr_histogram_idx + ctx->n_labels + label];
             }
         }
-
-        state->metrics.n_pixels_accumulated++;
     }
 }
 
