@@ -55,6 +55,7 @@
 
 using half_float::half;
 
+static const char *interrupt_reason;
 static bool interrupted = false;
 
 typedef struct {
@@ -853,6 +854,7 @@ collect_pixels(struct gm_rdt_context_impl* ctx,
 void
 sigint_handler(int signum)
 {
+    interrupt_reason = "User interrupted";
     interrupted = true;
 }
 
@@ -1395,6 +1397,10 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     struct timespec begin, last, now;
     int n_threads = ctx->n_threads;
 
+    /* Reset global state, in case a previous training run was interrupted... */
+    interrupted = false;
+    interrupt_reason = NULL;
+
     const char* data_dir = ctx->data_dir;
     if (!data_dir) {
         gm_throw(ctx->log, err, "Data directory not specified");
@@ -1595,7 +1601,6 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 
         // Quit if we've been interrupted
         if (interrupted) {
-            gm_warn(ctx->log, "Stopping training due to user-triggered interrupt");
             break;
         }
 
@@ -1705,6 +1710,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
             if (ctx->verbose)
                 gm_warn(ctx->log, "Interrupting - Maximum number of nodes (%d) reached",
                         ctx->max_nodes);
+            interrupt_reason = "Max nodes trained";
             interrupted = true;
         }
     }
@@ -1787,7 +1793,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
             "(%02d:%02d:%02d / %02d:%02d:%02d) %s\n",
             since_begin.hours, since_begin.minutes, since_begin.seconds,
             since_last.hours, since_last.minutes, since_last.seconds,
-            interrupted ? "Interrupted!" : "Done!");
+            interrupt_reason ?: "Done!");
 
     // Free memory that isn't needed anymore
     destroy_training_state(ctx);
