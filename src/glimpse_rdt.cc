@@ -88,6 +88,7 @@ struct thread_metrics {
     float accumulation_percent;
     float ranking_percent;
 
+    float nodes_per_second;
     int images_per_second;
     int pixels_per_second;
     int uvs_per_second;
@@ -111,19 +112,39 @@ struct thread_state {
         uint64_t accumulation_time;
         uint64_t n_pixels_accumulated;
         uint64_t n_images_accumulated;
+        uint64_t n_nodes;
 
         uint64_t gain_ranking_time;
     } metrics;
+
+    std::vector<thread_metrics> per_depth_metrics;
+};
+
+struct aggregate_metrics {
+    uint64_t duration;
+
+    float wait_percent;
+    float scheduling_percent;
+
+    float nodes_per_second;
+    int images_per_second;
+    int pixels_per_second;
+    int uvs_per_second;
+    int thresholds_per_second;
+
+    int pixels_per_node;
 };
 
 struct gm_rdt_context_impl {
     struct gm_logger* log;
 
+    JSON_Value* meta;
     JSON_Value* history;
 
     char*    reload;        // Reload and continue training with pre-existing tree
     bool     verbose;       // Verbose logging
     bool     profile;       // Verbose profiling
+    bool     pretty;        // Pretty JSON output
     int      seed;          // Seed for RNG
 
     char*    data_dir;      // Location of training data
@@ -175,8 +196,13 @@ struct gm_rdt_context_impl {
 
     std::vector<Node>   tree; // The decision tree being built
     std::vector<float>  tree_histograms; // label histograms for leaf nodes
-                                         // in node->id order
 
+    /* Note: These metrics are reset at the start of each tree level */
+    struct {
+        uint64_t start;
+        uint64_t wait_duration;
+    } metrics;
+    std::vector<aggregate_metrics> per_depth_metrics;
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -227,12 +253,91 @@ get_format_duration_suffix(uint64_t duration_ns)
 }
 
 static void
+calculate_aggregate_metrics(struct gm_rdt_context_impl *ctx,
+                            uint64_t current_time,
+                            struct aggregate_metrics *metrics)
+{
+    uint64_t run_duration = current_time - ctx->metrics.start;
+
+    memset(metrics, 0, sizeof(*metrics));
+    if (!run_duration)
+        return;
+
+    double run_time_sec = run_duration / 1e9;
+
+    /* time spent in main thread waiting for results from thread pool */
+    double wait_percent = ((double)ctx->metrics.wait_duration / run_duration) * 100.0;
+    /* time spent in main thread scheduling more work for thread pool */
+    double scheduling_percent = 100.0 - wait_percent;
+
+    uint64_t nodes_total = 0;
+    uint64_t images_total = 0;
+    uint64_t pixels_total = 0;
+    uint64_t uvs_total = 0;
+    uint64_t thresholds_total = 0;
+
+    for (int i = 0; i < (int)ctx->thread_pool.size(); i++) {
+        struct thread_state *state = &ctx->thread_pool[i];
+
+        nodes_total += state->metrics.n_nodes;
+        images_total += state->metrics.n_images_accumulated;
+        pixels_total += state->metrics.n_pixels_accumulated;
+        uvs_total += state->metrics.n_pixels_accumulated * ctx->n_uvs;
+        thresholds_total += state->metrics.n_pixels_accumulated * ctx->n_thresholds;
+    }
+
+    double nodes_per_second = (double)nodes_total / run_time_sec;
+    double images_per_sec = (double)images_total / run_time_sec;
+    double px_per_sec = (double)pixels_total / run_time_sec;
+    double uvs_per_sec = (double)uvs_total / run_time_sec;
+    double thresholds_per_sec = (double)thresholds_total / run_time_sec;
+    double pixels_per_node = (double)pixels_total / nodes_total;
+
+    metrics->duration = run_duration;
+
+    metrics->wait_percent = wait_percent;
+    metrics->scheduling_percent = scheduling_percent;
+
+    metrics->nodes_per_second = nodes_per_second;
+    metrics->images_per_second = images_per_sec;
+    metrics->pixels_per_second = px_per_sec;
+    metrics->uvs_per_second = uvs_per_sec;
+    metrics->thresholds_per_second = thresholds_per_sec;
+    metrics->pixels_per_node = pixels_per_node;
+}
+
+static JSON_Value*
+aggregate_metrics_to_json(struct gm_rdt_context_impl* ctx,
+                          struct aggregate_metrics* metrics)
+{
+    JSON_Value *js = json_value_init_object();
+
+    json_object_set_number(json_object(js), "duration", metrics->duration);
+
+    json_object_set_number(json_object(js), "wait_percent", metrics->wait_percent);
+    json_object_set_number(json_object(js), "scheduling_percent", metrics->scheduling_percent);
+
+    json_object_set_number(json_object(js), "nodes_per_second", metrics->nodes_per_second);
+    json_object_set_number(json_object(js), "images_per_second", metrics->images_per_second);
+    json_object_set_number(json_object(js), "pixels_per_second", metrics->pixels_per_second);
+    json_object_set_number(json_object(js), "uvs_per_second", metrics->uvs_per_second);
+    json_object_set_number(json_object(js), "thresholds_per_second", metrics->thresholds_per_second);
+    json_object_set_number(json_object(js), "pixels_per_node", metrics->pixels_per_node);
+
+    return js;
+}
+
+static void
 calculate_thread_metrics(struct gm_rdt_context_impl *ctx,
                          struct thread_state *state,
                          uint64_t current_time,
                          struct thread_metrics *metrics)
 {
     uint64_t run_duration = current_time - state->metrics.start;
+
+    memset(metrics, 0, sizeof(*metrics));
+    if (!run_duration)
+        return;
 
     double idle_percent = ((double)state->metrics.idle_duration /
         run_duration) * 100.0;
@@ -242,6 +347,8 @@ calculate_thread_metrics(struct gm_rdt_context_impl *ctx,
         run_duration) * 100.0;
 
     double run_time_sec = run_duration / 1e9;
+    double nodes_per_second = (double)state->metrics.n_nodes /
+        run_time_sec;
     double images_per_sec = (double)state->metrics.n_images_accumulated /
         run_time_sec;
     double px_per_sec = (double)state->metrics.n_pixels_accumulated /
@@ -253,10 +360,56 @@ calculate_thread_metrics(struct gm_rdt_context_impl *ctx,
     metrics->accumulation_percent = accu_percent;
     metrics->ranking_percent = rank_percent;
 
+    metrics->nodes_per_second = nodes_per_second;
     metrics->images_per_second = images_per_sec;
     metrics->pixels_per_second = px_per_sec;
     metrics->uvs_per_second = px_per_sec * ctx->n_uvs;
     metrics->thresholds_per_second = px_per_sec * ctx->n_thresholds;
+}
+
+static JSON_Value*
+thread_metrics_to_json(struct gm_rdt_context_impl* ctx,
+                       struct thread_metrics* metrics)
+{
+    JSON_Value *js = json_value_init_object();
+
+    json_object_set_number(json_object(js), "duration", metrics->duration);
+
+    json_object_set_number(json_object(js), "idle_percent", metrics->idle_percent);
+    json_object_set_number(json_object(js), "accumulation_percent", metrics->accumulation_percent);
+    json_object_set_number(json_object(js), "ranking_percent", metrics->ranking_percent);
+
+    json_object_set_number(json_object(js), "nodes_per_second", metrics->nodes_per_second);
+    json_object_set_number(json_object(js), "images_per_second", metrics->images_per_second);
+    json_object_set_number(json_object(js), "pixels_per_second", metrics->pixels_per_second);
+    json_object_set_number(json_object(js), "uvs_per_second", metrics->uvs_per_second);
+    json_object_set_number(json_object(js), "thresholds_per_second", metrics->thresholds_per_second);
+
+    return js;
+}
+
+static void
+log_thread_metrics(struct gm_rdt_context_impl *ctx,
+                   int thread_index,
+                   struct thread_metrics *metrics)
+{
+
+    gm_info(ctx->log, "%02d: over %.2f%s: idle %5.2f%%, acc %5.2f%% (%5.2f nd/s %6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %5.2f%%",
+            thread_index,
+            get_format_duration(metrics->duration),
+            get_format_duration_suffix(metrics->duration),
+
+            metrics->idle_percent,
+            metrics->accumulation_percent,
+
+            metrics->nodes_per_second,
+            metrics->images_per_second,
+            metrics->pixels_per_second,
+            metrics->uvs_per_second,
+            metrics->thresholds_per_second,
+
+            metrics->ranking_percent
+            );
 }
 
 static void
@@ -264,29 +417,33 @@ maybe_log_thread_metrics(struct gm_rdt_context_impl *ctx,
                          struct thread_state *state,
                          uint64_t current_time)
 {
-    if (current_time - state->last_metrics_log < 1000000000)
-        return;
+    if (current_time - state->last_metrics_log > 1000000000) {
+        struct thread_metrics metrics;
+        calculate_thread_metrics(ctx, state, current_time, &metrics);
+        log_thread_metrics(ctx, state->idx, &metrics);
+        state->last_metrics_log = current_time;
+    }
+}
 
-    struct thread_metrics metrics;
-    calculate_thread_metrics(ctx, state, current_time, &metrics);
+static void
+log_aggregate_metrics(struct gm_rdt_context_impl* ctx,
+                      struct aggregate_metrics* metrics)
+{
+    gm_info(ctx->log, "aggregated over %.2f%s: sched %5.2f%%, wait work %5.2f%% (%5.2f nd/s %6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s, %d px/nd)",
+            get_format_duration(metrics->duration),
+            get_format_duration_suffix(metrics->duration),
 
-    gm_info(ctx->log, "%02d: over %.2f%s: idle %5.2f%%, acc %5.2f%% (%6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %5.2f%%",
-            state->idx,
-            get_format_duration(metrics.duration),
-            get_format_duration_suffix(metrics.duration),
+            metrics->scheduling_percent,
+            metrics->wait_percent,
 
-            metrics.idle_percent,
-            metrics.accumulation_percent,
+            metrics->nodes_per_second,
+            metrics->images_per_second,
+            metrics->pixels_per_second,
+            metrics->uvs_per_second,
+            metrics->thresholds_per_second,
 
-            metrics.images_per_second,
-            metrics.pixels_per_second,
-            metrics.uvs_per_second,
-            metrics.thresholds_per_second,
-
-            metrics.ranking_percent
+            metrics->pixels_per_node
             );
-
-    state->last_metrics_log = current_time;
 }
 
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
@@ -449,7 +606,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         }
 
         if (p % 10000 == 0 && ctx->profile) {
-                maybe_log_thread_metrics(ctx, state, get_time());
+            maybe_log_thread_metrics(ctx, state, get_time());
         }
 
         int64_t image_idx = (int64_t)i * ctx->width * ctx->height;
@@ -632,6 +789,7 @@ worker_thread_cb(void* userdata)
             state->metrics.gain_ranking_time += rank_end - rank_start;
         }
 
+        state->metrics.n_nodes++;
         uint64_t work_end = get_time();
         result.duration = work_end - idle_end;
 
@@ -837,6 +995,15 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = INT_MAX;
     ctx->properties.push_back(prop);
 
+    ctx->pretty = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "pretty";
+    prop.desc = "Pretty JSON output";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->pretty;
+    ctx->properties.push_back(prop);
+
     ctx->verbose = false;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -873,10 +1040,32 @@ gm_rdt_context_new(struct gm_logger *log)
     return (struct gm_rdt_context *)ctx;
 }
 
+static void
+destroy_training_state(struct gm_rdt_context_impl* ctx)
+{
+    xfree(ctx->uvs);
+    ctx->uvs = NULL;
+    xfree(ctx->thresholds);
+    ctx->thresholds = NULL;
+    xfree(ctx->label_images);
+    ctx->label_images = NULL;
+    xfree(ctx->depth_images);
+    ctx->depth_images = NULL;
+    if (ctx->history) {
+        json_value_free(ctx->history);
+        ctx->history = NULL;
+    }
+    if (ctx->meta) {
+        json_value_free(ctx->meta);
+        ctx->meta = NULL;
+    }
+}
+
 void
 gm_rdt_context_destroy(struct gm_rdt_context *_ctx)
 {
     struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
+    destroy_training_state(ctx);
     delete ctx;
 }
 
@@ -962,32 +1151,12 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
 {
     JSON_Value *root = json_value_init_object();
 
-    JSON_Value *meta_val = json_value_init_object();
+    JSON_Value *meta_val = ctx->meta;
     JSON_Value *history = json_value_deep_copy(ctx->history);
     if (!history) {
         history = json_value_init_array();
     }
     json_array_append_value(json_array(history), meta_val);
-
-    time_t unix_time = time(NULL);
-    struct tm cur_time = *localtime(&unix_time);
-    asctime(&cur_time);
-
-    char date_str[256];
-    if (snprintf(date_str, sizeof(date_str), "%d-%d-%d-%d-%d-%d",
-                 (int)cur_time.tm_year + 1900,
-                 (int)cur_time.tm_mon + 1,
-                 (int)cur_time.tm_mday,
-                 (int)cur_time.tm_hour,
-                 (int)cur_time.tm_min,
-                 (int)cur_time.tm_sec) >= (int)sizeof(date_str))
-    {
-        gm_error(ctx->log, "Unable to format date string");
-    } else {
-        json_object_set_string(json_object(meta_val), "date", date_str);
-    }
-
-    gm_props_to_json(ctx->log, &ctx->properties_state, meta_val);
 
     json_object_set_value(json_object(root), "history", history);
 
@@ -1012,7 +1181,11 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
 
     json_object_set_value(json_object(root), "root", nodes);
 
-    JSON_Status status = json_serialize_to_file_pretty(root, filename);
+    JSON_Status status;
+    if (ctx->pretty)
+        status = json_serialize_to_file_pretty(root, filename);
+    else
+        status = json_serialize_to_file(root, filename);
     if (status != JSONSuccess)
     {
         fprintf(stderr, "Failed to serialize output to JSON\n");
@@ -1186,29 +1359,59 @@ reload_tree(struct gm_rdt_context_impl *ctx,
     return true;
 }
 
-bool
-gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
+static JSON_Value*
+create_training_meta(struct gm_rdt_context_impl* ctx)
 {
-    struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
+    JSON_Value *meta_val = json_value_init_object();
+
+    time_t unix_time = time(NULL);
+    struct tm cur_time = *localtime(&unix_time);
+    asctime(&cur_time);
+
+    char date_str[256];
+    if (snprintf(date_str, sizeof(date_str), "%d-%d-%d-%d-%d-%d",
+                 (int)cur_time.tm_year + 1900,
+                 (int)cur_time.tm_mon + 1,
+                 (int)cur_time.tm_mday,
+                 (int)cur_time.tm_hour,
+                 (int)cur_time.tm_min,
+                 (int)cur_time.tm_sec) >= (int)sizeof(date_str))
+    {
+        gm_error(ctx->log, "Unable to format date string");
+    } else {
+        json_object_set_string(json_object(meta_val), "date", date_str);
+    }
+
+    gm_props_to_json(ctx->log, &ctx->properties_state, meta_val);
+
+    return meta_val;
+}
+
+bool
+gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
+{
+    struct gm_rdt_context_impl* ctx = (struct gm_rdt_context_impl*)_ctx;
     TimeForDisplay since_begin, since_last;
     struct timespec begin, last, now;
     int n_threads = ctx->n_threads;
 
-    const char *data_dir = ctx->data_dir;
+    const char* data_dir = ctx->data_dir;
     if (!data_dir) {
         gm_throw(ctx->log, err, "Data directory not specified");
         return false;
     }
-    const char *index_name = ctx->index_name;
+    const char* index_name = ctx->index_name;
     if (!index_name) {
         gm_throw(ctx->log, err, "Index name not specified");
         return false;
     }
-    const char *out_filename = ctx->out_filename;
+    const char* out_filename = ctx->out_filename;
     if (!out_filename) {
         gm_throw(ctx->log, err, "Output filename not specified");
         return false;
     }
+
+    ctx->meta = create_training_meta(ctx);
 
     gm_info(ctx->log, "Scanning training directories...\n");
     if (!gather_train_data(ctx->log,
@@ -1221,6 +1424,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
                            &ctx->fov,
                            err))
     {
+        destroy_training_state(ctx);
         return false;
     }
 
@@ -1275,13 +1479,15 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
 
     if (ctx->reload) {
-        if (!reload_tree(ctx, ctx->reload, root_node, err))
+        if (!reload_tree(ctx, ctx->reload, root_node, err)) {
+            destroy_training_state(ctx);
             return false;
+        }
     } else {
         ctx->train_queue.push(root_node);
     }
 
-    std::vector<thread_metrics> level_metrics(ctx->max_depth);
+    ctx->per_depth_metrics.resize(ctx->max_depth);
 
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
     ctx->thread_pool.resize(n_threads);
@@ -1290,11 +1496,13 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         struct thread_state *state = &ctx->thread_pool[i];
         state->idx = i;
         state->ctx = ctx;
+        state->per_depth_metrics.resize(ctx->max_depth);
 
         if (pthread_create(&state->thread, NULL,
                            worker_thread_cb, (void*)state) != 0)
         {
             gm_throw(ctx->log, err, "Error creating thread\n");
+            destroy_training_state(ctx);
             return false;
         }
     }
@@ -1305,6 +1513,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
     last = begin;
     uint64_t last_metrics = get_time();
     int last_depth = -1;
+    uint64_t wait_start, wait_end;
     while (ctx->train_queue.size())
     {
         int best_uv = 0;
@@ -1321,27 +1530,43 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             since_begin = get_time_for_display(&begin, &now);
             since_last = get_time_for_display(&last, &now);
             last = now;
-            last_depth = node_data.depth;
 
             uint64_t current = get_time();
-            for (int i = 0; i < ctx->n_threads; i++) {
-                struct thread_state *state = &ctx->thread_pool[i];
 
-                calculate_thread_metrics(ctx, state, current,
-                                         &level_metrics[last_depth]);
-                memset(&state->metrics, 0, sizeof(state->metrics));
-                state->metrics.start = current;
+            if (last_depth != -1) { // Finished last_depth
+                gm_info(ctx->log, "Finished level %d: ", last_depth + 1);
+                calculate_aggregate_metrics(ctx, current,
+                                            &ctx->per_depth_metrics[last_depth]);
+                log_aggregate_metrics(ctx, &ctx->per_depth_metrics[last_depth]);
+
+                for (int i = 0; i < ctx->n_threads; i++) {
+                    struct thread_state *state = &ctx->thread_pool[i];
+
+                    calculate_thread_metrics(ctx, state, current,
+                                             &state->per_depth_metrics[last_depth]);
+                    log_thread_metrics(ctx, state->idx, &state->per_depth_metrics[last_depth]);
+                }
             }
 
             gm_info(ctx->log,
-                    "(%02d:%02d:%02d / %02d:%02d:%02d) Training depth %d (%d nodes)\n",
+                    "(%02d:%02d:%02d / %02d:%02d:%02d) Training level %d (%d nodes)\n",
                     since_begin.hours, since_begin.minutes, since_begin.seconds,
                     since_last.hours, since_last.minutes, since_last.seconds,
-                    last_depth + 1, (int)ctx->train_queue.size() + 1);
+                    node_data.depth + 1, (int)ctx->train_queue.size() + 1);
+
+            for (int i = 0; i < ctx->n_threads; i++) {
+                struct thread_state *state = &ctx->thread_pool[i];
+                memset(&state->metrics, 0, sizeof(state->metrics));
+                state->metrics.start = current;
+            }
+            memset(&ctx->metrics, 0, sizeof(ctx->metrics));
+            ctx->metrics.start = current;
+
+            last_depth = node_data.depth;
         }
 
         /* XXX: note we don't need to take the work_queue_lock here since the
-         * currently scheduling model implies there's no work being processed
+         * current scheduling model implies there's no work being processed
          * by any of the threads at this point...
          */
 
@@ -1357,12 +1582,16 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             ctx->work_queue.push(work);
             n_pending_results++;
         }
+
+        wait_start = get_time();
         pthread_cond_broadcast(&ctx->work_queue_changed);
 
         pthread_mutex_lock(&ctx->results_lock);
         while (!interrupted && (int)ctx->results.size() < n_pending_results)
             pthread_cond_wait(&ctx->results_changed, &ctx->results_lock);
         pthread_mutex_unlock(&ctx->results_lock);
+        wait_end = get_time();
+        ctx->metrics.wait_duration += wait_end - wait_start;
 
         // Quit if we've been interrupted
         if (interrupted) {
@@ -1377,6 +1606,9 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
                     struct thread_state *state = &ctx->thread_pool[i];
                     maybe_log_thread_metrics(ctx, state, current);
                 }
+                struct aggregate_metrics agg_metrics;
+                calculate_aggregate_metrics(ctx, current, &agg_metrics);
+                log_aggregate_metrics(ctx, &agg_metrics);
                 last_metrics = current;
             }
         }
@@ -1393,7 +1625,7 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             }
         }
 
-        // Add this node to the tree and possible add left/ride nodes to the
+        // Add this node to the tree and possibly add left/ride nodes to the
         // training queue.
         Node* node = &ctx->tree[node_data.id];
         if (best_gain > 0.f && (node_data.depth + 1) < ctx->max_depth)
@@ -1471,7 +1703,8 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         ctx->n_nodes_trained++;
         if (ctx->max_nodes && ctx->n_nodes_trained > ctx->max_nodes) {
             if (ctx->verbose)
-                gm_debug(ctx->log, "Maximum number of nodes reached");
+                gm_warn(ctx->log, "Interrupting - Maximum number of nodes (%d) reached",
+                        ctx->max_nodes);
             interrupted = true;
         }
     }
@@ -1486,22 +1719,48 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
         if (pthread_join(state->thread, NULL) != 0) {
             gm_error(ctx->log, "Error joining thread, trying to continue...\n");
         }
-        if (ctx->profile)
-            maybe_log_thread_metrics(ctx, state, get_time());
     }
 
-    // Free memory that isn't needed anymore
-    xfree(ctx->uvs);
-    ctx->uvs = NULL;
-    xfree(ctx->thresholds);
-    ctx->thresholds = NULL;
-    xfree(ctx->label_images);
-    ctx->label_images = NULL;
-    xfree(ctx->depth_images);
-    ctx->depth_images = NULL;
-    if (ctx->history) {
-        json_value_free(ctx->history);
-        ctx->history = NULL;
+    JSON_Value *js_metrics = json_value_init_object();
+    json_object_set_value(json_object(ctx->meta), "metrics", js_metrics);
+    JSON_Value *js_dmetrics = NULL; // per-depth metrics
+
+    for (int i = 0; i < ctx->max_depth; i++) {
+        struct aggregate_metrics *dmetrics = &ctx->per_depth_metrics[i];
+
+        /* If we reloaded an existing tree then we might not have metrics for
+         * every depth...
+         */
+        if (dmetrics->duration == 0)
+            continue;
+
+        if (!js_dmetrics) {
+            js_dmetrics = json_value_init_array();
+            json_object_set_value(json_object(js_metrics), "per_depth", js_dmetrics);
+        }
+
+        JSON_Value *js_depth = json_value_init_object();
+        json_object_set_number(json_object(js_depth), "depth", i);
+        json_array_append_value(json_array(js_dmetrics), js_depth);
+
+        JSON_Value *js_agg_metrics = aggregate_metrics_to_json(ctx, dmetrics);
+        json_object_set_value(json_object(js_depth), "aggregate", js_agg_metrics);
+
+        JSON_Value *js_per_thread = json_value_init_array();
+        json_object_set_value(json_object(js_depth), "per_thread", js_per_thread);
+
+        for (int t = 0; t < n_threads; t++) {
+            struct thread_state *state = &ctx->thread_pool[t];
+            struct thread_metrics *tmetrics = &state->per_depth_metrics[i];
+
+            if (tmetrics->duration != dmetrics->duration) {
+                gm_warn(ctx->log, "Inconsistent duration between aggregate metrics and thread %d metrics for depth = %d",
+                        state->idx, i);
+            }
+
+            JSON_Value *js_tmetrics = thread_metrics_to_json(ctx, &state->per_depth_metrics[i]);
+            json_array_append_value(json_array(js_per_thread), js_tmetrics);
+        }
     }
 
     // Write to file
@@ -1529,6 +1788,9 @@ gm_rdt_context_train(struct gm_rdt_context *_ctx, char **err)
             since_begin.hours, since_begin.minutes, since_begin.seconds,
             since_last.hours, since_last.minutes, since_last.seconds,
             interrupted ? "Interrupted!" : "Done!");
+
+    // Free memory that isn't needed anymore
+    destroy_training_state(ctx);
 
     return true;
 }
