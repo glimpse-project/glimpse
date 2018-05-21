@@ -971,7 +971,10 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.desc = "Depth to train tree to";
     prop.type = GM_PROPERTY_INT;
     prop.int_state.ptr = &ctx->max_depth;
-    prop.int_state.min = 1;
+    // a value of 1 would just mean associating a random selection of pixels
+    // with the root node and calculating the histograms of labels without
+    // any decisions, so set the minimum to 2...
+    prop.int_state.min = 2;
     prop.int_state.max = 30;
     ctx->properties.push_back(prop);
 
