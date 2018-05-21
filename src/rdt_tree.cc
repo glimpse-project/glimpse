@@ -145,11 +145,11 @@ rdt_tree_load_from_json(struct gm_logger* log,
     tree->header.fov = (float)json_object_get_number(json_tree, "vertical_fov");
 
     // Count probability arrays
-    int n_pr_tables = count_pr_tables(root);
+    int n_pr_tables = root ? count_pr_tables(root) : 0;
     tree->n_pr_tables = n_pr_tables;
 
     // Allocate tree structure
-    int n_nodes = roundf(powf(2.f, tree->header.depth)) - 1;
+    int n_nodes = (1<<tree->header.depth) - 1;
     tree->nodes = (Node*)xmalloc(n_nodes * sizeof(Node));
 
     /* In case we don't have a complete tree we need to initialize label_pr_idx
@@ -222,7 +222,7 @@ rdt_tree_load_from_buf(struct gm_logger* log,
     }
 
     // Read in the decision tree nodes
-    int n_nodes = roundf(powf(2.f, tree->header.depth)) - 1;
+    int n_nodes = (1<<tree->header.depth) - 1;
     tree->nodes = (Node*)xmalloc(n_nodes * sizeof(Node));
     if ((size_t)len < (sizeof(Node) * n_nodes))
     {
@@ -315,7 +315,7 @@ rdt_tree_save(RDTree* tree, const char* filename)
         goto save_tree_close;
     }
 
-    n_nodes = roundf(powf(2.f, tree->header.depth)) - 1;
+    n_nodes = (1<<tree->header.depth) - 1;
     if (fwrite(tree->nodes, sizeof(Node), n_nodes, output) != (size_t)n_nodes)
     {
         fprintf(stderr, "Error writing tree nodes\n");
