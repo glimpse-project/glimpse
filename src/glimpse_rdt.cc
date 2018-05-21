@@ -1038,6 +1038,11 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = 128;
     ctx->properties.push_back(prop);
 
+    /* TODO: remove bg_label by accepting some kind of label map or updating
+     * the pre-processor to mask the background with a label of zero.
+     */
+    ctx->bg_label = 33;
+
     ctx->properties_state.n_properties = ctx->properties.size();
     pthread_mutex_init(&ctx->properties_state.lock, NULL);
     ctx->properties_state.properties = &ctx->properties[0];
