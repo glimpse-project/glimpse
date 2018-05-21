@@ -64,10 +64,23 @@ indexer.py rendered-training-data/pre-processed/test-render
 JOBS=$(cat<<'EOF'
 [
     {
+        "index_name": "full",
+        "out_file": "full-d2.json",
+        "max_depth": 2,
+        "n_pixels": 500,
+        "n_thresholds": 25,
+        "n_uvs": 500,
+        "pretty": true
+    },
+    {
+        "index_name": "full",
+        "reload": "full-d2.json",
+        "out_file": "full-d3.json",
         "max_depth": 3,
         "n_pixels": 500,
         "n_thresholds": 25,
-        "n_uvs": 500
+        "n_uvs": 500,
+        "pretty": true
     }
 ]
 EOF
