@@ -1240,7 +1240,16 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    grey_to_id_map[0x07] = 0; // head left
+    // XXX 33 is used for 'head left' because we used to use 33 for the
+    // background but later decided 0 was a more practical value.
+    //
+    // Reserving 0 as a background mask means that decision tree training
+    // doesn't need to know anything about the labels except how many there
+    // are. (previously we had to inform training of the background label which
+    // could theoretically change if we decided to add/remove body part labels)
+    //
+    grey_to_id_map[0x40] = 0;
+                              // XXX: see note above head left
     grey_to_id_map[0x0f] = 1; // head right
     grey_to_id_map[0x16] = 2; // head top left
     grey_to_id_map[0x1d] = 3; // head top right
@@ -1273,9 +1282,7 @@ main(int argc, char **argv)
     grey_to_id_map[0xe2] = 30; // right toes
     grey_to_id_map[0xe9] = 31; // left waist
     grey_to_id_map[0xf0] = 32; // right waist
-
-static_assert(BACKGROUND_ID == 33, "");
-    grey_to_id_map[0x40] = BACKGROUND_ID;
+    grey_to_id_map[0x07] = 33; // head left - XXX: see note above
 
     // A few paranoid checks...
     static_assert(MAX_PACKED_INDEX == 33, "Only expecting 33 labels");
@@ -1291,7 +1298,7 @@ static_assert(BACKGROUND_ID == 33, "");
         left_to_right_map[B] = tmp; \
     } while(0)
 
-    flip(0, 1); //head
+    flip(33, 1); //head
     flip(2, 3); // head top
     flip(5, 6); // clavicle
     flip(7, 9); // shoulder

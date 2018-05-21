@@ -174,11 +174,6 @@ struct gm_rdt_context_impl {
 
     int      n_threads;     // How many threads to spawn for training
 
-    // label that represents the background. Unlike other labels we aren't
-    // trying to learn how to classify the background and we avoid picking
-    // sampling points outside the body.
-    int      bg_label;
-
     int      n_nodes_trained;   // The number of nodes trained so far
 
     std::queue<NodeTrainData> train_queue;
@@ -486,7 +481,7 @@ generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
                           "Label '%d' is bigger than expected (max %d)\n",
                           label, ctx->n_labels - 1);
 
-                if (label != ctx->bg_label) {
+                if (label != 0) { // 0 = background
                     in_body_pixels.push_back(off);
                 }
             }
@@ -1038,11 +1033,6 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = 128;
     ctx->properties.push_back(prop);
 
-    /* TODO: remove bg_label by accepting some kind of label map or updating
-     * the pre-processor to mask the background with a label of zero.
-     */
-    ctx->bg_label = 33;
-
     ctx->properties_state.n_properties = ctx->properties.size();
     pthread_mutex_init(&ctx->properties_state.lock, NULL);
     ctx->properties_state.properties = &ctx->properties[0];
@@ -1185,7 +1175,7 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
      * knows to ignore background pixels.
      */
     json_object_set_number(json_object(root), "n_labels", ctx->n_labels);
-    json_object_set_number(json_object(root), "bg_label", ctx->bg_label);
+    json_object_set_number(json_object(root), "bg_label", 0);
 
     JSON_Value *nodes = recursive_build_tree(ctx, &tree[0], 0, 0);
 
