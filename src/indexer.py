@@ -33,10 +33,10 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     description=textwrap.dedent("""\
         This script builds an index of all available rendered frames in a given
-        directory and can then split that into multiple sub sets with no
-        overlap. For example you could index three sets of 300k images out of a
-        larger set of 1 million images for training three separate decision
-        trees.
+        directory and can then create further index files based on a random
+        sampling from the full index (with optional exclusions). For example you
+        could create three index files of 300k random frames out of 1 million
+        for training three separate decision trees.
         """),
     epilog=textwrap.dedent("""\
         Firstly if no index.full file can be loaded listing all available
@@ -44,18 +44,27 @@ parser = argparse.ArgumentParser(
         <data> directory looking for frames. --full can be used to override
         which index is loaded here.
 
-        Then if you need to exclude files from the randomly sampled index files
-        you can pass options like -e <name1> -e <name2> and the frames listed in
+        Then if you need to exclude files from the new index files you can pass
+        options like -e <name1> -e <name2> and the frames listed in
         data/index.<name1> and data/index.<name2> will be loaded as blacklists
         of frames to not sample.
         
         Finally for each -i <name> <N> argument sequence given it will create a
         data/index.<name> file with <N> randomly sampled frames taken from the
-        full index. Each index is created in the order specified and no frames
-        will be added to more than one of these name index files.
+        full index.
 
-        Importantly the sampling is pseudo random and reproducible for a given
-        directory of data. The seed can be explicitly given via --seed=
+        Sampling for each index is done with replacment by default, such that
+        you may get duplicates within an index. Use the -w,--without-replacment
+        options to sample without replacment.  Replacement always happens after
+        creating each index, so you should run the tool multiple times and use
+        -e,--exclude to avoid any overlapping samples between separate index
+        files if required.
+
+        The sampling is pseudo random and reproducible for a given directory of
+        data. The seed can be explicitly given via --seed= and the value is
+        passed as a string to random.seed() which will calculate a hash of the
+        string to use as an RNG seed. The default seed is the name of the current
+        index being created.
 
         Note: Even if the exclusions from passing -e have no effect the act of
         passing -e options can change the random sampling compared to running
@@ -67,13 +76,10 @@ parser.add_argument("-v", "--verbose", action="store_true", help="Display verbos
 parser.add_argument("-s", "--seed", help="Seed for random sampling")
 parser.add_argument("-f", "--full", nargs=1, default=['full'], help="An alternative index.<FULL> extension for the full index (default 'full')")
 parser.add_argument("-e", "--exclude", action="append", nargs=1, metavar=('NAME'), help="Load index.<NAME> frames to be excluded from sampling")
+parser.add_argument("-w", "--without-replacement", action="store_true", help="Sample each index without replacement (use -e if you need to avoid replacement between index files)")
 parser.add_argument("-i", "--index", action="append", nargs=2, metavar=('NAME','N'), help="Create an index.<NAME> file with N frames")
 
 args = parser.parse_args()
-
-random.seed(0xf11bb1e)
-if args.seed:
-    random.seed(int(args.seed))
 
 data_dir = args.data[0]
 full_filename = os.path.join(data_dir, "index.%s" % args.full[0])
@@ -128,18 +134,15 @@ if args.exclude:
 # 3. Create randomly sampled index files
 if args.index:
     names = {}
-    total_samples = 0
 
     for (name, length_str) in args.index:
-        total_samples += int(length_str)
         if name in names:
             raise ValueError("each index needs a unique name")
         names[name] = 1
+        n_samples = int(length_str)
+        if args.without_replacement and n_samples > n_frames:
+            raise ValueError("Not enough frames to create requested index file %s" % name)
 
-    if total_samples > n_frames:
-        raise ValueError("Not enough frames to create requested index files")
-
-    samples = random.sample(range(n_frames), total_samples)
 
     start = 0
     if args.verbose:
@@ -152,6 +155,23 @@ if args.index:
     start = 0
     for (name, length_str) in args.index:
         N = int(length_str)
+
+        if args.verbose:
+            if args.without_replacement:
+                print("index %s: %d samples (without replacement)" % (name, N))
+            else:
+                print("index %s: %d samples (with replacement)" % (name, N))
+
+        if args.seed:
+            random.seed(args.seed)
+        else:
+            random.seed(name)
+
+        frame_range = range(n_frames)
+        if args.without_replacement:
+            samples = random.sample(frame_range, N)
+        else:
+            samples = [ random.choice(frame_range) for i in range(N) ]
 
         with open(os.path.join(data_dir, "index.%s" % name), 'w+') as fp:
             index = []
