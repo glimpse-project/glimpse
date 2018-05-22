@@ -156,12 +156,6 @@ if args.index:
     for (name, length_str) in args.index:
         N = int(length_str)
 
-        if args.verbose:
-            if args.without_replacement:
-                print("index %s: %d samples (without replacement)" % (name, N))
-            else:
-                print("index %s: %d samples (with replacement)" % (name, N))
-
         if args.seed:
             random.seed(args.seed)
         else:
@@ -174,10 +168,11 @@ if args.index:
             samples = [ random.choice(frame_range) for i in range(N) ]
 
         with open(os.path.join(data_dir, "index.%s" % name), 'w+') as fp:
-            index = []
-            subset = samples[start:start+N]
-            for i in subset:
+            for i in samples:
                 fp.write(full_index[i])
-            start += N
-            print("index.%s: %u frames" % (name, N))
+
+            if args.without_replacement:
+                print("index %s: %d samples (without replacement)" % (name, N))
+            else:
+                print("index %s: %d samples (with replacement)" % (name, N))
 
