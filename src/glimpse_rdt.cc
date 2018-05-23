@@ -35,6 +35,7 @@
 #include <pthread.h>
 #include <time.h>
 #include <signal.h>
+#include <inttypes.h>
 
 #include <random>
 #include <thread>
@@ -1464,6 +1465,9 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     gm_assert(ctx->log, ctx->n_labels <= MAX_LABELS,
               "Can't handle training with more than %d labels",
               MAX_LABELS);
+    gm_assert(ctx->log, (uint64_t)ctx->n_pixels * ctx->n_images < INT_MAX,
+              "Can't handle training with more than %d pixels, but n_pixels * n_images = %" PRIu64,
+              INT_MAX, (uint64_t)ctx->n_pixels * ctx->n_images);
 
     // Work out pixels per meter and adjust uv range accordingly
     float ppm = (ctx->height / 2.f) / tanf(ctx->fov / 2.f);
