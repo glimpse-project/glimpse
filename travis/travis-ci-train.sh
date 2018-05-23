@@ -57,7 +57,7 @@ export PATH=$PWD/src:$PATH
 export PATH=$PWD/build:$PATH
 
 image-pre-processor rendered-training-data/generated/test-render \
-    rendered-training-data/pre-processed/test-render
+    rendered-training-data/pre-processed/test-render src/label-map.json
 
 indexer.py rendered-training-data/pre-processed/test-render
 

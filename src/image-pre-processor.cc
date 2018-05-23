@@ -131,10 +131,8 @@ static std::queue<struct work> work_queue;
 
 static int indent = 0;
 
-static int grey_to_id_map[255];
-
-#define MAX_PACKED_INDEX 33
-static int left_to_right_map[MAX_PACKED_INDEX + 1];
+static uint8_t grey_to_id_map[255];
+static uint8_t left_to_right_map[255];
 
 static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
 static int n_cpus = 0;
@@ -447,17 +445,8 @@ load_frame_labels(const char *dir,
     for (int y = 0; y < expected_height; y++) {
         uint8_t *row = img->data_u8 + expected_width * y;
 
-        for (int x = 0; x < expected_width; x++) {
+        for (int x = 0; x < expected_width; x++)
             row[x] = grey_to_id_map[row[x]];
-
-            if (row[x] > MAX_PACKED_INDEX) {
-                fprintf(stderr, "Failed to map a label value of 0x%x/%d in image %s\n",
-                        row[x], row[x],
-                        input_filename);
-                free_image(img);
-                return NULL;
-            }
-        }
     }
 
     return img;
@@ -1121,7 +1110,7 @@ static void
 usage(void)
 {
     printf(
-"Usage image-pre-processor [options] <top_src> <top_dest>\n"
+"Usage image-pre-processor [options] <top_src> <top_dest> <label_map.json>\n"
 "\n"
 "    -f,--full                  Write full-float channel depth images (otherwise\n"
 "                               writes half-float)\n"
@@ -1150,6 +1139,18 @@ usage(void)
     exit(1);
 }
 
+static int
+find_label_index(JSON_Value* label_map, const char* name)
+{
+    JSON_Array* label_map_array = json_array(label_map);
+    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
+        JSON_Object* mapping = json_array_get_object(label_map_array, i);
+        if (strcmp(name, json_object_get_string(mapping, "name")) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
 
 int
 main(int argc, char **argv)
@@ -1160,10 +1161,7 @@ main(int argc, char **argv)
 #define MIN_BODY_PX_OPT         (CHAR_MAX + 2)
 #define MIN_BODY_CHNG_PC_OPT    (CHAR_MAX + 3)
 
-    /* N.B. The initial '+' means that getopt will stop looking for options
-     * after the first non-option argument...
-     */
-    const char *short_options="+hfgpv:b:j:m:";
+    const char *short_options="hfgpv:b:j:m:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
@@ -1232,93 +1230,64 @@ main(int argc, char **argv)
         }
     }
 
-    if (optind != argc - 2)
+    if (argc - optind != 3) {
         usage();
+    }
 
     if (write_pfm_depth && write_half_float) {
         fprintf(stderr, "Not possible to write half float data to PFM files\n");
         exit(1);
     }
 
-    // XXX 33 is used for 'head left' because we used to use 33 for the
-    // background but later decided 0 was a more practical value.
-    //
-    // Reserving 0 as a background mask means that decision tree training
-    // doesn't need to know anything about the labels except how many there
-    // are. (previously we had to inform training of the background label which
-    // could theoretically change if we decided to add/remove body part labels)
-    //
-    grey_to_id_map[0x40] = 0;
-                              // XXX: see note above head left
-    grey_to_id_map[0x0f] = 1; // head right
-    grey_to_id_map[0x16] = 2; // head top left
-    grey_to_id_map[0x1d] = 3; // head top right
-    grey_to_id_map[0x24] = 4; // neck
-    grey_to_id_map[0x2c] = 5; // clavicle left
-    grey_to_id_map[0x33] = 6; // clavicle right
-    grey_to_id_map[0x3a] = 7; // shoulder left
-    grey_to_id_map[0x42] = 8; // upper-arm left
-    grey_to_id_map[0x49] = 9; // shoulder right
-    grey_to_id_map[0x50] = 10; // upper-arm right
-    grey_to_id_map[0x57] = 11; // elbow left
-    grey_to_id_map[0x5f] = 12; // forearm left
-    grey_to_id_map[0x66] = 13; // elbow right
-    grey_to_id_map[0x6d] = 14; // forearm right
-    grey_to_id_map[0x75] = 15; // left wrist
-    grey_to_id_map[0x7c] = 16; // left hand
-    grey_to_id_map[0x83] = 17; // right wrist
-    grey_to_id_map[0x8a] = 18; // right hand
-    grey_to_id_map[0x92] = 19; // left hip
-    grey_to_id_map[0x99] = 20; // left thigh
-    grey_to_id_map[0xa0] = 21; // right hip
-    grey_to_id_map[0xa8] = 22; // right thigh
-    grey_to_id_map[0xaf] = 23; // left knee
-    grey_to_id_map[0xb6] = 24; // left shin
-    grey_to_id_map[0xbd] = 25; // right knee
-    grey_to_id_map[0xc5] = 26; // right shin
-    grey_to_id_map[0xcc] = 27; // left ankle
-    grey_to_id_map[0xd3] = 28; // left toes
-    grey_to_id_map[0xdb] = 29; // right ankle
-    grey_to_id_map[0xe2] = 30; // right toes
-    grey_to_id_map[0xe9] = 31; // left waist
-    grey_to_id_map[0xf0] = 32; // right waist
-    grey_to_id_map[0x07] = 33; // head left - XXX: see note above
-
-    // A few paranoid checks...
-    static_assert(MAX_PACKED_INDEX == 33, "Only expecting 33 labels");
-    static_assert(ARRAY_LEN(left_to_right_map) == (MAX_PACKED_INDEX + 1),
-                  "Only expecting to flip 33 packed labels");
-
-    for (unsigned i = 0; i < ARRAY_LEN(left_to_right_map); i++)
-        left_to_right_map[i] = i;
-
-#define flip(A, B) do {  \
-        uint8_t tmp = left_to_right_map[A]; \
-        left_to_right_map[A] = left_to_right_map[B]; \
-        left_to_right_map[B] = tmp; \
-    } while(0)
-
-    flip(33, 1); //head
-    flip(2, 3); // head top
-    flip(5, 6); // clavicle
-    flip(7, 9); // shoulder
-    flip(8, 10); // upper-arm
-    flip(11, 13); // elbow
-    flip(12, 14); // forearm
-    flip(15, 17); // wrist
-    flip(16, 18); // hand
-    flip(19, 21); // hip
-    flip(20, 22); // thigh
-    flip(23, 25); // knee
-    flip(24, 26); // shin
-    flip(27, 29); // ankle
-    flip(28, 30); // toes
-    flip(31, 32); // waist
-
-#undef flip
-
     top_src_dir = argv[optind];
     top_out_dir = argv[optind + 1];
+    char *label_map_file = argv[optind + 2];
+
+    JSON_Value *label_map = json_parse_file(label_map_file);
+    if (!label_map) {
+        fprintf(stderr, "Failed to parse joint map %s\n", optarg);
+        exit(1);
+    }
+
+    static_assert(sizeof(grey_to_id_map) == 255,
+                  "grey_to_id_map should be a 255 byte table");
+
+    /* NB: by default the grey_to_id_map is zero initialized which means
+     * everything is mapped to the background label
+     */
+    JSON_Array *label_map_array = json_array(label_map);
+    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
+        JSON_Object *mapping = json_array_get_object(label_map_array, i);
+        const char *label_name = json_object_get_string(mapping, "name");
+
+        JSON_Array *inputs = json_object_get_array(mapping, "inputs");
+        for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
+            int input = json_array_get_number(inputs, j);
+            if (input < 0 || input > 255) {
+                fprintf(stderr, "Out of range \"%s\" label mapping from %d\n",
+                        label_name, input);
+                exit(1);
+            }
+            if (grey_to_id_map[input]) {
+                fprintf(stderr, "Input %d sampled by multiple labels\n", input);
+                exit(1);
+            }
+            grey_to_id_map[input] = i;
+        }
+
+        const char *opposite_name = json_object_get_string(mapping, "opposite");
+        if (opposite_name) {
+            int opposite_i = find_label_index(label_map, opposite_name);
+            if (opposite_i <= 0) {
+                fprintf(stderr, "Invalid flip mapping from \"%s\" to \"%s\"\n",
+                        label_name, opposite_name);
+                exit(1);
+            }
+            left_to_right_map[i] = opposite_i;
+        } else {
+            left_to_right_map[i] = i;
+        }
+    }
 
     char meta_filename[512];
     xsnprintf(meta_filename, "%s/meta.json", top_src_dir);
