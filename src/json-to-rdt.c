@@ -112,7 +112,7 @@ main(int argc, char **argv)
         return 1;
     }
 
-    RDTree *tree = rdt_tree_load_from_file(log, argv[optind], NULL);
+    RDTree *tree = rdt_tree_load_from_json_file(log, argv[optind], NULL);
     if (!tree)
         return 1;
 
