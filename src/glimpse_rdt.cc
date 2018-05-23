@@ -60,7 +60,6 @@ static bool interrupted = false;
 
 typedef struct {
     int       id;              // Unique id to place the node a tree.
-    int       depth;           // Tree depth at which this node sits.
     int       n_pixels;        // Number of pixels that have reached this node.
     Int3D*    pixels;          // A list of pixel pairs and image indices.
 } NodeTrainData;
@@ -442,6 +441,25 @@ log_aggregate_metrics(struct gm_rdt_context_impl* ctx,
             );
 }
 
+static int
+id_to_depth(int id)
+{
+    uint32_t id32 = id;
+
+    /* clz() counts the number of leading zeros.
+     *
+     * 32-clz(value) essentially calculates an integer (rounded-down)
+     * log2(value) (for a 32bit integer)
+     *
+     * Our IDs are generally base 0 (i.e. root node has ID = 0) but with base-1
+     * IDs then every depth level neatly starts with a power of two ID (thus
+     * the (id32 + 1))
+     *
+     * Finally subtract 1 to return a base-0 ID.
+     */
+    return 32 - __builtin_clz(id32 + 1) - 1;
+}
+
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
  * of the example pose for that frame.
  */
@@ -589,8 +607,15 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 {
     int p;
     int last_i = -1;
+    int max_depth = ctx->max_depth;
+    int node_depth = id_to_depth(data->id);
+    int n_pixels = data->n_pixels;
+    int n_labels = ctx->n_labels;
+    int n_thresholds = ctx->n_thresholds;
+    int width = ctx->width;
+    int height = ctx->height;
 
-    for (p = 0; p < data->n_pixels && !interrupted; p++)
+    for (p = 0; p < n_pixels && !interrupted; p++)
     {
         Int2D pixel = data->pixels[p].xy;
         int i = data->pixels[p].i;
@@ -605,24 +630,24 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             maybe_log_thread_metrics(ctx, state, get_time());
         }
 
-        int64_t image_idx = (int64_t)i * ctx->width * ctx->height;
+        int64_t image_idx = (int64_t)i * width * height;
 
         half* depth_image = &ctx->depth_images[image_idx];
         uint8_t* label_image = &ctx->label_images[image_idx];
 
-        int pixel_idx = (pixel[1] * ctx->width) + pixel[0];
+        int pixel_idx = (pixel[1] * width) + pixel[0];
         int label = (int)label_image[pixel_idx];
         float depth = depth_image[pixel_idx];
 
-        gm_assert(ctx->log, label < ctx->n_labels,
+        gm_assert(ctx->log, label < n_labels,
                   "Label '%d' is bigger than expected (max %d)\n",
-                  label, ctx->n_labels - 1);
+                  label, n_labels - 1);
 
         // Accumulate root histogram
         ++root_histogram[label];
 
         // Don't waste processing time if this is the last depth
-        if (data->depth >= ctx->max_depth - 1) {
+        if (node_depth >= max_depth - 1) {
             continue;
         }
 
@@ -634,22 +659,22 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         {
             UVPair uv = ctx->uvs[c];
             samples[c - uv_start] = sample_uv(depth_image,
-                                              ctx->width, ctx->height,
+                                              width, height,
                                               pixel, depth, uv);
         }
 
         // Partition on thresholds
         for (int c = 0, lr_histogram_idx = 0; c < uv_end - uv_start; c++)
         {
-            for (int t = 0; t < ctx->n_thresholds;
-                 t++, lr_histogram_idx += ctx->n_labels * 2)
+            for (int t = 0; t < n_thresholds;
+                 t++, lr_histogram_idx += n_labels * 2)
             {
                 // Accumulate histogram for this particular uvt combination
                 // on both theoretical branches
                 float threshold = ctx->thresholds[t];
                 ++uvt_lr_histograms[samples[c] < threshold ?
                     lr_histogram_idx + label :
-                    lr_histogram_idx + ctx->n_labels + label];
+                    lr_histogram_idx + n_labels + label];
             }
         }
     }
@@ -705,6 +730,8 @@ worker_thread_cb(void* userdata)
         gm_assert(ctx->log, work.node != NULL, "Spurious NULL work node");
         node_data = work.node;
 
+        int node_depth = id_to_depth(node_data->id);
+
         // Clear histogram accumulators
         memset(node_histogram, 0, sizeof(node_histogram));
         uvt_lr_histograms.clear();
@@ -733,7 +760,7 @@ worker_thread_cb(void* userdata)
         result.best_gain = 0.f;
 
         // If there's only 1 label, skip all this, gain is zero
-        if (root_n_pixels[1] > 1 && node_data->depth < ctx->max_depth - 1)
+        if (root_n_pixels[1] > 1 && node_depth < ctx->max_depth - 1)
         {
             uint64_t rank_start = get_time();
 
@@ -1263,6 +1290,7 @@ reload_tree(struct gm_rdt_context_impl *ctx,
     while (reload_queue.size())
     {
         NodeTrainData node_data = reload_queue.front();
+        int node_depth = id_to_depth(node_data.id);
         reload_queue.pop();
         Node* node = &ctx->tree[node_data.id];
 
@@ -1272,7 +1300,7 @@ reload_tree(struct gm_rdt_context_impl *ctx,
             ctx->train_queue.push(node_data);
         }
         else if (node->label_pr_idx != 0 && // leaf node
-                 node_data.depth == (checkpoint->header.depth - 1) &&
+                 node_depth == (checkpoint->header.depth - 1) &&
                  ctx->max_depth > checkpoint->header.depth)
         {
             /* Also need to train leaf nodes in the last level of the reloaded
@@ -1281,7 +1309,7 @@ reload_tree(struct gm_rdt_context_impl *ctx,
             node->label_pr_idx = INT_MAX;
             ctx->train_queue.push(node_data);
         }
-        else if (node_data.depth == (ctx->max_depth - 1) &&
+        else if (node_depth == (ctx->max_depth - 1) &&
                  node->label_pr_idx == 0 && // wasn't previously a leaf node
                  checkpoint->header.depth > ctx->max_depth)
         {
@@ -1324,17 +1352,14 @@ reload_tree(struct gm_rdt_context_impl *ctx,
                                n_lr_pixels);
 
                 int id = (2 * node_data.id) + 1;
-                int depth = node_data.depth + 1;
 
                 NodeTrainData ldata;
                 ldata.id = id;
-                ldata.depth = depth;
                 ldata.n_pixels = n_lr_pixels[0];
                 ldata.pixels = l_pixels;
 
                 NodeTrainData rdata;
                 rdata.id = id + 1;
-                rdata.depth = depth;
                 rdata.n_pixels = n_lr_pixels[1];
                 rdata.pixels = r_pixels;
 
@@ -1479,7 +1504,6 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     //
     NodeTrainData root_node;
     root_node.id = 0;
-    root_node.depth = 0;
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
 
     if (ctx->reload) {
@@ -1528,7 +1552,9 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         NodeTrainData node_data = ctx->train_queue.front();
         ctx->train_queue.pop();
 
-        if (node_data.depth != last_depth)
+        int node_depth = id_to_depth(node_data.id);
+
+        if (node_depth != last_depth)
         {
             clock_gettime(CLOCK_MONOTONIC, &now);
             since_begin = get_time_for_display(&begin, &now);
@@ -1556,7 +1582,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
                     "(%02d:%02d:%02d / %02d:%02d:%02d) Training level %d (%d nodes)\n",
                     since_begin.hours, since_begin.minutes, since_begin.seconds,
                     since_last.hours, since_last.minutes, since_last.seconds,
-                    node_data.depth + 1, (int)ctx->train_queue.size() + 1);
+                    node_depth + 1, (int)ctx->train_queue.size() + 1);
 
             for (int i = 0; i < ctx->n_threads; i++) {
                 struct thread_state *state = &ctx->thread_pool[i];
@@ -1566,7 +1592,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
             memset(&ctx->metrics, 0, sizeof(ctx->metrics));
             ctx->metrics.start = current;
 
-            last_depth = node_data.depth;
+            last_depth = node_depth;
         }
 
         /* XXX: note we don't need to take the work_queue_lock here since the
@@ -1631,7 +1657,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         // Add this node to the tree and possibly add left/ride nodes to the
         // training queue.
         Node* node = &ctx->tree[node_data.id];
-        if (best_gain > 0.f && (node_data.depth + 1) < ctx->max_depth)
+        if (best_gain > 0.f && (node_depth + 1) < ctx->max_depth)
         {
             node->uv = ctx->uvs[best_uv];
             node->t = ctx->thresholds[best_threshold];
@@ -1656,16 +1682,13 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
                            &l_pixels, &r_pixels, n_lr_pixels);
 
             int id = (2 * node_data.id) + 1;
-            int depth = node_data.depth + 1;
             NodeTrainData ldata;
             ldata.id = id;
-            ldata.depth = depth;
             ldata.n_pixels = n_lr_pixels[0];
             ldata.pixels = l_pixels;
 
             NodeTrainData rdata;
             rdata.id = id + 1;
-            rdata.depth = depth;
             rdata.n_pixels = n_lr_pixels[1];
             rdata.pixels = r_pixels;
 
