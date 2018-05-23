@@ -32,12 +32,13 @@
 #include <libgen.h>
 #include <limits.h>
 #include <math.h>
-#include <random>
-#include <thread>
-#include <queue>
 #include <pthread.h>
 #include <time.h>
 #include <signal.h>
+
+#include <random>
+#include <thread>
+#include <queue>
 
 #include "half.hpp"
 
@@ -56,7 +57,7 @@
 using half_float::half;
 
 static const char *interrupt_reason;
-static bool interrupted = false;
+static bool interrupted;
 
 typedef struct {
     int       id;              // Unique id to place the node a tree.
@@ -615,7 +616,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
     int width = ctx->width;
     int height = ctx->height;
 
-    for (p = 0; p < n_pixels && !interrupted; p++)
+    for (p = 0; p < n_pixels; p++)
     {
         Int2D pixel = data->pixels[p].xy;
         int i = data->pixels[p].i;
@@ -626,8 +627,11 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             last_i = i;
         }
 
-        if (p % 10000 == 0 && ctx->profile) {
-            maybe_log_thread_metrics(ctx, state, get_time());
+        if (p % 10000 == 0) {
+            if (interrupted)
+                break;
+            if (ctx->profile)
+                maybe_log_thread_metrics(ctx, state, get_time());
         }
 
         int64_t image_idx = (int64_t)i * width * height;
@@ -1737,8 +1741,15 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     }
 
     // Signal threads to free memory and quit
+    //
+    // Note: we need to take work_queue_lock otherwise there's a race within
+    // the worker thread in the loop between checking the interrupted state and
+    // starting pthread_cond_wait() where we will get a deadlock if we happen
+    // to set interrupted = true at that point.
+    pthread_mutex_lock(&ctx->work_queue_lock);
     interrupted = true;
     pthread_cond_broadcast(&ctx->work_queue_changed);
+    pthread_mutex_unlock(&ctx->work_queue_lock);
     for (int i = 0; i < n_threads; i++)
     {
         struct thread_state *state = &ctx->thread_pool[i];
