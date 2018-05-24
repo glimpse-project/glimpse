@@ -1296,10 +1296,6 @@ main(int argc, char **argv)
         fprintf(stderr, "Failed to parse top level meta.json\n");
     }
 
-    if (json_object_get_number(json_object(meta), "n_labels") != 34) {
-        fprintf(stderr, "Only expecting data sets with 34 labels\n");
-        exit(1);
-    }
     JSON_Value *cam = json_object_get_value(json_object(meta), "camera");
     expected_width = json_object_get_number(json_object(cam), "width");
     expected_height = json_object_get_number(json_object(cam), "height");
@@ -1322,6 +1318,17 @@ main(int argc, char **argv)
            get_duration_ns_print_scale_suffix(duration_ns));
 
     ensure_directory(top_out_dir);
+
+    /* We want to add the label names to the output meta.json but it doesn't
+     * make sense to keep the input mappings...
+     */
+    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
+        JSON_Object *mapping = json_array_get_object(label_map_array, i);
+        json_object_remove(mapping, "inputs");
+    }
+    json_object_set_value(json_object(meta), "labels", label_map);
+    json_object_set_number(json_object(meta), "n_labels",
+                           json_array_get_count(label_map_array));
 
     xsnprintf(meta_filename, "%s/meta.json", top_out_dir);
     if (json_serialize_to_file(meta, meta_filename) != JSONSuccess) {
