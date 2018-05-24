@@ -1225,7 +1225,7 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
                std::vector<float> &tree_histograms,
                const char* filename)
 {
-    JSON_Value *root = json_value_init_object();
+    JSON_Value *rdt = json_value_init_object();
 
     JSON_Value *record_val = ctx->record;
     JSON_Value *history = json_value_deep_copy(ctx->history);
@@ -1234,10 +1234,10 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     }
     json_array_append_value(json_array(history), record_val);
 
-    json_object_set_value(json_object(root), "history", history);
+    json_object_set_value(json_object(rdt), "history", history);
 
-    json_object_set_number(json_object(root), "depth", ctx->max_depth);
-    json_object_set_number(json_object(root), "vertical_fov", ctx->fov);
+    json_object_set_number(json_object(rdt), "depth", ctx->max_depth);
+    json_object_set_number(json_object(rdt), "vertical_fov", ctx->fov);
 
     /* TODO: we could remove the background label
      *
@@ -1250,18 +1250,23 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
      * probabilities for a background label, or perhaps assume the caller
      * knows to ignore background pixels.
      */
-    json_object_set_number(json_object(root), "n_labels", ctx->n_labels);
-    json_object_set_number(json_object(root), "bg_label", 0);
+    json_object_set_number(json_object(rdt), "n_labels", ctx->n_labels);
+    json_object_set_number(json_object(rdt), "bg_label", 0);
+
+    JSON_Value* labels = json_object_get_value(json_object(ctx->data_meta),
+                                               "labels");
+    labels = json_value_deep_copy(labels);
+    json_object_set_value(json_object(rdt), "labels", labels);
 
     JSON_Value *nodes = recursive_build_tree(ctx, &tree[0], 0, 0);
 
-    json_object_set_value(json_object(root), "root", nodes);
+    json_object_set_value(json_object(rdt), "root", nodes);
 
     JSON_Status status;
     if (ctx->pretty)
-        status = json_serialize_to_file_pretty(root, filename);
+        status = json_serialize_to_file_pretty(rdt, filename);
     else
-        status = json_serialize_to_file(root, filename);
+        status = json_serialize_to_file(rdt, filename);
     if (status != JSONSuccess)
     {
         fprintf(stderr, "Failed to serialize output to JSON\n");
