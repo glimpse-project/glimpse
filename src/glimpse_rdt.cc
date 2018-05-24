@@ -1506,6 +1506,39 @@ print_label_histogram(struct gm_logger* log,
     }
 }
 
+/* A histogram of the labels for the root node pixels is useful to help double
+ * check they roughly match the relative sizes of the different labels else
+ * maybe there was a problem with generating our sample points.
+ */
+static void
+check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
+                            NodeTrainData* root_node)
+{
+    gm_info(ctx->log, "Calculating root node pixel histogram");
+    ctx->root_pixel_histogram.resize(ctx->n_labels);
+    ctx->root_pixel_nhistogram.resize(ctx->n_labels);
+    accumulate_pixel_histograms(ctx, root_node, ctx->root_pixel_histogram.data());
+    normalize_histogram(ctx->root_pixel_histogram.data(),
+                        ctx->n_labels,
+                        ctx->root_pixel_nhistogram.data());
+    JSON_Array* labels = json_object_get_array(json_object(ctx->data_meta),
+                                               "labels");
+    gm_info(ctx->log, "Histogram of root node pixel labels:");
+    print_label_histogram(ctx->log,
+                          labels,
+                          ctx->root_pixel_nhistogram.data(),
+                          ctx->root_pixel_nhistogram.size());
+
+    JSON_Value* hist_val = json_value_init_array();
+    JSON_Array* hist = json_array(hist_val);
+    for (int i = 0; i < ctx->n_labels; i++) {
+        json_array_append_number(hist, ctx->root_pixel_nhistogram[i]);
+    }
+
+    json_object_set_value(json_object(ctx->record), "root_pixels_histogram",
+                          hist_val);
+}
+
 bool
 gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 {
@@ -1610,24 +1643,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     root_node.id = 0;
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
 
-    /* A histogram of the labels is just useful to help double check they
-     * roughly match the relative sizes of the different labels else maybe
-     * there was a problem with generating our sample points
-     */
-    gm_info(ctx->log, "Calculating root node pixel histogram");
-    ctx->root_pixel_histogram.resize(ctx->n_labels);
-    ctx->root_pixel_nhistogram.resize(ctx->n_labels);
-    accumulate_pixel_histograms(ctx, &root_node, ctx->root_pixel_histogram.data());
-    normalize_histogram(ctx->root_pixel_histogram.data(),
-                        ctx->n_labels,
-                        ctx->root_pixel_nhistogram.data());
-    JSON_Array* labels = json_object_get_array(json_object(ctx->data_meta),
-                                               "labels");
-    gm_info(ctx->log, "Histogram of root node pixel labels:");
-    print_label_histogram(ctx->log,
-                          labels,
-                          ctx->root_pixel_nhistogram.data(),
-                          ctx->root_pixel_nhistogram.size());
+    check_root_pixels_histogram(ctx, &root_node);
 
     if (ctx->reload) {
         if (!reload_tree(ctx, ctx->reload, root_node, err)) {
