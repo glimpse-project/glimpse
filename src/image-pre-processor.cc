@@ -1331,7 +1331,7 @@ main(int argc, char **argv)
                            json_array_get_count(label_map_array));
 
     xsnprintf(meta_filename, "%s/meta.json", top_out_dir);
-    if (json_serialize_to_file(meta, meta_filename) != JSONSuccess) {
+    if (json_serialize_to_file_pretty(meta, meta_filename) != JSONSuccess) {
         fprintf(stderr, "Failed to write %s\n", meta_filename);
         exit(1);
     }
