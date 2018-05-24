@@ -226,11 +226,8 @@ struct seg_codeword
 // Depth pixel classification for segmentation
 enum seg_class
 {
+    UNC,      // Unclassified
     BG,       // Background
-    FL,       // Flat
-    FLK,      // Flickering
-    FL_FLK,   // Flickering and flat
-    TB,       // The bag (uninteresting foreground object)
     FG,       // Foreground
     CAN,      // Tracking candidate that didn't track
     TRK,      // Tracking
@@ -417,8 +414,7 @@ struct gm_context
 
     struct gm_pose depth_pose;
     glm::mat4 start_to_depth_pose;
-    std::vector<std::vector<struct seg_codeword>> depth_seg;
-    std::vector<struct seg_codeword *> depth_seg_bg;
+    std::vector<std::vector<pcl::PointXYZL>> bg_model;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -542,14 +538,10 @@ struct gm_context
     float cluster_tolerance;
 
     bool motion_detection;
-    float seg_tb;
-    float seg_tf;
-    int seg_N;
-    int seg_b;
-    int seg_gamma;
-    int seg_alpha;
-    float seg_psi;
-    float seg_timeout;
+    int seg_samples;
+    float seg_radius;
+    int seg_bg_samples;
+    int seg_update_freq;
 
     bool joint_refinement;
     int max_joint_predictions;
@@ -1845,10 +1837,8 @@ class LabelComparator: public pcl::Comparator<PointT>
 
     virtual bool
     compare (int idx1, int idx2) const {
-        if ((input_->points[idx1].label == FLK ||
-             input_->points[idx1].label == FG) &&
-            (input_->points[idx2].label == FLK ||
-             input_->points[idx2].label == FG)) {
+        if (input_->points[idx1].label == FG &&
+            input_->points[idx2].label == FG) {
             return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
                 depth_threshold_;
         }
@@ -1957,104 +1947,6 @@ project_point_into_codebook(pcl::PointXYZL *point,
     }
 
     return width * dny + dnx;
-}
-
-static void
-update_depth_codebook(struct gm_context *ctx,
-                      struct gm_tracking_impl *tracking,
-                      glm::mat4 to_start,
-                      glm::mat4 to_codebook,
-                      int seg_res)
-{
-    uint64_t start = get_time();
-
-    int n_codewords = 0;
-    struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
-
-    unsigned depth_class_size = tracking->depth_class->points.size();
-    for (unsigned depth_off = 0; depth_off < depth_class_size; ++depth_off) {
-        pcl::PointXYZL point = tracking->depth_class->points[depth_off];
-
-        if (std::isnan(point.z)) {
-            continue;
-        } else {
-            int off = project_point_into_codebook(&point,
-                                                  to_start,
-                                                  to_codebook,
-                                                  &intrinsics,
-                                                  seg_res);
-            // Falls outside of codebook so we can't classify...
-            if (off < 0)
-                continue;
-
-            // At this point z has been projected into the coordinate space of
-            // the codebook
-            float depth = point.z;
-
-            // Look to see if this pixel falls into an existing codeword
-            struct seg_codeword *codeword = NULL;
-            std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
-            std::vector<struct seg_codeword>::iterator it;
-            for (it = codewords.begin(); it != codewords.end(); ++it) {
-                struct seg_codeword &candidate = *it;
-
-                if (fabsf(depth - candidate.m) < ctx->seg_tb) {
-                    codeword = &candidate;
-                    break;
-                }
-            }
-
-            // Don't update pixels that we're tracking
-            if (tracking->depth_class->points[depth_off].label == TRK) {
-                if (codeword) {
-                    if (codewords.size() > 2) {
-                        std::swap(*it, codewords.back());
-                        codewords.pop_back();
-                    } else {
-                        codewords.erase(it);
-                    }
-                }
-                continue;
-            }
-
-            const uint64_t t = tracking->frame->timestamp;
-
-            // Create a new codeword if one didn't fit
-            if (!codeword) {
-                codewords.push_back({ 0, 0, t, t, 0 });
-                codeword = &codewords.back();
-            }
-
-            // Update the codeword info
-            // Update the mean depth
-            float n = (float)std::min(ctx->seg_N, codeword->n);
-            codeword->m = ((n * codeword->m) + depth) / (n + 1.f);
-
-            // Increment number of depth values
-            ++codeword->n;
-
-            // Increment consecutive number of depth values if its happened in
-            // consecutive frames
-            if (!ctx->n_tracking ||
-                codeword->tl != ctx->latest_tracking->frame->timestamp) {
-                ++codeword->nc;
-            }
-
-            // Track the latest timestamp to touch this codeword
-            codeword->tl = t;
-
-            // Keep track of the amount of codewords we have
-            n_codewords += (int)codewords.size();
-        }
-    }
-
-    uint64_t end = get_time();
-    uint64_t duration = end - start;
-    LOGI("Codeword update (%.2f codewords/pix) took %.3f%s",
-         n_codewords / (float)(tracking->depth_class->width *
-                               tracking->depth_class->height),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
 }
 
 static glm::mat4
@@ -2431,30 +2323,15 @@ static void
 depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
 {
     switch(label) {
+    case UNC:
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0x00;
+        rgb_out[2] = 0xFF;
+        break;
     case BG:
         rgb_out[0] = 0x00;
         rgb_out[1] = 0x00;
         rgb_out[2] = 0x00;
-        break;
-    case FL:
-        rgb_out[0] = 0xC0;
-        rgb_out[1] = 0xC0;
-        rgb_out[2] = 0xC0;
-        break;
-    case FLK:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0x00;
-        break;
-    case FL_FLK:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0xA0;
-        rgb_out[2] = 0x00;
-        break;
-    case TB:
-        rgb_out[0] = 0x00;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0xFF;
         break;
     case FG:
         rgb_out[0] = 0xFF;
@@ -2470,12 +2347,6 @@ depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
         rgb_out[0] = 0x00;
         rgb_out[1] = 0xFF;
         rgb_out[2] = 0x00;
-        break;
-    default:
-        // Invalid/unhandled value
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0xFF;
         break;
     }
 }
@@ -2695,8 +2566,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     bool reset_pose = false;
     bool motion_detection = ctx->motion_detection;
 
-    if (ctx->depth_seg.size() != depth_class_size ||
-        (!ctx->depth_pose.valid && tracking->frame->pose.valid))
+    if (ctx->bg_model.size() != depth_class_size)
     {
         gm_debug(ctx->log, "XXX: Resetting pose");
         reset_pose = true;
@@ -2748,9 +2618,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
     }
 
     if (reset_pose) {
-        ctx->depth_seg.clear();
-        ctx->depth_seg.resize(depth_class_size);
-        ctx->depth_seg_bg.resize(depth_class_size);
+        ctx->bg_model.clear();
+        ctx->bg_model.resize(depth_class_size);
+
         ctx->depth_pose = tracking->frame->pose;
         ctx->start_to_depth_pose = glm::inverse(to_start);
 
@@ -2811,111 +2681,93 @@ gm_context_track_skeleton(struct gm_context *ctx,
             colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
         }
 
-        // Remove depth classification old codewords
-        for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
-            std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
-            ctx->depth_seg_bg[off] = NULL;
-            for (unsigned i = 0; i < codewords.size();) {
-                struct seg_codeword &codeword = codewords[i];
-                if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
-                    ctx->seg_timeout) {
-                    std::swap(codeword, codewords.back());
-                    codewords.pop_back();
-                } else {
-                    if (!ctx->depth_seg_bg[off] ||
-                        codeword.n > ctx->depth_seg_bg[off]->n) {
-                        ctx->depth_seg_bg[off] = &codeword;
-                    }
-                    ++i;
-                }
-            }
-        }
 
-        // Do classification of depth buffer
-        for (unsigned depth_off = 0;
-             depth_off < depth_class_size; ++depth_off) {
+        for (unsigned i = 0; i < depth_class_size; ++i) {
             pcl::PointXYZL point =
-                tracking->depth_class->points[depth_off];
+                tracking->depth_class->points[i];
 
-            if (std::isnan(point.z)) {
-                // We'll never cluster a nan value, so we can immediately
-                // classify it as background.
-                tracking->depth_class->points[depth_off].label = BG;
-                continue;
-            } else {
-                int off = project_point_into_codebook(
+            int off = i;
+            bool pt_isnan = std::isnan(point.x);
+
+            if (!pt_isnan && tracking->frame->pose.valid) {
+                off = project_point_into_codebook(
                     &point, to_start, start_to_codebook,
                     &tracking->depth_camera_intrinsics, seg_res);
+            }
 
-                // Falls outside of codebook so we can't classify...
-                if (off < 0)
+            if (off < 0) {
+                // This point falls outside of the codebook so we can't
+                // classify it.
+                tracking->depth_class->points[i].label = UNC;
+                continue;
+            }
+
+            // We need to seed the bg model first or everything will forever
+            // be classed as foreground. It's ok if we incorrectly add
+            // foreground to the BG model as it'll quickly decay and be
+            // replaced by background.
+            if (ctx->bg_model[off].size() < ctx->seg_samples) {
+                ctx->bg_model[off].push_back(point);
+                tracking->depth_class->points[off].label = UNC;
+                continue;
+            } else if (ctx->bg_model[off].size() > ctx->seg_samples) {
+                ctx->bg_model[off].resize(ctx->seg_samples);
+            }
+
+            // Compare against the background model
+            int matches = 0;
+            for (int s = 0;
+                 matches < ctx->seg_bg_samples && s < ctx->seg_samples; ++s) {
+                if (std::isnan(ctx->bg_model[off][s].x) != pt_isnan) {
                     continue;
-
-                // At this point z has been projected into the coordinate space
-                // of the codebook
-                float depth = point.z;
-
-                const uint64_t t = tracking->frame->timestamp;
-                const float tb = ctx->seg_tb;
-                const float tf = ctx->seg_tf;
-                const int b = ctx->seg_b;
-                const int gamma = (float)ctx->seg_gamma;
-                const int alpha = ctx->seg_alpha;
-                const float psi = ctx->seg_psi;
-
-                // Look to see if this pixel falls into an existing codeword
-                struct seg_codeword *codeword = NULL;
-                struct seg_codeword *bg_codeword = ctx->depth_seg_bg[off];
-
-                std::vector<struct seg_codeword> &codewords =
-                    ctx->depth_seg[off];
-                for (std::vector<struct seg_codeword>::iterator it =
-                     codewords.begin(); it != codewords.end(); ++it) {
-                    struct seg_codeword &candidate = *it;
-
-                    float dist = fabsf(depth - candidate.m);
-                    if (dist < tb) {
-                        codeword = &candidate;
-                        break;
-                    }
                 }
 
-                assert(bg_codeword || (!bg_codeword && !codeword));
+                if (pt_isnan) {
+                    ++matches;
+                    continue;
+                }
 
-                // Classify this depth value
-                const float frame_time = ctx->n_tracking ?
-                    (float)(t - ctx->tracking_history[0]->frame->timestamp) :
-                    100000000.f;
+                float dist = distance_between(&point.x,
+                                              &ctx->bg_model[off][s].x);
+                if (dist < ctx->seg_radius) {
+                    ++matches;
+                }
+            }
 
-                if (!codeword) {
-                    tracking->depth_class->points[depth_off].label = FG;
-                } else if (codeword->n == bg_codeword->n) {
-                    tracking->depth_class->points[depth_off].label = BG;
-                } else {
-                    bool flat = false, flickering = false;
-                    float mean_diff = fabsf(codeword->m - bg_codeword->m);
-                    if ((tb < mean_diff) && (mean_diff <= tf)) {
-                        flat = true;
-                    }
-                    if ((b * codeword->nc) > codeword->n &&
-                        (int)(((t - codeword->ts) / frame_time) / gamma) <=
-                        codeword->nc) {
-                        flickering = true;
-                    }
-                    if (flat || flickering) {
-                        tracking->depth_class->points[depth_off].label =
-                            (flat && flickering) ?
-                                FL_FLK : (flat ?  FL : FLK);
-                    } else {
-                        if (codeword->n > alpha &&
-                            ((codeword->tl - codeword->ts) / frame_time) /
-                            (float)codeword->n >= psi) {
-                            tracking->depth_class->points[depth_off].label = TB;
+            if (matches >= ctx->seg_bg_samples) {
+                // Pixel matches the background
+                tracking->depth_class->points[off].label = BG;
+
+                if ((rand() % ctx->seg_update_freq) + 1 == 1) {
+                    // Add to the background model
+                    int replace = rand() % ctx->seg_samples;
+                    ctx->bg_model[off][replace] = point;
+                }
+
+                if ((rand() % ctx->seg_update_freq) + 1 == 1) {
+                    // Update neighbouring pixel
+                    int x = off % tracking->depth_class->width;
+                    int y = off / tracking->depth_class->width;
+
+                    int ni = rand() % 9;
+                    if (ni >= 4) { ++ni; }
+                    int nx = x + ((ni % 3) - 1);
+                    int ny = y + ((ni / 3) - 1);
+
+                    if (nx >= 0 && nx < tracking->depth_class->width &&
+                        ny >= 0 && ny < tracking->depth_class->height) {
+                        int noff = ny * tracking->depth_class->width + nx;
+                        int replace = rand() % ctx->seg_samples;
+                        if (replace >= ctx->bg_model[noff].size()) {
+                            ctx->bg_model[noff].push_back(point);
                         } else {
-                            tracking->depth_class->points[depth_off].label = FG;
+                            ctx->bg_model[noff][replace] = point;
                         }
                     }
                 }
+            } else {
+                // Pixel doesn't match the background
+                tracking->depth_class->points[off].label = FG;
             }
         }
     }
@@ -2936,12 +2788,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
     start = get_time();
 
     std::vector<pcl::PointIndices> cluster_indices;
-    if (!motion_detection || !ctx->latest_tracking ||
-        !ctx->latest_tracking->success || reset_pose) {
-        // If we've not tracked a human yet, the depth classification may not
-        // be reliable - just use a simple clustering technique to find a
-        // human and separate them from the floor, then rely on motion detection
-        // for subsequent frames.
+    if (!motion_detection) {
+        // If motion detection is disabled, use a simple clustering technique
+        // to find a human and separate them from the floor.
         int width = (int)tracking->depth_class->width;
         int height = (int)tracking->depth_class->height;
         int fx = width / 2;
@@ -3234,10 +3083,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 
     if (persons.size() == 0) {
-        if (motion_detection) {
-            update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
-                                  seg_res);
-        }
         LOGI("Skipping detection: Could not find a person cluster");
         return false;
     }
@@ -3435,46 +3280,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
     if (tracked) {
         start = get_time();
 
-        // The codebook may have been polluted before this point by a human
-        // failing to track. To counteract this, as well as removing and of
-        // the codewords that apply to the tracked figure, we also remove all
-        // but the furthest-away codewords. This is in the hope that if there
-        // was an untracked human in the codebook that at some point we saw
-        // background behind them.
-        if (motion_detection &&
-            (!ctx->latest_tracking || !ctx->latest_tracking->success)) {
-#if 0
-            foreach_xy_off(tracking->depth_class->width,
-                           tracking->depth_class->height) {
-                std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
-                if (codewords.size() <= 1) {
-                    continue;
-                }
-
-                std::list<struct seg_codeword>::iterator furthest, it;
-                for (furthest = it = codewords.begin();
-                     it != codewords.end(); ++it) {
-                    if ((*it).m > (*furthest).m) {
-                        furthest = it;
-                    }
-                }
-
-                it = codewords.begin();
-                while (it != codewords.end()) {
-                    if (it == furthest) {
-                        ++it;
-                    } else {
-                        it = codewords.erase(it);
-                    }
-                }
-            }
-#else
-            ctx->depth_seg.clear();
-            ctx->depth_seg.resize(depth_class_size);
-            ctx->depth_seg_bg.resize(depth_class_size);
-#endif
-        }
-
         // TODO: We just take the most confident skeleton above, but we should
         //       probably establish some thresholds and spit out multiple
         //       skeletons.
@@ -3494,11 +3299,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
         LOGI("Joint processing took %.3f%s",
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
-
-        if (motion_detection) {
-            update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
-                                  seg_res);
-        }
     }
 
     return tracked;
@@ -4910,92 +4710,49 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.bool_state.ptr = &ctx->motion_detection;
     ctx->properties.push_back(prop);
 
-    ctx->seg_tb = 0.05f;
+    ctx->seg_samples = 20;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "seg_tb";
-    prop.desc = "Segmentation bucket threshold";
+    prop.name = "seg_samples";
+    prop.desc = "Number of samples to take per pixel for segmentaiton";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->seg_samples;
+    prop.int_state.min = 2;
+    prop.int_state.max = 50;
+    ctx->properties.push_back(prop);
+
+    ctx->seg_radius = 0.03f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_radius";
+    prop.desc = "Segmentation background search radius";
     prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_tb;
-    prop.float_state.min = 0.001f;
+    prop.float_state.ptr = &ctx->seg_radius;
+    prop.float_state.min = 0.01f;
     prop.float_state.max = 0.1f;
     ctx->properties.push_back(prop);
 
-    ctx->seg_tf = 0.2f;
+    ctx->seg_bg_samples = 2;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "seg_tf";
-    prop.desc = "Segmentation flickering threshold";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_tf;
-    prop.float_state.min = 0.05f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_N = 100;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_N";
-    prop.desc = "Segmentation max existing mean weight";
+    prop.name = "seg_bg_samples";
+    prop.desc = "Number of matching samples necessary for background "
+                "classification";
     prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_N;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_b = 3;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_b";
-    prop.desc = "Segmentation flickering frame consecutiveness threshold";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_b;
+    prop.int_state.ptr = &ctx->seg_bg_samples;
     prop.int_state.min = 1;
-    prop.int_state.max = 10;
+    prop.int_state.max = 50;
     ctx->properties.push_back(prop);
 
-    ctx->seg_gamma = 100;
+    ctx->seg_update_freq = 16;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "seg_gamma";
-    prop.desc = "Segmentation max flickering frame occurence";
+    prop.name = "seg_update_freq";
+    prop.desc = "Frequency with which to update background model";
     prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_gamma;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_alpha = 200;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_alpha";
-    prop.desc = "Segmentation frame-time for uninteresting objects";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_alpha;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_psi = 0.8f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_psi";
-    prop.desc = "Segmentation ratio for uninteresting object matches";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_psi;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 1.f;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_timeout = 3.0f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_timeout";
-    prop.desc = "Unused segmentation codeword recycle timeout";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_timeout;
-    prop.float_state.min = 0.2f;
-    prop.float_state.max = 10.f;
+    prop.int_state.ptr = &ctx->seg_update_freq;
+    prop.int_state.min = 1;
+    prop.int_state.max = 30;
     ctx->properties.push_back(prop);
 
     ctx->floor_threshold = 0.1f;
