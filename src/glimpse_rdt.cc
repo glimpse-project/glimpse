@@ -529,7 +529,8 @@ generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
         std::sort(indices.begin(), indices.end());
 
         for (int j = 0; j < ctx->n_pixels; j++) {
-            int off = indices[j];
+            int off = in_body_pixels[indices[j]];
+
             int x = off % ctx->width;
             int y = off / ctx->width;
 
