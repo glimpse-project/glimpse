@@ -1277,27 +1277,53 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
 }
 
 static bool
-reload_tree(struct gm_rdt_context_impl *ctx,
-            const char *filename,
+reload_tree(struct gm_rdt_context_impl* ctx,
+            const char* filename,
             NodeTrainData &root_node,
-            char **err)
+            char** err)
 {
     gm_info(ctx->log, "Reloading %s...\n", filename);
 
     int len = strlen(filename);
     RDTree* checkpoint = NULL;
     if (len > 5 && strcmp(filename + len - 5, ".json") == 0) {
-        JSON_Value *js = json_parse_file(filename);
+        JSON_Value* js = json_parse_file(filename);
         if (!js) {
             gm_throw(ctx->log, err, "Failed to parse %s", filename);
-            return NULL;
+            return false;
         }
 
         checkpoint = rdt_tree_load_from_json(ctx->log, js, err);
 
-        JSON_Value *history = json_object_get_value(json_object(js), "history");
+        JSON_Value* history = json_object_get_value(json_object(js), "history");
         if (history) {
             ctx->history = json_value_deep_copy(history);
+        }
+
+        JSON_Value* labels = json_object_get_value(json_object(ctx->data_meta), "labels");
+        JSON_Value* rlabels = json_object_get_value(json_object(js), "labels");
+        if (labels) {
+            JSON_Array* labels_array = json_array(labels);
+            JSON_Array* rlabels_array = json_array(rlabels);
+            int n_labels = json_array_get_count(labels_array);
+            int n_rlabels = json_array_get_count(rlabels_array);
+            if (n_labels != n_rlabels || n_labels != ctx->n_labels) {
+                gm_throw(ctx->log, err, "%s has %d labels, expected %d\n",
+                         filename,
+                         n_rlabels, ctx->n_labels);
+                return false;
+            }
+            for (int i = 0; i < n_labels; i++) {
+                JSON_Object* label = json_array_get_object(labels_array, i);
+                JSON_Object* rlabel = json_array_get_object(rlabels_array, i);
+                if (strcmp(json_object_get_string(label, "name"),
+                           json_object_get_string(rlabel, "name")) != 0)
+                {
+                    gm_throw(ctx->log, err, "%s label semantics don't match those of the training data",
+                             filename);
+                    return false;
+                }
+            }
         }
 
         json_value_free(js);
