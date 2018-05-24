@@ -605,6 +605,42 @@ calculate_gain(float entropy, int n_pixels,
 }
 
 static void
+accumulate_pixel_histograms(struct gm_rdt_context_impl* ctx,
+                            NodeTrainData* data,
+                            int* node_histogram)
+{
+    int p;
+    int n_pixels = data->n_pixels;
+    int n_labels = ctx->n_labels;
+    int width = ctx->width;
+    int height = ctx->height;
+
+    for (p = 0; p < n_pixels; p++)
+    {
+        Int2D pixel = data->pixels[p].xy;
+        int i = data->pixels[p].i;
+
+        if (p % 10000 == 0) {
+            if (interrupted)
+                break;
+        }
+
+        int64_t image_idx = (int64_t)i * width * height;
+
+        uint8_t* label_image = &ctx->label_images[image_idx];
+
+        int pixel_idx = (pixel[1] * width) + pixel[0];
+        int label = (int)label_image[pixel_idx];
+
+        gm_assert(ctx->log, label < n_labels,
+                  "Label '%d' is bigger than expected (max %d)\n",
+                  label, n_labels - 1);
+
+        ++node_histogram[label];
+    }
+}
+
+static void
 accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                              struct thread_state *state,
                              NodeTrainData* data,
@@ -1425,6 +1461,51 @@ create_training_record(struct gm_rdt_context_impl* ctx)
     return record_val;
 }
 
+static void
+print_label_histogram(struct gm_logger* log,
+                      JSON_Array* labels,
+                      float* histogram,
+                      int histogram_len)
+{
+    static const char *bars[] = {
+        " ",
+        "▏",
+        "▎",
+        "▍",
+        "▌",
+        "▋",
+        "▊",
+        "▉",
+        "█"
+    };
+
+    int max_bar_width = 30; // measured in terminal columns
+
+    for (int i = 0; i < (int)json_array_get_count(labels); i++) {
+        JSON_Object* label = json_array_get_object(labels, i);
+        const char *name = json_object_get_string(label, "name");
+        int bar_len = max_bar_width * 8 * histogram[i];
+        char bar[max_bar_width * 4]; // room for multi-byte utf8 characters
+        int bar_pos = 0;
+
+        for (int j = 0; j < max_bar_width; j++) {
+            int part;
+            if (bar_len > 8) {
+                part = 8;
+                bar_len -= 8;
+            } else {
+                part = bar_len;
+                bar_len = 0;
+            }
+            int len = strlen(bars[part]);
+            memcpy(bar + bar_pos, bars[part], len);
+            bar_pos += len;
+        }
+        bar[bar_pos++] = '\0';
+        gm_info(log, "%-20s, %-3.0f%%|%s|", name, histogram[i] * 100.0f, bar);
+    }
+}
+
 bool
 gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 {
@@ -1528,6 +1609,25 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     NodeTrainData root_node;
     root_node.id = 0;
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
+
+    /* A histogram of the labels is just useful to help double check they
+     * roughly match the relative sizes of the different labels else maybe
+     * there was a problem with generating our sample points
+     */
+    gm_info(ctx->log, "Calculating root node pixel histogram");
+    ctx->root_pixel_histogram.resize(ctx->n_labels);
+    ctx->root_pixel_nhistogram.resize(ctx->n_labels);
+    accumulate_pixel_histograms(ctx, &root_node, ctx->root_pixel_histogram.data());
+    normalize_histogram(ctx->root_pixel_histogram.data(),
+                        ctx->n_labels,
+                        ctx->root_pixel_nhistogram.data());
+    JSON_Array* labels = json_object_get_array(json_object(ctx->data_meta),
+                                               "labels");
+    gm_info(ctx->log, "Histogram of root node pixel labels:");
+    print_label_histogram(ctx->log,
+                          labels,
+                          ctx->root_pixel_nhistogram.data(),
+                          ctx->root_pixel_nhistogram.size());
 
     if (ctx->reload) {
         if (!reload_tree(ctx, ctx->reload, root_node, err)) {
