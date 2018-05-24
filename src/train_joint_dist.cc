@@ -105,67 +105,6 @@ thread_body(void* userdata)
 }
 
 static void
-logger_cb(struct gm_logger* logger,
-          enum gm_log_level level,
-          const char* context,
-          struct gm_backtrace *backtrace,
-          const char* format,
-          va_list ap,
-          void* user_data)
-{
-    TrainContext* ctx = (TrainContext*)user_data;
-    char* msg = NULL;
-
-    if (vasprintf(&msg, format, ap) > 0) {
-        if (ctx->log_fp) {
-            switch (level) {
-            case GM_LOG_ERROR:
-                fprintf(ctx->log_fp, "%s: ERROR: ", context);
-                break;
-            case GM_LOG_WARN:
-                fprintf(ctx->log_fp, "%s: WARN: ", context);
-                break;
-            default:
-                fprintf(ctx->log_fp, "%s: ", context);
-            }
-
-            fprintf(ctx->log_fp, "%s\n", msg);
-
-            if (backtrace) {
-                int line_len = 100;
-                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-                gm_logger_get_backtrace_strings(logger, backtrace,
-                                                line_len, (char *)formatted);
-                for (int i = 0; i < backtrace->n_frames; i++) {
-                    char *line = formatted + line_len * i;
-                    fprintf(ctx->log_fp, "> %s\n", line);
-                }
-            }
-
-            fflush(ctx->log_fp);
-            fflush(stdout);
-        }
-
-        free(msg);
-    }
-}
-
-static void
-logger_abort_cb(struct gm_logger* logger, void* user_data)
-{
-    TrainContext *ctx = (TrainContext*)user_data;
-
-    if (ctx->log_fp) {
-        fprintf(ctx->log_fp, "ABORT\n");
-        fflush(ctx->log_fp);
-        fclose(ctx->log_fp);
-    }
-
-    abort();
-}
-
-static void
 print_usage(FILE* stream)
 {
     fprintf(stream,
@@ -195,9 +134,7 @@ main(int argc, char** argv)
     TrainContext ctx = { 0, };
     ctx.n_threads = std::thread::hardware_concurrency();
 
-    ctx.log_fp = stderr;
-    ctx.log = gm_logger_new(logger_cb, &ctx);
-    gm_logger_set_abort_callback(ctx.log, logger_abort_cb, &ctx);
+    ctx.log = gm_logger_new(NULL, NULL);
 
     const char *short_opts="+jpvh";
     const struct option long_opts[] = {
