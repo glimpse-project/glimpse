@@ -175,19 +175,18 @@ main(int argc, char** argv)
     out_file = argv[optind + 3];
 
     printf("Scanning training directories...\n");
-    gather_train_data(ctx.log,
-                      data_dir,
-                      index_name,
-                      joint_map_path,
-                      &ctx.n_sets,
-                      &ctx.n_joints,
-                      NULL, NULL, // width, height
-                      NULL, // depth images
-                      NULL, // label images
-                      &ctx.joints,
-                      NULL, // n labels
-                      NULL, // fov
-                      NULL); // simply abort on error
+    JSON_Value *meta =
+        gather_train_data(ctx.log,
+                          data_dir,
+                          index_name,
+                          joint_map_path,
+                          &ctx.n_sets,
+                          &ctx.n_joints,
+                          NULL, NULL, // width, height
+                          NULL, // depth images
+                          NULL, // label images
+                          &ctx.joints,
+                          NULL); // simply abort on error
 
     // Create worker threads
     pthread_t threads[ctx.n_threads];
@@ -321,6 +320,8 @@ main(int argc, char** argv)
         xfree(thread_ctx[i].max_dists);
     }
     xfree(ctx.joints);
+
+    json_value_free(meta);
 
     return 0;
 }

@@ -638,28 +638,24 @@ main(int argc, char** argv)
                                             NULL);
 
     printf("Scanning training directories...\n");
-    gather_train_data(ctx.log,
-                      data_dir,
-                      index_name,
-                      joint_map_path,
-                      &ctx.n_images,
-                      &ctx.n_joints,
-                      &ctx.width, &ctx.height,
-                      &ctx.depth_images,
-                      ctx.check_accuracy ? &ctx.label_images : NULL,
-                      &ctx.joints,
-                      NULL, // n labels
-                      &ctx.fov,
-                      NULL); // simply abort on error
+    JSON_Value *meta =
+        gather_train_data(ctx.log,
+                          data_dir,
+                          index_name,
+                          joint_map_path,
+                          &ctx.n_images,
+                          &ctx.n_joints,
+                          &ctx.width, &ctx.height,
+                          &ctx.depth_images,
+                          ctx.check_accuracy ? &ctx.label_images : NULL,
+                          &ctx.joints,
+                          NULL); // simply abort on error
 
-    // Note, there's a background label, so there ought to always be fewer joints
-    // than labels. Maybe there are some situations where this might be desired
-    // though, so just warn about it.
-    if (ctx.n_joints >= ctx.forest[0]->header.n_labels)
-    {
-        fprintf(stderr, "WARNING: Joints exceeds labels (%d >= %u)\n",
-                ctx.n_joints, (int)ctx.forest[0]->header.n_labels);
-    }
+    JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
+    ctx.fov = json_object_get_number(camera, "vertical_fov");
+    json_value_free(meta);
+    meta = NULL;
+    camera = NULL;
 
     printf("Loading joint map...\n");
     ctx.joint_map = json_parse_file(joint_map_path);
@@ -668,6 +664,11 @@ main(int argc, char** argv)
         fprintf(stderr, "Failed to load joint map %s\n", joint_map_path);
         return 1;
     }
+
+    // Joints are derived from labels so it's unlikely to ever make sense to
+    // have more joints defined than labels.
+    gm_assert(log, ctx.n_joints < ctx.forest[0]->header.n_labels,
+              "More joints defined than labels");
 
     printf("Generating test parameters...\n");
     printf("%u bandwidths from %.3f to %.3f\n",

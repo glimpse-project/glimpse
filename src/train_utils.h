@@ -30,7 +30,9 @@
 
 #include "half.hpp"
 
-bool
+#include "parson.h"
+
+JSON_Value*
 gather_train_data(struct gm_logger *log,
                   const char* data_dir,
                   const char* index_name,
@@ -40,9 +42,7 @@ gather_train_data(struct gm_logger *log,
                   int* out_width,
                   int* out_height,
                   half_float::half** out_depth_images,
-                  uint8_t**   out_label_images,
-                  float**     out_joints,
-                  int*        out_n_labels,
-                  float*      out_fov,
-                  char**      err);
+                  uint8_t** out_label_images,
+                  float** out_joints,
+                  char** err);
 

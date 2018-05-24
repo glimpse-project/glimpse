@@ -140,7 +140,8 @@ struct aggregate_metrics {
 struct gm_rdt_context_impl {
     struct gm_logger* log;
 
-    JSON_Value* meta;
+    JSON_Value* data_meta;
+    JSON_Value* record;
     JSON_Value* history;
 
     char*    reload;        // Reload and continue training with pre-existing tree
@@ -193,6 +194,9 @@ struct gm_rdt_context_impl {
 
     std::vector<Node>   tree; // The decision tree being built
     std::vector<float>  tree_histograms; // label histograms for leaf nodes
+
+    std::vector<int>    root_pixel_histogram; // label histogram for initial pixels
+    std::vector<float>  root_pixel_nhistogram; // normalized histogram for initial pixels
 
     /* Note: These metrics are reset at the start of each tree level */
     struct {
@@ -1087,9 +1091,13 @@ destroy_training_state(struct gm_rdt_context_impl* ctx)
         json_value_free(ctx->history);
         ctx->history = NULL;
     }
-    if (ctx->meta) {
-        json_value_free(ctx->meta);
-        ctx->meta = NULL;
+    if (ctx->record) {
+        json_value_free(ctx->record);
+        ctx->record = NULL;
+    }
+    if (ctx->data_meta) {
+        json_value_free(ctx->data_meta);
+        ctx->data_meta = NULL;
     }
 }
 
@@ -1183,12 +1191,12 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
 {
     JSON_Value *root = json_value_init_object();
 
-    JSON_Value *meta_val = ctx->meta;
+    JSON_Value *record_val = ctx->record;
     JSON_Value *history = json_value_deep_copy(ctx->history);
     if (!history) {
         history = json_value_init_array();
     }
-    json_array_append_value(json_array(history), meta_val);
+    json_array_append_value(json_array(history), record_val);
 
     json_object_set_value(json_object(root), "history", history);
 
@@ -1390,9 +1398,9 @@ reload_tree(struct gm_rdt_context_impl *ctx,
 }
 
 static JSON_Value*
-create_training_meta(struct gm_rdt_context_impl* ctx)
+create_training_record(struct gm_rdt_context_impl* ctx)
 {
-    JSON_Value *meta_val = json_value_init_object();
+    JSON_Value *record_val = json_value_init_object();
 
     time_t unix_time = time(NULL);
     struct tm cur_time = *localtime(&unix_time);
@@ -1409,12 +1417,12 @@ create_training_meta(struct gm_rdt_context_impl* ctx)
     {
         gm_error(ctx->log, "Unable to format date string");
     } else {
-        json_object_set_string(json_object(meta_val), "date", date_str);
+        json_object_set_string(json_object(record_val), "date", date_str);
     }
 
-    gm_props_to_json(ctx->log, &ctx->properties_state, meta_val);
+    gm_props_to_json(ctx->log, &ctx->properties_state, record_val);
 
-    return meta_val;
+    return record_val;
 }
 
 bool
@@ -1445,22 +1453,29 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         return false;
     }
 
-    ctx->meta = create_training_meta(ctx);
+    ctx->record = create_training_record(ctx);
 
     gm_info(ctx->log, "Scanning training directories...\n");
-    if (!gather_train_data(ctx->log,
-                           data_dir,
-                           index_name,
-                           NULL,     // no joint map
-                           &ctx->n_images, NULL, &ctx->width, &ctx->height,
-                           &ctx->depth_images, &ctx->label_images, NULL,
-                           &ctx->n_labels,
-                           &ctx->fov,
-                           err))
-    {
+    ctx->data_meta =
+        gather_train_data(ctx->log,
+                          data_dir,
+                          index_name,
+                          NULL, // no joint map
+                          &ctx->n_images,
+                          NULL, // ignore n_joints
+                          &ctx->width, &ctx->height,
+                          &ctx->depth_images, &ctx->label_images, NULL,
+                          err);
+    if (!ctx->data_meta) {
         destroy_training_state(ctx);
         return false;
     }
+
+    JSON_Object* meta_camera =
+        json_object_get_object(json_object(ctx->data_meta), "camera");
+    ctx->fov = json_object_get_number(meta_camera, "vertical_fov");
+
+    ctx->n_labels = json_object_get_number(json_object(ctx->data_meta), "n_labels");
 
     gm_assert(ctx->log, ctx->n_labels <= MAX_LABELS,
               "Can't handle training with more than %d labels",
@@ -1764,7 +1779,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     }
 
     JSON_Value *js_metrics = json_value_init_object();
-    json_object_set_value(json_object(ctx->meta), "metrics", js_metrics);
+    json_object_set_value(json_object(ctx->record), "metrics", js_metrics);
     JSON_Value *js_dmetrics = NULL; // per-depth metrics
 
     for (int i = 0; i < ctx->max_depth; i++) {

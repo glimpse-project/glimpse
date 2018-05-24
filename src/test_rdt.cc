@@ -212,31 +212,31 @@ main(int argc, char **argv)
     int width;
     int height;
     int n_images;
-    int n_labels;
 
     half *depth_images;
     uint8_t *label_images;
 
     start = get_time();
-    if (!gather_train_data(log,
-                           data_dir,
-                           index_name,
-                           NULL, // no joint map
-                           &n_images,
-                           NULL, // n_joints
-                           &width,
-                           &height,
-                           &depth_images,
-                           &label_images,
-                           NULL, // no joint data
-                           &n_labels,
-                           NULL, // fov
-                           &err))
-    {
+    JSON_Value *meta =
+        gather_train_data(log,
+                          data_dir,
+                          index_name,
+                          NULL, // no joint map
+                          &n_images,
+                          NULL, // n_joints
+                          &width,
+                          &height,
+                          &depth_images,
+                          &label_images,
+                          NULL, // no joint data
+                          &err);
+    if (!meta) {
         return false;
     }
     end = get_time();
     uint64_t load_data_duration = end - start;
+
+    int n_labels = json_object_get_number(json_object(meta), "n_labels");
 
     float *probs = (float*)xmalloc(width * height * sizeof(float) * n_labels);
 

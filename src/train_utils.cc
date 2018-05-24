@@ -34,7 +34,6 @@
 #include "train_utils.h"
 #include "image_utils.h"
 #include "xalloc.h"
-#include "llist.h"
 #include "parson.h"
 
 #include "glimpse_log.h"
@@ -209,7 +208,7 @@ load_frame(TrainData *data, int index, char **err)
     return true;
 }
 
-bool
+JSON_Value*
 gather_train_data(struct gm_logger* log,
                   const char* data_dir,
                   const char* index_name,
@@ -221,8 +220,6 @@ gather_train_data(struct gm_logger* log,
                   half** out_depth_images,
                   uint8_t** out_label_images,
                   float** out_joints,
-                  int* out_n_labels,
-                  float* out_fov,
                   char** err)
 {
     char meta_filename[1024];
@@ -248,7 +245,7 @@ gather_train_data(struct gm_logger* log,
     JSON_Value* meta = json_parse_file(meta_filename);
     if (!meta) {
         gm_throw(log, err, "Failed to parse %s", meta_filename);
-        return false;
+        return NULL;
     }
 
     int n_labels = json_object_get_number(json_object(meta), "n_labels");
@@ -257,9 +254,6 @@ gather_train_data(struct gm_logger* log,
     data.vertical_fov = json_object_get_number(camera, "vertical_fov");
     int width = json_object_get_number(camera, "width");
     int height = json_object_get_number(camera, "height");
-
-    json_value_free(meta);
-    meta = NULL;
 
     data.label_spec.width = width;
     data.label_spec.height = height;
@@ -271,7 +265,8 @@ gather_train_data(struct gm_logger* log,
         JSON_Value *map = json_parse_file(joint_map_path);
         if (!map) {
             gm_throw(log, err, "Failed to parse joint map %s\n", joint_map_path);
-            return false;
+            json_value_free(meta);
+            return NULL;
         }
 
         /* For now we just care about how many joints there are but maybe
@@ -282,8 +277,10 @@ gather_train_data(struct gm_logger* log,
         map = NULL;
     }
 
-    if (!load_training_index(data_dir, index_name, &data, err))
-        return false;
+    if (!load_training_index(data_dir, index_name, &data, err)) {
+        json_value_free(meta);
+        return NULL;
+    }
 
     size_t n_pixels = (size_t)width * height * data.n_images;
 
@@ -315,7 +312,8 @@ gather_train_data(struct gm_logger* log,
         xfree(data.label_images);
         xfree(data.depth_images);
         xfree(data.joint_data);
-        return false;
+        json_value_free(meta);
+        return NULL;
     }
 
     if (out_width) {
@@ -338,13 +336,7 @@ gather_train_data(struct gm_logger* log,
     if (out_joints) {
         *out_joints = data.joint_data;
     }
-    if (out_n_labels) {
-        *out_n_labels = n_labels;
-    }
-    if (out_fov) {
-        *out_fov = data.vertical_fov;
-    }
 
-    return true;
+    return meta;
 }
 
