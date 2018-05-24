@@ -604,7 +604,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                              struct thread_state *state,
                              NodeTrainData* data,
                              int uv_start, int uv_end,
-                             int* root_histogram,
+                             int* node_histogram,
                              int* uvt_lr_histograms)
 {
     int p;
@@ -648,8 +648,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                   "Label '%d' is bigger than expected (max %d)\n",
                   label, n_labels - 1);
 
-        // Accumulate root histogram
-        ++root_histogram[label];
+        ++node_histogram[label];
 
         // Don't waste processing time if this is the last depth
         if (node_depth >= max_depth - 1) {
