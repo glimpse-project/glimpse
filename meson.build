@@ -458,6 +458,19 @@ executable('pfm-debug',
            [ 'src/pfm-debug.c' ],
            include_directories: inc)
 
+executable('index-to-recording',
+           [ 'src/index-to-recording.cc',
+             'src/glimpse_log.c',
+             'src/train_utils.cc',
+             'src/image_utils.cc',
+             'src/rdt_tree.cc',
+             'src/tinyexr.cc',
+             'src/parson.c',
+             'src/xalloc.c',
+           ],
+           include_directories: inc,
+           dependencies: [ libpng_dep, threads_dep ])
+
 if snappy_dep.found()
     executable('pack-training-data',
                [ 'src/pack-training-data.cc',
