@@ -66,7 +66,7 @@ default_stderr_logger_cb(struct gm_logger *logger,
                          va_list ap,
                          void *user_data)
 {
-    bool verbose = user_data ? false : *(bool *)user_data;
+    bool verbose = user_data == NULL ? false : *(bool *)user_data;
     FILE *log_fp = stderr;
 
     if (verbose == false && level < GM_LOG_ERROR)
