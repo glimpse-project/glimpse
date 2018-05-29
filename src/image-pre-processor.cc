@@ -65,7 +65,7 @@
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
-#define BACKGROUND_ID 33
+#define BACKGROUND_ID 0
 
 using half_float::half;
 
