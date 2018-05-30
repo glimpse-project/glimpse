@@ -471,6 +471,18 @@ executable('index-to-recording',
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
+executable('json-to-jnt',
+           [ 'src/json-to-jnt.cc',
+             'src/glimpse_log.c',
+             'src/train_utils.cc',
+             'src/image_utils.cc',
+             'src/tinyexr.cc',
+             'src/parson.c',
+             'src/xalloc.c',
+           ],
+           include_directories: inc,
+           dependencies: [ libpng_dep, threads_dep ])
+
 if snappy_dep.found()
     executable('pack-training-data',
                [ 'src/pack-training-data.cc',
