@@ -32,6 +32,46 @@
 
 #include "parson.h"
 
+struct gm_data_index*
+gm_data_index_open(struct gm_logger* log,
+                   const char* top_dir,
+                   const char* index_name,
+                   char **err);
+
+void
+gm_data_index_destroy(struct gm_data_index* data_index);
+
+int
+gm_data_index_get_len(struct gm_data_index* data_index);
+
+const char*
+gm_data_index_get_top_dir(struct gm_data_index* data_index);
+
+JSON_Value*
+gm_data_index_get_meta(struct gm_data_index* data_index);
+
+int
+gm_data_index_get_width(struct gm_data_index* data_index);
+
+int
+gm_data_index_get_height(struct gm_data_index* data_index);
+
+int
+gm_data_index_get_n_labels(struct gm_data_index* data_index);
+
+float
+gm_data_index_get_vfov(struct gm_data_index* data_index);
+
+bool
+gm_data_index_foreach(struct gm_data_index* data_index,
+                      bool (*callback)(struct gm_data_index* data_index,
+                                       int index,
+                                       const char* frame_path,
+                                       void* user_data,
+                                       char** err),
+                      void* user_data,
+                      char** err);
+
 JSON_Value*
 gather_train_data(struct gm_logger *log,
                   const char* data_dir,
