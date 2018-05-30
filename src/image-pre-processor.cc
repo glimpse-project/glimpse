@@ -131,8 +131,8 @@ static std::queue<struct work> work_queue;
 
 static int indent = 0;
 
-static uint8_t grey_to_id_map[255];
-static uint8_t left_to_right_map[255];
+static uint8_t grey_to_id_map[256];
+static uint8_t left_to_right_map[256];
 
 static pthread_once_t cpu_count_once = PTHREAD_ONCE_INIT;
 static int n_cpus = 0;
@@ -1249,8 +1249,8 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    static_assert(sizeof(grey_to_id_map) == 255,
-                  "grey_to_id_map should be a 255 byte table");
+    static_assert(sizeof(grey_to_id_map) == 256,
+                  "grey_to_id_map should be a 256 byte table");
 
     /* NB: by default the grey_to_id_map is zero initialized which means
      * everything is mapped to the background label
