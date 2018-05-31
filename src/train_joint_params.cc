@@ -56,7 +56,6 @@ using half_float::half;
 static bool verbose = false;
 
 typedef struct {
-    FILE       *log_fp;
     struct gm_logger *log;
 
     float    fov;           // Camera field of view
@@ -95,68 +94,6 @@ typedef struct {
     float*             best_offset;      // Best offset per joint
     pthread_barrier_t* barrier ;         // Barrier to synchronise dependent work
 } TrainThreadData;
-
-static void
-logger_cb(struct gm_logger* logger,
-          enum gm_log_level level,
-          const char* context,
-          struct gm_backtrace *backtrace,
-          const char* format,
-          va_list ap,
-          void* user_data)
-{
-    TrainContext* ctx = (TrainContext*)user_data;
-    char* msg = NULL;
-
-    if (vasprintf(&msg, format, ap) > 0) {
-        if (ctx->log_fp) {
-            switch (level) {
-            case GM_LOG_ERROR:
-                fprintf(ctx->log_fp, "%s: ERROR: ", context);
-                break;
-            case GM_LOG_WARN:
-                fprintf(ctx->log_fp, "%s: WARN: ", context);
-                break;
-            default:
-                fprintf(ctx->log_fp, "%s: ", context);
-            }
-
-            fprintf(ctx->log_fp, "%s\n", msg);
-
-            if (backtrace) {
-                int line_len = 100;
-                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-                gm_logger_get_backtrace_strings(logger, backtrace,
-                                                line_len, (char *)formatted);
-                for (int i = 0; i < backtrace->n_frames; i++) {
-                    char *line = formatted + line_len * i;
-                    fprintf(ctx->log_fp, "> %s\n", line);
-                }
-            }
-
-            fflush(ctx->log_fp);
-            fflush(stdout);
-        }
-
-        free(msg);
-    }
-}
-
-static void
-logger_abort_cb(struct gm_logger* logger, void* user_data)
-{
-    TrainContext *ctx = (TrainContext*)user_data;
-
-    if (ctx->log_fp) {
-        fprintf(ctx->log_fp, "ABORT\n");
-        fflush(ctx->log_fp);
-        fclose(ctx->log_fp);
-    }
-
-    abort();
-}
-
 
 static void
 print_usage(FILE* stream)
@@ -396,8 +333,6 @@ gen_range(float** data, float min, float max, int n)
 int
 main(int argc, char** argv)
 {
-    struct gm_logger *log = gm_logger_new(NULL, NULL);
-
     if (argc < 5)
     {
         print_usage(stderr);
@@ -413,9 +348,7 @@ main(int argc, char** argv)
     // Set default parameters
     TrainContext ctx = { 0, };
 
-    ctx.log_fp = stderr;
-    ctx.log = gm_logger_new(logger_cb, &ctx);
-    gm_logger_set_abort_callback(ctx.log, logger_abort_cb, &ctx);
+    ctx.log = gm_logger_new(NULL, NULL);
 
     ctx.n_bandwidths = 10;
     float min_bandwidth = 0.02f;
@@ -558,7 +491,7 @@ main(int argc, char** argv)
     }
 
     printf("Loading decision forest...\n");
-    ctx.forest = rdt_forest_load_from_files(log,
+    ctx.forest = rdt_forest_load_from_files(ctx.log,
                                             (const char**)tree_paths,
                                             ctx.n_trees,
                                             NULL);
@@ -593,7 +526,7 @@ main(int argc, char** argv)
 
     // Joints are derived from labels so it's unlikely to ever make sense to
     // have more joints defined than labels.
-    gm_assert(log, ctx.n_joints < ctx.forest[0]->header.n_labels,
+    gm_assert(ctx.log, ctx.n_joints < ctx.forest[0]->header.n_labels,
               "More joints defined than labels");
 
     printf("Generating test parameters...\n");
