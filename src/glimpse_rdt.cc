@@ -57,24 +57,33 @@
 
 using half_float::half;
 
+static void
+process_node_shards_work_cb(struct thread_state* state,
+                            void* user_data);
+
+
 static const char *interrupt_reason;
 static bool interrupted;
 
-typedef struct {
-    int       id;              // Unique id to place the node a tree.
-    int       n_pixels;        // Number of pixels that have reached this node.
-    Int3D*    pixels;          // A list of pixel pairs and image indices.
-} NodeTrainData;
+struct node_data {
+    int    id;        // Unique id to place the node in a tree.
+    int    n_pixels;  // Number of pixels that have reached this node.
+    Int3D* pixels;    // A list of pixel pairs and image indices.
+};
 
 /* Work submitted for the thread pool to process... */
 struct work {
-    NodeTrainData *node;
-    int            uv_start;
-    int            uv_end;
+    int depth; // All work is associated with a depth to help collect
+               // and report metrics
+
+    void (*work_cb)(struct thread_state* state,
+                    void* user_data);
+    void* user_data;
 };
 
 #define MAX_LABELS 40
-struct result {
+struct node_shard_data {
+    bool done;
     float best_gain;
     int best_uv;
     int best_threshold;
@@ -83,7 +92,44 @@ struct result {
     uint64_t duration;
 };
 
-struct thread_metrics {
+#if 0
+enum {
+    RESULS_BUSY, // Submitted to be processed by a worker thread
+    RESULT_DONE, // Worker thread has finished computing result
+    RESULT_PROCESSING // Worker thread is processing / combining result with others
+};
+#endif
+
+struct node_shard_results {
+    int ref;
+    pthread_mutex_t check_lock; // Use to avoid processing results more than
+                                // once. Take lock and enumerate each data entry
+                                // to see that they are all complete.
+    bool taken;
+
+    int n_shards;
+    struct node_shard_data data[];
+};
+
+/* Instructions to process a subset of a single node along with a place to
+ * store results. It is the collective responsibility of these workers to
+ * queue a follow up worker to process the results after completing
+ * a shard.
+ */
+struct node_shard_work {
+    struct node_data node_data;
+    int uv_start;
+    int uv_end;
+    struct node_shard_results* results;
+    int shard_index;
+};
+
+struct process_node_shards_work {
+    struct node_data node_data;
+    struct node_shard_results* results;
+};
+
+struct thread_depth_metrics_report {
     uint64_t duration;
 
     float idle_percent;
@@ -97,44 +143,32 @@ struct thread_metrics {
     int thresholds_per_second;
 };
 
+struct thread_depth_metrics_raw {
+    // Mutually exclusive
+    uint64_t idle_time;
+    uint64_t work_time;
+
+    uint64_t accumulation_time;
+    uint64_t gain_ranking_time;
+
+    uint64_t n_pixels_accumulated;
+    uint64_t n_images_accumulated;
+    uint64_t n_nodes;
+};
+
+#define MAX_DEPTH 30
+
 struct thread_state {
     struct gm_rdt_context_impl* ctx;
     int idx;
 
     pthread_t thread;
 
+    std::vector<int> uvt_lr_histograms;
+
     uint64_t last_metrics_log;
 
-    /* Note: These metrics are reset at the start of each tree level */
-    struct {
-        uint64_t start;
-
-        uint64_t idle_duration;
-
-        uint64_t accumulation_time;
-        uint64_t n_pixels_accumulated;
-        uint64_t n_images_accumulated;
-        uint64_t n_nodes;
-
-        uint64_t gain_ranking_time;
-    } metrics;
-
-    std::vector<thread_metrics> per_depth_metrics;
-};
-
-struct aggregate_metrics {
-    uint64_t duration;
-
-    float wait_percent;
-    float scheduling_percent;
-
-    float nodes_per_second;
-    int images_per_second;
-    int pixels_per_second;
-    int uvs_per_second;
-    int thresholds_per_second;
-
-    int pixels_per_node;
+    std::vector<thread_depth_metrics_raw> per_depth_metrics;
 };
 
 struct gm_rdt_context_impl {
@@ -145,8 +179,11 @@ struct gm_rdt_context_impl {
     JSON_Value* history;
 
     char*    reload;        // Reload and continue training with pre-existing tree
+
+    pthread_mutex_t tidy_log_lock;
     bool     verbose;       // Verbose logging
     bool     profile;       // Verbose profiling
+
     bool     pretty;        // Pretty JSON output
     int      seed;          // Seed for RNG
 
@@ -178,32 +215,26 @@ struct gm_rdt_context_impl {
 
     int      n_nodes_trained;   // The number of nodes trained so far
 
-    std::queue<NodeTrainData> train_queue;
+    uint64_t start;
 
     std::vector<thread_state> thread_pool;
+
+    pthread_mutex_t     scheduler_lock;
+
+    pthread_mutex_t         train_queue_lock;
+    std::deque<node_data>   train_queue; // deque so we can iterate for debugging
 
     // Queue of work for thread pool
     pthread_mutex_t     work_queue_lock;
     pthread_cond_t      work_queue_changed;
-    std::queue<work>    work_queue;
-
-    // Results computed by the worker threads
-    pthread_mutex_t     results_lock;
-    pthread_cond_t      results_changed;
-    std::vector<result> results;
+    std::deque<work>    work_queue; //deque so we can iterate for debugging
+    int                 n_idle; // number of threads currently waiting for work
 
     std::vector<Node>   tree; // The decision tree being built
     std::vector<float>  tree_histograms; // label histograms for leaf nodes
 
     std::vector<int>    root_pixel_histogram; // label histogram for initial pixels
     std::vector<float>  root_pixel_nhistogram; // normalized histogram for initial pixels
-
-    /* Note: These metrics are reset at the start of each tree level */
-    struct {
-        uint64_t start;
-        uint64_t wait_duration;
-    } metrics;
-    std::vector<aggregate_metrics> per_depth_metrics;
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -219,141 +250,57 @@ get_time(void)
     return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-static float
-get_format_duration(uint64_t duration_ns)
+/* The longest format is like "00:00:00" which needs up to 9 bytes but notably
+ * gcc complains if buf < 14 bytes, so rounding up to power of two for neatness.
+ */
+char *
+format_duration_s16(uint64_t duration_ns, char buf[16])
 {
-    if (duration_ns > 1000000000ULL*60*60)
-        return duration_ns / (1e9 * 60.0 * 60.0);
-    else if (duration_ns > 1000000000ULL*60)
-        return duration_ns / (1e9 * 60.0);
-    else if (duration_ns > 1000000000)
-        return duration_ns / 1e9;
-    else if (duration_ns > 1000000)
-        return duration_ns / 1e6;
-    else if (duration_ns > 1000)
-        return duration_ns / 1e3;
-    else
-        return duration_ns;
-}
+    if (duration_ns > 1000000000) {
+        const uint64_t hour_ns = 1000000000ULL*60*60;
+        const uint64_t min_ns = 1000000000ULL*60;
+        const uint64_t sec_ns = 1000000000ULL;
 
-static char *
-get_format_duration_suffix(uint64_t duration_ns)
-{
-    if (duration_ns > 1000000000ULL*60*60)
-        return (char *)"hr";
-    else if (duration_ns > 1000000000ULL*60)
-        return (char *)"min";
-    else if (duration_ns > 1000000000)
-        return (char *)"s";
-    else if (duration_ns > 1000000)
-        return (char *)"ms";
-    else if (duration_ns > 1000)
-        return (char *)"us";
-    else
-        return (char *)"ns";
-}
-
-static void
-calculate_aggregate_metrics(struct gm_rdt_context_impl *ctx,
-                            uint64_t current_time,
-                            struct aggregate_metrics *metrics)
-{
-    uint64_t run_duration = current_time - ctx->metrics.start;
-
-    memset(metrics, 0, sizeof(*metrics));
-    if (!run_duration)
-        return;
-
-    double run_time_sec = run_duration / 1e9;
-
-    /* time spent in main thread waiting for results from thread pool */
-    double wait_percent = ((double)ctx->metrics.wait_duration / run_duration) * 100.0;
-    /* time spent in main thread scheduling more work for thread pool */
-    double scheduling_percent = 100.0 - wait_percent;
-
-    uint64_t nodes_total = 0;
-    uint64_t images_total = 0;
-    uint64_t pixels_total = 0;
-    uint64_t uvs_total = 0;
-    uint64_t thresholds_total = 0;
-
-    for (int i = 0; i < (int)ctx->thread_pool.size(); i++) {
-        struct thread_state *state = &ctx->thread_pool[i];
-
-        nodes_total += state->metrics.n_nodes;
-        images_total += state->metrics.n_images_accumulated;
-        pixels_total += state->metrics.n_pixels_accumulated;
-        uvs_total += state->metrics.n_pixels_accumulated * ctx->n_uvs;
-        thresholds_total += state->metrics.n_pixels_accumulated * ctx->n_thresholds;
+        uint64_t hours = duration_ns / hour_ns;
+        duration_ns -= hours * hour_ns;
+        uint64_t minutes = duration_ns / min_ns;
+        duration_ns -= minutes * min_ns;
+        uint64_t seconds = duration_ns / sec_ns;
+        snprintf(buf, 16, "%02d:%02d:%02d", (int)hours, (int)minutes, (int)seconds);
+    } else if (duration_ns > 1000000) {
+        uint64_t ms = duration_ns / 1000000;
+        snprintf(buf, 16, "%dms", (int)ms);
+    } else if (duration_ns > 1000) {
+        uint64_t us = duration_ns / 1000;
+        snprintf(buf, 16, "%dus", (int)us);
+    } else {
+        snprintf(buf, 16, "%dns", (int)duration_ns);
     }
 
-    double nodes_per_second = (double)nodes_total / run_time_sec;
-    double images_per_sec = (double)images_total / run_time_sec;
-    double px_per_sec = (double)pixels_total / run_time_sec;
-    double uvs_per_sec = (double)uvs_total / run_time_sec;
-    double thresholds_per_sec = (double)thresholds_total / run_time_sec;
-    double pixels_per_node = (double)pixels_total / nodes_total;
-
-    metrics->duration = run_duration;
-
-    metrics->wait_percent = wait_percent;
-    metrics->scheduling_percent = scheduling_percent;
-
-    metrics->nodes_per_second = nodes_per_second;
-    metrics->images_per_second = images_per_sec;
-    metrics->pixels_per_second = px_per_sec;
-    metrics->uvs_per_second = uvs_per_sec;
-    metrics->thresholds_per_second = thresholds_per_sec;
-    metrics->pixels_per_node = pixels_per_node;
-}
-
-static JSON_Value*
-aggregate_metrics_to_json(struct gm_rdt_context_impl* ctx,
-                          struct aggregate_metrics* metrics)
-{
-    JSON_Value *js = json_value_init_object();
-
-    json_object_set_number(json_object(js), "duration", metrics->duration);
-
-    json_object_set_number(json_object(js), "wait_percent", metrics->wait_percent);
-    json_object_set_number(json_object(js), "scheduling_percent", metrics->scheduling_percent);
-
-    json_object_set_number(json_object(js), "nodes_per_second", metrics->nodes_per_second);
-    json_object_set_number(json_object(js), "images_per_second", metrics->images_per_second);
-    json_object_set_number(json_object(js), "pixels_per_second", metrics->pixels_per_second);
-    json_object_set_number(json_object(js), "uvs_per_second", metrics->uvs_per_second);
-    json_object_set_number(json_object(js), "thresholds_per_second", metrics->thresholds_per_second);
-    json_object_set_number(json_object(js), "pixels_per_node", metrics->pixels_per_node);
-
-    return js;
+    return buf;
 }
 
 static void
-calculate_thread_metrics(struct gm_rdt_context_impl *ctx,
-                         struct thread_state *state,
-                         uint64_t current_time,
-                         struct thread_metrics *metrics)
+calculate_thread_depth_metrics_report(struct thread_state* state,
+                                      int depth,
+                                      struct thread_depth_metrics_raw* raw,
+                                      struct thread_depth_metrics_report* metrics)
 {
-    uint64_t run_duration = current_time - state->metrics.start;
+    struct gm_rdt_context_impl* ctx = state->ctx;
+    uint64_t run_duration = raw->idle_time + raw->work_time;
 
     memset(metrics, 0, sizeof(*metrics));
     if (!run_duration)
         return;
 
-    double idle_percent = ((double)state->metrics.idle_duration /
-        run_duration) * 100.0;
-    double accu_percent = ((double)state->metrics.accumulation_time /
-        run_duration) * 100.0;
-    double rank_percent = ((double)state->metrics.gain_ranking_time /
-        run_duration) * 100.0;
+    double idle_percent = ((double)raw->idle_time / run_duration) * 100.0;
+    double accu_percent = ((double)raw->accumulation_time / run_duration) * 100.0;
+    double rank_percent = ((double)raw->gain_ranking_time / run_duration) * 100.0;
 
     double run_time_sec = run_duration / 1e9;
-    double nodes_per_second = (double)state->metrics.n_nodes /
-        run_time_sec;
-    double images_per_sec = (double)state->metrics.n_images_accumulated /
-        run_time_sec;
-    double px_per_sec = (double)state->metrics.n_pixels_accumulated /
-        run_time_sec;
+    double nodes_per_second = (double)raw->n_nodes / run_time_sec;
+    double images_per_sec = (double)raw->n_images_accumulated / run_time_sec;
+    double px_per_sec = (double)raw->n_pixels_accumulated / run_time_sec;
 
     metrics->duration = run_duration;
 
@@ -370,7 +317,7 @@ calculate_thread_metrics(struct gm_rdt_context_impl *ctx,
 
 static JSON_Value*
 thread_metrics_to_json(struct gm_rdt_context_impl* ctx,
-                       struct thread_metrics* metrics)
+                       struct thread_depth_metrics_report* metrics)
 {
     JSON_Value *js = json_value_init_object();
 
@@ -390,15 +337,18 @@ thread_metrics_to_json(struct gm_rdt_context_impl* ctx,
 }
 
 static void
-log_thread_metrics(struct gm_rdt_context_impl *ctx,
-                   int thread_index,
-                   struct thread_metrics *metrics)
+log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
+                         const char *prefix,
+                         int depth,
+                         struct thread_depth_metrics_report *metrics)
 {
+    char buf[16];
 
-    gm_info(ctx->log, "%02d: over %.2f%s: idle %5.2f%%, acc %5.2f%% (%5.2f nd/s %6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %5.2f%%",
-            thread_index,
-            get_format_duration(metrics->duration),
-            get_format_duration_suffix(metrics->duration),
+    gm_info(ctx->log, "%s%-2d: taken %8s: idle %5.2f%%, acc %5.2f%% (%5.2f nd/s %6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s), ranking %5.2f%%",
+            prefix,
+            depth,
+
+            format_duration_s16(metrics->duration, buf),
 
             metrics->idle_percent,
             metrics->accumulation_percent,
@@ -414,37 +364,22 @@ log_thread_metrics(struct gm_rdt_context_impl *ctx,
 }
 
 static void
-maybe_log_thread_metrics(struct gm_rdt_context_impl *ctx,
-                         struct thread_state *state,
-                         uint64_t current_time)
+maybe_log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
+                               struct thread_state *state,
+                               int depth,
+                               uint64_t current_time)
 {
     if (current_time - state->last_metrics_log > 1000000000) {
-        struct thread_metrics metrics;
-        calculate_thread_metrics(ctx, state, current_time, &metrics);
-        log_thread_metrics(ctx, state->idx, &metrics);
+        char prefix[32];
+        snprintf(prefix, sizeof(prefix), "Thread %2d, d", state->idx);
+
+        struct thread_depth_metrics_raw* raw =
+            &state->per_depth_metrics[depth];
+        struct thread_depth_metrics_report metrics;
+        calculate_thread_depth_metrics_report(state, depth, raw, &metrics);
+        log_thread_depth_metrics(ctx, prefix, depth, &metrics);
         state->last_metrics_log = current_time;
     }
-}
-
-static void
-log_aggregate_metrics(struct gm_rdt_context_impl* ctx,
-                      struct aggregate_metrics* metrics)
-{
-    gm_info(ctx->log, "aggregated over %.2f%s: sched %5.2f%%, wait work %5.2f%% (%5.2f nd/s %6d img/s, %7d px/s, %7d uvs/s, %7d thresh/s, %d px/nd)",
-            get_format_duration(metrics->duration),
-            get_format_duration_suffix(metrics->duration),
-
-            metrics->scheduling_percent,
-            metrics->wait_percent,
-
-            metrics->nodes_per_second,
-            metrics->images_per_second,
-            metrics->pixels_per_second,
-            metrics->uvs_per_second,
-            metrics->thresholds_per_second,
-
-            metrics->pixels_per_node
-            );
 }
 
 static int
@@ -457,7 +392,7 @@ id_to_depth(int id)
      * 32-clz(value) essentially calculates an integer (rounded-down)
      * log2(value) (for a 32bit integer)
      *
-     * Our IDs are generally base 0 (i.e. root node has ID = 0) but with base-1
+     * Our node IDs are base 0 (i.e. root node has ID = 0) but with base-1
      * IDs then every depth level neatly starts with a power of two ID (thus
      * the (id32 + 1))
      *
@@ -606,7 +541,7 @@ calculate_gain(float entropy, int n_pixels,
 
 static void
 accumulate_pixel_histograms(struct gm_rdt_context_impl* ctx,
-                            NodeTrainData* data,
+                            struct node_data* data,
                             int* node_histogram)
 {
     int p;
@@ -643,7 +578,7 @@ accumulate_pixel_histograms(struct gm_rdt_context_impl* ctx,
 static void
 accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                              struct thread_state *state,
-                             NodeTrainData* data,
+                             struct node_data* data,
                              int uv_start, int uv_end,
                              int* node_histogram,
                              int* uvt_lr_histograms)
@@ -658,14 +593,17 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
     int width = ctx->width;
     int height = ctx->height;
 
+    struct thread_depth_metrics_raw *depth_metrics =
+        &state->per_depth_metrics[node_depth];
+
     for (p = 0; p < n_pixels; p++)
     {
         Int2D pixel = data->pixels[p].xy;
         int i = data->pixels[p].i;
 
-        state->metrics.n_pixels_accumulated++;
+        depth_metrics->n_pixels_accumulated++;
         if (i != last_i) {
-            state->metrics.n_images_accumulated++;
+            depth_metrics->n_images_accumulated++;
             last_i = i;
         }
 
@@ -673,7 +611,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             if (interrupted)
                 break;
             if (ctx->profile)
-                maybe_log_thread_metrics(ctx, state, get_time());
+                maybe_log_thread_depth_metrics(ctx, state, node_depth, get_time());
         }
 
         int64_t image_idx = (int64_t)i * width * height;
@@ -725,154 +663,277 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
     }
 }
 
-static void*
-worker_thread_cb(void* userdata)
+static void
+node_shard_work_cb(struct thread_state* state,
+                   void* user_data)
 {
-    struct thread_state *state = (struct thread_state *)userdata;
     struct gm_rdt_context_impl* ctx = state->ctx;
+    struct node_shard_work* shard_work = (struct node_shard_work*)user_data;
+
+    struct node_shard_results* results = shard_work->results;
+    struct node_shard_data* shard_data = &results->data[shard_work->shard_index];
 
     // Histogram for the node being processed
     int node_histogram[ctx->n_labels];
+    memset(node_histogram, 0, sizeof(node_histogram));
 
     // Histograms for each uvt combination being tested
-    std::vector<int> uvt_lr_histograms;
+    int n_uvt_combos = (shard_work->uv_end - shard_work->uv_start) *
+        ctx->n_thresholds;
+    state->uvt_lr_histograms.clear();
+    state->uvt_lr_histograms.resize(ctx->n_labels * n_uvt_combos * 2);
 
-    // We don't expect to be asked to process more than this many uvt
-    // combos at a time so we can allocate the memory up front...
-    int max_uvt_combos_per_thread = (ctx->n_uvs + ctx->n_threads/2) / ctx->n_threads;
-    uvt_lr_histograms.reserve(max_uvt_combos_per_thread);
+    struct node_data node_data = shard_work->node_data;
 
-    while (1)
-    {
-        struct work work = {};
-        struct result result = {};
-        NodeTrainData *node_data = NULL;
+    int node_depth = id_to_depth(node_data.id);
+    struct thread_depth_metrics_raw *depth_metrics =
+        &state->per_depth_metrics[node_depth];
 
-        uint64_t idle_start = get_time();
-
-        pthread_mutex_lock(&ctx->work_queue_lock);
-        if (!ctx->work_queue.empty()) {
-            work = ctx->work_queue.front();
-            ctx->work_queue.pop();
-        } else {
-            while (!interrupted) {
-                pthread_cond_wait(&ctx->work_queue_changed, &ctx->work_queue_lock);
-                if (!ctx->work_queue.empty()) {
-                    work = ctx->work_queue.front();
-                    ctx->work_queue.pop();
-                    break;
-                }
-            }
-        }
-        pthread_mutex_unlock(&ctx->work_queue_lock);
-
-        uint64_t idle_end = get_time();
-        state->metrics.idle_duration += (idle_end - idle_start);
-
-        if (interrupted)
-            break;
-
-        gm_assert(ctx->log, work.node != NULL, "Spurious NULL work node");
-        node_data = work.node;
-
-        int node_depth = id_to_depth(node_data->id);
-
-        // Clear histogram accumulators
-        memset(node_histogram, 0, sizeof(node_histogram));
-        uvt_lr_histograms.clear();
-        uvt_lr_histograms.resize(ctx->n_labels *
-                                 (work.uv_end - work.uv_start) *
-                                 ctx->n_thresholds * 2);
-
-        // Accumulate histograms
-        uint64_t accu_start = get_time();
-        accumulate_uvt_lr_histograms(ctx,
-                                     state,
-                                     node_data,
-                                     work.uv_start, work.uv_end,
-                                     node_histogram,
-                                     uvt_lr_histograms.data());
-        uint64_t accu_end = get_time();
-        state->metrics.accumulation_time += accu_end - accu_start;
-
-        // Calculate the normalised label histogram and get the number of pixels
-        // and the number of labels in the root histogram.
-        Int2D root_n_pixels = normalize_histogram(node_histogram,
-                                                  ctx->n_labels,
-                                                  result.nhistogram);
-
-        // Determine the best u,v,t combination
-        result.best_gain = 0.f;
-
-        // If there's only 1 label, skip all this, gain is zero
-        if (root_n_pixels[1] > 1 && node_depth < ctx->max_depth - 1)
-        {
-            uint64_t rank_start = get_time();
-
-            // Calculate the shannon entropy for the normalised label histogram
-            float entropy = calculate_shannon_entropy(result.nhistogram,
-                                                      ctx->n_labels);
-
-            // Calculate the gain for each combination of u,v,t and store the best
-            for (int i = work.uv_start, lr_histo_base = 0;
-                 i < work.uv_end && !interrupted; i++)
-            {
-                for (int j = 0; j < ctx->n_thresholds && !interrupted;
-                     j++, lr_histo_base += ctx->n_labels * 2)
-                {
-                    float nhistogram[ctx->n_labels];
-                    float l_entropy, r_entropy, gain;
-
-                    Int2D l_n_pixels =
-                        normalize_histogram(&uvt_lr_histograms[lr_histo_base],
-                                            ctx->n_labels, nhistogram);
-                    if (l_n_pixels[0] == 0 || l_n_pixels[0] == root_n_pixels[0])
-                    {
-                        continue;
-                    }
-                    l_entropy = calculate_shannon_entropy(nhistogram,
-                                                          ctx->n_labels);
-
-                    Int2D r_n_pixels =
-                        normalize_histogram(
-                            &uvt_lr_histograms[lr_histo_base + ctx->n_labels],
-                            ctx->n_labels, nhistogram);
-                    r_entropy = calculate_shannon_entropy(nhistogram,
-                                                          ctx->n_labels);
-
-                    gain = calculate_gain(entropy, root_n_pixels[0],
-                                          l_entropy, l_n_pixels[0],
-                                          r_entropy, r_n_pixels[0]);
-
-                    if (gain > result.best_gain) {
-                        result.best_gain = gain;
-                        result.best_uv = i;
-                        result.best_threshold = j;
-                        result.n_lr_pixels[0] = l_n_pixels[0];
-                        result.n_lr_pixels[1] = r_n_pixels[0];
-                    }
-                }
-            }
-            uint64_t rank_end = get_time();
-            state->metrics.gain_ranking_time += rank_end - rank_start;
-        }
-
-        state->metrics.n_nodes++;
-        uint64_t work_end = get_time();
-        result.duration = work_end - idle_end;
-
-        pthread_mutex_lock(&ctx->results_lock);
-        ctx->results.push_back(result);
-        pthread_cond_signal(&ctx->results_changed);
-        pthread_mutex_unlock(&ctx->results_lock);
+    if (ctx->verbose) {
+        gm_info(ctx->log, "Training shard %d of node %d, depth=%d",
+                shard_work->shard_index, node_data.id, node_depth);
     }
 
-    return NULL;
+
+    // Accumulate histograms
+    uint64_t accu_start = get_time();
+    accumulate_uvt_lr_histograms(ctx,
+                                 state,
+                                 &node_data,
+                                 shard_work->uv_start, shard_work->uv_end,
+                                 node_histogram,
+                                 state->uvt_lr_histograms.data());
+    uint64_t accu_end = get_time();
+    depth_metrics->accumulation_time += accu_end - accu_start;
+
+    // Calculate the normalised label histogram and get the number of pixels
+    // and the number of labels in the root histogram.
+    Int2D root_n_pixels = normalize_histogram(node_histogram,
+                                              ctx->n_labels,
+                                              shard_data->nhistogram);
+
+    // Determine the best u,v,t combination
+    shard_data->best_gain = 0.f;
+
+    // If there's only 1 label, skip all this, gain is zero
+    if (root_n_pixels[1] > 1 && node_depth < ctx->max_depth - 1)
+    {
+        uint64_t rank_start = get_time();
+
+        // Calculate the shannon entropy for the normalised label histogram
+        float entropy = calculate_shannon_entropy(shard_data->nhistogram,
+                                                  ctx->n_labels);
+
+        // Calculate the gain for each combination of u,v,t and store the best
+        for (int i = shard_work->uv_start, lr_histo_base = 0;
+             i < shard_work->uv_end && !interrupted; i++)
+        {
+            for (int j = 0; j < ctx->n_thresholds && !interrupted;
+                 j++, lr_histo_base += ctx->n_labels * 2)
+            {
+                float nhistogram[ctx->n_labels];
+                float l_entropy, r_entropy, gain;
+
+                Int2D l_n_pixels =
+                    normalize_histogram(&state->uvt_lr_histograms[lr_histo_base],
+                                        ctx->n_labels, nhistogram);
+                if (l_n_pixels[0] == 0 || l_n_pixels[0] == root_n_pixels[0])
+                {
+                    continue;
+                }
+                l_entropy = calculate_shannon_entropy(nhistogram,
+                                                      ctx->n_labels);
+
+                Int2D r_n_pixels =
+                    normalize_histogram(
+                        &state->uvt_lr_histograms[lr_histo_base + ctx->n_labels],
+                        ctx->n_labels, nhistogram);
+                r_entropy = calculate_shannon_entropy(nhistogram,
+                                                      ctx->n_labels);
+
+                gain = calculate_gain(entropy, root_n_pixels[0],
+                                      l_entropy, l_n_pixels[0],
+                                      r_entropy, r_n_pixels[0]);
+
+                if (gain > shard_data->best_gain) {
+                    shard_data->best_gain = gain;
+                    shard_data->best_uv = i;
+                    shard_data->best_threshold = j;
+                    shard_data->n_lr_pixels[0] = l_n_pixels[0];
+                    shard_data->n_lr_pixels[1] = r_n_pixels[0];
+                }
+            }
+        }
+        uint64_t rank_end = get_time();
+        depth_metrics->gain_ranking_time += rank_end - rank_start;
+    }
+
+    shard_data->done = true;
+
+    /* Once we set shard_data->done then we are racing with other threads
+     * that might process the results if this was the last node.
+     *
+     * NB: The shard results are ref counted and we handle unrefs in
+     * process_node_shards_work_cb
+     */
+
+    struct process_node_shards_work* process_work =
+        (struct process_node_shards_work*)xmalloc(sizeof(*process_work));
+    process_work->node_data = node_data;
+    process_work->results = shard_work->results;
+
+    struct work entry;
+    entry.depth = node_depth;
+    entry.work_cb = process_node_shards_work_cb;
+    entry.user_data = process_work;
+
+    pthread_mutex_lock(&ctx->work_queue_lock);
+    ctx->work_queue.push_back(entry);
+    pthread_cond_signal(&ctx->work_queue_changed);
+    pthread_mutex_unlock(&ctx->work_queue_lock);
+
+    xfree(shard_work);
+    // Note: the shard_work->results will be unreferenced/freed by
+    // process_node_shards_work_cb
+}
+
+static bool
+schedule_node_work(struct thread_state* state)
+{
+    struct gm_rdt_context_impl* ctx = state->ctx;
+    struct node_data node_data;
+
+    pthread_mutex_lock(&ctx->scheduler_lock);
+
+    bool busy = false;
+    bool popped_node = false;
+
+    pthread_mutex_lock(&ctx->work_queue_lock);
+    if ((int)ctx->work_queue.size() >= (ctx->n_threads * 2))
+        busy = true;
+    pthread_mutex_unlock(&ctx->work_queue_lock);
+
+    if (!busy) {
+        pthread_mutex_lock(&ctx->train_queue_lock);
+        if (!ctx->train_queue.empty()) {
+            node_data = ctx->train_queue.front();
+            ctx->train_queue.pop_front();
+            popped_node = true;
+        }
+        pthread_mutex_unlock(&ctx->train_queue_lock);
+    }
+
+    pthread_mutex_unlock(&ctx->scheduler_lock);
+
+    /* We don't block waiting for something to schedule because we can assume
+     * some other thread will schedule work after adding nodes to the training
+     * queue (or else we will recognise we have finished when all threads are
+     * idle)
+     */
+    if (!popped_node) {
+        return false;
+    }
+
+    /*
+     * XXX: Note that because we don't synchronize the full scheduler then
+     * multiple threads may reach this point concurrently and submit more
+     * work in total than the above 'busy' threshold. This isn't expected
+     * to be a problem though since there's still a reasonable bound
+     * (n_threads * max_shards) on how much can be scheduled and work entries
+     * aren't very large.
+     */
+
+    if (ctx->verbose) {
+        gm_info(ctx->log, "Scheduling");
+    }
+
+    int node_depth = id_to_depth(node_data.id);
+
+    /*
+     * TODO: It's probably worth implementing some simple caching allocator for
+     * node_shard_results and node_shard_work structures, considering the
+     * maximum degree of sharding and the maximum number of in-flight nodes.
+     */
+
+    /* We must calculate results->n_shards before scheduling any of the
+     * individual shards, otherwise there will be a race and a subset of the
+     * shards may be considered complete (and the results processed) before we
+     * finish submitting all of the shards to the work queue.
+     *
+     * We also want to schedule all the shards atomically so verbose printing
+     * of the work queue changes won't race with other worker threads taking
+     * jobs from the queue.
+     */
+    int n_shards = ctx->n_threads;
+    int n_uvs_per_shard = std::max(ctx->n_uvs / n_shards, 1);
+    n_shards = ctx->n_uvs / n_uvs_per_shard;
+
+    size_t node_data_size = sizeof(struct node_shard_data) * n_shards;
+    struct node_shard_results* node_results =
+        (struct node_shard_results*)xcalloc(1, sizeof(*node_results) +
+                                            node_data_size);
+    pthread_mutex_init(&node_results->check_lock, NULL);
+
+    node_results->n_shards = n_shards;
+    node_results->ref = n_shards;
+
+    struct work jobs[n_shards];
+
+    for (int i = 0; i < n_shards; i++) {
+        struct node_shard_work *node_work =
+            (struct node_shard_work*)xmalloc(sizeof(*node_work));
+
+        node_work->node_data = node_data;
+        node_work->uv_start = i * n_uvs_per_shard;
+        int end = (i + 1) * n_uvs_per_shard;
+        if (i == (n_shards - 1) || end > ctx->n_uvs)
+            end = ctx->n_uvs;
+        node_work->uv_end = end;
+        node_work->results = node_results;
+        node_work->shard_index = i;
+
+        jobs[i].depth = node_depth;
+        jobs[i].work_cb = node_shard_work_cb;
+        jobs[i].user_data = node_work;
+    }
+
+    pthread_mutex_lock(&ctx->work_queue_lock);
+    for (int i = 0; i < n_shards; i++)
+        ctx->work_queue.push_back(jobs[i]);
+
+    if (ctx->verbose) {
+        pthread_mutex_lock(&ctx->tidy_log_lock);
+        gm_info(ctx->log, "work queue:");
+        int i = 0;
+        for (auto &iter: ctx->work_queue) {
+            if (iter.work_cb == node_shard_work_cb) {
+                struct node_shard_work *work = (struct node_shard_work*)iter.user_data;
+                gm_info(ctx->log, "  %-3d: shard,           node id=%d, depth=%d, shard=%d",
+                        i, work->node_data.id, iter.depth, work->shard_index);
+            } else if (iter.work_cb == process_node_shards_work_cb) {
+                struct process_node_shards_work *work =
+                    (struct process_node_shards_work*)iter.user_data;
+                gm_info(ctx->log, "  %-3d: process results, node id=%d, depth=%d",
+                        i, work->node_data.id, iter.depth);
+            } else
+                gm_info(ctx->log, "  %-3d: unknown", i);
+            i++;
+        }
+        pthread_mutex_unlock(&ctx->tidy_log_lock);
+    }
+
+    pthread_cond_signal(&ctx->work_queue_changed);
+    pthread_mutex_unlock(&ctx->work_queue_lock);
+
+    if (ctx->profile)
+        maybe_log_thread_depth_metrics(ctx, state, node_depth, get_time());
+
+    return true;
 }
 
 static void
 collect_pixels(struct gm_rdt_context_impl* ctx,
-               NodeTrainData* data,
+               struct node_data* data,
                UVPair uv, float t,
                Int3D** l_pixels, Int3D** r_pixels, int* n_lr_pixels)
 {
@@ -918,6 +979,283 @@ collect_pixels(struct gm_rdt_context_impl* ctx,
     }
 }
 
+static void
+shard_results_unref(struct node_shard_results* results)
+{
+    if (__builtin_expect(--(results->ref) < 1, 0))
+        xfree(results);
+}
+
+static void
+process_node_shards_work_cb(struct thread_state* state,
+                            void* user_data)
+{
+    struct gm_rdt_context_impl* ctx = state->ctx;
+    struct process_node_shards_work* process_work =
+        (struct process_node_shards_work*)user_data;
+
+    struct node_shard_results* results = process_work->results;
+    int n_shards = results->n_shards;
+
+    /* Make sure only one worker can process the shard results for a node...
+     */
+    bool taker = false;
+    pthread_mutex_lock(&results->check_lock);
+    if (!results->taken) {
+        taker = true;
+        for (int i = 0; i < n_shards; i++) {
+            struct node_shard_data* shard_data = &results->data[i];
+            if (!shard_data->done) {
+                taker = false;
+                break;
+            }
+        }
+        if (taker)
+            results->taken = true;
+    }
+    pthread_mutex_unlock(&results->check_lock);
+
+    if (!taker) {
+        shard_results_unref(results);
+        xfree(process_work);
+        return;
+    }
+
+    struct node_data node_data = process_work->node_data;
+    int node_depth = id_to_depth(node_data.id);
+
+    if (ctx->verbose) {
+        gm_info(ctx->log, "Processing shard results for node %d, depth=%d",
+                node_data.id, node_depth);
+    }
+
+    int best_uv = 0;
+    int best_threshold = 0;
+    int *n_lr_pixels = NULL;
+    float best_gain = 0.0;
+
+    // See which shard got the best uvt combination
+    for (int i = 0; i < n_shards; i++) {
+        struct node_shard_data* shard_data = &results->data[i];
+
+        if (shard_data->best_gain > best_gain) {
+            best_gain = shard_data->best_gain;
+            best_uv = shard_data->best_uv;
+            best_threshold = shard_data->best_threshold;
+            n_lr_pixels = shard_data->n_lr_pixels;
+        }
+    }
+
+    // Add this node to the tree and possibly add left/ride nodes to the
+    // training queue.
+    Node* node = &ctx->tree[node_data.id];
+    if (best_gain > 0.f && (node_depth + 1) < ctx->max_depth)
+    {
+        node->uv = ctx->uvs[best_uv];
+        node->t = ctx->thresholds[best_threshold];
+        if (ctx->verbose)
+        {
+            gm_info(ctx->log,
+                    "  Node (%u)\n"
+                    "    Gain: %f\n"
+                    "    U: (%f, %f)\n"
+                    "    V: (%f, %f)\n"
+                    "    T: %f\n",
+                    node_data.id, best_gain,
+                    node->uv[0], node->uv[1],
+                    node->uv[2], node->uv[3],
+                    node->t);
+        }
+
+        Int3D* l_pixels;
+        Int3D* r_pixels;
+
+        collect_pixels(ctx, &node_data, node->uv, node->t,
+                       &l_pixels, &r_pixels, n_lr_pixels);
+
+        int id = (2 * node_data.id) + 1;
+        struct node_data ldata;
+        ldata.id = id;
+        ldata.n_pixels = n_lr_pixels[0];
+        ldata.pixels = l_pixels;
+
+        struct node_data rdata;
+        rdata.id = id + 1;
+        rdata.n_pixels = n_lr_pixels[1];
+        rdata.pixels = r_pixels;
+
+        pthread_mutex_lock(&ctx->train_queue_lock);
+        ctx->train_queue.push_back(ldata);
+        ctx->train_queue.push_back(rdata);
+        pthread_mutex_unlock(&ctx->train_queue_lock);
+
+        // Mark the node as a continuing node
+        node->label_pr_idx = 0;
+    }
+    else
+    {
+        /* Each shard result will include a normalized histogram of pixel
+         * labels for the last node that was processed. They should all be
+         * identical so we just refer to the first result...
+         */
+        float *nhistogram = results->data[0].nhistogram;
+        if (ctx->verbose)
+        {
+            pthread_mutex_lock(&ctx->tidy_log_lock);
+            gm_info(ctx->log, "  Leaf node (%d)\n", node_data.id);
+            for (int i = 0; i < ctx->n_labels; i++) {
+                if (nhistogram[i] > 0.f) {
+                    gm_info(ctx->log, "    %02d - %f\n", i, nhistogram[i]);
+                }
+            }
+            pthread_mutex_unlock(&ctx->tidy_log_lock);
+        }
+
+        // NB: 0 is reserved for non-leaf nodes
+        node->label_pr_idx = (ctx->tree_histograms.size() / ctx->n_labels) + 1;
+        int len = ctx->tree_histograms.size();
+        ctx->tree_histograms.resize(len + ctx->n_labels);
+        memcpy(&ctx->tree_histograms[len], nhistogram, ctx->n_labels * sizeof(float));
+    }
+
+    // We no longer need the node's pixel data
+    xfree(node_data.pixels);
+    node_data.pixels = NULL;
+
+    struct thread_depth_metrics_raw *depth_metrics =
+        &state->per_depth_metrics[node_depth];
+    depth_metrics->n_nodes++;
+
+    ctx->n_nodes_trained++;
+    if (ctx->max_nodes && ctx->n_nodes_trained > ctx->max_nodes) {
+        if (ctx->verbose)
+            gm_warn(ctx->log, "Interrupting - Maximum number of nodes (%d) reached",
+                    ctx->max_nodes);
+        interrupt_reason = "Max nodes trained";
+        interrupted = true;
+    }
+
+    while (schedule_node_work(state))
+        ;
+
+    shard_results_unref(results);
+    xfree(process_work);
+}
+
+static void*
+worker_thread_cb(void* userdata)
+{
+    struct thread_state* state = (struct thread_state*)userdata;
+    struct gm_rdt_context_impl* ctx = state->ctx;
+
+    // We don't expect to be asked to process more than this many uvt
+    // combos at a time so we can allocate the memory up front...
+    int max_uv_combos_per_thread = (ctx->n_uvs + ctx->n_threads/2) / ctx->n_threads;
+
+    state->uvt_lr_histograms.reserve(ctx->n_labels *
+                                     max_uv_combos_per_thread *
+                                     ctx->n_thresholds *
+                                     2);
+
+    while (1)
+    {
+        struct work work = {};
+
+        uint64_t idle_start = get_time();
+
+        pthread_mutex_lock(&ctx->work_queue_lock);
+        if (!ctx->work_queue.empty()) {
+            work = ctx->work_queue.front();
+            ctx->work_queue.pop_front();
+        } else {
+
+            /* If we reach the point where all threads are waiting for work
+             * then we've implicitly finished training...
+             */
+            if (++ctx->n_idle == ctx->n_threads) {
+                // Inform all other threads that we are done...
+                interrupted = true;
+                pthread_cond_broadcast(&ctx->work_queue_changed);
+            }
+
+            while (!interrupted) {
+                pthread_cond_wait(&ctx->work_queue_changed, &ctx->work_queue_lock);
+                if (!ctx->work_queue.empty()) {
+                    work = ctx->work_queue.front();
+                    ctx->work_queue.pop_front();
+                    break;
+                }
+            }
+            ctx->n_idle--;
+        }
+        pthread_mutex_unlock(&ctx->work_queue_lock);
+
+        uint64_t idle_end = get_time();
+
+        if (interrupted)
+            break;
+
+        int depth = work.depth;
+        struct thread_depth_metrics_raw* depth_metrics =
+            &state->per_depth_metrics[depth];
+
+        /* XXX: There are no strict guarantees about the order that training
+         * nodes are scheduled to the work queue so we can't be sure when we've
+         * finished processing a particular depth of the tree.
+         *
+         * Since we currently assume nodes are processed in (approximately)
+         * breadth-first order (there can be some reordering as threads race to
+         * schedule work) then we can recognise when we start on a new depth
+         * and use that as an opportunity to print metrics about the previous
+         * level. Technically there may still be some work left for the
+         * previous level but the metrics are hopefully representative.  (NB:
+         * the metrics that are logged at the very end will be complete so it's
+         * also possible to analyze these if there's any doubt).
+         */
+
+        if (depth > 0 && depth_metrics->work_time == 0) {
+            uint64_t duration = get_time() - ctx->start;
+            char buf[16];
+
+            pthread_mutex_lock(&ctx->tidy_log_lock);
+
+            gm_info(ctx->log, "Thread %2d: total %s, started level %d, recent depth metrics:",
+                    state->idx,
+                    format_duration_s16(duration, buf),
+                    depth);
+
+            // Print metrics for last two levels (the details from two levels
+            // are more certainly complete than the previous level)...
+            for (int i = depth - 1; i >= 0 && i >= depth - 2; i--) {
+                struct thread_depth_metrics_raw* prev_depth_metrics =
+                    &state->per_depth_metrics[i];
+
+                if (prev_depth_metrics->work_time) {
+                    struct thread_depth_metrics_raw* raw =
+                        &state->per_depth_metrics[i];
+                    struct thread_depth_metrics_report report;
+
+                    calculate_thread_depth_metrics_report(state,
+                                                          i,
+                                                          raw,
+                                                          &report);
+                    log_thread_depth_metrics(ctx, "> ", i, &report);
+                }
+            }
+
+            pthread_mutex_unlock(&ctx->tidy_log_lock);
+        }
+
+        depth_metrics->idle_time += (idle_end - idle_start);
+
+        work.work_cb(state, work.user_data);
+        uint64_t work_end = get_time();
+        depth_metrics->work_time += (work_end - idle_end);
+    }
+
+    return NULL;
+}
+
 void
 sigint_handler(int signum)
 {
@@ -942,6 +1280,10 @@ gm_rdt_context_new(struct gm_logger *log)
 
     char cwd[PATH_MAX];
     getcwd(cwd, sizeof(cwd));
+
+    // To help with verbose logging so we can log multiple lines together
+    // without interleaving with messages between threads.
+    pthread_mutex_init(&ctx->tidy_log_lock, NULL);
 
     ctx->data_dir = strdup(cwd);
     prop = gm_ui_property();
@@ -1279,7 +1621,7 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
 static bool
 reload_tree(struct gm_rdt_context_impl* ctx,
             const char* filename,
-            NodeTrainData &root_node,
+            struct node_data &root_node,
             char** err)
 {
     gm_info(ctx->log, "Reloading %s...\n", filename);
@@ -1363,13 +1705,13 @@ reload_tree(struct gm_rdt_context_impl* ctx,
 
     // Navigate the tree to determine any unfinished nodes and the last
     // trained depth
-    std::queue<NodeTrainData> reload_queue;
+    std::queue<node_data> reload_queue;
 
     reload_queue.push(root_node);
 
     while (reload_queue.size())
     {
-        NodeTrainData node_data = reload_queue.front();
+        struct node_data node_data = reload_queue.front();
         int node_depth = id_to_depth(node_data.id);
         reload_queue.pop();
         Node* node = &ctx->tree[node_data.id];
@@ -1377,7 +1719,7 @@ reload_tree(struct gm_rdt_context_impl* ctx,
         if (node->label_pr_idx == INT_MAX)
         {
             // INT_MAX implies it wasn't trained yet..
-            ctx->train_queue.push(node_data);
+            ctx->train_queue.push_back(node_data);
         }
         else if (node->label_pr_idx != 0 && // leaf node
                  node_depth == (checkpoint->header.depth - 1) &&
@@ -1387,7 +1729,7 @@ reload_tree(struct gm_rdt_context_impl* ctx,
              * tree if we're training deeper now...
              */
             node->label_pr_idx = INT_MAX;
-            ctx->train_queue.push(node_data);
+            ctx->train_queue.push_back(node_data);
         }
         else if (node_depth == (ctx->max_depth - 1) &&
                  node->label_pr_idx == 0 && // wasn't previously a leaf node
@@ -1398,7 +1740,7 @@ reload_tree(struct gm_rdt_context_impl* ctx,
              * need to be re-trained to calculate histograms...
              */
             node->label_pr_idx = INT_MAX;
-            ctx->train_queue.push(node_data);
+            ctx->train_queue.push_back(node_data);
         }
         else
         {
@@ -1433,12 +1775,12 @@ reload_tree(struct gm_rdt_context_impl* ctx,
 
                 int id = (2 * node_data.id) + 1;
 
-                NodeTrainData ldata;
+                struct node_data ldata;
                 ldata.id = id;
                 ldata.n_pixels = n_lr_pixels[0];
                 ldata.pixels = l_pixels;
 
-                NodeTrainData rdata;
+                struct node_data rdata;
                 rdata.id = id + 1;
                 rdata.n_pixels = n_lr_pixels[1];
                 rdata.pixels = r_pixels;
@@ -1543,7 +1885,7 @@ print_label_histogram(struct gm_logger* log,
  */
 static void
 check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
-                            NodeTrainData* root_node)
+                            struct node_data* root_node)
 {
     gm_info(ctx->log, "Calculating root node pixel histogram");
     ctx->root_pixel_histogram.resize(ctx->n_labels);
@@ -1574,8 +1916,6 @@ bool
 gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 {
     struct gm_rdt_context_impl* ctx = (struct gm_rdt_context_impl*)_ctx;
-    TimeForDisplay since_begin, since_last;
-    struct timespec begin, last, now;
     int n_threads = ctx->n_threads;
 
     /* Reset global state, in case a previous training run was interrupted... */
@@ -1670,7 +2010,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     // either terminating when a branch runs out of pixels to differentiate
     // or after reaching the maximum training depth.
     //
-    NodeTrainData root_node;
+    struct node_data root_node;
     root_node.id = 0;
     root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
 
@@ -1682,19 +2022,24 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
             return false;
         }
     } else {
-        ctx->train_queue.push(root_node);
+        ctx->train_queue.push_back(root_node);
     }
-
-    ctx->per_depth_metrics.resize(ctx->max_depth);
 
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
     ctx->thread_pool.resize(n_threads);
-    for (int i = 0; i < n_threads; i++)
-    {
+
+    for (int i = 0; i < n_threads; i++) {
         struct thread_state *state = &ctx->thread_pool[i];
         state->idx = i;
         state->ctx = ctx;
+        state->last_metrics_log = get_time();
         state->per_depth_metrics.resize(ctx->max_depth);
+    }
+
+    /* This thread will effectively become thread 0 ... */
+    ctx->thread_pool[0].thread = pthread_self();
+    for (int i = 1; i < n_threads; i++) {
+        struct thread_state *state = &ctx->thread_pool[i];
 
         if (pthread_create(&state->thread, NULL,
                            worker_thread_cb, (void*)state) != 0)
@@ -1707,217 +2052,14 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 
     gm_info(ctx->log, "Beginning training...\n");
     signal(SIGINT, sigint_handler);
-    clock_gettime(CLOCK_MONOTONIC, &begin);
-    last = begin;
-    uint64_t last_metrics = get_time();
-    int last_depth = -1;
-    uint64_t wait_start, wait_end;
-    while (ctx->train_queue.size())
-    {
-        int best_uv = 0;
-        int best_threshold = 0;
-        int *n_lr_pixels = NULL;
-        float best_gain = 0.0;
+    ctx->start = get_time();
 
-        NodeTrainData node_data = ctx->train_queue.front();
-        ctx->train_queue.pop();
+    while (schedule_node_work(&ctx->thread_pool[0]))
+        ;
+    worker_thread_cb(&ctx->thread_pool[0]);
 
-        int node_depth = id_to_depth(node_data.id);
-
-        if (node_depth != last_depth)
-        {
-            clock_gettime(CLOCK_MONOTONIC, &now);
-            since_begin = get_time_for_display(&begin, &now);
-            since_last = get_time_for_display(&last, &now);
-            last = now;
-
-            uint64_t current = get_time();
-
-            if (last_depth != -1) { // Finished last_depth
-                gm_info(ctx->log, "Finished level %d: ", last_depth + 1);
-                calculate_aggregate_metrics(ctx, current,
-                                            &ctx->per_depth_metrics[last_depth]);
-                log_aggregate_metrics(ctx, &ctx->per_depth_metrics[last_depth]);
-
-                for (int i = 0; i < ctx->n_threads; i++) {
-                    struct thread_state *state = &ctx->thread_pool[i];
-
-                    calculate_thread_metrics(ctx, state, current,
-                                             &state->per_depth_metrics[last_depth]);
-                    log_thread_metrics(ctx, state->idx, &state->per_depth_metrics[last_depth]);
-                }
-            }
-
-            gm_info(ctx->log,
-                    "(%02d:%02d:%02d / %02d:%02d:%02d) Training level %d (%d nodes)\n",
-                    since_begin.hours, since_begin.minutes, since_begin.seconds,
-                    since_last.hours, since_last.minutes, since_last.seconds,
-                    node_depth + 1, (int)ctx->train_queue.size() + 1);
-
-            for (int i = 0; i < ctx->n_threads; i++) {
-                struct thread_state *state = &ctx->thread_pool[i];
-                memset(&state->metrics, 0, sizeof(state->metrics));
-                state->metrics.start = current;
-            }
-            memset(&ctx->metrics, 0, sizeof(ctx->metrics));
-            ctx->metrics.start = current;
-
-            last_depth = node_depth;
-        }
-
-        /* XXX: note we don't need to take the work_queue_lock here since the
-         * current scheduling model implies there's no work being processed
-         * by any of the threads at this point...
-         */
-
-        ctx->results.clear();
-        int n_pending_results = 0;
-
-        int n_uvs_per_work = ctx->n_uvs / n_threads;
-        for (int i = 0; i < n_threads; i++) {
-            struct work work;
-            work.node = &node_data;
-            work.uv_start = i * n_uvs_per_work;
-            work.uv_end = (i == n_threads - 1) ? ctx->n_uvs : (i + 1) * n_uvs_per_work;
-            ctx->work_queue.push(work);
-            n_pending_results++;
-        }
-
-        wait_start = get_time();
-        pthread_cond_broadcast(&ctx->work_queue_changed);
-
-        pthread_mutex_lock(&ctx->results_lock);
-        while (!interrupted && (int)ctx->results.size() < n_pending_results)
-            pthread_cond_wait(&ctx->results_changed, &ctx->results_lock);
-        pthread_mutex_unlock(&ctx->results_lock);
-        wait_end = get_time();
-        ctx->metrics.wait_duration += wait_end - wait_start;
-
-        // Quit if we've been interrupted
-        if (interrupted) {
-            break;
-        }
-
-        if (ctx->profile) {
-            uint64_t current = get_time();
-            if (current - last_metrics > 1000000000) {
-                for (int i = 0; i < ctx->n_threads; i++) {
-                    struct thread_state *state = &ctx->thread_pool[i];
-                    maybe_log_thread_metrics(ctx, state, current);
-                }
-                struct aggregate_metrics agg_metrics;
-                calculate_aggregate_metrics(ctx, current, &agg_metrics);
-                log_aggregate_metrics(ctx, &agg_metrics);
-                last_metrics = current;
-            }
-        }
-
-        // See which thread got the best uvt combination
-        for (int i = 0; i < (int)ctx->results.size(); i++) {
-            struct result *result = &ctx->results[i];
-            if (result->best_gain > best_gain)
-            {
-                best_gain = result->best_gain;
-                best_uv = result->best_uv;
-                best_threshold = result->best_threshold;
-                n_lr_pixels = result->n_lr_pixels;
-            }
-        }
-
-        // Add this node to the tree and possibly add left/ride nodes to the
-        // training queue.
-        Node* node = &ctx->tree[node_data.id];
-        if (best_gain > 0.f && (node_depth + 1) < ctx->max_depth)
-        {
-            node->uv = ctx->uvs[best_uv];
-            node->t = ctx->thresholds[best_threshold];
-            if (ctx->verbose)
-            {
-                gm_info(ctx->log,
-                        "  Node (%u)\n"
-                        "    Gain: %f\n"
-                        "    U: (%f, %f)\n"
-                        "    V: (%f, %f)\n"
-                        "    T: %f\n",
-                        node_data.id, best_gain,
-                        node->uv[0], node->uv[1],
-                        node->uv[2], node->uv[3],
-                        node->t);
-            }
-
-            Int3D* l_pixels;
-            Int3D* r_pixels;
-
-            collect_pixels(ctx, &node_data, node->uv, node->t,
-                           &l_pixels, &r_pixels, n_lr_pixels);
-
-            int id = (2 * node_data.id) + 1;
-            NodeTrainData ldata;
-            ldata.id = id;
-            ldata.n_pixels = n_lr_pixels[0];
-            ldata.pixels = l_pixels;
-
-            NodeTrainData rdata;
-            rdata.id = id + 1;
-            rdata.n_pixels = n_lr_pixels[1];
-            rdata.pixels = r_pixels;
-
-            ctx->train_queue.push(ldata);
-            ctx->train_queue.push(rdata);
-
-            // Mark the node as a continuing node
-            node->label_pr_idx = 0;
-        }
-        else
-        {
-            /* Each result will include a normalized histogram of pixel labels
-             * for the last node that was processed. They should all be
-             * identical so we just refer to the first result...
-             */
-            float *nhistogram = ctx->results[0].nhistogram;
-
-            if (ctx->verbose)
-            {
-                gm_info(ctx->log, "  Leaf node (%d)\n", node_data.id);
-                for (int i = 0; i < ctx->n_labels; i++) {
-                    if (nhistogram[i] > 0.f) {
-                        gm_info(ctx->log, "    %02d - %f\n", i, nhistogram[i]);
-                    }
-                }
-            }
-
-            // NB: 0 is reserved for non-leaf nodes
-            node->label_pr_idx = (ctx->tree_histograms.size() / ctx->n_labels) + 1;
-            int len = ctx->tree_histograms.size();
-            ctx->tree_histograms.resize(len + ctx->n_labels);
-            memcpy(&ctx->tree_histograms[len], nhistogram, ctx->n_labels * sizeof(float));
-        }
-
-        // We no longer need the node's pixel data
-        xfree(node_data.pixels);
-
-        ctx->n_nodes_trained++;
-        if (ctx->max_nodes && ctx->n_nodes_trained > ctx->max_nodes) {
-            if (ctx->verbose)
-                gm_warn(ctx->log, "Interrupting - Maximum number of nodes (%d) reached",
-                        ctx->max_nodes);
-            interrupt_reason = "Max nodes trained";
-            interrupted = true;
-        }
-    }
-
-    // Signal threads to free memory and quit
-    //
-    // Note: we need to take work_queue_lock otherwise there's a race within
-    // the worker thread in the loop between checking the interrupted state and
-    // starting pthread_cond_wait() where we will get a deadlock if we happen
-    // to set interrupted = true at that point.
-    pthread_mutex_lock(&ctx->work_queue_lock);
-    interrupted = true;
-    pthread_cond_broadcast(&ctx->work_queue_changed);
-    pthread_mutex_unlock(&ctx->work_queue_lock);
-    for (int i = 0; i < n_threads; i++)
-    {
+    // NB: thread 0 is this thread...
+    for (int i = 1; i < n_threads; i++) {
         struct thread_state *state = &ctx->thread_pool[i];
 
         if (pthread_join(state->thread, NULL) != 0) {
@@ -1930,13 +2072,6 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     JSON_Value *js_dmetrics = NULL; // per-depth metrics
 
     for (int i = 0; i < ctx->max_depth; i++) {
-        struct aggregate_metrics *dmetrics = &ctx->per_depth_metrics[i];
-
-        /* If we reloaded an existing tree then we might not have metrics for
-         * every depth...
-         */
-        if (dmetrics->duration == 0)
-            continue;
 
         if (!js_dmetrics) {
             js_dmetrics = json_value_init_array();
@@ -1947,35 +2082,26 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         json_object_set_number(json_object(js_depth), "depth", i);
         json_array_append_value(json_array(js_dmetrics), js_depth);
 
-        JSON_Value *js_agg_metrics = aggregate_metrics_to_json(ctx, dmetrics);
-        json_object_set_value(json_object(js_depth), "aggregate", js_agg_metrics);
-
         JSON_Value *js_per_thread = json_value_init_array();
         json_object_set_value(json_object(js_depth), "per_thread", js_per_thread);
 
         for (int t = 0; t < n_threads; t++) {
             struct thread_state *state = &ctx->thread_pool[t];
-            struct thread_metrics *tmetrics = &state->per_depth_metrics[i];
+            struct thread_depth_metrics_raw *tmetrics = &state->per_depth_metrics[i];
+            struct thread_depth_metrics_report treport;
 
-            if (tmetrics->duration != dmetrics->duration) {
-                gm_warn(ctx->log, "Inconsistent duration between aggregate metrics and thread %d metrics for depth = %d",
-                        state->idx, i);
-            }
-
-            JSON_Value *js_tmetrics = thread_metrics_to_json(ctx, &state->per_depth_metrics[i]);
+            calculate_thread_depth_metrics_report(state, i, tmetrics, &treport);
+            JSON_Value *js_tmetrics = thread_metrics_to_json(ctx, &treport);
             json_array_append_value(json_array(js_per_thread), js_tmetrics);
         }
     }
 
     // Write to file
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    since_begin = get_time_for_display(&begin, &now);
-    since_last = get_time_for_display(&last, &now);
-    last = now;
-    gm_info(ctx->log,
-            "(%02d:%02d:%02d / %02d:%02d:%02d) Writing output to '%s'...\n",
-            since_begin.hours, since_begin.minutes, since_begin.seconds,
-            since_last.hours, since_last.minutes, since_last.seconds,
+    uint64_t duration = get_time() - ctx->start;
+    char buf[16];
+
+    gm_info(ctx->log, "(%s) Writing output to '%s'...\n",
+            format_duration_s16(duration, buf),
             out_filename);
 
     save_tree_json(ctx,
@@ -1983,14 +2109,9 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
                    ctx->tree_histograms,
                    out_filename);
 
-    clock_gettime(CLOCK_MONOTONIC, &now);
-    since_begin = get_time_for_display(&begin, &now);
-    since_last = get_time_for_display(&last, &now);
-    last = now;
-    gm_info(ctx->log,
-            "(%02d:%02d:%02d / %02d:%02d:%02d) %s\n",
-            since_begin.hours, since_begin.minutes, since_begin.seconds,
-            since_last.hours, since_last.minutes, since_last.seconds,
+    duration = get_time() - ctx->start;
+    gm_info(ctx->log, "(%s) %s\n",
+            format_duration_s16(duration, buf),
             interrupt_reason ?: "Done!");
 
     // Free memory that isn't needed anymore
