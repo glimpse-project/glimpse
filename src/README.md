@@ -98,17 +98,6 @@ the bone. For example:
 
 By default the revision controlled `src/joint-map.json` file should be used
 
-Generating joint files
-======================
-
-Run the tool 'json-to-jnt.py' like so:
-
-json-to-jnt.py joint-map.json path-to-labels-directory
-
-Binary files with the same names as the json files, but the extension '.jnt'
-will be written to the same location as the json files. These files will be
-used by the joint inference training program.
-
 Training joint inference parameters
 ===================================
 
@@ -116,17 +105,17 @@ Run the tool 'train_joint_params' to train joint parameters. Running it with no
 parameters, or with the -h/--help parameter will print usage details, with
 details about the default parameters.
 
-Note that this tool is currently much more CPU and memory intensive than the
-decision tree training tool.
+Note that this tool doesn't currently scale to handling as many images as
+the decision tree training tool so it's recommended to create a smaller
+dedicated index for training joint params.
 
-For example, to train joint parameters from a decision forest of two trees
-named 'tree1.rdt' and 'tree2.rdt' using a shuffled set of 10 training images,
-where the background label is '33':
+For example, if you have an `index.joint-param-training` file then to train
+joint parameters from a decision forest of two trees named 'tree0.rdt' and
+'tree1.rdt' you could run:
 
-train_joint_params path-to-depth-imgs path-to-jnt-files jointmap.txt \
-                   output.jip -l 10 -s -g 33 -- tree1.rdt tree2.rdt
-
-The joint parameter training program can also output the accuracy of the
-decision forest when used for inferrence with the given depth images by
-specifying a label directory that corresponds to the given depth image
-directory. This can be accomplished with the -c/--label-dir parameter.
+```
+train_joint_params path-to-training-data \
+                   joint-param-training \
+                   src/joint-map.json \
+                   output.jip -- tree0.rdt tree1.rdt
+```
