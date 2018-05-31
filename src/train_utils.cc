@@ -54,7 +54,6 @@ typedef struct {
 
     int      width;
     int      height;
-    double   vertical_fov;  // Field of view used to render depth images
 
     half*    depth_images;  // Depth image data
     uint8_t* label_images;  // Label image data
@@ -172,14 +171,6 @@ int
 gm_data_index_get_n_labels(struct gm_data_index* data_index)
 {
     return json_object_get_number(json_object(data_index->meta), "n_labels");
-}
-
-float
-gm_data_index_get_vfov(struct gm_data_index* data_index)
-{
-    JSON_Value* meta = data_index->meta;
-    JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
-    return json_object_get_number(camera, "vertical_fov");
 }
 
 bool
@@ -430,9 +421,6 @@ gather_train_data(struct gm_logger* log,
     data.n_labels = gm_data_index_get_n_labels(data_index);
     data.width = gm_data_index_get_width(data_index);
     data.height = gm_data_index_get_height(data_index);
-
-    /* TODO: consider this per-frame state */
-    data.vertical_fov = gm_data_index_get_vfov(data_index);
 
     size_t n_pixels = (size_t)data.width * data.height * data.n_images;
 

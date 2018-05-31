@@ -59,9 +59,6 @@ gm_data_index_get_height(struct gm_data_index* data_index);
 int
 gm_data_index_get_n_labels(struct gm_data_index* data_index);
 
-float
-gm_data_index_get_vfov(struct gm_data_index* data_index);
-
 bool
 gm_data_index_foreach(struct gm_data_index* data_index,
                       bool (*callback)(struct gm_data_index* data_index,
