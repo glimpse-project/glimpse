@@ -32,6 +32,8 @@
 
 #include "parson.h"
 
+struct gm_data_index;
+
 struct gm_data_index*
 gm_data_index_open(struct gm_logger* log,
                    const char* top_dir,
