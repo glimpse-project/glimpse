@@ -50,7 +50,6 @@ typedef struct {
 
     int      n_images;      // Number of training images
     int      n_labels;
-    int      n_joints;      // Number of joints
 
     int      width;
     int      height;
