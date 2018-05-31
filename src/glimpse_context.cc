@@ -287,6 +287,24 @@ struct gm_skeleton {
       distance(0.f) {}
 };
 
+enum gm_bg_model_type {
+    DEPTH,
+    VIDEO
+};
+
+union gm_bg_model_data {
+    pcl::PointXYZL pt;
+    uint32_t pixel;
+
+    gm_bg_model_data() {
+        new(&pt) pcl::PointXYZL();
+    }
+    gm_bg_model_data(uint32_t pixel) :
+      pixel(pixel) {}
+    gm_bg_model_data(pcl::PointXYZL &pt) :
+      pt(pt) {}
+};
+
 struct gm_prediction_impl
 {
     struct gm_prediction base;
@@ -414,7 +432,8 @@ struct gm_context
 
     struct gm_pose depth_pose;
     glm::mat4 start_to_depth_pose;
-    std::vector<std::vector<pcl::PointXYZL>> bg_model;
+    enum gm_bg_model_type bg_model_type;
+    std::vector<std::vector<gm_bg_model_data>> bg_model;
 
     pthread_t detect_thread;
     dlib::frontal_face_detector detector;
@@ -538,6 +557,8 @@ struct gm_context
     float cluster_tolerance;
 
     bool motion_detection;
+    enum gm_bg_model_type seg_type;
+    std::vector<struct gm_ui_enumerant> seg_type_enumerants;
     int seg_samples;
     float seg_radius;
     int seg_bg_samples;
@@ -2565,8 +2586,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     bool reset_pose = false;
     bool motion_detection = ctx->motion_detection;
+    enum gm_bg_model_type seg_type = ctx->seg_type;
 
-    if (ctx->bg_model.size() != depth_class_size)
+    if (ctx->bg_model.size() != depth_class_size ||
+        ctx->bg_model_type != seg_type)
     {
         gm_debug(ctx->log, "XXX: Resetting pose");
         reset_pose = true;
@@ -2619,6 +2642,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     if (reset_pose) {
         ctx->bg_model.clear();
+        ctx->bg_model_type = seg_type;
         ctx->bg_model.resize(depth_class_size);
 
         ctx->depth_pose = tracking->frame->pose;
@@ -2681,6 +2705,15 @@ gm_context_track_skeleton(struct gm_context *ctx,
             colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
         }
 
+        int vid_fx = tracking->video_camera_intrinsics.fx;
+        int vid_fy = tracking->video_camera_intrinsics.fy;
+        int vid_cx = tracking->video_camera_intrinsics.cx;
+        int vid_cy = tracking->video_camera_intrinsics.cy;
+        int vid_width = tracking->frame->video_intrinsics.width;
+        int vid_height = tracking->frame->video_intrinsics.height;
+        int vid_rot_width = tracking->video_camera_intrinsics.width;
+        int vid_rot_height = tracking->video_camera_intrinsics.height;
+        uint8_t *video = (uint8_t*)tracking->frame->video->data;
 
         for (unsigned i = 0; i < depth_class_size; ++i) {
             pcl::PointXYZL point =
@@ -2702,12 +2735,83 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
+            gm_bg_model_data data;
+            switch (seg_type) {
+                case DEPTH:
+                    data.pt = point;
+                    break;
+                case VIDEO: {
+                    if (pt_isnan) {
+                        data.pixel = 0;
+                        break;
+                    }
+                    // Reverse rotation so we can use with_rotated_rx_ry_roff
+                    enum gm_rotation rotation;
+                    switch (tracking->frame->camera_rotation) {
+                    case GM_ROTATION_0: rotation = GM_ROTATION_0; break;
+                    case GM_ROTATION_90: rotation = GM_ROTATION_270; break;
+                    case GM_ROTATION_180: rotation = GM_ROTATION_180; break;
+                    case GM_ROTATION_270: rotation = GM_ROTATION_90; break;
+                    }
+
+                    // Reproject video to this depth point
+                    int vx = clampf(point.x * vid_fx / point.z + vid_cx,
+                                    0.f, (float)vid_rot_width);
+                    int vy = clampf(point.y * vid_fy / point.z + vid_cy,
+                                    0.f, (float)vid_rot_height);
+
+                    uint32_t pixel;
+                    uint8_t *subpixel = (uint8_t *)(&pixel);
+                    with_rotated_rx_ry_roff(vx, vy,
+                        vid_rot_width, vid_rot_height, rotation, vid_width,
+                        {
+                            switch (tracking->frame->video_format) {
+                            case GM_FORMAT_RGB_U8:
+                                subpixel[0] = video[roff*3];
+                                subpixel[1] = video[roff*3+1];
+                                subpixel[2] = video[roff*3+2];
+                                break;
+                            case GM_FORMAT_BGR_U8:
+                                subpixel[2] = video[roff*3];
+                                subpixel[1] = video[roff*3+1];
+                                subpixel[0] = video[roff*3+2];
+                                break;
+                            case GM_FORMAT_RGBX_U8:
+                            case GM_FORMAT_RGBA_U8:
+                                subpixel[0] = video[roff*4];
+                                subpixel[1] = video[roff*4+1];
+                                subpixel[2] = video[roff*4+2];
+                                break;
+                            case GM_FORMAT_BGRX_U8:
+                            case GM_FORMAT_BGRA_U8:
+                                subpixel[2] = video[roff*4];
+                                subpixel[1] = video[roff*4+1];
+                                subpixel[0] = video[roff*4+2];
+                                break;
+                            case GM_FORMAT_LUMINANCE_U8:
+                                subpixel[0] = subpixel[1] = subpixel[2] =
+                                    video[roff];
+                                break;
+
+                            case GM_FORMAT_UNKNOWN:
+                            case GM_FORMAT_Z_U16_MM:
+                            case GM_FORMAT_Z_F32_M:
+                            case GM_FORMAT_Z_F16_M:
+                            case GM_FORMAT_POINTS_XYZC_F32_M:
+                                gm_assert(ctx->log, 0,
+                                          "Unexpected video buffer format");
+                            }
+                        });
+                    data.pixel = pixel;
+                }
+            }
+
             // We need to seed the bg model first or everything will forever
             // be classed as foreground. It's ok if we incorrectly add
-            // foreground to the BG model as it'll quickly decay and be
+            // foreground to the BG model as it'll (hopefully) decay and be
             // replaced by background.
             if (ctx->bg_model[off].size() < ctx->seg_samples) {
-                ctx->bg_model[off].push_back(point);
+                ctx->bg_model[off].push_back(data);
                 tracking->depth_class->points[off].label = UNC;
                 continue;
             } else if (ctx->bg_model[off].size() > ctx->seg_samples) {
@@ -2716,22 +2820,54 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
             // Compare against the background model
             int matches = 0;
-            for (int s = 0;
-                 matches < ctx->seg_bg_samples && s < ctx->seg_samples; ++s) {
-                if (std::isnan(ctx->bg_model[off][s].x) != pt_isnan) {
-                    continue;
-                }
+            switch (seg_type) {
+            case DEPTH:
+                for (int s = 0; matches < ctx->seg_bg_samples &&
+                     s < ctx->seg_samples; ++s)
+                {
+                    if (std::isnan(ctx->bg_model[off][s].pt.x) != pt_isnan) {
+                        continue;
+                    }
 
-                if (pt_isnan) {
-                    ++matches;
-                    continue;
-                }
+                    if (pt_isnan) {
+                        ++matches;
+                        continue;
+                    }
 
-                float dist = distance_between(&point.x,
-                                              &ctx->bg_model[off][s].x);
-                if (dist < ctx->seg_radius) {
-                    ++matches;
+                    float dist = distance_between(&data.pt.x,
+                                                  &ctx->bg_model[off][s].pt.x);
+                    if (dist < ctx->seg_radius) {
+                        ++matches;
+                    }
                 }
+                break;
+            case VIDEO:
+                for (int s = 0; matches < ctx->seg_bg_samples &&
+                     s < ctx->seg_samples; ++s)
+                {
+                    if ((data.pixel == 0) !=
+                        (ctx->bg_model[off][s].pixel == 0)) {
+                        continue;
+                    }
+
+                    if (data.pixel == 0) {
+                        ++matches;
+                        continue;
+                    }
+
+                    uint8_t *subpixel1 = (uint8_t *)(&data.pixel);
+                    uint8_t *subpixel2 = (uint8_t *)
+                        (&ctx->bg_model[off][s].pixel);
+
+                    float diff = 0.f;
+                    for (int c = 0; c < 3; ++c) {
+                        diff += fabsf(((int)subpixel1[c]-subpixel2[c]) / 255.f);
+                    }
+                    if (diff / 3.f < ctx->seg_radius) {
+                        ++matches;
+                    }
+                }
+                break;
             }
 
             if (matches >= ctx->seg_bg_samples) {
@@ -2741,7 +2877,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 if ((rand() % ctx->seg_update_freq) + 1 == 1) {
                     // Add to the background model
                     int replace = rand() % ctx->seg_samples;
-                    ctx->bg_model[off][replace] = point;
+                    ctx->bg_model[off][replace] = data;
                 }
 
                 if ((rand() % ctx->seg_update_freq) + 1 == 1) {
@@ -2759,9 +2895,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
                         int noff = ny * tracking->depth_class->width + nx;
                         int replace = rand() % ctx->seg_samples;
                         if (replace >= ctx->bg_model[noff].size()) {
-                            ctx->bg_model[noff].push_back(point);
+                            ctx->bg_model[noff].push_back(data);
                         } else {
-                            ctx->bg_model[noff][replace] = point;
+                            ctx->bg_model[noff][replace] = data;
                         }
                     }
                 }
@@ -4710,6 +4846,30 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.bool_state.ptr = &ctx->motion_detection;
     ctx->properties.push_back(prop);
 
+    ctx->seg_type = DEPTH;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "seg_type";
+    prop.desc = "The data type to segment with";
+    prop.type = GM_PROPERTY_ENUM;
+    prop.enum_state.ptr = (int *)(&ctx->seg_type);
+
+    struct gm_ui_enumerant enumerant;
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "Depth";
+    enumerant.desc = "Segment on depth data";
+    enumerant.val = DEPTH;
+    ctx->seg_type_enumerants.push_back(enumerant);
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "Video";
+    enumerant.desc = "Segment on video data";
+    enumerant.val = VIDEO;
+    ctx->seg_type_enumerants.push_back(enumerant);
+
+    prop.enum_state.n_enumerants = ctx->seg_type_enumerants.size();
+    prop.enum_state.enumerants = ctx->seg_type_enumerants.data();
+    ctx->properties.push_back(prop);
+
     ctx->seg_samples = 20;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -4923,7 +5083,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.type = GM_PROPERTY_ENUM;
     prop.enum_state.ptr = &ctx->debug_label;
 
-    struct gm_ui_enumerant enumerant;
     enumerant = gm_ui_enumerant();
     enumerant.name = "most likely";
     enumerant.desc = "Visualize Most Probable Labels";
