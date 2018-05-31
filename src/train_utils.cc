@@ -190,52 +190,6 @@ gm_data_index_foreach(struct gm_data_index* data_index,
     return true;
 }
 
-static bool
-load_frame_foreach_cb(struct gm_data_index* data_index,
-                      int index,
-                      const char* path,
-                      void* user_data,
-                      char** err)
-{
-    TrainData* data = (TrainData*)user_data;
-    const char* top_dir = gm_data_index_get_top_dir(data_index);
-
-    char labels_filename[512];
-    char depth_filename[512];
-
-    xsnprintf(labels_filename, sizeof(labels_filename), "%s/labels/%s.png", top_dir, path);
-    xsnprintf(depth_filename, sizeof(depth_filename), "%s/depth/%s.exr", top_dir, path);
-
-    if (data->gather_label)
-    {
-        IUImageSpec label_spec = { data->width, data->height, IU_FORMAT_U8 };
-        int64_t off = (int64_t)index * data->width * data->height;
-        uint8_t* output = &data->label_images[off];
-
-        if (iu_read_png_from_file(labels_filename, &label_spec, &output,
-                                  NULL, // palette output
-                                  NULL) // palette size
-            != SUCCESS)
-        {
-            gm_throw(data->log, err, "Failed to read image '%s'\n", labels_filename);
-            return false;
-        }
-    }
-
-    if (data->gather_depth)
-    {
-        IUImageSpec depth_spec = { data->width, data->height, IU_FORMAT_HALF };
-        int64_t off = (int64_t)index * data->width * data->height;
-        void* output = &data->depth_images[off];
-        if (iu_read_exr_from_file(depth_filename, &depth_spec, &output) != SUCCESS) {
-            gm_throw(data->log, err, "Failed to read image '%s'\n", depth_filename);
-            return false;
-        }
-    }
-
-    return true;
-}
-
 struct joint_mapping {
     char *name;
     const char *end; // "head" or "tail"
@@ -386,6 +340,52 @@ exit:
 
     json_value_free(joint_map_val);
     return status;
+}
+
+static bool
+load_frame_foreach_cb(struct gm_data_index* data_index,
+                      int index,
+                      const char* path,
+                      void* user_data,
+                      char** err)
+{
+    TrainData* data = (TrainData*)user_data;
+    const char* top_dir = gm_data_index_get_top_dir(data_index);
+
+    char labels_filename[512];
+    char depth_filename[512];
+
+    xsnprintf(labels_filename, sizeof(labels_filename), "%s/labels/%s.png", top_dir, path);
+    xsnprintf(depth_filename, sizeof(depth_filename), "%s/depth/%s.exr", top_dir, path);
+
+    if (data->gather_label)
+    {
+        IUImageSpec label_spec = { data->width, data->height, IU_FORMAT_U8 };
+        int64_t off = (int64_t)index * data->width * data->height;
+        uint8_t* output = &data->label_images[off];
+
+        if (iu_read_png_from_file(labels_filename, &label_spec, &output,
+                                  NULL, // palette output
+                                  NULL) // palette size
+            != SUCCESS)
+        {
+            gm_throw(data->log, err, "Failed to read image '%s'\n", labels_filename);
+            return false;
+        }
+    }
+
+    if (data->gather_depth)
+    {
+        IUImageSpec depth_spec = { data->width, data->height, IU_FORMAT_HALF };
+        int64_t off = (int64_t)index * data->width * data->height;
+        void* output = &data->depth_images[off];
+        if (iu_read_exr_from_file(depth_filename, &depth_spec, &output) != SUCCESS) {
+            gm_throw(data->log, err, "Failed to read image '%s'\n", depth_filename);
+            return false;
+        }
+    }
+
+    return true;
 }
 
 JSON_Value*
