@@ -58,7 +58,6 @@ typedef struct {
 
     half*    depth_images;  // Depth image data
     uint8_t* label_images;  // Label image data
-    float*   joint_data;    // Joint data
 
     bool     gather_depth;  // Whether to load depth images
     bool     gather_label;  // Whether to load label images
@@ -246,69 +245,156 @@ load_frame_foreach_cb(struct gm_data_index* data_index,
     return true;
 }
 
+struct joint_mapping {
+    char *name;
+    const char *end; // "head" or "tail"
+};
+
+struct joints_loader {
+    std::vector<joint_mapping> joint_map;
+    int n_joints;
+    float* joint_data;
+};
+
 static bool
-load_frame_joints_foreach_cb(struct gm_data_index* data_index,
-                             int index,
-                             const char* path,
-                             void* user_data,
-                             char** err)
+load_joints_foreach_cb(struct gm_data_index* data_index,
+                       int index,
+                       const char* path,
+                       void* user_data,
+                       char** err)
 {
-    TrainData* data = (TrainData*)user_data;
+    struct joints_loader* loader = (struct joints_loader*)user_data;
     const char* top_dir = gm_data_index_get_top_dir(data_index);
+    std::vector<joint_mapping> &joint_map = loader->joint_map;
 
-    char jnt_filename[512];
-    xsnprintf(jnt_filename, sizeof(jnt_filename), "%s/labels/%s.jnt", top_dir, path);
+    char json_filename[512];
+    xsnprintf(json_filename, sizeof(json_filename), "%s/labels/%s.json", top_dir, path);
 
-    FILE* fp;
-    if (!(fp = fopen(jnt_filename, "rb"))) {
-        gm_throw(data->log, err, "Error opening joint file '%s'\n", jnt_filename);
+    JSON_Value *frame_js = json_parse_file(json_filename);
+    if (!frame_js) {
+        gm_throw(data_index->log, err, "Failed to parse %s", json_filename);
         return false;
     }
 
-    if (fseek(fp, 0, SEEK_END) == -1)
-    {
-        gm_throw(data->log, err, "Error seeking to end of joint file '%s'\n",
-                 jnt_filename);
-        return false;
-    }
+    JSON_Array *bones = json_object_get_array(json_object(frame_js), "bones");
+    int n_bones = json_array_get_count(bones);
 
-    long n_bytes = ftell(fp);
-    if (n_bytes == 0 ||
-        n_bytes % sizeof(float) != 0 ||
-        (n_bytes % sizeof(float)) % 3 != 0)
-    {
-        gm_throw(data->log, err, "Unexpected joint file size in '%s'\n",
-                 jnt_filename);
-        return false;
-    }
+    int n_joints = loader->n_joints;
+    float jnt_data[n_joints * 3];
 
-    uint8_t n_joints = (uint8_t)((n_bytes / sizeof(float)) / 3);
-    if (n_joints != data->n_joints)
-    {
-        gm_throw(data->log, err,
-                 "Unexpected number of joints %u (expected %u)\n",
-                 n_joints, data->n_joints);
-        return false;
-    }
+    for (int i = 0; i < n_joints; i++) {
+        struct joint_mapping joint = joint_map[i];
+        int jnt_pos = i * 3;
 
-    if (fseek(fp, 0, SEEK_SET) == -1)
-    {
-        gm_throw(data->log, err,
-                 "Error seeking to start of joint file '%s'\n", jnt_filename);
-        return false;
+        bool found = false;
+        for (int j = 0; j < n_bones; j++) {
+            JSON_Object *bone = json_array_get_object(bones, j);
+            const char *bone_name = json_object_get_string(bone, "name");
+            if (strcmp(joint.name, bone_name) != 0)
+                continue;
+
+            JSON_Array *end = json_object_get_array(bone, joint.end);
+            if (!end)
+                break;
+
+            jnt_data[jnt_pos+0] = json_array_get_number(end, 0);
+            jnt_data[jnt_pos+1] = json_array_get_number(end, 1);
+            jnt_data[jnt_pos+2] = json_array_get_number(end, 2);
+
+            //printf("%s.%s = (%5.2f, %5.2f, %5.2f)\n",
+            //       joint.name, joint.end,
+            //       jnt_data[jnt_pos+0],
+            //       jnt_data[jnt_pos+1],
+            //       jnt_data[jnt_pos+2]);
+            found  = true;
+            break;
+        }
+
+        if (!found) {
+            gm_throw(data_index->log, err, "Failed to find bone %s.%s in %s",
+                     joint.name, joint.end, json_filename);
+            json_value_free(frame_js);
+            return false;
+        }
     }
 
     int64_t off = (int64_t)index * n_joints * 3;
-    float* joints = &data->joint_data[off];
-    if (fread(joints, sizeof(float) * 3, n_joints, fp) != n_joints)
-    {
-        gm_throw(data->log, err, "%s: Error reading joints\n", jnt_filename);
+    float* joints = &loader->joint_data[off];
+    memcpy(joints, jnt_data, sizeof(jnt_data));
+
+    json_value_free(frame_js);
+    return true;
+}
+
+bool
+gm_data_index_load_joints(struct gm_data_index* data_index,
+                          const char* joint_map_file,
+                          int* out_n_joints,
+                          float** out_joints,
+                          char** err)
+{
+    struct joints_loader loader = {};
+    int n_images = gm_data_index_get_len(data_index);
+    bool status = false;
+
+    gm_assert(data_index->log, out_n_joints != NULL, "Must pass out_n_joints pointer");
+    gm_assert(data_index->log, out_joints != NULL, "Must pass out_joints pointer");
+
+    JSON_Value *joint_map_val = json_parse_file(joint_map_file);
+    if (!joint_map_val) {
+        gm_throw(data_index->log, err, "Failed to parse %s", joint_map_file);
         return false;
     }
+    JSON_Array *joint_map = json_array(joint_map_val);
 
-    fclose(fp);
+    int n_joints = json_array_get_count(joint_map);
+    loader.n_joints = n_joints;
 
-    return true;
+    for (int i = 0; i < n_joints; i++) {
+        JSON_Object *joint = json_array_get_object(joint_map, i);
+        struct joint_mapping mapping;
+        int name_len;
+
+        const char *name = json_object_get_string(joint, "joint");
+        const char *dot = strstr(name, ".");
+        if (!dot) {
+            gm_throw(data_index->log, err,
+                     "Spurious joint %s in %s not formatted like <name>.<end>",
+                     name, joint_map_file);
+            goto exit;
+        }
+        name_len = dot - name;
+        mapping.name = strndup(name, name_len);
+        mapping.end = name + name_len + 1;
+        loader.joint_map.push_back(mapping);
+    }
+
+    loader.joint_data = (float*)xmalloc(n_images * n_joints * 3 * sizeof(float));
+
+    if (!gm_data_index_foreach(data_index,
+                               load_joints_foreach_cb,
+                               &loader, // user data
+                               err))
+    {
+        xfree(loader.joint_data);
+        goto exit;
+    }
+
+    *out_n_joints = n_joints;
+    *out_joints = loader.joint_data;
+
+    status = true;
+exit:
+
+    // NB: might have failed part-way through parsing joint map so size might
+    // not == n_joints
+    for (int i = 0; i < (int)loader.joint_map.size(); i++) {
+        free(loader.joint_map[i].name);
+        // don't need to free .end which points to const string within json state
+    }
+
+    json_value_free(joint_map_val);
+    return status;
 }
 
 JSON_Value*
@@ -372,34 +458,14 @@ gather_train_data(struct gm_logger* log,
         gm_assert(log, joint_map_path != NULL,
                   "Expected joint_map_path when requesting joint data");
 
-        JSON_Value *map = json_parse_file(joint_map_path);
-        if (!map) {
-            gm_throw(log, err, "Failed to parse joint map %s\n", joint_map_path);
-            goto error;
-        }
-
-        /* For now we just care about how many joints there are but maybe
-         * we should be handing the map back to the caller somehow?
-         */
-        data.n_joints = json_array_get_count(json_array(map));
-        json_value_free(map);
-        map = NULL;
-
-        data.joint_data = (float*)xmalloc(data.n_images * data.n_joints *
-                                          3 * sizeof(float));
-
-        if (!gm_data_index_foreach(data_index,
-                                   load_frame_joints_foreach_cb,
-                                   &data,
-                                   err))
+        if (!gm_data_index_load_joints(data_index,
+                                       joint_map_path,
+                                       out_n_joints,
+                                       out_joints,
+                                       err))
         {
             goto error;
         }
-
-        if (out_n_joints)
-            *out_n_joints = data.n_joints;
-        if (out_joints)
-            *out_joints = data.joint_data;
     }
 
     gm_data_index_destroy(data_index);
@@ -419,11 +485,9 @@ gather_train_data(struct gm_logger* log,
 error:
     xfree(data.label_images);
     xfree(data.depth_images);
-    xfree(data.joint_data);
     json_value_free(meta);
     if (data_index)
         gm_data_index_destroy(data_index);
 
     return NULL;
 }
-

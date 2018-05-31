@@ -72,6 +72,13 @@ gm_data_index_foreach(struct gm_data_index* data_index,
                       void* user_data,
                       char** err);
 
+bool
+gm_data_index_load_joints(struct gm_data_index* data_index,
+                          const char* joint_map_file,
+                          int* out_n_joints,
+                          float** out_joints,
+                          char** err);
+
 JSON_Value*
 gather_train_data(struct gm_logger *log,
                   const char* data_dir,

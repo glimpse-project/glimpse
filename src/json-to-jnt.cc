@@ -43,15 +43,10 @@
             exit(1); \
     } while(0)
 
-struct joint_mapping {
-    char *name;
-    const char *end; // "head" or "tail"
-};
-
 struct data {
     struct gm_logger *log;
-    std::vector<joint_mapping> joint_map;
     int n_joints;
+    float *joint_data;
 };
 
 static bool
@@ -63,58 +58,6 @@ write_jnt_file_foreach_cb(struct gm_data_index* data_index,
 {
     struct data *data = (struct data *)user_data;
     const char* top_dir = gm_data_index_get_top_dir(data_index);
-    std::vector<joint_mapping> &joint_map = data->joint_map;
-
-    char json_filename[512];
-    xsnprintf(json_filename, sizeof(json_filename), "%s/labels/%s.json", top_dir, path);
-
-    JSON_Value *frame_js = json_parse_file(json_filename);
-    if (!frame_js) {
-        gm_throw(data->log, err, "Failed to parse %s", json_filename);
-        return false;
-    }
-
-    JSON_Array *bones = json_object_get_array(json_object(frame_js), "bones");
-    int n_bones = json_array_get_count(bones);
-
-    int n_joints = data->n_joints;
-    float jnt_data[n_joints * 3];
-
-    for (int i = 0; i < n_joints; i++) {
-        struct joint_mapping joint = joint_map[i];
-        int jnt_pos = i * 3;
-
-        bool found = false;
-        for (int j = 0; j < n_bones; j++) {
-            JSON_Object *bone = json_array_get_object(bones, j);
-            const char *bone_name = json_object_get_string(bone, "name");
-            if (strcmp(joint.name, bone_name) != 0)
-                continue;
-
-            JSON_Array *end = json_object_get_array(bone, joint.end);
-            if (!end)
-                break;
-
-            jnt_data[jnt_pos+0] = json_array_get_number(end, 0);
-            jnt_data[jnt_pos+1] = json_array_get_number(end, 1);
-            jnt_data[jnt_pos+2] = json_array_get_number(end, 2);
-
-            //printf("%s.%s = (%5.2f, %5.2f, %5.2f)\n",
-            //       joint.name, joint.end,
-            //       jnt_data[jnt_pos+0],
-            //       jnt_data[jnt_pos+1],
-            //       jnt_data[jnt_pos+2]);
-            found  = true;
-            break;
-        }
-
-        if (!found) {
-            gm_throw(data->log, err, "Failed to find bone %s.%s in %s",
-                     joint.name, joint.end, json_filename);
-            json_value_free(frame_js);
-            return false;
-        }
-    }
 
     char jnt_filename[512];
     xsnprintf(jnt_filename, sizeof(jnt_filename), "%s/labels/%s.jnt", top_dir, path);
@@ -122,20 +65,23 @@ write_jnt_file_foreach_cb(struct gm_data_index* data_index,
     FILE *fp = fopen(jnt_filename, "w");
     if (!fp) {
         gm_throw(data->log, err, "Failed to open %s for writing", jnt_filename);
-        json_value_free(frame_js);
         return false;
     }
 
-    if (fwrite(jnt_data, sizeof(jnt_data), 1, fp) != 1) {
+    int n_joints = data->n_joints;
+    int64_t off = (int64_t)index * n_joints * 3;
+    float *jnt_data = &data->joint_data[off];
+    int jnt_data_size = n_joints * 3 * sizeof(float);
+
+    printf("writting %d bytes to %s\n", jnt_data_size, jnt_filename);
+    if (fwrite(jnt_data, jnt_data_size, 1, fp) != 1) {
         gm_throw(data->log, err, "Failed to write joint data to %s", jnt_filename);
         fclose(fp);
-        json_value_free(frame_js);
         return false;
     }
 
     fclose(fp);
 
-    json_value_free(frame_js);
     return true;
 }
 
@@ -183,33 +129,6 @@ main(int argc, char **argv)
     }
 
     const char *joint_map_file = argv[optind+2];
-    JSON_Value *joint_map = json_parse_file(joint_map_file);
-    if (!joint_map) {
-        gm_error(data.log, "Failed to parse %s", joint_map_file);
-        return 1;
-    }
-    int n_joints = json_array_get_count(json_array(joint_map));
-    data.n_joints = n_joints;
-
-    JSON_Array *joint_map_arr = json_array(joint_map);
-
-    for (int i = 0; i < n_joints; i++) {
-        JSON_Object *joint = json_array_get_object(joint_map_arr, i);
-
-        const char *name = json_object_get_string(joint, "joint");
-        const char *dot = strstr(name, ".");
-        if (!dot) {
-            gm_error(data.log, "Spurious joint %s in %s not formatted like <name>.<end>",
-                     name, joint_map_file);
-            return 1;
-        }
-        int name_len = dot - name;
-        struct joint_mapping mapping;
-        mapping.name = strndup(name, name_len);
-        mapping.end = name + name_len + 1;
-        printf("joint %d: \"%s\" %s\n", i, mapping.name, mapping.end);
-        data.joint_map.push_back(mapping);
-    }
 
     struct gm_data_index *data_index =
         gm_data_index_open(data.log,
@@ -217,17 +136,19 @@ main(int argc, char **argv)
                            argv[optind+1], // index name
                            NULL); // abort on error
 
+    gm_data_index_load_joints(data_index,
+                              joint_map_file,
+                              &data.n_joints,
+                              &data.joint_data,
+                              NULL); // abort on error
     gm_data_index_foreach(data_index,
                           write_jnt_file_foreach_cb,
                           &data, // user data
                           NULL); // abort on error
 
-    gm_data_index_destroy(data_index);
+    xfree(data.joint_data);
 
-    for (int i = 0; i < n_joints; i++) {
-        free(data.joint_map[i].name);
-    }
-    json_value_free(joint_map);
+    gm_data_index_destroy(data_index);
 
     gm_logger_destroy(data.log);
 
