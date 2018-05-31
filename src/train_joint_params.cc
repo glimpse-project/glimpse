@@ -84,8 +84,6 @@ typedef struct {
     float*   offsets;       // Z offsets to test
 
     int      n_threads;     // Number of threads to use for work
-
-    bool check_accuracy;    // Test the accuracy of joint inferrence
 } TrainContext;
 
 typedef struct {
@@ -95,7 +93,6 @@ typedef struct {
     float*             best_bandwidth;   // Best bandwidth per joint
     float*             best_threshold;   // Best threshold per joint
     float*             best_offset;      // Best offset per joint
-    float*             accuracy;         // Accuracy of inference
     pthread_barrier_t* barrier ;         // Barrier to synchronise dependent work
 } TrainThreadData;
 
@@ -177,7 +174,6 @@ print_usage(FILE* stream)
             "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
             "  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
             "  -j, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
-            "  -a, --accuracy              Report accuracy of joint inference\n"
             "  -v, --verbose               Verbose output\n"
             "  -h, --help                  Display this message\n");
 }
@@ -216,8 +212,7 @@ thread_body(void* userdata)
 
     int n_labels = ctx->forest[0]->header.n_labels;
 
-    // Generate probability tables and pixel weights, and possibly calculate
-    // inference accuracy
+    // Generate probability tables and pixel weights
     int images_per_thread =
         std::max(1, ctx->n_images / ctx->n_threads);
     int i_start = images_per_thread * data->thread;
@@ -237,68 +232,6 @@ thread_body(void* userdata)
                                  ctx->width, ctx->height, n_labels,
                                  ctx->joint_map,
                                  &ctx->weights[weight_idx]);
-
-        // Calculate inference accuracy if label images were specified
-        if (ctx->check_accuracy)
-        {
-            int label_incidence[n_labels];
-            int correct_label_incidence[n_labels];
-            int label_idx = idx;
-
-            /* NB: clang doesn't allow using an = {0} initializer with dynamic
-             * sized arrays...
-             */
-            memset(label_incidence, 0, n_labels * sizeof(label_incidence[0]));
-            memset(correct_label_incidence, 0,
-                   n_labels * sizeof(correct_label_incidence[0]));
-
-            for (int y = 0; y < ctx->height; y++)
-            {
-                for (int x = 0; x < ctx->width; x++, label_idx++)
-                {
-                    int actual_label = (int)ctx->label_images[label_idx];
-
-                    float best_pr = 0.f;
-                    int inferred_label = 0;
-                    for (int l = 0; l < n_labels; l++)
-                    {
-                        float pr =
-                            ctx->inferred[i][((label_idx - idx) * n_labels) + l];
-                        if (pr > best_pr)
-                        {
-                            best_pr = pr;
-                            inferred_label = l;
-                        }
-                    }
-
-                    label_incidence[actual_label] ++;
-                    if (inferred_label == actual_label)
-                    {
-                        correct_label_incidence[inferred_label]++;
-                    }
-                }
-            }
-
-            int present_labels = 0;
-            float accuracy = 0.f;
-            for (int l = 0; l < n_labels; l++)
-            {
-                if (label_incidence[l] > 0)
-                {
-                    accuracy += correct_label_incidence[l] /
-                        (float)label_incidence[l];
-                    present_labels ++;
-                }
-            }
-            accuracy /= (float)present_labels;
-
-            *data->accuracy += accuracy;
-        }
-    }
-
-    if (ctx->check_accuracy)
-    {
-        *data->accuracy /= (float)(i_end - i_start);
     }
 
     // Wait for all threads to finish
@@ -548,10 +481,6 @@ main(int argc, char** argv)
             {
                 param = 'z';
             }
-            else if (strstr(arg, "accuracy"))
-            {
-                param = 'a';
-            }
             else if (strstr(arg, "threads="))
             {
                 param = 'j';
@@ -612,9 +541,6 @@ main(int argc, char** argv)
         case 'z':
             read_three(value, &min_offset, &max_offset, &ctx.n_offsets);
             break;
-        case 'a':
-            ctx.check_accuracy = true;
-            break;
         case 'j':
             ctx.n_threads = atoi(value);
             break;
@@ -647,7 +573,7 @@ main(int argc, char** argv)
                           &ctx.n_joints,
                           &ctx.width, &ctx.height,
                           &ctx.depth_images,
-                          ctx.check_accuracy ? &ctx.label_images : NULL,
+                          NULL, // skip label images
                           &ctx.joints,
                           NULL); // simply abort on error
 
@@ -710,7 +636,6 @@ main(int argc, char** argv)
         xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
     float* best_offsets = (float*)
         xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
-    float* accuracies = (float*)xcalloc(ctx.n_threads, sizeof(float));
     pthread_t threads[ctx.n_threads];
 
     for (int i = 0; i < ctx.n_threads; i++)
@@ -723,7 +648,6 @@ main(int argc, char** argv)
         thread_data->best_bandwidth = &best_bandwidths[i * ctx.n_joints];
         thread_data->best_threshold = &best_thresholds[i * ctx.n_joints];
         thread_data->best_offset = &best_offsets[i * ctx.n_joints];
-        thread_data->accuracy = &accuracies[i];
         thread_data->barrier = &barrier;
 
         if (pthread_create(&threads[i], NULL, thread_body,
@@ -735,24 +659,6 @@ main(int argc, char** argv)
     }
 
     pthread_barrier_wait(&barrier);
-
-    if (ctx.check_accuracy)
-    {
-        // We no longer need the label images
-        xfree(ctx.label_images);
-
-        // Calculate accuracy
-        float accuracy = 0.f;
-        int n_accuracies = std::min(ctx.n_threads, ctx.n_images);
-        for (int i = 0; i < n_accuracies; i++)
-        {
-            accuracy += accuracies[i];
-        }
-        accuracy /= (float)n_accuracies;
-
-        printf("Inference accuracy: %f\n", accuracy);
-    }
-    xfree(accuracies);
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);
