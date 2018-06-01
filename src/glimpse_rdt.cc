@@ -379,14 +379,18 @@ log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
 }
 
 static void
-maybe_log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
-                               struct thread_state *state,
+maybe_log_thread_depth_metrics(struct thread_state* state,
+                               int node_progress,
                                int depth,
                                uint64_t current_time)
 {
-    if (current_time - state->last_metrics_log > 1000000000) {
-        char prefix[32];
-        snprintf(prefix, sizeof(prefix), "Thread %2d, d", state->idx);
+    struct gm_rdt_context_impl* ctx = state->ctx;
+
+    if (current_time - state->last_metrics_log > 5000000000) {
+        char prefix[64];
+
+        snprintf(prefix, sizeof(prefix), "Thread %2d, node %2d%%, d",
+                 state->idx, node_progress);
 
         uint64_t partial_work_time = current_time - state->current_work_start;
 
@@ -398,7 +402,9 @@ maybe_log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
                                               partial_work_time,
                                               raw,
                                               &metrics);
+        pthread_mutex_lock(&ctx->tidy_log_lock);
         log_thread_depth_metrics(ctx, prefix, depth, &metrics);
+        pthread_mutex_unlock(&ctx->tidy_log_lock);
         state->last_metrics_log = current_time;
     }
 }
@@ -520,7 +526,7 @@ generate_randomized_sample_points_cb(struct gm_data_index* data_index,
 
     uint64_t current = get_time();
     if (current - generator->last_update > 2000000000) {
-        int percent = index / ctx->n_images;
+        int percent = index * 100 / ctx->n_images;
         gm_info(ctx->log, "%3d%%", percent);
         generator->last_update = current;
     }
@@ -679,8 +685,13 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         if (p % 10000 == 0) {
             if (interrupted)
                 break;
-            if (ctx->profile)
-                maybe_log_thread_depth_metrics(ctx, state, node_depth, get_time());
+            if (ctx->profile) {
+                int progress = (int64_t)p * 100 / n_pixels;
+                maybe_log_thread_depth_metrics(state,
+                                               progress,
+                                               node_depth,
+                                               get_time());
+            }
         }
 
         int64_t image_idx = (int64_t)i * width * height;
@@ -989,9 +1000,6 @@ schedule_node_work(struct thread_state* state)
 
     pthread_cond_broadcast(&ctx->work_queue_changed);
     pthread_mutex_unlock(&ctx->work_queue_lock);
-
-    if (ctx->profile)
-        maybe_log_thread_depth_metrics(ctx, state, node_depth, get_time());
 
     return true;
 }
