@@ -47,6 +47,7 @@
 #include "utils.h"
 #include "rdt_tree.h"
 #include "train_utils.h"
+#include "image_utils.h"
 
 #include "glimpse_rdt.h"
 #include "glimpse_log.h"
@@ -57,6 +58,12 @@
 
 using half_float::half;
 
+
+#define xsnprintf(dest, size, fmt, ...) do { \
+        if (snprintf(dest, size, fmt,  __VA_ARGS__) >= (int)size) \
+            exit(1); \
+    } while(0)
+
 static void
 process_node_shards_work_cb(struct thread_state* state,
                             void* user_data);
@@ -65,10 +72,17 @@ process_node_shards_work_cb(struct thread_state* state,
 static const char *interrupt_reason;
 static bool interrupted;
 
+struct pixel {
+    int16_t x;
+    int16_t y;
+    uint32_t label:8;
+    uint32_t i:24;
+};
+
 struct node_data {
-    int    id;        // Unique id to place the node in a tree.
-    int    n_pixels;  // Number of pixels that have reached this node.
-    Int3D* pixels;    // A list of pixel pairs and image indices.
+    int id; // Unique id to place the node in a tree.
+    int n_pixels; // Number of pixels that have reached this node.
+    struct pixel* pixels;   // An array of pixel pairs and image indices.
 };
 
 /* Work submitted for the thread pool to process... */
@@ -198,7 +212,6 @@ struct gm_rdt_context_impl {
     int      n_labels;      // Number of labels in label images
 
     int      n_images;      // Number of training images
-    uint8_t* label_images;  // Label images (row-major)
     half*    depth_images;  // Depth images (row-major)
 
     int      n_uvs;         // Number of combinations of u,v pairs
@@ -409,89 +422,152 @@ id_to_depth(int id)
     return 32 - __builtin_clz(id32 + 1) - 1;
 }
 
-/* For every image, pick N (ctx->n_pixels) random points within the silhoette
- * of the example pose for that frame.
- */
-static Int3D*
-generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
-                                  int* total_count)
+struct point_generator
 {
-    //std::random_device rd;
-    std::mt19937 rng(ctx->seed);
-    //std::default_random_engine rng(ctx->seed);
-    std::uniform_real_distribution<float> rand_0_1(0.0, 1.0);
+    struct gm_rdt_context_impl* ctx;
+    uint64_t last_update;
+    std::mt19937 rng;
+    std::uniform_real_distribution<float> rand_0_1;
+    int n_image_pixels;
+    std::vector<uint8_t> image_buf;
+    std::vector<int> in_body_pixels;
+    std::vector<int> indices;
+    int n_pixels;
+    struct node_data root_node;
+};
 
-    int n_image_pixels = ctx->width * ctx->height;
-    std::vector<int> in_body_pixels(n_image_pixels);
-    std::vector<int> indices(n_image_pixels);
+static bool
+generate_randomized_sample_points_cb(struct gm_data_index* data_index,
+                                     int index,
+                                     const char* frame_path,
+                                     void* user_data,
+                                     char** err)
+{
+    struct point_generator* generator = (struct point_generator*)user_data;
+    struct gm_rdt_context_impl* ctx = generator->ctx;
+    uint8_t* label_image = generator->image_buf.data();
 
-    int n_pixels = ctx->n_images * ctx->n_pixels;
-    Int3D* pixels = (Int3D*)xmalloc(n_pixels * sizeof(Int3D));
+    const char* top_dir = gm_data_index_get_top_dir(data_index);
 
-    for (int i = 0; i < ctx->n_images; i++)
+    char labels_filename[512];
+    xsnprintf(labels_filename, sizeof(labels_filename), "%s/labels/%s.png",
+              top_dir, frame_path);
+
+    IUImageSpec label_spec = { ctx->width, ctx->height, IU_FORMAT_U8 };
+    if (iu_read_png_from_file(labels_filename, &label_spec, &label_image,
+                              NULL, // palette output
+                              NULL) // palette size
+        != SUCCESS)
     {
-        int64_t image_idx = i * n_image_pixels;
-        uint8_t* label_image = &ctx->label_images[image_idx];
+        gm_throw(ctx->log, err, "Failed to read image '%s'\n", labels_filename);
+        return false;
+    }
 
-        /* Our tracking system assumes that the body has been segmented
-         * from the background before we try and label the different parts
-         * of the body and so we're only interested in sampling points
-         * inside the body...
-         */
-        in_body_pixels.clear();
-        for (int y = 0; y < ctx->height; y++) {
-            for (int x = 0; x < ctx->width; x++) {
-                int off = y * ctx->width + x;
-                int label = (int)label_image[off];
+    /* Our tracking system assumes that the body has been segmented
+     * from the background before we try and label the different parts
+     * of the body and so we're only interested in sampling points
+     * inside the body...
+     */
+    generator->in_body_pixels.clear();
 
-                gm_assert(ctx->log, label < ctx->n_labels,
-                          "Label '%d' is bigger than expected (max %d)\n",
-                          label, ctx->n_labels - 1);
+    for (int y = 0; y < ctx->height; y++) {
+        for (int x = 0; x < ctx->width; x++) {
+            int off = y * ctx->width + x;
+            int label = (int)label_image[off];
 
-                if (label != 0) { // 0 = background
-                    in_body_pixels.push_back(off);
-                }
+            gm_assert(ctx->log, label < ctx->n_labels,
+                      "Label '%d' is bigger than expected (max %d)\n",
+                      label, ctx->n_labels - 1);
+
+            if (label != 0) { // 0 = background
+                generator->in_body_pixels.push_back(off);
             }
-        }
-
-        /* Note: we don't do anything to filter out duplicates which could
-         * be fairly likely for frames where the body is relatively small.
-         *
-         * It seems best to not bias how many samples we consider across
-         * the body based on the in-frame size, so our training expends
-         * approximately the same amount of energy training on each pose
-         * regardless of body size or distance from the camera.
-         */
-        int n_body_points = in_body_pixels.size();
-        indices.clear();
-        for (int j = 0; j < ctx->n_pixels; j++) {
-            int off = rand_0_1(rng) * n_body_points;
-            indices.push_back(off);
-        }
-
-        /* May slightly improve cache access patterns if we can process
-         * our samples in memory order, even though the UV sampling
-         * is somewhat randomized relative to these pixels...
-         */
-        std::sort(indices.begin(), indices.end());
-
-        for (int j = 0; j < ctx->n_pixels; j++) {
-            int off = in_body_pixels[indices[j]];
-
-            int x = off % ctx->width;
-            int y = off / ctx->width;
-
-            Int3D pixel;
-            pixel.xy[0] = x;
-            pixel.xy[1] = y;
-            pixel.i = i;
-
-            pixels[i * ctx->n_pixels + j] = pixel;
         }
     }
 
-    *total_count = n_pixels;
-    return pixels;
+    /* Note: we don't do anything to filter out duplicates which could
+     * be fairly likely for frames where the body is relatively small.
+     *
+     * It seems best to not bias how many samples we consider across
+     * the body based on the in-frame size, so our training expends
+     * approximately the same amount of energy training on each pose
+     * regardless of body size or distance from the camera.
+     */
+    int n_body_points = generator->in_body_pixels.size();
+    generator->indices.clear();
+    for (int j = 0; j < ctx->n_pixels; j++) {
+        int off = generator->rand_0_1(generator->rng) * n_body_points;
+        generator->indices.push_back(off);
+    }
+
+    /* May slightly improve cache access patterns if we can process
+     * our samples in memory order, even though the UV sampling
+     * is somewhat randomized relative to these pixels...
+     */
+    std::sort(generator->indices.begin(), generator->indices.end());
+
+    for (int j = 0; j < ctx->n_pixels; j++) {
+        int off = generator->in_body_pixels[generator->indices[j]];
+
+        struct pixel pixel;
+        pixel.x = off % ctx->width;
+        pixel.y = off / ctx->width;
+        pixel.label = label_image[off];
+        pixel.i = index;
+
+        generator->root_node.pixels[(int64_t)index * ctx->n_pixels + j] = pixel;
+    }
+
+    uint64_t current = get_time();
+    if (current - generator->last_update > 2000000000) {
+        int percent = index / ctx->n_images;
+        gm_info(ctx->log, "%3d%%", percent);
+        generator->last_update = current;
+    }
+
+    return true;
+}
+
+/* For every image, pick N (ctx->n_pixels) random points within the silhoette
+ * of the example pose for that frame.
+ */
+static struct pixel*
+generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
+                                  struct gm_data_index* data_index,
+                                  int* total_count,
+                                  char** err)
+{
+    struct point_generator generator;
+
+    generator.ctx = ctx;
+    generator.last_update = get_time();
+    generator.rng = std::mt19937(ctx->seed);
+    generator.rand_0_1 = std::uniform_real_distribution<float>(0.0, 1.0);
+    generator.n_image_pixels = ctx->width * ctx->height;
+    generator.image_buf = std::vector<uint8_t>(generator.n_image_pixels);
+    generator.in_body_pixels = std::vector<int>(generator.n_image_pixels);
+    generator.indices = std::vector<int>(generator.n_image_pixels);
+    generator.n_pixels = ctx->n_images * ctx->n_pixels;
+    *total_count = generator.n_pixels;
+
+    struct node_data root_node;
+    root_node.id = 0;
+    root_node.pixels = (struct pixel*)xmalloc(generator.n_pixels *
+                                              sizeof(struct pixel));
+
+    generator.root_node = root_node;
+
+    gm_info(ctx->log, "Randomly sampling training pixels across all images...");
+    if (!gm_data_index_foreach(data_index,
+                               generate_randomized_sample_points_cb,
+                               &generator,
+                               err))
+    {
+        xfree(root_node.pixels);
+        return NULL;
+    }
+
+    return root_node.pixels;
 }
 
 static inline Int2D
@@ -552,34 +628,17 @@ accumulate_pixel_histograms(struct gm_rdt_context_impl* ctx,
                             struct node_data* data,
                             int* node_histogram)
 {
-    int p;
     int n_pixels = data->n_pixels;
-    int n_labels = ctx->n_labels;
-    int width = ctx->width;
-    int height = ctx->height;
 
-    for (p = 0; p < n_pixels; p++)
-    {
-        Int2D pixel = data->pixels[p].xy;
-        int i = data->pixels[p].i;
+    for (int p = 0; p < n_pixels; p++) {
+        int label = data->pixels[p].label;
+
+        node_histogram[label]++;
 
         if (p % 10000 == 0) {
             if (interrupted)
                 break;
         }
-
-        int64_t image_idx = (int64_t)i * width * height;
-
-        uint8_t* label_image = &ctx->label_images[image_idx];
-
-        int pixel_idx = (pixel[1] * width) + pixel[0];
-        int label = (int)label_image[pixel_idx];
-
-        gm_assert(ctx->log, label < n_labels,
-                  "Label '%d' is bigger than expected (max %d)\n",
-                  label, n_labels - 1);
-
-        ++node_histogram[label];
     }
 }
 
@@ -606,8 +665,10 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 
     for (p = 0; p < n_pixels; p++)
     {
-        Int2D pixel = data->pixels[p].xy;
-        int i = data->pixels[p].i;
+        struct pixel px = data->pixels[p];
+        Int2D pixel = {px.x, px.y};
+        int i = px.i;
+        int label = px.label;
 
         depth_metrics->n_pixels_accumulated++;
         if (i != last_i) {
@@ -623,12 +684,9 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         }
 
         int64_t image_idx = (int64_t)i * width * height;
-
         half* depth_image = &ctx->depth_images[image_idx];
-        uint8_t* label_image = &ctx->label_images[image_idx];
 
         int pixel_idx = (pixel[1] * width) + pixel[0];
-        int label = (int)label_image[pixel_idx];
         float depth = depth_image[pixel_idx];
 
         gm_assert(ctx->log, label < n_labels,
@@ -701,7 +759,6 @@ node_shard_work_cb(struct thread_state* state,
         gm_info(ctx->log, "Training shard %d of node %d, depth=%d",
                 shard_work->shard_index, node_data.id, node_depth);
     }
-
 
     // Accumulate histograms
     uint64_t accu_start = get_time();
@@ -943,46 +1000,47 @@ static void
 collect_pixels(struct gm_rdt_context_impl* ctx,
                struct node_data* data,
                UVPair uv, float t,
-               Int3D** l_pixels, Int3D** r_pixels, int* n_lr_pixels)
+               struct pixel** l_pixels,
+               struct pixel** r_pixels,
+               int* n_lr_pixels)
 {
-    *l_pixels = (Int3D*)xmalloc((n_lr_pixels[0] ? n_lr_pixels[0] :
-                                 data->n_pixels) *
-                                sizeof(Int3D));
-    *r_pixels = (Int3D*)xmalloc((n_lr_pixels[1] ? n_lr_pixels[1] :
-                                 data->n_pixels) *
-                                sizeof(Int3D));
+    *l_pixels = (struct pixel*)xmalloc((n_lr_pixels[0] ? n_lr_pixels[0] :
+                                        data->n_pixels) *
+                                       sizeof(struct pixel));
+    *r_pixels = (struct pixel*)xmalloc((n_lr_pixels[1] ? n_lr_pixels[1] :
+                                        data->n_pixels) *
+                                       sizeof(struct pixel));
 
     int l_index = 0;
     int r_index = 0;
-    for (int p = 0; p < data->n_pixels; p++)
-    {
-        Int3D* pixel = &data->pixels[p];
-        int64_t image_idx = (int64_t)pixel->i * ctx->width * ctx->height;
+    for (int p = 0; p < data->n_pixels; p++) {
+        struct pixel px = data->pixels[p];
+        Int2D px2d = {px.x, px.y};
+
+        int64_t image_idx = (int64_t)px.i * ctx->width * ctx->height;
         half* depth_image = &ctx->depth_images[image_idx];
 
-        float depth = depth_image[(pixel->xy[1] * ctx->width) + pixel->xy[0]];
-        float value = sample_uv(depth_image, ctx->width, ctx->height,
-                                pixel->xy, depth, uv);
-
+        float depth = depth_image[px.y * ctx->width + px.x];
+        float value = sample_uv(depth_image,
+                                ctx->width, ctx->height,
+                                px2d, depth, uv);
         if (value < t)
-        {
-            (*l_pixels)[l_index++] = *pixel;
-        }
+            (*l_pixels)[l_index++] = px;
         else
-        {
-            (*r_pixels)[r_index++] = *pixel;
-        }
+            (*r_pixels)[r_index++] = px;
     }
 
     if (n_lr_pixels[0] != l_index)
     {
-        *l_pixels = (Int3D*)xrealloc(*l_pixels, l_index * sizeof(Int3D));
+        *l_pixels = (struct pixel*)xrealloc(*l_pixels,
+                                            l_index * sizeof(struct pixel));
         n_lr_pixels[0] = l_index;
     }
 
     if (n_lr_pixels[1] != r_index)
     {
-        *r_pixels = (Int3D*)xrealloc(*r_pixels, r_index * sizeof(Int3D));
+        *r_pixels = (struct pixel*)xrealloc(*r_pixels,
+                                            r_index * sizeof(struct pixel));
         n_lr_pixels[1] = r_index;
     }
 }
@@ -1075,8 +1133,8 @@ process_node_shards_work_cb(struct thread_state* state,
                     node->t);
         }
 
-        Int3D* l_pixels;
-        Int3D* r_pixels;
+        struct pixel* l_pixels;
+        struct pixel* r_pixels;
 
         collect_pixels(ctx, &node_data, node->uv, node->t,
                        &l_pixels, &r_pixels, n_lr_pixels);
@@ -1471,8 +1529,6 @@ destroy_training_state(struct gm_rdt_context_impl* ctx)
     ctx->uvs = NULL;
     xfree(ctx->thresholds);
     ctx->thresholds = NULL;
-    xfree(ctx->label_images);
-    ctx->label_images = NULL;
     xfree(ctx->depth_images);
     ctx->depth_images = NULL;
     if (ctx->history) {
@@ -1775,8 +1831,8 @@ reload_tree(struct gm_rdt_context_impl* ctx,
                 // If the node isn't a leaf-node, calculate which pixels should
                 // go to the next two nodes and add them to the reload
                 // queue
-                Int3D* l_pixels;
-                Int3D* r_pixels;
+                struct pixel* l_pixels;
+                struct pixel* r_pixels;
                 int n_lr_pixels[] = { 0, 0 };
                 collect_pixels(ctx, &node_data,
                                node->uv, node->t,
@@ -1922,6 +1978,31 @@ check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
                           hist_val);
 }
 
+static bool
+load_depth_buffers_cb(struct gm_data_index* data_index,
+                      int index,
+                      const char* frame_path,
+                      void* user_data,
+                      char** err)
+{
+    struct gm_rdt_context_impl* ctx = (struct gm_rdt_context_impl*)user_data;
+
+    const char* top_dir = gm_data_index_get_top_dir(data_index);
+    char depth_filename[512];
+    xsnprintf(depth_filename, sizeof(depth_filename), "%s/depth/%s.exr",
+              top_dir, frame_path);
+
+    IUImageSpec depth_spec = { ctx->width, ctx->height, IU_FORMAT_HALF };
+    int64_t off = (int64_t)index * ctx->width * ctx->height;
+    void* output = &ctx->depth_images[off];
+    if (iu_read_exr_from_file(depth_filename, &depth_spec, &output) != SUCCESS) {
+        gm_throw(ctx->log, err, "Failed to read image '%s'\n", depth_filename);
+        return false;
+    }
+
+    return true;
+}
+
 bool
 gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 {
@@ -1950,21 +2031,23 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 
     ctx->record = create_training_record(ctx);
 
-    gm_info(ctx->log, "Scanning training directories...\n");
-    ctx->data_meta =
-        gather_train_data(ctx->log,
-                          data_dir,
-                          index_name,
-                          NULL, // no joint map
-                          &ctx->n_images,
-                          NULL, // ignore n_joints
-                          &ctx->width, &ctx->height,
-                          &ctx->depth_images, &ctx->label_images, NULL,
-                          err);
-    if (!ctx->data_meta) {
+    gm_info(ctx->log, "Opening training data index %s...", index_name);
+    struct gm_data_index* data_index =
+        gm_data_index_open(ctx->log,
+                           data_dir,
+                           index_name,
+                           err);
+    if (!data_index) {
         destroy_training_state(ctx);
         return false;
     }
+
+    ctx->data_meta =
+        json_value_deep_copy(gm_data_index_get_meta(data_index));
+
+    ctx->n_images = gm_data_index_get_len(data_index);
+    ctx->width = gm_data_index_get_width(data_index);
+    ctx->height = gm_data_index_get_height(data_index);
 
     JSON_Object* meta_camera =
         json_object_get_object(json_object(ctx->data_meta), "camera");
@@ -2022,7 +2105,32 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     //
     struct node_data root_node;
     root_node.id = 0;
-    root_node.pixels = generate_randomized_sample_points(ctx, &root_node.n_pixels);
+    root_node.pixels = generate_randomized_sample_points(ctx,
+                                                         data_index,
+                                                         &root_node.n_pixels,
+                                                         err);
+    if (!root_node.pixels) {
+        destroy_training_state(ctx);
+        return false;
+    }
+
+    ctx->depth_images = (half*)xmalloc((int64_t)ctx->n_images *
+                                       ctx->width *
+                                       ctx->height *
+                                       sizeof(half));
+
+    gm_info(ctx->log, "Loading all depth buffers...");
+    if (!gm_data_index_foreach(data_index,
+                               load_depth_buffers_cb,
+                               ctx,
+                               err))
+    {
+        destroy_training_state(ctx);
+        return false;
+    }
+
+    gm_data_index_destroy(data_index);
+    data_index = NULL;
 
     check_root_pixels_histogram(ctx, &root_node);
 

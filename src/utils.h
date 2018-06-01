@@ -39,11 +39,6 @@
 typedef vector(int, 2) Int2D;
 typedef vector(float, 4) UVPair;
 
-typedef struct {
-    Int2D xy;
-    int i;
-} Int3D;
-
 template<typename FloatT>
 inline float
 sample_uv(FloatT* depth_image, int width, int height,
