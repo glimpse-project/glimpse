@@ -212,6 +212,8 @@ struct gm_rdt_context_impl {
     int      n_labels;      // Number of labels in label images
 
     int      n_images;      // Number of training images
+
+    uint64_t last_load_update;
     half*    depth_images;  // Depth images (row-major)
 
     int      n_uvs;         // Number of combinations of u,v pairs
@@ -2008,6 +2010,13 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
         return false;
     }
 
+    uint64_t current = get_time();
+    if (current - ctx->last_load_update > 2000000000) {
+        int percent = index * 100 / ctx->n_images;
+        gm_info(ctx->log, "%3d%%", percent);
+        ctx->last_load_update = current;
+    }
+
     return true;
 }
 
@@ -2128,6 +2137,7 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
                                        sizeof(half));
 
     gm_info(ctx->log, "Loading all depth buffers...");
+    ctx->last_load_update = get_time();
     if (!gm_data_index_foreach(data_index,
                                load_depth_buffers_cb,
                                ctx,
