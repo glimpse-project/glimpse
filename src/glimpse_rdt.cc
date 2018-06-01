@@ -797,7 +797,7 @@ node_shard_work_cb(struct thread_state* state,
 
     pthread_mutex_lock(&ctx->work_queue_lock);
     ctx->work_queue.push_back(entry);
-    pthread_cond_signal(&ctx->work_queue_changed);
+    pthread_cond_broadcast(&ctx->work_queue_changed);
     pthread_mutex_unlock(&ctx->work_queue_lock);
 
     xfree(shard_work);
@@ -930,7 +930,7 @@ schedule_node_work(struct thread_state* state)
         pthread_mutex_unlock(&ctx->tidy_log_lock);
     }
 
-    pthread_cond_signal(&ctx->work_queue_changed);
+    pthread_cond_broadcast(&ctx->work_queue_changed);
     pthread_mutex_unlock(&ctx->work_queue_lock);
 
     if (ctx->profile)
