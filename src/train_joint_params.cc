@@ -95,6 +95,29 @@ typedef struct {
     pthread_barrier_t* barrier ;         // Barrier to synchronise dependent work
 } TrainThreadData;
 
+typedef struct {
+    int32_t hours;
+    int32_t minutes;
+    int32_t seconds;
+} TimeForDisplay;
+
+static TimeForDisplay
+get_time_for_display(struct timespec* begin, struct timespec* end)
+{
+    uint32_t elapsed;
+    TimeForDisplay display;
+
+    elapsed = (end->tv_sec - begin->tv_sec);
+    elapsed += (end->tv_nsec - begin->tv_nsec) / 1000000000;
+
+    display.seconds = elapsed % 60;
+    display.minutes = elapsed / 60;
+    display.hours = display.minutes / 60;
+    display.minutes = display.minutes % 60;
+
+    return display;
+}
+
 static void
 print_usage(FILE* stream)
 {

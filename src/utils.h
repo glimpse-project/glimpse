@@ -83,28 +83,5 @@ sample_uv(FloatT* depth_image, int width, int height,
 #endif
 }
 
-typedef struct {
-    int32_t hours;
-    int32_t minutes;
-    int32_t seconds;
-} TimeForDisplay;
-
-inline TimeForDisplay
-get_time_for_display(struct timespec* begin, struct timespec* end)
-{
-    uint32_t elapsed;
-    TimeForDisplay display;
-
-    elapsed = (end->tv_sec - begin->tv_sec);
-    elapsed += (end->tv_nsec - begin->tv_nsec) / 1000000000;
-
-    display.seconds = elapsed % 60;
-    display.minutes = elapsed / 60;
-    display.hours = display.minutes / 60;
-    display.minutes = display.minutes % 60;
-
-    return display;
-}
-
 #endif /* __UTILS__ */
 
