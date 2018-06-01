@@ -166,6 +166,7 @@ struct thread_state {
 
     std::vector<int> uvt_lr_histograms;
 
+    uint64_t current_work_start;
     uint64_t last_metrics_log;
 
     std::vector<thread_depth_metrics_raw> per_depth_metrics;
@@ -283,11 +284,12 @@ format_duration_s16(uint64_t duration_ns, char buf[16])
 static void
 calculate_thread_depth_metrics_report(struct thread_state* state,
                                       int depth,
+                                      uint64_t partial_work_time,
                                       struct thread_depth_metrics_raw* raw,
                                       struct thread_depth_metrics_report* metrics)
 {
     struct gm_rdt_context_impl* ctx = state->ctx;
-    uint64_t run_duration = raw->idle_time + raw->work_time;
+    uint64_t run_duration = raw->idle_time + raw->work_time + partial_work_time;
 
     memset(metrics, 0, sizeof(*metrics));
     if (!run_duration)
@@ -373,10 +375,16 @@ maybe_log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
         char prefix[32];
         snprintf(prefix, sizeof(prefix), "Thread %2d, d", state->idx);
 
+        uint64_t partial_work_time = current_time - state->current_work_start;
+
         struct thread_depth_metrics_raw* raw =
             &state->per_depth_metrics[depth];
         struct thread_depth_metrics_report metrics;
-        calculate_thread_depth_metrics_report(state, depth, raw, &metrics);
+
+        calculate_thread_depth_metrics_report(state, depth,
+                                              partial_work_time,
+                                              raw,
+                                              &metrics);
         log_thread_depth_metrics(ctx, prefix, depth, &metrics);
         state->last_metrics_log = current_time;
     }
@@ -1237,6 +1245,7 @@ worker_thread_cb(void* userdata)
 
                     calculate_thread_depth_metrics_report(state,
                                                           i,
+                                                          0, // no partial work time
                                                           raw,
                                                           &report);
                     log_thread_depth_metrics(ctx, "> ", i, &report);
@@ -1248,9 +1257,10 @@ worker_thread_cb(void* userdata)
 
         depth_metrics->idle_time += (idle_end - idle_start);
 
+        state->current_work_start = idle_end;
         work.work_cb(state, work.user_data);
         uint64_t work_end = get_time();
-        depth_metrics->work_time += (work_end - idle_end);
+        depth_metrics->work_time += (work_end - state->current_work_start);
     }
 
     return NULL;
@@ -2090,7 +2100,11 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
             struct thread_depth_metrics_raw *tmetrics = &state->per_depth_metrics[i];
             struct thread_depth_metrics_report treport;
 
-            calculate_thread_depth_metrics_report(state, i, tmetrics, &treport);
+            calculate_thread_depth_metrics_report(state,
+                                                  i, // depth
+                                                  0, // no partial work time
+                                                  tmetrics,
+                                                  &treport);
             JSON_Value *js_tmetrics = thread_metrics_to_json(ctx, &treport);
             json_array_append_value(json_array(js_per_thread), js_tmetrics);
         }
