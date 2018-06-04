@@ -2469,6 +2469,126 @@ colour_debug_cloud(struct gm_context *ctx,
     }
 }
 
+static int
+pick_8way_neighbour(int off, int width, int height)
+{
+    int x = off % width;
+    int y = off / width;
+
+    int valid_offsets[8];
+    int n_offsets = 0;
+    for (int ny = -1; ny <= 1; ++ny) {
+        int oy = y + ny;
+        if (oy < 0 || oy >= height) {
+            continue;
+        }
+
+        for (int nx = -1; nx <= 1; ++nx) {
+            int ox = x + nx;
+            if (ox < 0 || ox >= width) {
+                continue;
+            }
+            if (nx == 0 && ny == 0) {
+                continue;
+            }
+
+            valid_offsets[n_offsets++] = oy * width + ox;
+        }
+    }
+
+    return valid_offsets[rand() % n_offsets];
+}
+
+static gm_bg_model_data
+get_bg_model_data(struct gm_tracking_impl *tracking, int off,
+                  gm_bg_model_type seg_type)
+{
+    int vid_fx = tracking->video_camera_intrinsics.fx;
+    int vid_fy = tracking->video_camera_intrinsics.fy;
+    int vid_cx = tracking->video_camera_intrinsics.cx;
+    int vid_cy = tracking->video_camera_intrinsics.cy;
+    int vid_width = tracking->frame->video_intrinsics.width;
+    //int vid_height = tracking->frame->video_intrinsics.height;
+    int vid_rot_width = tracking->video_camera_intrinsics.width;
+    int vid_rot_height = tracking->video_camera_intrinsics.height;
+    uint8_t *video = (uint8_t*)tracking->frame->video->data;
+
+    pcl::PointXYZL point = tracking->depth_class->points[off];
+
+    gm_bg_model_data data;
+    switch (seg_type) {
+        case DEPTH:
+            data.pt = point;
+            break;
+        case VIDEO: {
+            if (std::isnan(point.z)) {
+                data.pixel = 0;
+                break;
+            }
+            // Reverse rotation so we can use with_rotated_rx_ry_roff
+            enum gm_rotation rotation;
+            switch (tracking->frame->camera_rotation) {
+            case GM_ROTATION_0: rotation = GM_ROTATION_0; break;
+            case GM_ROTATION_90: rotation = GM_ROTATION_270; break;
+            case GM_ROTATION_180: rotation = GM_ROTATION_180; break;
+            case GM_ROTATION_270: rotation = GM_ROTATION_90; break;
+            }
+
+            // Reproject video to this depth point
+            int vx = clampf(point.x * vid_fx / point.z + vid_cx,
+                           0.f, vid_rot_width);
+            int vy = clampf(point.y * vid_fy / point.z + vid_cy,
+                           0.f, vid_rot_height);
+
+            uint32_t pixel;
+            uint8_t *subpixel = (uint8_t *)(&pixel);
+            with_rotated_rx_ry_roff(vx, vy,
+                vid_rot_width, vid_rot_height, rotation, vid_width,
+                {
+                    switch (tracking->frame->video_format) {
+                    case GM_FORMAT_RGB_U8:
+                        subpixel[0] = video[roff*3];
+                        subpixel[1] = video[roff*3+1];
+                        subpixel[2] = video[roff*3+2];
+                        break;
+                    case GM_FORMAT_BGR_U8:
+                        subpixel[2] = video[roff*3];
+                        subpixel[1] = video[roff*3+1];
+                        subpixel[0] = video[roff*3+2];
+                        break;
+                    case GM_FORMAT_RGBX_U8:
+                    case GM_FORMAT_RGBA_U8:
+                        subpixel[0] = video[roff*4];
+                        subpixel[1] = video[roff*4+1];
+                        subpixel[2] = video[roff*4+2];
+                        break;
+                    case GM_FORMAT_BGRX_U8:
+                    case GM_FORMAT_BGRA_U8:
+                        subpixel[2] = video[roff*4];
+                        subpixel[1] = video[roff*4+1];
+                        subpixel[0] = video[roff*4+2];
+                        break;
+                    case GM_FORMAT_LUMINANCE_U8:
+                        subpixel[0] = subpixel[1] = subpixel[2] =
+                            video[roff];
+                        break;
+
+                    case GM_FORMAT_UNKNOWN:
+                    case GM_FORMAT_Z_U16_MM:
+                    case GM_FORMAT_Z_F32_M:
+                    case GM_FORMAT_Z_F16_M:
+                    case GM_FORMAT_POINTS_XYZC_F32_M:
+                        gm_assert(tracking->ctx->log, 0,
+                                  "Unexpected video buffer format");
+                    }
+                });
+            data.pixel = pixel;
+        }
+    }
+
+    return data;
+}
+
 static bool
 gm_context_track_skeleton(struct gm_context *ctx,
                           struct gm_tracking_impl *tracking)
@@ -2706,27 +2826,17 @@ gm_context_track_skeleton(struct gm_context *ctx,
             colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
         }
 
-        int vid_fx = tracking->video_camera_intrinsics.fx;
-        int vid_fy = tracking->video_camera_intrinsics.fy;
-        int vid_cx = tracking->video_camera_intrinsics.cx;
-        int vid_cy = tracking->video_camera_intrinsics.cy;
-        int vid_width = tracking->frame->video_intrinsics.width;
-        //int vid_height = tracking->frame->video_intrinsics.height;
-        int vid_rot_width = tracking->video_camera_intrinsics.width;
-        int vid_rot_height = tracking->video_camera_intrinsics.height;
-        uint8_t *video = (uint8_t*)tracking->frame->video->data;
-
         for (unsigned i = 0; i < depth_class_size; ++i) {
-            pcl::PointXYZL point =
-                tracking->depth_class->points[i];
 
             int off = i;
-            bool pt_isnan = std::isnan(point.z);
-
-            if (!pt_isnan && tracking->frame->pose.valid) {
-                off = project_point_into_codebook(
-                    &point, to_start, start_to_codebook,
-                    &tracking->depth_camera_intrinsics, seg_res);
+            if (tracking->frame->pose.valid) {
+                pcl::PointXYZL point =
+                    tracking->depth_class->points[i];
+                if (!std::isnan(point.z)) {
+                    off = project_point_into_codebook(
+                        &point, to_start, start_to_codebook,
+                        &tracking->depth_camera_intrinsics, seg_res);
+                }
             }
 
             if (off < 0) {
@@ -2736,107 +2846,37 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
-            gm_bg_model_data data;
-            switch (seg_type) {
-                case DEPTH:
-                    data.pt = point;
-                    break;
-                case VIDEO: {
-                    if (pt_isnan) {
-                        data.pixel = 0;
-                        break;
-                    }
-                    // Reverse rotation so we can use with_rotated_rx_ry_roff
-                    enum gm_rotation rotation;
-                    switch (tracking->frame->camera_rotation) {
-                    case GM_ROTATION_0: rotation = GM_ROTATION_0; break;
-                    case GM_ROTATION_90: rotation = GM_ROTATION_270; break;
-                    case GM_ROTATION_180: rotation = GM_ROTATION_180; break;
-                    case GM_ROTATION_270: rotation = GM_ROTATION_90; break;
-                    }
-
-                    // Reproject video to this depth point
-                    int vx = clampf(point.x * vid_fx / point.z + vid_cx,
-                                   0.f, vid_rot_width);
-                    int vy = clampf(point.y * vid_fy / point.z + vid_cy,
-                                   0.f, vid_rot_height);
-
-                    uint32_t pixel;
-                    uint8_t *subpixel = (uint8_t *)(&pixel);
-                    with_rotated_rx_ry_roff(vx, vy,
-                        vid_rot_width, vid_rot_height, rotation, vid_width,
-                        {
-                            switch (tracking->frame->video_format) {
-                            case GM_FORMAT_RGB_U8:
-                                subpixel[0] = video[roff*3];
-                                subpixel[1] = video[roff*3+1];
-                                subpixel[2] = video[roff*3+2];
-                                break;
-                            case GM_FORMAT_BGR_U8:
-                                subpixel[2] = video[roff*3];
-                                subpixel[1] = video[roff*3+1];
-                                subpixel[0] = video[roff*3+2];
-                                break;
-                            case GM_FORMAT_RGBX_U8:
-                            case GM_FORMAT_RGBA_U8:
-                                subpixel[0] = video[roff*4];
-                                subpixel[1] = video[roff*4+1];
-                                subpixel[2] = video[roff*4+2];
-                                break;
-                            case GM_FORMAT_BGRX_U8:
-                            case GM_FORMAT_BGRA_U8:
-                                subpixel[2] = video[roff*4];
-                                subpixel[1] = video[roff*4+1];
-                                subpixel[0] = video[roff*4+2];
-                                break;
-                            case GM_FORMAT_LUMINANCE_U8:
-                                subpixel[0] = subpixel[1] = subpixel[2] =
-                                    video[roff];
-                                break;
-
-                            case GM_FORMAT_UNKNOWN:
-                            case GM_FORMAT_Z_U16_MM:
-                            case GM_FORMAT_Z_F32_M:
-                            case GM_FORMAT_Z_F16_M:
-                            case GM_FORMAT_POINTS_XYZC_F32_M:
-                                gm_assert(ctx->log, 0,
-                                          "Unexpected video buffer format");
-                            }
-                        });
-                    data.pixel = pixel;
-                }
-            }
-
-            int x = off % tracking->depth_class->width;
-            int y = off / tracking->depth_class->width;
-
             // We need to seed the bg model first or everything will forever
             // be classed as foreground. It's ok if we incorrectly add
             // foreground to the BG model as it'll (hopefully) decay and be
             // replaced by background.
+            int seg_samples = ctx->seg_samples;
+
             if (reset_pose) {
-                for (int s = 0; s < ctx->seg_samples; ++s) {
+                for (int s = 0; s < seg_samples; ++s) {
                     // Pick a random neighbour to initialise this point in the
                     // background model.
-                    int ni = rand() % 9;
-                    if (ni >= 4) { ++ni; }
-                    int nx = clamp(int, x + ((ni % 3) - 1),
-                                   0, tracking->depth_class->width - 1);
-                    int ny = clamp(int, y + ((ni / 3) - 1),
-                                   0, tracking->depth_class->height - 1);
-                    int noff = ny * tracking->depth_class->width + nx;
-                    ctx->bg_model[noff].push_back(data);
+                    int noff = pick_8way_neighbour(off,
+                        tracking->depth_class->width,
+                        tracking->depth_class->height);
+                    gm_bg_model_data data =
+                        get_bg_model_data(tracking, noff, seg_type);
+                    ctx->bg_model[off].push_back(data);
                 }
                 continue;
-            } else if (ctx->bg_model[off].size() > ctx->seg_samples) {
-                ctx->bg_model[off].resize(ctx->seg_samples);
+            } else if (ctx->bg_model[off].size() > seg_samples) {
+                ctx->bg_model[off].resize(seg_samples);
             }
 
             // Compare against the background model
-            int matches = pt_isnan ? ctx->seg_bg_samples : 0;
+            gm_bg_model_data data = get_bg_model_data(tracking, off, seg_type);
+            int seg_bg_samples = ctx->seg_bg_samples;
+            int matches;
+
             switch (seg_type) {
             case DEPTH:
-                for (unsigned s = 0; matches < ctx->seg_bg_samples &&
+                matches = std::isnan(data.pt.z) ? seg_bg_samples : 0;
+                for (unsigned s = 0; matches < seg_bg_samples &&
                      s < ctx->bg_model[off].size(); ++s)
                 {
                     if (std::isnan(ctx->bg_model[off][s].pt.z)) {
@@ -2851,7 +2891,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 }
                 break;
             case VIDEO:
-                for (unsigned s = 0; matches < ctx->seg_bg_samples &&
+                matches = (data.pixel == 0) ? seg_bg_samples : 0;
+                for (unsigned s = 0; matches < seg_bg_samples &&
                      s < ctx->bg_model[off].size(); ++s)
                 {
                     if (ctx->bg_model[off][s].pixel == 0) {
@@ -2873,32 +2914,31 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 break;
             }
 
-            if (matches >= ctx->seg_bg_samples) {
+            if (matches >= seg_bg_samples) {
                 // Pixel matches the background
                 tracking->depth_class->points[off].label = BG;
 
-                if ((rand() % ctx->seg_update_freq) + 1 == 1) {
+                if ((rand() % ctx->seg_update_freq) == 0) {
                     // Add to the background model
-                    int replace = rand() % ctx->bg_model[off].size();
-                    ctx->bg_model[off][replace] = data;
+                    unsigned replace = rand() % seg_samples;
+                    if (replace >= ctx->bg_model[off].size()) {
+                        ctx->bg_model[off].push_back(data);
+                    } else {
+                        ctx->bg_model[off][replace] = data;
+                    }
                 }
 
-                if ((rand() % ctx->seg_update_freq) + 1 == 1) {
+                if ((rand() % ctx->seg_update_freq) == 0) {
                     // Update neighbouring pixel
-                    int ni = rand() % 9;
-                    if (ni >= 4) { ++ni; }
-                    int nx = x + ((ni % 3) - 1);
-                    int ny = y + ((ni / 3) - 1);
-
-                    if (nx >= 0 && nx < tracking->depth_class->width &&
-                        ny >= 0 && ny < tracking->depth_class->height) {
-                        int noff = ny * tracking->depth_class->width + nx;
-                        int replace = rand() % ctx->seg_samples;
-                        if (replace >= ctx->bg_model[noff].size()) {
-                            ctx->bg_model[noff].push_back(data);
-                        } else {
-                            ctx->bg_model[noff][replace] = data;
-                        }
+                    int noff =
+                        pick_8way_neighbour(off,
+                                            tracking->depth_class->width,
+                                            tracking->depth_class->height);
+                    unsigned replace = rand() % seg_samples;
+                    if (replace >= ctx->bg_model[noff].size()) {
+                        ctx->bg_model[noff].push_back(data);
+                    } else {
+                        ctx->bg_model[noff][replace] = data;
                     }
                 }
             } else {
