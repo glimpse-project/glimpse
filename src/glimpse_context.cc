@@ -114,7 +114,8 @@
     for (int y = 0, off = 0; y < (int)height; ++y) \
         for (int x = 0; x < (int)width; ++x, ++off)
 
-#define clampf(v, lo, hi) std::min(std::max(v, lo), hi)
+#define clamp(type, v, lo, hi) std::min<type>(std::max<type>((type)(v), (type)(lo)), (type)(hi))
+#define clampf(v, lo, hi) clamp(float, v, lo, hi)
 
 /* A suboptimal but convenient way for us to handle image rotations inline with
  * copies/format conversions.
@@ -2403,8 +2404,8 @@ colour_debug_cloud(struct gm_context *ctx,
 
                     // Reproject the depth coordinates into video space
                     // TODO: Support extrinsics
-                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width);
-                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height);
+                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, vid_width);
+                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, vid_height);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
                     debug_cloud[i].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
@@ -2423,8 +2424,8 @@ colour_debug_cloud(struct gm_context *ctx,
 
                     // Reproject the depth coordinates into video space
                     // TODO: Support extrinsics
-                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width);
-                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height);
+                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, vid_width);
+                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, vid_height);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
                     debug_cloud[off].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
@@ -2710,7 +2711,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int vid_cx = tracking->video_camera_intrinsics.cx;
         int vid_cy = tracking->video_camera_intrinsics.cy;
         int vid_width = tracking->frame->video_intrinsics.width;
-        int vid_height = tracking->frame->video_intrinsics.height;
+        //int vid_height = tracking->frame->video_intrinsics.height;
         int vid_rot_width = tracking->video_camera_intrinsics.width;
         int vid_rot_height = tracking->video_camera_intrinsics.height;
         uint8_t *video = (uint8_t*)tracking->frame->video->data;
@@ -2720,7 +2721,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 tracking->depth_class->points[i];
 
             int off = i;
-            bool pt_isnan = std::isnan(point.x);
+            bool pt_isnan = std::isnan(point.z);
 
             if (!pt_isnan && tracking->frame->pose.valid) {
                 off = project_point_into_codebook(
@@ -2756,9 +2757,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
                     // Reproject video to this depth point
                     int vx = clampf(point.x * vid_fx / point.z + vid_cx,
-                                    0.f, (float)vid_rot_width);
+                                   0.f, vid_rot_width);
                     int vy = clampf(point.y * vid_fy / point.z + vid_cy,
-                                    0.f, (float)vid_rot_height);
+                                   0.f, vid_rot_height);
 
                     uint32_t pixel;
                     uint8_t *subpixel = (uint8_t *)(&pixel);
@@ -2806,31 +2807,39 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 }
             }
 
+            int x = off % tracking->depth_class->width;
+            int y = off / tracking->depth_class->width;
+
             // We need to seed the bg model first or everything will forever
             // be classed as foreground. It's ok if we incorrectly add
             // foreground to the BG model as it'll (hopefully) decay and be
             // replaced by background.
-            if (ctx->bg_model[off].size() < ctx->seg_samples) {
-                ctx->bg_model[off].push_back(data);
-                tracking->depth_class->points[off].label = UNC;
+            if (reset_pose) {
+                for (int s = 0; s < ctx->seg_samples; ++s) {
+                    // Pick a random neighbour to initialise this point in the
+                    // background model.
+                    int ni = rand() % 9;
+                    if (ni >= 4) { ++ni; }
+                    int nx = clamp(int, x + ((ni % 3) - 1),
+                                   0, tracking->depth_class->width - 1);
+                    int ny = clamp(int, y + ((ni / 3) - 1),
+                                   0, tracking->depth_class->height - 1);
+                    int noff = ny * tracking->depth_class->width + nx;
+                    ctx->bg_model[noff].push_back(data);
+                }
                 continue;
             } else if (ctx->bg_model[off].size() > ctx->seg_samples) {
                 ctx->bg_model[off].resize(ctx->seg_samples);
             }
 
             // Compare against the background model
-            int matches = 0;
+            int matches = pt_isnan ? ctx->seg_bg_samples : 0;
             switch (seg_type) {
             case DEPTH:
-                for (int s = 0; matches < ctx->seg_bg_samples &&
-                     s < ctx->seg_samples; ++s)
+                for (unsigned s = 0; matches < ctx->seg_bg_samples &&
+                     s < ctx->bg_model[off].size(); ++s)
                 {
-                    if (std::isnan(ctx->bg_model[off][s].pt.x) != pt_isnan) {
-                        continue;
-                    }
-
-                    if (pt_isnan) {
-                        ++matches;
+                    if (std::isnan(ctx->bg_model[off][s].pt.z)) {
                         continue;
                     }
 
@@ -2842,16 +2851,10 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 }
                 break;
             case VIDEO:
-                for (int s = 0; matches < ctx->seg_bg_samples &&
-                     s < ctx->seg_samples; ++s)
+                for (unsigned s = 0; matches < ctx->seg_bg_samples &&
+                     s < ctx->bg_model[off].size(); ++s)
                 {
-                    if ((data.pixel == 0) !=
-                        (ctx->bg_model[off][s].pixel == 0)) {
-                        continue;
-                    }
-
-                    if (data.pixel == 0) {
-                        ++matches;
+                    if (ctx->bg_model[off][s].pixel == 0) {
                         continue;
                     }
 
@@ -2876,15 +2879,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
                 if ((rand() % ctx->seg_update_freq) + 1 == 1) {
                     // Add to the background model
-                    int replace = rand() % ctx->seg_samples;
+                    int replace = rand() % ctx->bg_model[off].size();
                     ctx->bg_model[off][replace] = data;
                 }
 
                 if ((rand() % ctx->seg_update_freq) + 1 == 1) {
                     // Update neighbouring pixel
-                    int x = off % tracking->depth_class->width;
-                    int y = off / tracking->depth_class->width;
-
                     int ni = rand() % 9;
                     if (ni >= 4) { ++ni; }
                     int nx = x + ((ni % 3) - 1);
