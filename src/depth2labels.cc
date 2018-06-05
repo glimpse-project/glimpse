@@ -40,7 +40,6 @@
 
 #include "image_utils.h"
 #include "xalloc.h"
-#include "utils.h"
 #include "rdt_tree.h"
 #include "infer.h"
 

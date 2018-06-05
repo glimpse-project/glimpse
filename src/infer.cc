@@ -35,7 +35,6 @@
 
 #include "infer.h"
 #include "xalloc.h"
-#include "utils.h"
 #include "rdt_tree.h"
 #include "jip.h"
 
@@ -71,6 +70,8 @@ typedef struct {
     float* output;
 } InferThreadData;
 
+typedef vector(int, 2) Int2D;
+
 template<typename FloatT>
 static void*
 infer_labels_thread(void* userdata)
@@ -79,19 +80,22 @@ infer_labels_thread(void* userdata)
     FloatT* depth_image = (FloatT*)data->depth_image;
     int n_labels = data->forest[0]->header.n_labels;
 
+    int width = data->width;
+    int height = data->height;
+
     // Accumulate probability map
     for (int off = data->thread;
-         off < data->width * data->height;
+         off < width * height;
          off += data->n_threads)
     {
         int y = off / data->width;
         int x = off % data->width;
 
         float* out_pr_table = &data->output[off * n_labels];
-        float depth_value = (float)depth_image[off];
+        float depth = depth_image[off];
 
         // TODO: Provide a configurable threshold here?
-        if (depth_value >= HUGE_DEPTH)
+        if (depth >= HUGE_DEPTH)
         {
             out_pr_table[data->forest[0]->header.bg_label] += 1.0f;
             continue;
@@ -101,14 +105,23 @@ infer_labels_thread(void* userdata)
         for (int i = 0; i < data->n_trees; ++i)
         {
             RDTree* tree = data->forest[i];
-            Node* node = tree->nodes;
+            Node node = tree->nodes[0];
 
             int id = 0;
-            while (node->label_pr_idx == 0)
-            {
-                float value = sample_uv<FloatT>(depth_image,
-                                                data->width, data->height,
-                                                pixel, depth_value, node->uv);
+            while (node.label_pr_idx == 0) {
+                Int2D u = { (int)(pixel[0] + node.uv[0] / depth),
+                            (int)(pixel[1] + node.uv[1] / depth) };
+                Int2D v = { (int)(pixel[0] + node.uv[2] / depth),
+                            (int)(pixel[1] + node.uv[3] / depth) };
+
+                float upixel = (u[0] >= 0 && u[0] < (int)width &&
+                                u[1] >= 0 && u[1] < (int)height) ?
+                    (float)depth_image[((u[1] * width) + u[0])] : 1000.f;
+                float vpixel = (v[0] >= 0 && v[0] < (int)width &&
+                                v[1] >= 0 && v[1] < (int)height) ?
+                    (float)depth_image[((v[1] * width) + v[0])] : 1000.f;
+
+                float gradient = upixel - vpixel;
 
                 /* NB: The nodes are arranged in breadth-first, left then
                  * right child order with the root node at index zero.
@@ -117,16 +130,17 @@ infer_labels_thread(void* userdata)
                  * ('id' here) then 2 * id + 1 is the index for the left
                  * child and 2 * id + 2 is the index for the right child...
                  */
-                id = (value < node->t) ? 2 * id + 1 : 2 * id + 2;
+                //id = (gradient < (node->t / 1000.0f)) ? 2 * id + 1 : 2 * id + 2;
+                id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
 
-                node = &tree->nodes[id];
+                node = tree->nodes[id];
             }
 
             /* NB: node->label_pr_idx is a base-one index since index zero
              * is reserved to indicate that the node is not a leaf node
              */
             float* pr_table =
-                &tree->label_pr_tables[(node->label_pr_idx - 1) * n_labels];
+                &tree->label_pr_tables[(node.label_pr_idx - 1) * n_labels];
             for (int n = 0; n < n_labels; ++n)
             {
                 out_pr_table[n] += pr_table[n];

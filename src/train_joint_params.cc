@@ -35,8 +35,6 @@
 #include <cmath>
 
 #include "xalloc.h"
-#include "llist.h"
-#include "utils.h"
 #include "train_utils.h"
 #include "rdt_tree.h"
 #include "infer.h"
@@ -46,6 +44,7 @@
 
 #include "glimpse_log.h"
 
+#define JIP_VERSION 0
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.001f
 #define PROGRESS_WIDTH 80
