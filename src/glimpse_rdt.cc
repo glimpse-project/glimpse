@@ -1527,7 +1527,7 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = INT_MAX;
     ctx->properties.push_back(prop);
 
-    ctx->uv_range = 0.8;
+    ctx->uv_range = 0.4;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "uv_range";
