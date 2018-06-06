@@ -2783,6 +2783,13 @@ viewer_destroy(Data *data)
 
     delete data->events_front;
     delete data->events_back;
+
+#ifdef USE_GLFW
+    ImGui_ImplGlfwGLES3_Shutdown();
+    glfwDestroyWindow(data->window);
+    glfwTerminate();
+#endif
+
     delete data;
 
     ProfileShutdown();
@@ -3045,10 +3052,6 @@ main(int argc, char **argv)
     event_loop(data);
 
     viewer_destroy(data);
-
-    ImGui_ImplGlfwGLES3_Shutdown();
-    glfwDestroyWindow(data->window);
-    glfwTerminate();
 
     return 0;
 #endif
