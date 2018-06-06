@@ -2327,6 +2327,12 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     for (int i = 0; i < ctx->n_uvs * 4; i++)
         ctx->uvs[i] = round(rand_uv(rng));
 
+    if (ctx->n_thresholds % 2 == 0) {
+        gm_info(ctx->log, "Increasing N thresholds from %d to %d for symmetry around zero",
+                ctx->n_thresholds, ctx->n_thresholds + 1);
+        ctx->n_thresholds++;
+    }
+
     ctx->thresholds = (int16_t*)xmalloc(ctx->n_thresholds * sizeof(int16_t));
 
     int threshold_step_mm = ctx->threshold_range * 500.0 /
