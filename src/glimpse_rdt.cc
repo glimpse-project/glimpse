@@ -72,9 +72,6 @@ using half_float::half;
             threshold; /* statement expression evaluates to this */ \
         })
 
-#define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
-typedef vector(int, 2) Int2D;
-
 static void
 process_node_shards_work_cb(struct thread_state* state,
                             void* user_data);
@@ -113,7 +110,6 @@ struct node_shard_data {
     int best_uv;
     int best_threshold;
     int n_lr_pixels[2];
-    float nhistogram[MAX_LABELS];
     uint64_t duration;
 };
 
@@ -137,6 +133,9 @@ struct node_shard_results {
                                 // once. Take lock and enumerate each data entry
                                 // to see that they are all complete.
     bool taken;
+
+    int n_node_labels; // How many labels have been observed for this node's pixels
+    float nhistogram[MAX_LABELS];
 
     int n_shards;
     struct node_shard_data data[];
@@ -600,46 +599,41 @@ generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
     return root_node.pixels;
 }
 
-static inline Int2D
-normalize_histogram(int* histogram, int n_labels, float* normalized)
+static void
+normalize_histogram(int* histogram,
+                    int n_labels,
+                    float* normalized,
+                    int* n_histogram_pixels_ret,
+                    int* n_histogram_labels_ret)
 {
-    Int2D sums = { 0, 0 };
+    int n_histogram_pixels = 0;
+    int n_histogram_labels = 0;
 
-    for (int i = 0; i < n_labels; i++)
-    {
-        if (histogram[i] > 0)
-        {
-            sums[0] += histogram[i];
-            ++sums[1];
+    for (int i = 0; i < n_labels; i++) {
+        if (histogram[i] > 0) {
+            n_histogram_pixels += histogram[i];
+            n_histogram_labels++;
         }
     }
 
-    if (sums[0] > 0)
-    {
+    if (n_histogram_pixels) {
         for (int i = 0; i < n_labels; i++)
-        {
-            normalized[i] = histogram[i] / (float)sums[0];
-        }
-    }
-    else
-    {
+            normalized[i] = histogram[i] / (float)n_histogram_pixels;
+    } else
         memset(normalized, 0, n_labels * sizeof(float));
-    }
 
-    return sums;
+    *n_histogram_pixels_ret = n_histogram_pixels;
+    *n_histogram_labels_ret = n_histogram_labels;
 }
 
 static inline float
 calculate_shannon_entropy(float* normalized_histogram, int n_labels)
 {
     float entropy = 0.f;
-    for (int i = 0; i < n_labels; i++)
-    {
+    for (int i = 0; i < n_labels; i++) {
         float value = normalized_histogram[i];
         if (value > 0.f && value < 1.f)
-        {
             entropy += -value * log2f(value);
-        }
     }
     return entropy;
 }
@@ -713,7 +707,6 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                              struct thread_state *state,
                              struct node_data* data,
                              int uv_start, int uv_end,
-                             int* node_histogram,
                              int* uvt_lr_histograms,
                              int n_shards)
 {
@@ -762,8 +755,6 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         gm_assert(ctx->log, label < n_labels,
                   "Label '%d' is bigger than expected (max %d)\n",
                   label, n_labels - 1);
-
-        node_histogram[label]++;
 
         // Don't waste processing time if this is the last depth
         if (node_depth >= max_depth - 1) {
@@ -823,10 +814,6 @@ node_shard_work_cb(struct thread_state* state,
     struct node_shard_results* results = shard_work->results;
     struct node_shard_data* shard_data = &results->data[shard_work->shard_index];
 
-    // Histogram for the node being processed
-    int node_histogram[ctx->n_labels];
-    memset(node_histogram, 0, sizeof(node_histogram));
-
     int n_labels = ctx->n_labels;
 
     // Histograms for each uvt combination being tested
@@ -847,34 +834,27 @@ node_shard_work_cb(struct thread_state* state,
                 shard_work->shard_index, node_data.id, node_depth);
     }
 
-    // Accumulate histograms
-    uint64_t accu_start = get_time();
-    accumulate_uvt_lr_histograms(ctx,
-                                 state,
-                                 &node_data,
-                                 shard_work->uv_start, shard_work->uv_end,
-                                 node_histogram,
-                                 state->uvt_lr_histograms.data(),
-                                 results->n_shards);
-    uint64_t accu_end = get_time();
-    depth_metrics->accumulation_time += accu_end - accu_start;
-
-    // Calculate the normalised label histogram and get the number of pixels
-    // and the number of labels in the root histogram.
-    Int2D root_n_pixels = normalize_histogram(node_histogram,
-                                              ctx->n_labels,
-                                              shard_data->nhistogram);
-
     // Determine the best u,v,t combination
     shard_data->best_gain = 0.f;
 
     // If there's only 1 label, skip all this, gain is zero
-    if (root_n_pixels[1] > 1 && node_depth < ctx->max_depth - 1)
+    if (results->n_node_labels > 1 && node_depth < ctx->max_depth - 1)
     {
+        uint64_t accu_start = get_time();
+        accumulate_uvt_lr_histograms(ctx,
+                                     state,
+                                     &node_data,
+                                     shard_work->uv_start, shard_work->uv_end,
+                                     state->uvt_lr_histograms.data(),
+                                     results->n_shards);
+        uint64_t accu_end = get_time();
+        depth_metrics->accumulation_time += accu_end - accu_start;
+
+
         uint64_t rank_start = get_time();
 
         // Calculate the shannon entropy for the normalised label histogram
-        float entropy = calculate_shannon_entropy(shard_data->nhistogram,
+        float entropy = calculate_shannon_entropy(results->nhistogram,
                                                   ctx->n_labels);
 
         int n_uv_combos = shard_work->uv_end - shard_work->uv_start;
@@ -888,33 +868,38 @@ node_shard_work_cb(struct thread_state* state,
                 float nhistogram[ctx->n_labels];
                 float l_entropy, r_entropy, gain;
 
-                Int2D l_n_pixels =
-                    normalize_histogram(&state->uvt_lr_histograms[lr_histo_base],
-                                        ctx->n_labels, nhistogram);
-                if (l_n_pixels[0] == 0 || l_n_pixels[0] == root_n_pixels[0])
-                {
+                int l_n_pixels = 0;
+                int l_n_labels = 0;
+                normalize_histogram(&state->uvt_lr_histograms[lr_histo_base],
+                                    ctx->n_labels, nhistogram,
+                                    &l_n_pixels,
+                                    &l_n_labels);
+                if (l_n_pixels == 0 || l_n_pixels == node_data.n_pixels)
                     continue;
-                }
+
                 l_entropy = calculate_shannon_entropy(nhistogram,
                                                       ctx->n_labels);
 
-                Int2D r_n_pixels =
-                    normalize_histogram(
-                        &state->uvt_lr_histograms[lr_histo_base + ctx->n_labels],
-                        ctx->n_labels, nhistogram);
+                int r_n_pixels = 0;
+                int r_n_labels = 0;
+                normalize_histogram(
+                    &state->uvt_lr_histograms[lr_histo_base + ctx->n_labels],
+                    ctx->n_labels, nhistogram,
+                    &r_n_pixels,
+                    &r_n_labels);
                 r_entropy = calculate_shannon_entropy(nhistogram,
                                                       ctx->n_labels);
 
-                gain = calculate_gain(entropy, root_n_pixels[0],
-                                      l_entropy, l_n_pixels[0],
-                                      r_entropy, r_n_pixels[0]);
+                gain = calculate_gain(entropy, node_data.n_pixels,
+                                      l_entropy, l_n_pixels,
+                                      r_entropy, r_n_pixels);
 
                 if (gain > shard_data->best_gain) {
                     shard_data->best_gain = gain;
                     shard_data->best_uv = shard_work->uv_start + i;
                     shard_data->best_threshold = j;
-                    shard_data->n_lr_pixels[0] = l_n_pixels[0];
-                    shard_data->n_lr_pixels[1] = r_n_pixels[0];
+                    shard_data->n_lr_pixels[0] = l_n_pixels;
+                    shard_data->n_lr_pixels[1] = r_n_pixels;
                 }
             }
         }
@@ -1032,6 +1017,25 @@ schedule_node_work(struct thread_state* state)
 
     node_results->n_shards = n_shards;
     node_results->ref = n_shards;
+
+    // Histogram for the node being processed
+    int node_histogram[ctx->n_labels];
+    memset(node_histogram, 0, sizeof(node_histogram));
+
+    accumulate_pixel_histograms(ctx, &node_data, node_histogram);
+
+    // Calculate the normalised label histogram and get the number of pixels
+    // and the number of labels in the root histogram.
+    int n_node_pixels = 0;
+    normalize_histogram(node_histogram,
+                        ctx->n_labels,
+                        node_results->nhistogram,
+                        &n_node_pixels,
+                        &node_results->n_node_labels);
+
+    gm_assert(ctx->log, n_node_pixels == node_data.n_pixels,
+              "Mismatching N pixels from node_data (%d) and histogram (%d)",
+              node_data.n_pixels, n_node_pixels);
 
     struct work jobs[n_shards];
 
@@ -1256,11 +1260,7 @@ process_node_shards_work_cb(struct thread_state* state,
     }
     else
     {
-        /* Each shard result will include a normalized histogram of pixel
-         * labels for the last node that was processed. They should all be
-         * identical so we just refer to the first result...
-         */
-        float *nhistogram = results->data[0].nhistogram;
+        float *nhistogram = results->nhistogram;
         if (ctx->verbose)
         {
             pthread_mutex_lock(&ctx->tidy_log_lock);
@@ -2052,9 +2052,13 @@ check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
     ctx->root_pixel_histogram.resize(ctx->n_labels);
     ctx->root_pixel_nhistogram.resize(ctx->n_labels);
     accumulate_pixel_histograms(ctx, root_node, ctx->root_pixel_histogram.data());
+    int n_root_pixels = 0;
+    int n_root_labels = 0;
     normalize_histogram(ctx->root_pixel_histogram.data(),
                         ctx->n_labels,
-                        ctx->root_pixel_nhistogram.data());
+                        ctx->root_pixel_nhistogram.data(),
+                        &n_root_pixels,
+                        &n_root_labels);
     JSON_Array* labels = json_object_get_array(json_object(ctx->data_meta),
                                                "labels");
     gm_info(ctx->log, "Histogram of root node pixel labels:");
