@@ -196,7 +196,12 @@ struct thread_state {
 
     pthread_t thread;
 
-    std::vector<int> uvt_lr_histograms;
+    /* We aim to use 16bit histograms when there are fewer than UINT16_MAX
+     * pixels for the current node, since the write bandwidth to these
+     * histograms can be a performance bottleneck
+     */
+    std::vector<uint32_t> uvt_lr_histograms_32;
+    std::vector<uint16_t> uvt_lr_histograms_16;
 
     uint64_t current_work_start;
     uint64_t last_metrics_log;
@@ -269,7 +274,7 @@ struct gm_rdt_context_impl {
     std::vector<node>   tree; // The decision tree being built
     std::vector<float>  tree_histograms; // label histograms for leaf nodes
 
-    std::vector<int>    root_pixel_histogram; // label histogram for initial pixels
+    std::vector<uint32_t>  root_pixel_histogram; // label histogram for initial pixels
     std::vector<float>  root_pixel_nhistogram; // normalized histogram for initial pixels
 
     struct gm_ui_properties properties_state;
@@ -600,11 +605,38 @@ generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
 }
 
 static void
-normalize_histogram(int* histogram,
-                    int n_labels,
-                    float* normalized,
-                    int* n_histogram_pixels_ret,
-                    int* n_histogram_labels_ret)
+normalize_histogram_16(uint16_t* histogram,
+                       int n_labels,
+                       float* normalized,
+                       int* n_histogram_pixels_ret,
+                       int* n_histogram_labels_ret)
+{
+    int n_histogram_pixels = 0;
+    int n_histogram_labels = 0;
+
+    for (int i = 0; i < n_labels; i++) {
+        if (histogram[i] > 0) {
+            n_histogram_pixels += histogram[i];
+            n_histogram_labels++;
+        }
+    }
+
+    if (n_histogram_pixels) {
+        for (int i = 0; i < n_labels; i++)
+            normalized[i] = histogram[i] / (float)n_histogram_pixels;
+    } else
+        memset(normalized, 0, n_labels * sizeof(float));
+
+    *n_histogram_pixels_ret = n_histogram_pixels;
+    *n_histogram_labels_ret = n_histogram_labels;
+}
+
+static void
+normalize_histogram_32(uint32_t* histogram,
+                       int n_labels,
+                       float* normalized,
+                       int* n_histogram_pixels_ret,
+                       int* n_histogram_labels_ret)
 {
     int n_histogram_pixels = 0;
     int n_histogram_labels = 0;
@@ -648,9 +680,9 @@ calculate_gain(float entropy, int n_pixels,
 }
 
 static void
-accumulate_pixel_histograms(struct gm_rdt_context_impl* ctx,
-                            struct node_data* data,
-                            int* node_histogram)
+accumulate_pixels_histogram_32(struct gm_rdt_context_impl* ctx,
+                               struct node_data* data,
+                               uint32_t* node_histogram)
 {
     int n_pixels = data->n_pixels;
 
@@ -707,7 +739,6 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                              struct thread_state *state,
                              struct node_data* data,
                              int uv_start, int uv_end,
-                             int* uvt_lr_histograms,
                              int n_shards)
 {
     int p;
@@ -722,6 +753,9 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 
     struct thread_depth_metrics_raw *depth_metrics =
         &state->per_depth_metrics[node_depth];
+
+    uint16_t* uvt_lr_histograms_16 = state->uvt_lr_histograms_16.data();
+    uint32_t* uvt_lr_histograms_32 = state->uvt_lr_histograms_32.data();
 
     for (p = 0; p < n_pixels; p++)
     {
@@ -782,26 +816,46 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         }
 
         int n_uv_combos = uv_end - uv_start;
-        for (int i = 0;  i < n_uv_combos; i++) {
-            int uv_offset = i * n_thresholds * n_labels * 2;
-            for (int n = 0; n < n_thresholds; n++) {
-                int threshold = ctx->thresholds[n];
-                int t_offset = n * n_labels * 2;
-                int lr_histogram_idx = uv_offset + t_offset;
 
-                //gm_info(ctx->log, "combo %d: %s", c,
-                //        gradients[c] < threshold ? "left" : "right");
-                // Accumulate histogram for this particular uvt combination
-                // on both theoretical branches
-                ++uvt_lr_histograms[(gradients[i] < threshold) ?
-                    lr_histogram_idx + label :
-                    lr_histogram_idx + n_labels + label];
+        /* Aim to minimize our memory bandwidth usage here by using 16bit
+         * histograms, since this is our typical bottleneck...
+         */
+        if (n_pixels < UINT16_MAX) {
+            for (int i = 0;  i < n_uv_combos; i++) {
+                int uv_offset = i * n_thresholds * n_labels * 2;
+                for (int n = 0; n < n_thresholds; n++) {
+                    int threshold = ctx->thresholds[n];
+                    int t_offset = n * n_labels * 2;
+                    int lr_histogram_idx = uv_offset + t_offset;
+
+                    //gm_info(ctx->log, "combo %d: %s", c,
+                    //        gradients[c] < threshold ? "left" : "right");
+                    // Accumulate histogram for this particular uvt combination
+                    // on both theoretical branches
+                    ++uvt_lr_histograms_16[(gradients[i] < threshold) ?
+                        lr_histogram_idx + label :
+                        lr_histogram_idx + n_labels + label];
+                }
             }
+        } else {
+            for (int i = 0;  i < n_uv_combos; i++) {
+                int uv_offset = i * n_thresholds * n_labels * 2;
+                for (int n = 0; n < n_thresholds; n++) {
+                    int threshold = ctx->thresholds[n];
+                    int t_offset = n * n_labels * 2;
+                    int lr_histogram_idx = uv_offset + t_offset;
 
+                    //gm_info(ctx->log, "combo %d: %s", c,
+                    //        gradients[c] < threshold ? "left" : "right");
+                    // Accumulate histogram for this particular uvt combination
+                    // on both theoretical branches
+                    ++uvt_lr_histograms_32[(gradients[i] < threshold) ?
+                        lr_histogram_idx + label :
+                        lr_histogram_idx + n_labels + label];
+                }
+            }
         }
-
     }
-
 }
 
 static void
@@ -816,14 +870,23 @@ node_shard_work_cb(struct thread_state* state,
 
     int n_labels = ctx->n_labels;
 
+    struct node_data node_data = shard_work->node_data;
+
     // Histograms for each uvt combination being tested
     int n_uv_combos = shard_work->uv_end - shard_work->uv_start;
     int n_thresholds = ctx->n_thresholds;
     int n_uvt_combos = n_uv_combos * n_thresholds;
-    state->uvt_lr_histograms.clear();
-    state->uvt_lr_histograms.resize(ctx->n_labels * n_uvt_combos * 2);
+    if (node_data.n_pixels < UINT16_MAX) {
+        state->uvt_lr_histograms_16.clear();
+        state->uvt_lr_histograms_16.resize(ctx->n_labels * n_uvt_combos * 2);
+        gm_info(ctx->log, "16 bit histogram");
+    } else {
+        state->uvt_lr_histograms_32.clear();
+        state->uvt_lr_histograms_32.resize(ctx->n_labels * n_uvt_combos * 2);
+    }
 
-    struct node_data node_data = shard_work->node_data;
+    uint16_t* uvt_lr_histograms_16 = state->uvt_lr_histograms_16.data();
+    uint32_t* uvt_lr_histograms_32 = state->uvt_lr_histograms_32.data();
 
     int node_depth = id_to_depth(node_data.id);
     struct thread_depth_metrics_raw *depth_metrics =
@@ -845,7 +908,6 @@ node_shard_work_cb(struct thread_state* state,
                                      state,
                                      &node_data,
                                      shard_work->uv_start, shard_work->uv_end,
-                                     state->uvt_lr_histograms.data(),
                                      results->n_shards);
         uint64_t accu_end = get_time();
         depth_metrics->accumulation_time += accu_end - accu_start;
@@ -870,10 +932,18 @@ node_shard_work_cb(struct thread_state* state,
 
                 int l_n_pixels = 0;
                 int l_n_labels = 0;
-                normalize_histogram(&state->uvt_lr_histograms[lr_histo_base],
-                                    ctx->n_labels, nhistogram,
-                                    &l_n_pixels,
-                                    &l_n_labels);
+
+                if (node_data.n_pixels < UINT16_MAX) {
+                    normalize_histogram_16(&uvt_lr_histograms_16[lr_histo_base],
+                                           ctx->n_labels, nhistogram,
+                                           &l_n_pixels,
+                                           &l_n_labels);
+                } else {
+                    normalize_histogram_32(&uvt_lr_histograms_32[lr_histo_base],
+                                           ctx->n_labels, nhistogram,
+                                           &l_n_pixels,
+                                           &l_n_labels);
+                }
                 if (l_n_pixels == 0 || l_n_pixels == node_data.n_pixels)
                     continue;
 
@@ -882,11 +952,19 @@ node_shard_work_cb(struct thread_state* state,
 
                 int r_n_pixels = 0;
                 int r_n_labels = 0;
-                normalize_histogram(
-                    &state->uvt_lr_histograms[lr_histo_base + ctx->n_labels],
-                    ctx->n_labels, nhistogram,
-                    &r_n_pixels,
-                    &r_n_labels);
+                if (node_data.n_pixels < UINT16_MAX) {
+                    normalize_histogram_16(
+                        &uvt_lr_histograms_16[lr_histo_base + ctx->n_labels],
+                        ctx->n_labels, nhistogram,
+                        &r_n_pixels,
+                        &r_n_labels);
+                } else {
+                    normalize_histogram_32(
+                        &uvt_lr_histograms_32[lr_histo_base + ctx->n_labels],
+                        ctx->n_labels, nhistogram,
+                        &r_n_pixels,
+                        &r_n_labels);
+                }
                 r_entropy = calculate_shannon_entropy(nhistogram,
                                                       ctx->n_labels);
 
@@ -1019,19 +1097,19 @@ schedule_node_work(struct thread_state* state)
     node_results->ref = n_shards;
 
     // Histogram for the node being processed
-    int node_histogram[ctx->n_labels];
+    uint32_t node_histogram[ctx->n_labels];
     memset(node_histogram, 0, sizeof(node_histogram));
 
-    accumulate_pixel_histograms(ctx, &node_data, node_histogram);
+    accumulate_pixels_histogram_32(ctx, &node_data, node_histogram);
 
     // Calculate the normalised label histogram and get the number of pixels
     // and the number of labels in the root histogram.
     int n_node_pixels = 0;
-    normalize_histogram(node_histogram,
-                        ctx->n_labels,
-                        node_results->nhistogram,
-                        &n_node_pixels,
-                        &node_results->n_node_labels);
+    normalize_histogram_32(node_histogram,
+                           ctx->n_labels,
+                           node_results->nhistogram,
+                           &n_node_pixels,
+                           &node_results->n_node_labels);
 
     gm_assert(ctx->log, n_node_pixels == node_data.n_pixels,
               "Mismatching N pixels from node_data (%d) and histogram (%d)",
@@ -1315,10 +1393,14 @@ worker_thread_cb(void* userdata)
     // combos at a time so we can allocate the memory up front...
     int max_uv_combos_per_thread = (ctx->n_uvs + ctx->n_threads/2) / ctx->n_threads;
 
-    state->uvt_lr_histograms.reserve(ctx->n_labels *
-                                     max_uv_combos_per_thread *
-                                     ctx->n_thresholds *
-                                     2);
+    state->uvt_lr_histograms_16.reserve(ctx->n_labels *
+                                        max_uv_combos_per_thread *
+                                        ctx->n_thresholds *
+                                        2);
+    state->uvt_lr_histograms_32.reserve(ctx->n_labels *
+                                        max_uv_combos_per_thread *
+                                        ctx->n_thresholds *
+                                        2);
 
     while (1)
     {
@@ -2051,14 +2133,14 @@ check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
     gm_info(ctx->log, "Calculating root node pixel histogram");
     ctx->root_pixel_histogram.resize(ctx->n_labels);
     ctx->root_pixel_nhistogram.resize(ctx->n_labels);
-    accumulate_pixel_histograms(ctx, root_node, ctx->root_pixel_histogram.data());
+    accumulate_pixels_histogram_32(ctx, root_node, ctx->root_pixel_histogram.data());
     int n_root_pixels = 0;
     int n_root_labels = 0;
-    normalize_histogram(ctx->root_pixel_histogram.data(),
-                        ctx->n_labels,
-                        ctx->root_pixel_nhistogram.data(),
-                        &n_root_pixels,
-                        &n_root_labels);
+    normalize_histogram_32(ctx->root_pixel_histogram.data(),
+                           ctx->n_labels,
+                           ctx->root_pixel_nhistogram.data(),
+                           &n_root_pixels,
+                           &n_root_labels);
     JSON_Array* labels = json_object_get_array(json_object(ctx->data_meta),
                                                "labels");
     gm_info(ctx->log, "Histogram of root node pixel labels:");
