@@ -580,11 +580,12 @@ pre_process_label_image_cb(struct gm_data_index* data_index,
     int n_body_points = labels_pre_processor->in_body_pixels.size();
     labels_pre_processor->indices.clear();
     for (int j = 0; j < ctx->n_pixels; j++) {
-        float rnd01 = labels_pre_processor->rand_0_1(labels_pre_processor->rng);
-        int off = rnd01 * n_body_points;
-        gm_assert(ctx->log, off < n_body_points, "Out-of-range body pixel selected (%d/%d), rand=%f",
-                  off, n_body_points, rnd01);
-        labels_pre_processor->indices.push_back(off);
+
+        int off = labels_pre_processor->rand_0_1(labels_pre_processor->rng) * n_body_points;
+
+        /* XXX: It's important we clamp here since the rounding can otherwise
+         * result in off == n_body_points */
+        labels_pre_processor->indices.push_back(std::min(off, n_body_points - 1));
     }
 
     /* May slightly improve cache access patterns if we can process
