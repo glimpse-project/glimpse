@@ -581,6 +581,7 @@ pre_process_label_image_cb(struct gm_data_index* data_index,
     labels_pre_processor->indices.clear();
     for (int j = 0; j < ctx->n_pixels; j++) {
         int off = labels_pre_processor->rand_0_1(labels_pre_processor->rng) * n_body_points;
+        gm_assert(ctx->log, off < n_body_points, "Out-of-range body pixel selected");
         labels_pre_processor->indices.push_back(off);
     }
 
@@ -599,6 +600,12 @@ pre_process_label_image_cb(struct gm_data_index* data_index,
         pixel.y = off / width;
         pixel.label = label_image[off];
         pixel.i = index;
+
+        /* Try and double check we haven't muddled up something silly... */
+        gm_assert(ctx->log, label_image[pixel.y * width + pixel.x] != 0,
+                  "Spurious background pixel (%d,%d) sampled for image %s",
+                  pixel.x, pixel.y,
+                  frame_path);
 
         pixel.x -= bounds.min_x;
         pixel.y -= bounds.min_y;
