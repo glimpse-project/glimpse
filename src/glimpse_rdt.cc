@@ -769,6 +769,8 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             last_i = i;
         }
 
+        int n_uv_combos = uv_end - uv_start;
+
         if (p % 10000 == 0) {
             if (interrupted)
                 break;
@@ -805,7 +807,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 
         int32_t *uvs = ctx->uvs.data();
 
-        int16_t gradients[uv_end - uv_start];
+        int16_t gradients[n_uv_combos];
         for (int c = uv_start; c < uv_end; c++) {
             gradients[c - uv_start] = sample_uv_gradient_mm(depth_image,
                                                             width, height,
@@ -814,8 +816,6 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                                                             half_depth,
                                                             uvs + 4 * c);
         }
-
-        int n_uv_combos = uv_end - uv_start;
 
         /* Aim to minimize our memory bandwidth usage here by using 16bit
          * histograms, since this is our typical bottleneck...
@@ -1083,7 +1083,15 @@ schedule_node_work(struct thread_state* state)
      * of the work queue changes won't race with other worker threads taking
      * jobs from the queue.
      */
-    int n_shards = ctx->n_threads;
+
+    // We want the working set of uvt combos to be constrained enough that
+    // the uvt_lr_histrograms array can be cached
+    int est_uvt_lr_hist_size = ctx->n_uvs * ctx->n_thresholds * ctx->n_labels * 2;
+    /* TODO: make this configurable... */
+    int max_thread_uvt_lr_size = 4000000 / ctx->n_threads;
+    //int max_thread_uvt_lr_size = 1000000 / ctx->n_threads;
+    //int max_thread_uvt_lr_size = est_uvt_lr_hist_size / ctx->n_threads;
+    int n_shards = est_uvt_lr_hist_size / max_thread_uvt_lr_size;
     int n_uvs_per_shard = std::max(ctx->n_uvs / n_shards, 1);
     n_shards = ctx->n_uvs / n_uvs_per_shard;
 
