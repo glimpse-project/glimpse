@@ -80,6 +80,19 @@ process_node_shards_work_cb(struct thread_state* state,
 static const char *interrupt_reason;
 static bool interrupted;
 
+struct bounds {
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
+};
+
+struct depth_meta {
+    int width;
+    int height;
+    int64_t pixel_offset;
+};
+
 struct pixel {
     int16_t x;
     int16_t y;
@@ -229,8 +242,6 @@ struct gm_rdt_context_impl {
     char*    index_name;    // Name of the frame index like <name>.index to read
     char*    out_filename;  // Filename of tree (.json or .rdt) to write
 
-    int      width;         // Width of training images
-    int      height;        // Height of training images
     float    fov;           // Camera field of view
     int      n_labels;      // Number of labels in label images
 
@@ -257,6 +268,8 @@ struct gm_rdt_context_impl {
     int      n_nodes_trained;   // The number of nodes trained so far
 
     uint64_t start;
+
+    std::vector<depth_meta> depth_index;
 
     std::vector<thread_state> thread_pool;
 
@@ -456,30 +469,35 @@ id_to_depth(int id)
     return 32 - __builtin_clz(id32 + 1) - 1;
 }
 
-struct point_generator
+struct labels_pre_processor
 {
     struct gm_rdt_context_impl* ctx;
     uint64_t last_update;
     std::mt19937 rng;
     std::uniform_real_distribution<float> rand_0_1;
+    int width;
+    int height;
     int n_image_pixels;
     std::vector<uint8_t> image_buf;
     std::vector<int> in_body_pixels;
     std::vector<int> indices;
-    int n_pixels;
-    struct node_data root_node;
+    struct bounds* body_bounds;
+    struct pixel* random_pixels;
 };
 
 static bool
-generate_randomized_sample_points_cb(struct gm_data_index* data_index,
-                                     int index,
-                                     const char* frame_path,
-                                     void* user_data,
-                                     char** err)
+pre_process_label_image_cb(struct gm_data_index* data_index,
+                           int index,
+                           const char* frame_path,
+                           void* user_data,
+                           char** err)
 {
-    struct point_generator* generator = (struct point_generator*)user_data;
-    struct gm_rdt_context_impl* ctx = generator->ctx;
-    uint8_t* label_image = generator->image_buf.data();
+    struct labels_pre_processor* labels_pre_processor =
+        (struct labels_pre_processor*)user_data;
+    struct gm_rdt_context_impl* ctx = labels_pre_processor->ctx;
+    uint8_t* label_image = labels_pre_processor->image_buf.data();
+    int width = labels_pre_processor->width;
+    int height = labels_pre_processor->height;
 
     const char* top_dir = gm_data_index_get_top_dir(data_index);
 
@@ -487,7 +505,7 @@ generate_randomized_sample_points_cb(struct gm_data_index* data_index,
     xsnprintf(labels_filename, sizeof(labels_filename), "%s/labels/%s.png",
               top_dir, frame_path);
 
-    IUImageSpec label_spec = { ctx->width, ctx->height, IU_FORMAT_U8 };
+    IUImageSpec label_spec = { width, height, IU_FORMAT_U8 };
     if (iu_read_png_from_file(labels_filename, &label_spec, &label_image,
                               NULL, // palette output
                               NULL) // palette size
@@ -502,11 +520,17 @@ generate_randomized_sample_points_cb(struct gm_data_index* data_index,
      * of the body and so we're only interested in sampling points
      * inside the body...
      */
-    generator->in_body_pixels.clear();
+    labels_pre_processor->in_body_pixels.clear();
 
-    for (int y = 0; y < ctx->height; y++) {
-        for (int x = 0; x < ctx->width; x++) {
-            int off = y * ctx->width + x;
+    struct bounds bounds;
+    bounds.min_x = INT_MAX;
+    bounds.max_x = 0;
+    bounds.min_y = INT_MAX;
+    bounds.max_y = 0;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int off = y * width + x;
             int label = (int)label_image[off];
 
             gm_assert(ctx->log, label < ctx->n_labels,
@@ -514,10 +538,36 @@ generate_randomized_sample_points_cb(struct gm_data_index* data_index,
                       label, ctx->n_labels - 1);
 
             if (label != 0) { // 0 = background
-                generator->in_body_pixels.push_back(off);
+                if (x < bounds.min_x)
+                    bounds.min_x = x;
+                if (x > bounds.max_x)
+                    bounds.max_x = x;
+                if (y < bounds.min_y)
+                    bounds.min_y = y;
+                if (y > bounds.max_y)
+                    bounds.max_y = y;
+
+                labels_pre_processor->in_body_pixels.push_back(off);
             }
         }
     }
+
+    /* The image-pre-processor tool should already check this so just have
+     * a *very* conservative sanity check here...
+     */
+    gm_assert(ctx->log, labels_pre_processor->in_body_pixels.size() > 100,
+              "Fewer than 100 non-background pixels found in frame %s",
+              labels_filename);
+
+    int crop_width = bounds.max_x - bounds.min_x + 1;
+    int crop_height = bounds.max_y - bounds.min_y + 1;
+
+    gm_assert(ctx->log, width <= width,
+              "Bounded width (%d) > full width (%d)", crop_width, width);
+    gm_assert(ctx->log, height <= height,
+              "Bounded height (%d) > full height (%d)", crop_height, height);
+
+    labels_pre_processor->body_bounds[index] = bounds;
 
     /* Note: we don't do anything to filter out duplicates which could
      * be fairly likely for frames where the body is relatively small.
@@ -527,36 +577,57 @@ generate_randomized_sample_points_cb(struct gm_data_index* data_index,
      * approximately the same amount of energy training on each pose
      * regardless of body size or distance from the camera.
      */
-    int n_body_points = generator->in_body_pixels.size();
-    generator->indices.clear();
+    int n_body_points = labels_pre_processor->in_body_pixels.size();
+    labels_pre_processor->indices.clear();
     for (int j = 0; j < ctx->n_pixels; j++) {
-        int off = generator->rand_0_1(generator->rng) * n_body_points;
-        generator->indices.push_back(off);
+        int off = labels_pre_processor->rand_0_1(labels_pre_processor->rng) * n_body_points;
+        labels_pre_processor->indices.push_back(off);
     }
 
     /* May slightly improve cache access patterns if we can process
      * our samples in memory order, even though the UV sampling
      * is somewhat randomized relative to these pixels...
      */
-    std::sort(generator->indices.begin(), generator->indices.end());
+    std::sort(labels_pre_processor->indices.begin(),
+              labels_pre_processor->indices.end());
 
     for (int j = 0; j < ctx->n_pixels; j++) {
-        int off = generator->in_body_pixels[generator->indices[j]];
+        int off = labels_pre_processor->in_body_pixels[labels_pre_processor->indices[j]];
 
         struct pixel pixel;
-        pixel.x = off % ctx->width;
-        pixel.y = off / ctx->width;
+        pixel.x = off % width;
+        pixel.y = off / width;
         pixel.label = label_image[off];
         pixel.i = index;
 
-        generator->root_node.pixels[(int64_t)index * ctx->n_pixels + j] = pixel;
+        pixel.x -= bounds.min_x;
+        pixel.y -= bounds.min_y;
+
+        gm_assert(ctx->log, pixel.x < crop_width,
+                  "Image %s (%d,%d) has out-of-bounds width %d (after cropping to +%d,+%d,%dx%d)",
+                  frame_path,
+                  pixel.x + bounds.min_x,
+                  pixel.y + bounds.min_y,
+                  pixel.x,
+                  bounds.min_x, bounds.min_y,
+                  crop_width, crop_height);
+        gm_assert(ctx->log, pixel.y < crop_height,
+                  "Image %s (%d,%d) has out-of-bounds height %d (after cropping to +%d,+%d,%dx%d)",
+                  frame_path,
+                  pixel.x + bounds.min_x,
+                  pixel.y + bounds.min_y,
+                  pixel.y,
+                  bounds.min_x, bounds.min_y,
+                  crop_width, crop_height);
+
+        labels_pre_processor->random_pixels[(int64_t)index * ctx->n_pixels + j] = pixel;
     }
 
     uint64_t current = get_time();
-    if (current - generator->last_update > 2000000000) {
+    if (current - labels_pre_processor->last_update > 2000000000) {
         int percent = index * 100 / ctx->n_images;
         gm_info(ctx->log, "%3d%%", percent);
-        generator->last_update = current;
+        labels_pre_processor->last_update = current;
     }
 
     return true;
@@ -565,43 +636,38 @@ generate_randomized_sample_points_cb(struct gm_data_index* data_index,
 /* For every image, pick N (ctx->n_pixels) random points within the silhoette
  * of the example pose for that frame.
  */
-static struct pixel*
-generate_randomized_sample_points(struct gm_rdt_context_impl* ctx,
-                                  struct gm_data_index* data_index,
-                                  int* total_count,
-                                  char** err)
+static bool
+pre_process_label_images(struct gm_rdt_context_impl* ctx,
+                         struct gm_data_index* data_index,
+                         struct pixel* random_pixels, /* len: n_images * n_pixels */
+                         struct bounds* body_bounds, /* len: n_images */
+                         char** err)
 {
-    struct point_generator generator;
+    struct labels_pre_processor labels_pre_processor;
 
-    generator.ctx = ctx;
-    generator.last_update = get_time();
-    generator.rng = std::mt19937(ctx->seed);
-    generator.rand_0_1 = std::uniform_real_distribution<float>(0.0, 1.0);
-    generator.n_image_pixels = ctx->width * ctx->height;
-    generator.image_buf = std::vector<uint8_t>(generator.n_image_pixels);
-    generator.in_body_pixels = std::vector<int>(generator.n_image_pixels);
-    generator.indices = std::vector<int>(generator.n_image_pixels);
-    generator.n_pixels = ctx->n_images * ctx->n_pixels;
-    *total_count = generator.n_pixels;
-
-    struct node_data root_node;
-    root_node.id = 0;
-    root_node.pixels = (struct pixel*)xmalloc(generator.n_pixels *
-                                              sizeof(struct pixel));
-
-    generator.root_node = root_node;
+    labels_pre_processor.ctx = ctx;
+    labels_pre_processor.last_update = get_time();
+    labels_pre_processor.rng = std::mt19937(ctx->seed);
+    labels_pre_processor.rand_0_1 = std::uniform_real_distribution<float>(0.0, 1.0);
+    labels_pre_processor.width = gm_data_index_get_width(data_index);
+    labels_pre_processor.height = gm_data_index_get_height(data_index);
+    int n_image_pixels = labels_pre_processor.width * labels_pre_processor.height;
+    labels_pre_processor.image_buf = std::vector<uint8_t>(n_image_pixels);
+    labels_pre_processor.in_body_pixels = std::vector<int>(n_image_pixels);
+    labels_pre_processor.indices = std::vector<int>(n_image_pixels);
+    labels_pre_processor.random_pixels = random_pixels;
+    labels_pre_processor.body_bounds = body_bounds;
 
     gm_info(ctx->log, "Randomly sampling training pixels across all images...");
     if (!gm_data_index_foreach(data_index,
-                               generate_randomized_sample_points_cb,
-                               &generator,
+                               pre_process_label_image_cb,
+                               &labels_pre_processor,
                                err))
     {
-        xfree(root_node.pixels);
-        return NULL;
+        return false;
     }
 
-    return root_node.pixels;
+    return true;
 }
 
 static void
@@ -745,17 +811,18 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
     int last_i = -1;
     int max_depth = ctx->max_depth;
     int node_depth = id_to_depth(data->id);
+    struct depth_meta* depth_index = ctx->depth_index.data();
     int n_pixels = data->n_pixels;
     int n_labels = ctx->n_labels;
     int n_thresholds = ctx->n_thresholds;
-    int width = ctx->width;
-    int height = ctx->height;
 
     struct thread_depth_metrics_raw *depth_metrics =
         &state->per_depth_metrics[node_depth];
 
     uint16_t* uvt_lr_histograms_16 = state->uvt_lr_histograms_16.data();
     uint32_t* uvt_lr_histograms_32 = state->uvt_lr_histograms_32.data();
+
+    struct depth_meta depth_meta = {};
 
     for (p = 0; p < n_pixels; p++)
     {
@@ -765,6 +832,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 
         depth_metrics->n_pixels_accumulated++;
         if (i != last_i) {
+            depth_meta = depth_index[i];
             depth_metrics->n_images_accumulated++;
             last_i = i;
         }
@@ -799,10 +867,9 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
 
         // Accumulate LR branch histograms
 
-        int64_t image_idx = (int64_t)i * width * height;
-        int16_t* depth_image = &ctx->depth_images[image_idx];
+        int16_t* depth_image = &ctx->depth_images[depth_meta.pixel_offset];
 
-        int16_t depth_mm = depth_image[px.y * width + px.x];
+        int16_t depth_mm = depth_image[px.y * depth_meta.width + px.x];
         int16_t half_depth = depth_mm / 2;
 
         int32_t *uvs = ctx->uvs.data();
@@ -810,7 +877,8 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
         int16_t gradients[n_uv_combos];
         for (int c = uv_start; c < uv_end; c++) {
             gradients[c - uv_start] = sample_uv_gradient_mm(depth_image,
-                                                            width, height,
+                                                            depth_meta.width,
+                                                            depth_meta.height,
                                                             px.x, px.y,
                                                             depth_mm,
                                                             half_depth,
@@ -879,7 +947,6 @@ node_shard_work_cb(struct thread_state* state,
     if (node_data.n_pixels < UINT16_MAX) {
         state->uvt_lr_histograms_16.clear();
         state->uvt_lr_histograms_16.resize(ctx->n_labels * n_uvt_combos * 2);
-        gm_info(ctx->log, "16 bit histogram");
     } else {
         state->uvt_lr_histograms_32.clear();
         state->uvt_lr_histograms_32.resize(ctx->n_labels * n_uvt_combos * 2);
@@ -1192,18 +1259,19 @@ collect_pixels(struct gm_rdt_context_impl* ctx,
 
     int l_index = 0;
     int r_index = 0;
-    int width = ctx->width;
-    int height = ctx->height;
 
+    struct depth_meta* depth_index = ctx->depth_index.data();
     int16_t* depth_images = ctx->depth_images;
     for (int p = 0; p < data->n_pixels; p++) {
         struct pixel px = data->pixels[p];
 
-        int16_t* depth_image = &depth_images[(int64_t)px.i * width * height];
+        struct depth_meta depth_meta = depth_index[px.i];
+        int16_t* depth_image = &depth_images[depth_meta.pixel_offset];
 
-        int16_t depth_mm = depth_image[px.y * width + px.x];
+        int16_t depth_mm = depth_image[px.y * depth_meta.width + px.x];
         int16_t gradient = sample_uv_gradient_mm(depth_image,
-                                                 width, height,
+                                                 depth_meta.width,
+                                                 depth_meta.height,
                                                  px.x, px.y,
                                                  depth_mm,
                                                  depth_mm / 2,
@@ -2171,7 +2239,10 @@ struct depth_loader
 {
     struct gm_rdt_context_impl* ctx;
     uint64_t last_update;
+    int full_width;
+    int full_height;
     std::vector<half> image_buf;
+    struct bounds* body_bounds;
 };
 
 static bool
@@ -2183,9 +2254,14 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
 {
     struct depth_loader* loader = (struct depth_loader*)user_data;
     struct gm_rdt_context_impl* ctx = loader->ctx;
-    int width = ctx->width;
-    int height = ctx->height;
-    int n_image_pixels = width * height;
+    int full_width = loader->full_width;
+    int full_height = loader->full_height;
+    struct bounds bounds = loader->body_bounds[index];
+    struct depth_meta depth_meta = ctx->depth_index[index];
+    int cropped_x = bounds.min_x;
+    int cropped_y = bounds.min_y;
+    int cropped_width = depth_meta.width;
+    int cropped_height = depth_meta.height;
 
     const char* top_dir = gm_data_index_get_top_dir(data_index);
     char depth_filename[512];
@@ -2194,7 +2270,7 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
               top_dir, frame_path);
 
     void* tmp_buf = loader->image_buf.data();
-    IUImageSpec depth_spec = { width, height, IU_FORMAT_HALF };
+    IUImageSpec depth_spec = { full_width, full_height, IU_FORMAT_HALF };
     if (iu_read_exr_from_file(depth_filename, &depth_spec,
                               &tmp_buf) != SUCCESS)
     {
@@ -2203,26 +2279,29 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
     }
 
     half* src = loader->image_buf.data();
-    int64_t dest_off = (int64_t)index * n_image_pixels;
-    int16_t* dest = &ctx->depth_images[dest_off];
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int off = y * width + x;
+    int src_width = loader->full_width;
+    int16_t* dest = &ctx->depth_images[depth_meta.pixel_offset];
+    for (int y = 0; y < cropped_height; y++) {
+        for (int x = 0; x < cropped_width; x++) {
+            int src_x = cropped_x + x;
+            int src_y = cropped_y + y;
+            int src_off = src_y * src_width + src_x;
+            int dest_off = y * cropped_width + x;
 
-            float depth_m = src[off];
+            float depth_m = src[src_off];
 
             gm_assert(ctx->log, !std::isnan(depth_m),
                       "Spurious NAN depth value in training frame %s",
                       frame_path);
 
             if (depth_m >= HUGE_DEPTH)
-                dest[off] = INT16_MAX;
+                dest[dest_off] = INT16_MAX;
             else {
                 gm_assert(ctx->log, depth_m < (INT16_MAX / 1000.0),
                           "Depth value %f in training frame %s can't be represented in 16 bits",
                           depth_m, frame_path);
 
-                dest[off] = depth_m * 1000.5; // round nearest with the +0.5
+                dest[dest_off] = depth_m * 1000.5; // round nearest with the +0.5
             }
         }
     }
@@ -2232,6 +2311,152 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
         int percent = index * 100 / ctx->n_images;
         gm_info(ctx->log, "%3d%%", percent);
         ctx->last_load_update = current;
+    }
+
+    return true;
+}
+
+static bool
+load_training_data(struct gm_rdt_context_impl* ctx,
+                   const char* data_dir,
+                   const char* index_name,
+                   char** err)
+{
+    gm_info(ctx->log, "Opening training data index %s...", index_name);
+    struct gm_data_index* data_index =
+        gm_data_index_open(ctx->log,
+                           data_dir,
+                           index_name,
+                           err);
+    if (!data_index)
+        return false;
+
+    ctx->data_meta =
+        json_value_deep_copy(gm_data_index_get_meta(data_index));
+
+    ctx->n_images = gm_data_index_get_len(data_index);
+
+    JSON_Object* meta_camera =
+        json_object_get_object(json_object(ctx->data_meta), "camera");
+    ctx->fov = json_object_get_number(meta_camera, "vertical_fov");
+    ctx->fov *= (M_PI / 180.0);
+
+    ctx->n_labels = json_object_get_number(json_object(ctx->data_meta), "n_labels");
+
+    gm_assert(ctx->log, ctx->n_labels <= MAX_LABELS,
+              "Can't handle training with more than %d labels",
+              MAX_LABELS);
+    gm_assert(ctx->log, (uint64_t)ctx->n_pixels * ctx->n_images < INT_MAX,
+              "Can't handle training with more than %d pixels, but n_pixels * n_images = %" PRIu64,
+              INT_MAX, (uint64_t)ctx->n_pixels * ctx->n_images);
+
+    // Create the randomized sample points across all images that the decision
+    // tree is going to learn to classify, and associate with a root node...
+    //
+    // The training recursively splits the pixels at each node of the tree,
+    // either terminating when a branch runs out of pixels to differentiate
+    // or after reaching the maximum training depth.
+    //
+    struct node_data root_node;
+    root_node.id = 0;
+    root_node.pixels = (struct pixel*)xmalloc((size_t)ctx->n_images *
+                                              ctx->n_pixels *
+                                              sizeof(struct pixel));
+    root_node.n_pixels = ctx->n_images * ctx->n_pixels;
+
+    struct bounds *body_bounds = (struct bounds*)xmalloc(ctx->n_images *
+                                                         sizeof(struct bounds));
+    if (!pre_process_label_images(ctx,
+                                  data_index,
+                                  root_node.pixels,
+                                  body_bounds,
+                                  err))
+    {
+        xfree(root_node.pixels);
+        xfree(body_bounds);
+        return false;
+    }
+
+    ctx->depth_index.resize(ctx->n_images);
+
+    int max_width = gm_data_index_get_width(data_index);
+    int max_height = gm_data_index_get_height(data_index);
+    int64_t n_depth_pixels = 0;
+
+    for (int i = 0; i < ctx->n_images; i++) {
+        struct bounds bounds = body_bounds[i];
+
+        int width = bounds.max_x - bounds.min_x + 1;
+        int height = bounds.max_y - bounds.min_y + 1;
+
+        gm_assert(ctx->log, width <= max_width,
+                  "Bounded width (%d) > full width (%d)", width, max_width);
+        gm_assert(ctx->log, height <= max_height,
+                  "Bounded height (%d) > full height (%d)", height, max_height);
+
+        struct depth_meta meta;
+        meta.width = width;
+        meta.height = height;
+        meta.pixel_offset = n_depth_pixels;
+        ctx->depth_index[i] = meta;
+
+        n_depth_pixels += (width * height);
+    }
+
+    int64_t depth_size = n_depth_pixels * 2;
+    int64_t max_depth_size = max_width * max_height * ctx->n_images * 2;
+    gm_info(ctx->log, "Size of cropped depth data = %" PRIu64 " bytes, reduced from %" PRIu64 " (%d%% of original size)",
+            (int64_t)depth_size,
+            (int64_t)max_depth_size,
+            (int)((depth_size * 100 / max_depth_size)));
+
+    ctx->depth_images = (int16_t*)xmalloc(depth_size);
+
+    struct depth_loader loader;
+    loader.ctx = ctx;
+    loader.last_update = get_time();
+    loader.full_width = max_width;
+    loader.full_height = max_height;
+    loader.image_buf = std::vector<half>(max_width * max_height);
+    loader.body_bounds = body_bounds;
+
+    gm_info(ctx->log, "Loading all depth buffers...");
+    if (!gm_data_index_foreach(data_index,
+                               load_depth_buffers_cb,
+                               &loader,
+                               err))
+    {
+        xfree(root_node.pixels);
+        xfree(body_bounds);
+        return false;
+    }
+
+    gm_data_index_destroy(data_index);
+    data_index = NULL;
+
+    xfree(body_bounds);
+    body_bounds = NULL;
+
+    check_root_pixels_histogram(ctx, &root_node);
+
+    // Allocate memory to store the decision tree.
+    int n_tree_nodes = (1<<ctx->max_depth) - 1;
+    ctx->tree.resize(n_tree_nodes);
+
+    // Mark nodes in tree as unfinished, for checkpoint restoration
+    // Note: we still do this if we are reloading a tree, since it may
+    // be shallower than the total tree size.
+    for (int i = 0; i < (int)ctx->tree.size(); i++) {
+        ctx->tree[i].label_pr_idx = INT_MAX;
+    }
+
+    if (ctx->reload) {
+        if (!reload_tree(ctx, ctx->reload, root_node, err)) {
+            xfree(root_node.pixels);
+            return false;
+        }
+    } else {
+        ctx->train_queue.push_back(root_node);
     }
 
     return true;
@@ -2273,47 +2498,23 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         return false;
     }
 
-    ctx->record = create_training_record(ctx);
-
-    gm_info(ctx->log, "Opening training data index %s...", index_name);
-    struct gm_data_index* data_index =
-        gm_data_index_open(ctx->log,
-                           data_dir,
-                           index_name,
-                           err);
-    if (!data_index) {
+    /* Loads label data, depth data and potentially loads a pre-existing
+     * decision tree...
+     */
+    if (!load_training_data(ctx, data_dir, index_name, err)) {
         destroy_training_state(ctx);
         return false;
     }
 
-    ctx->data_meta =
-        json_value_deep_copy(gm_data_index_get_meta(data_index));
-
-    ctx->n_images = gm_data_index_get_len(data_index);
-    ctx->width = gm_data_index_get_width(data_index);
-    ctx->height = gm_data_index_get_height(data_index);
-
-    JSON_Object* meta_camera =
-        json_object_get_object(json_object(ctx->data_meta), "camera");
-    ctx->fov = json_object_get_number(meta_camera, "vertical_fov");
-    ctx->fov *= (M_PI / 180.0);
-
-    ctx->n_labels = json_object_get_number(json_object(ctx->data_meta), "n_labels");
-
-    gm_assert(ctx->log, ctx->n_labels <= MAX_LABELS,
-              "Can't handle training with more than %d labels",
-              MAX_LABELS);
-    gm_assert(ctx->log, (uint64_t)ctx->n_pixels * ctx->n_images < INT_MAX,
-              "Can't handle training with more than %d pixels, but n_pixels * n_images = %" PRIu64,
-              INT_MAX, (uint64_t)ctx->n_pixels * ctx->n_images);
-
+    ctx->record = create_training_record(ctx);
 
     // Adjust uv range into pixel-millimeters, considering that our depth
     // values are in mm, and we divide uv offsets by the depth to give us depth
     // invariance for uv offsets.
-    //
+    JSON_Object* camera = json_object_get_object(json_object(ctx->data_meta), "camera");
+    int camera_height = json_object_get_number(camera, "height");
     int16_t uv_range_pmm = meter_range_to_pixelmillimeters(ctx->fov,
-                                                           ctx->height,
+                                                           camera_height,
                                                            ctx->uv_range);
     gm_info(ctx->log, "UV range = %.2fm = %d pixel-millimeters",
             ctx->uv_range, uv_range_pmm);
@@ -2341,68 +2542,6 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     for (int n = 0; n < ctx->n_thresholds; n++) {
         ctx->thresholds[n] = nth_threshold(n, threshold_step_mm);
         //gm_info(ctx->log, "threshold: %d", ctx->thresholds[n]);
-    }
-
-    // Allocate memory to store the decision tree.
-    int n_tree_nodes = (1<<ctx->max_depth) - 1;
-    ctx->tree.resize(n_tree_nodes);
-
-    // Mark nodes in tree as unfinished, for checkpoint restoration
-    // Note: we still do this if we are reloading a tree, since it may
-    // be shallower than the total tree size.
-    for (int i = 0; i < (int)ctx->tree.size(); i++) {
-        ctx->tree[i].label_pr_idx = INT_MAX;
-    }
-
-    // Create the randomized sample points across all images that the decision
-    // tree is going to learn to classify, and associate with a root node...
-    //
-    // The training recursively splits the pixels at each node of the tree,
-    // either terminating when a branch runs out of pixels to differentiate
-    // or after reaching the maximum training depth.
-    //
-    struct node_data root_node;
-    root_node.id = 0;
-    root_node.pixels = generate_randomized_sample_points(ctx,
-                                                         data_index,
-                                                         &root_node.n_pixels,
-                                                         err);
-    if (!root_node.pixels) {
-        destroy_training_state(ctx);
-        return false;
-    }
-
-    int n_image_pixels = ctx->width * ctx->height;
-    ctx->depth_images = (int16_t*)xmalloc((size_t)ctx->n_images *
-                                           n_image_pixels *
-                                           sizeof(int16_t));
-    struct depth_loader loader;
-    loader.ctx = ctx;
-    loader.last_update = get_time();
-    loader.image_buf = std::vector<half>(n_image_pixels);
-
-    gm_info(ctx->log, "Loading all depth buffers...");
-    if (!gm_data_index_foreach(data_index,
-                               load_depth_buffers_cb,
-                               &loader,
-                               err))
-    {
-        destroy_training_state(ctx);
-        return false;
-    }
-
-    gm_data_index_destroy(data_index);
-    data_index = NULL;
-
-    check_root_pixels_histogram(ctx, &root_node);
-
-    if (ctx->reload) {
-        if (!reload_tree(ctx, ctx->reload, root_node, err)) {
-            destroy_training_state(ctx);
-            return false;
-        }
-    } else {
-        ctx->train_queue.push_back(root_node);
     }
 
     gm_info(ctx->log, "Initialising %u threads...\n", n_threads);
