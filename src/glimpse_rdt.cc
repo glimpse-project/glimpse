@@ -165,6 +165,8 @@ struct thread_depth_metrics_raw {
     uint64_t accumulation_time;
     uint64_t gain_ranking_time;
 
+    uint64_t n_thresholds_accumulated;
+    uint64_t n_uvs_accumulated;
     uint64_t n_pixels_accumulated;
     uint64_t n_images_accumulated;
     uint64_t n_nodes;
@@ -303,7 +305,6 @@ calculate_thread_depth_metrics_report(struct thread_state* state,
                                       struct thread_depth_metrics_raw* raw,
                                       struct thread_depth_metrics_report* metrics)
 {
-    struct gm_rdt_context_impl* ctx = state->ctx;
     uint64_t run_duration = raw->idle_time + raw->work_time + partial_work_time;
 
     memset(metrics, 0, sizeof(*metrics));
@@ -318,6 +319,8 @@ calculate_thread_depth_metrics_report(struct thread_state* state,
     double nodes_per_second = (double)raw->n_nodes / run_time_sec;
     double images_per_sec = (double)raw->n_images_accumulated / run_time_sec;
     double px_per_sec = (double)raw->n_pixels_accumulated / run_time_sec;
+    double uvs_per_sec = (double)raw->n_uvs_accumulated / run_time_sec;
+    double thresholds_per_sec = (double)raw->n_thresholds_accumulated / run_time_sec;
 
     metrics->duration = run_duration;
 
@@ -328,8 +331,8 @@ calculate_thread_depth_metrics_report(struct thread_state* state,
     metrics->nodes_per_second = nodes_per_second;
     metrics->images_per_second = images_per_sec;
     metrics->pixels_per_second = px_per_sec;
-    metrics->uvs_per_second = px_per_sec * ctx->n_uvs;
-    metrics->thresholds_per_second = px_per_sec * ctx->n_thresholds;
+    metrics->uvs_per_second = uvs_per_sec;
+    metrics->thresholds_per_second = thresholds_per_sec;
 }
 
 static JSON_Value*
@@ -656,7 +659,8 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
                              struct node_data* data,
                              int uv_start, int uv_end,
                              int* node_histogram,
-                             int* uvt_lr_histograms)
+                             int* uvt_lr_histograms,
+                             int n_shards)
 {
     int p;
     int last_i = -1;
@@ -688,7 +692,12 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             if (interrupted)
                 break;
             if (ctx->profile) {
-                int progress = (int64_t)p * 100 / n_pixels;
+                // Assume an even distribution of work across threads and shards
+                // to estimate the current node progress...
+                int nodes_per_depth = 1<<node_depth;
+                int64_t progress = ((depth_metrics->n_pixels_accumulated/nodes_per_depth) * 100 /
+                                    (n_pixels * n_shards / ctx->n_threads));
+
                 maybe_log_thread_depth_metrics(state,
                                                progress,
                                                node_depth,
@@ -757,8 +766,9 @@ node_shard_work_cb(struct thread_state* state,
     memset(node_histogram, 0, sizeof(node_histogram));
 
     // Histograms for each uvt combination being tested
-    int n_uvt_combos = (shard_work->uv_end - shard_work->uv_start) *
-        ctx->n_thresholds;
+    int n_uv_combos = shard_work->uv_end - shard_work->uv_start;
+    int n_thresholds = ctx->n_thresholds;
+    int n_uvt_combos = n_uv_combos * n_thresholds;
     state->uvt_lr_histograms.clear();
     state->uvt_lr_histograms.resize(ctx->n_labels * n_uvt_combos * 2);
 
@@ -780,7 +790,8 @@ node_shard_work_cb(struct thread_state* state,
                                  &node_data,
                                  shard_work->uv_start, shard_work->uv_end,
                                  node_histogram,
-                                 state->uvt_lr_histograms.data());
+                                 state->uvt_lr_histograms.data(),
+                                 results->n_shards);
     uint64_t accu_end = get_time();
     depth_metrics->accumulation_time += accu_end - accu_start;
 
@@ -846,6 +857,8 @@ node_shard_work_cb(struct thread_state* state,
         depth_metrics->gain_ranking_time += rank_end - rank_start;
     }
 
+    depth_metrics->n_uvs_accumulated += n_uv_combos;
+    depth_metrics->n_thresholds_accumulated += n_uvt_combos;
     shard_data->done = true;
 
     /* Once we set shard_data->done then we are racing with other threads
