@@ -2048,7 +2048,19 @@ reload_tree(struct gm_rdt_context_impl* ctx,
     // Restore nodes
     int n_reload_nodes = (1<<reload_depth) - 1;
     gm_info(ctx->log, "Reloading %d nodes", n_reload_nodes);
-    memcpy(ctx->tree.data(), checkpoint->nodes, n_reload_nodes * sizeof(struct node));
+
+    /* We track the UVT values as integers instead of float while training... */
+    for (int i = 0; i < n_reload_nodes; i++) {
+        Node float_node = checkpoint->nodes[i];
+        struct node fixed_node;
+        fixed_node.uvs[0] = round(float_node.uv[0] * 1000.0f);
+        fixed_node.uvs[1] = round(float_node.uv[1] * 1000.0f);
+        fixed_node.uvs[2] = round(float_node.uv[2] * 1000.0f);
+        fixed_node.uvs[3] = round(float_node.uv[3] * 1000.0f);
+        fixed_node.t_mm = round(float_node.t * 1000.0f);
+        fixed_node.label_pr_idx = float_node.label_pr_idx;
+        ctx->tree[i] = fixed_node;
+    }
 
     // Navigate the tree to determine any unfinished nodes and the last
     // trained depth

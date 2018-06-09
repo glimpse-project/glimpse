@@ -46,10 +46,11 @@ assert_rdt_abi()
 static int
 count_pr_tables(JSON_Object* node)
 {
+    if (!node)
+        return 0;
+
     if (json_object_has_value(node, "p"))
-    {
         return 1;
-    }
 
     return count_pr_tables(json_object_get_object(node, "l")) +
         count_pr_tables(json_object_get_object(node, "r"));
@@ -80,6 +81,7 @@ unpack_json_tree(JSON_Object* jnode, Node* nodes, int node_index,
     JSON_Array* v = json_object_get_array(jnode, "v");
 
     if (u == NULL || v == NULL) {
+        node->label_pr_idx = INT_MAX;
         return;
     }
 
