@@ -267,6 +267,9 @@ struct gm_rdt_context_impl {
 
     int      n_nodes_trained;   // The number of nodes trained so far
 
+    int      uvt_histograms_mem; // Constraint on working set memory usage for
+                                 // UVT left/right histograms
+
     uint64_t start;
 
     std::vector<depth_meta> depth_index;
@@ -1169,10 +1172,7 @@ schedule_node_work(struct thread_state* state)
     // We want the working set of uvt combos to be constrained enough that
     // the uvt_lr_histrograms array can be cached
     int est_uvt_lr_hist_size = ctx->n_uvs * ctx->n_thresholds * ctx->n_labels * 2;
-    /* TODO: make this configurable... */
-    int max_thread_uvt_lr_size = 4000000 / ctx->n_threads;
-    //int max_thread_uvt_lr_size = 1000000 / ctx->n_threads;
-    //int max_thread_uvt_lr_size = est_uvt_lr_hist_size / ctx->n_threads;
+    int max_thread_uvt_lr_size = ctx->uvt_histograms_mem / ctx->n_threads;
     int n_shards = est_uvt_lr_hist_size / max_thread_uvt_lr_size;
     int n_uvs_per_shard = std::max(ctx->n_uvs / n_shards, 1);
     n_shards = ctx->n_uvs / n_uvs_per_shard;
@@ -1783,6 +1783,17 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.ptr = &ctx->n_threads;
     prop.int_state.min = 1;
     prop.int_state.max = 128;
+    ctx->properties.push_back(prop);
+
+    ctx->uvt_histograms_mem = 4000000;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "uvt_histograms_mem";
+    prop.desc = "Working set memory constraint for UVT combo histograms";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->uvt_histograms_mem;
+    prop.int_state.min = 128000;
+    prop.int_state.max = 64000000;
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();
