@@ -1171,8 +1171,10 @@ schedule_node_work(struct thread_state* state)
 
     // We want the working set of uvt combos to be constrained enough that
     // the uvt_lr_histrograms array can be cached
-    int est_uvt_lr_hist_size = ctx->n_uvs * ctx->n_thresholds * ctx->n_labels * 2;
-    int max_thread_uvt_lr_size = ctx->uvt_histograms_mem / ctx->n_threads;
+    int est_uvt_lr_hist_size = ctx->n_uvs * ctx->n_thresholds * ctx->n_labels * 4 * 2;
+    int max_thread_uvt_lr_size =
+        (std::min(ctx->uvt_histograms_mem, est_uvt_lr_hist_size) /
+         ctx->n_threads);
     int n_shards = est_uvt_lr_hist_size / max_thread_uvt_lr_size;
     int n_uvs_per_shard = std::max(ctx->n_uvs / n_shards, 1);
     n_shards = ctx->n_uvs / n_uvs_per_shard;
