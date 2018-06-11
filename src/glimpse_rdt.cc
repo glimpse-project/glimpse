@@ -338,6 +338,50 @@ format_duration_s16(uint64_t duration_ns, char buf[16])
 }
 
 static void
+print_label_histogram(struct gm_logger* log,
+                      JSON_Array* labels,
+                      float* histogram)
+{
+    static const char *bars[] = {
+        " ",
+        "▏",
+        "▎",
+        "▍",
+        "▌",
+        "▋",
+        "▊",
+        "▉",
+        "█"
+    };
+
+    int max_bar_width = 30; // measured in terminal columns
+
+    for (int i = 0; i < (int)json_array_get_count(labels); i++) {
+        JSON_Object* label = json_array_get_object(labels, i);
+        const char *name = json_object_get_string(label, "name");
+        int bar_len = max_bar_width * 8 * histogram[i];
+        char bar[max_bar_width * 4]; // room for multi-byte utf8 characters
+        int bar_pos = 0;
+
+        for (int j = 0; j < max_bar_width; j++) {
+            int part;
+            if (bar_len > 8) {
+                part = 8;
+                bar_len -= 8;
+            } else {
+                part = bar_len;
+                bar_len = 0;
+            }
+            int len = strlen(bars[part]);
+            memcpy(bar + bar_pos, bars[part], len);
+            bar_pos += len;
+        }
+        bar[bar_pos++] = '\0';
+        gm_info(log, "%-20s, %-3.0f%%|%s|", name, histogram[i] * 100.0f, bar);
+    }
+}
+
+static void
 calculate_thread_depth_metrics_report(struct thread_state* state,
                                       int depth,
                                       uint64_t partial_work_time,
@@ -681,7 +725,8 @@ pre_process_label_images(struct gm_rdt_context_impl* ctx,
     labels_pre_processor.random_pixels = random_pixels;
     labels_pre_processor.body_bounds = body_bounds;
 
-    gm_info(ctx->log, "Randomly sampling training pixels across all images...");
+    gm_info(ctx->log, "Randomly sampling training pixels (%d per-image) across %d images...",
+            ctx->n_pixels, ctx->n_images);
     if (!gm_data_index_foreach(data_index,
                                pre_process_label_image_cb,
                                &labels_pre_processor,
@@ -1081,6 +1126,9 @@ node_shard_work_cb(struct thread_state* state,
      * process_node_shards_work_cb
      */
 
+    if (ctx->verbose) {
+        gm_info(ctx->log, "Queueing done follow up for %d", node_data.id);
+    }
     struct process_node_shards_work* process_work =
         (struct process_node_shards_work*)xmalloc(sizeof(*process_work));
     process_work->node_data = node_data;
@@ -1113,12 +1161,29 @@ schedule_node_work(struct thread_state* state)
     bool popped_node = false;
 
     pthread_mutex_lock(&ctx->work_queue_lock);
-    if ((int)ctx->work_queue.size() >= (ctx->n_threads * 2))
+    if ((int)ctx->work_queue.size() >= (ctx->n_threads * 2)) {
+        if (ctx->verbose) {
+            gm_info(ctx->log, "Work queue len %d > %d, therefore too busy to schedule more work",
+                    (int)ctx->work_queue.size(), (int)(ctx->n_threads * 2));
+        }
         busy = true;
+    }
     pthread_mutex_unlock(&ctx->work_queue_lock);
 
     if (!busy) {
         pthread_mutex_lock(&ctx->train_queue_lock);
+        if (ctx->verbose) {
+            gm_info(ctx->log, "Training queue len = %d:",
+                    (int)ctx->train_queue.size());
+            int first_n = std::min(25, (int)ctx->train_queue.size());
+            for (int i = 0; i < first_n; i++) {
+                struct node_data node_tmp = ctx->train_queue[i];
+                gm_info(ctx->log, "  id=%d, n_pixels=%d",
+                        node_tmp.id, node_tmp.n_pixels);
+            }
+            if (first_n == 25)
+                gm_info(ctx->log, "  ...");
+        }
         if (!ctx->train_queue.empty()) {
             node_data = ctx->train_queue.front();
             ctx->train_queue.pop_front();
@@ -1135,6 +1200,13 @@ schedule_node_work(struct thread_state* state)
      * idle)
      */
     if (!popped_node) {
+        if (ctx->verbose) {
+            if (busy) {
+                gm_info(ctx->log, "Currently too busy to schedule");
+            } else {
+                gm_info(ctx->log, "Currently no work to schedule");
+            }
+        }
         return false;
     }
 
@@ -1146,10 +1218,6 @@ schedule_node_work(struct thread_state* state)
      * (n_threads * max_shards) on how much can be scheduled and work entries
      * aren't very large.
      */
-
-    if (ctx->verbose) {
-        gm_info(ctx->log, "Scheduling");
-    }
 
     int node_depth = id_to_depth(node_data.id);
 
@@ -1206,6 +1274,15 @@ schedule_node_work(struct thread_state* state)
     gm_assert(ctx->log, n_node_pixels == node_data.n_pixels,
               "Mismatching N pixels from node_data (%d) and histogram (%d)",
               node_data.n_pixels, n_node_pixels);
+
+    if (ctx->verbose) {
+        gm_info(ctx->log, "Scheduling node %d with %d pixels, histogram:",
+                node_data.id,
+                n_node_pixels);
+        JSON_Array* labels =
+            json_object_get_array(json_object(ctx->data_meta), "labels");
+        print_label_histogram(ctx->log, labels, node_results->nhistogram);
+    }
 
     struct work jobs[n_shards];
 
@@ -1313,10 +1390,17 @@ collect_pixels(struct gm_rdt_context_impl* ctx,
 }
 
 static void
-shard_results_unref(struct node_shard_results* results)
+shard_results_unref(struct gm_rdt_context_impl* ctx,
+                    struct node_data* node_data,
+                    struct node_shard_results* results)
 {
-    if (__builtin_expect(--(results->ref) < 1, 0))
+    if (__builtin_expect(--(results->ref) < 1, 0)) {
+        if (ctx->verbose) {
+            gm_info(ctx->log, "freeing shard results %p, for node %d",
+                    results, node_data->id);
+        }
         xfree(results);
+    }
 }
 
 static void
@@ -1329,6 +1413,9 @@ process_node_shards_work_cb(struct thread_state* state,
 
     struct node_shard_results* results = process_work->results;
     int n_shards = results->n_shards;
+
+    struct node_data node_data = process_work->node_data;
+    int node_depth = id_to_depth(node_data.id);
 
     /* Make sure only one worker can process the shard results for a node...
      */
@@ -1346,20 +1433,21 @@ process_node_shards_work_cb(struct thread_state* state,
         if (taker)
             results->taken = true;
     }
+    if (ctx->verbose) {
+        if (taker) {
+            gm_info(ctx->log, "Processing shard results for node %d, depth=%d",
+                    node_data.id, node_depth);
+        } else {
+            gm_info(ctx->log, "Taker check for node %d (exiting, %s)",
+                    node_data.id, results->taken ? "already taken" : "not ready");
+        }
+    }
     pthread_mutex_unlock(&results->check_lock);
 
     if (!taker) {
-        shard_results_unref(results);
+        shard_results_unref(ctx, &process_work->node_data, results);
         xfree(process_work);
         return;
-    }
-
-    struct node_data node_data = process_work->node_data;
-    int node_depth = id_to_depth(node_data.id);
-
-    if (ctx->verbose) {
-        gm_info(ctx->log, "Processing shard results for node %d, depth=%d",
-                node_data.id, node_depth);
     }
 
     int best_uv = 0;
@@ -1390,19 +1478,6 @@ process_node_shards_work_cb(struct thread_state* state,
     {
         memcpy(node->uvs, &ctx->uvs[4 * best_uv], sizeof(node->uvs));
         node->t_mm = ctx->thresholds[best_threshold];
-        if (ctx->verbose)
-        {
-            gm_info(ctx->log,
-                    "  Node (%u)\n"
-                    "    Gain: %f\n"
-                    "    U: (%f, %f)\n"
-                    "    V: (%f, %f)\n"
-                    "    T: %f\n",
-                    node_data.id, best_gain,
-                    node->uvs[0] / 1000.0f, node->uvs[1] / 1000.0f,
-                    node->uvs[2] / 1000.0f, node->uvs[3] / 1000.0f,
-                    node->t_mm / 1000.0f);
-        }
 
         struct pixel* l_pixels;
         struct pixel* r_pixels;
@@ -1428,10 +1503,35 @@ process_node_shards_work_cb(struct thread_state* state,
 
         // Mark the node as a continuing node
         node->label_pr_idx = 0;
+
+        if (ctx->verbose)
+        {
+            gm_info(ctx->log,
+                    "  Node (%u)\n"
+                    "    Gain: %f\n"
+                    "    U: (%f, %f)\n"
+                    "    V: (%f, %f)\n"
+                    "    T: %f\n"
+                    "  Queued left id=%d, right id=%d\n",
+                    node_data.id, best_gain,
+                    node->uvs[0] / 1000.0f, node->uvs[1] / 1000.0f,
+                    node->uvs[2] / 1000.0f, node->uvs[3] / 1000.0f,
+                    node->t_mm / 1000.0f,
+                    ldata.id,
+                    rdata.id);
+        }
+
     }
     else
     {
         float *nhistogram = results->nhistogram;
+
+        // NB: 0 is reserved for non-leaf nodes
+        node->label_pr_idx = (ctx->tree_histograms.size() / ctx->n_labels) + 1;
+        int len = ctx->tree_histograms.size();
+        ctx->tree_histograms.resize(len + ctx->n_labels);
+        memcpy(&ctx->tree_histograms[len], nhistogram, ctx->n_labels * sizeof(float));
+
         if (ctx->verbose)
         {
             pthread_mutex_lock(&ctx->tidy_log_lock);
@@ -1443,12 +1543,6 @@ process_node_shards_work_cb(struct thread_state* state,
             }
             pthread_mutex_unlock(&ctx->tidy_log_lock);
         }
-
-        // NB: 0 is reserved for non-leaf nodes
-        node->label_pr_idx = (ctx->tree_histograms.size() / ctx->n_labels) + 1;
-        int len = ctx->tree_histograms.size();
-        ctx->tree_histograms.resize(len + ctx->n_labels);
-        memcpy(&ctx->tree_histograms[len], nhistogram, ctx->n_labels * sizeof(float));
     }
 
     // We no longer need the node's pixel data
@@ -1469,10 +1563,7 @@ process_node_shards_work_cb(struct thread_state* state,
         interrupted = true;
     }
 
-    while (schedule_node_work(state))
-        ;
-
-    shard_results_unref(results);
+    shard_results_unref(ctx, &node_data, results);
     xfree(process_work);
 }
 
@@ -1511,6 +1602,7 @@ worker_thread_cb(void* userdata)
              * then we've implicitly finished training...
              */
             if (++ctx->n_idle == ctx->n_threads) {
+                gm_info(ctx->log, "All workers idle");
                 // Inform all other threads that we are done...
                 interrupted = true;
                 pthread_cond_broadcast(&ctx->work_queue_changed);
@@ -1591,6 +1683,9 @@ worker_thread_cb(void* userdata)
         work.work_cb(state, work.user_data);
         uint64_t work_end = get_time();
         depth_metrics->work_time += (work_end - state->current_work_start);
+
+        while (schedule_node_work(state))
+            ;
     }
 
     return NULL;
@@ -1842,6 +1937,10 @@ recursive_build_tree(struct gm_rdt_context_impl* ctx,
 {
     JSON_Value* json_node_val = json_value_init_object();
     JSON_Object* json_node = json_object(json_node_val);
+
+    if (ctx->verbose) {
+        json_object_set_number(json_node, "id", id);
+    }
 
     if (node->label_pr_idx == 0)
     {
@@ -2193,51 +2292,6 @@ create_training_record(struct gm_rdt_context_impl* ctx)
     return record_val;
 }
 
-static void
-print_label_histogram(struct gm_logger* log,
-                      JSON_Array* labels,
-                      float* histogram,
-                      int histogram_len)
-{
-    static const char *bars[] = {
-        " ",
-        "▏",
-        "▎",
-        "▍",
-        "▌",
-        "▋",
-        "▊",
-        "▉",
-        "█"
-    };
-
-    int max_bar_width = 30; // measured in terminal columns
-
-    for (int i = 0; i < (int)json_array_get_count(labels); i++) {
-        JSON_Object* label = json_array_get_object(labels, i);
-        const char *name = json_object_get_string(label, "name");
-        int bar_len = max_bar_width * 8 * histogram[i];
-        char bar[max_bar_width * 4]; // room for multi-byte utf8 characters
-        int bar_pos = 0;
-
-        for (int j = 0; j < max_bar_width; j++) {
-            int part;
-            if (bar_len > 8) {
-                part = 8;
-                bar_len -= 8;
-            } else {
-                part = bar_len;
-                bar_len = 0;
-            }
-            int len = strlen(bars[part]);
-            memcpy(bar + bar_pos, bars[part], len);
-            bar_pos += len;
-        }
-        bar[bar_pos++] = '\0';
-        gm_info(log, "%-20s, %-3.0f%%|%s|", name, histogram[i] * 100.0f, bar);
-    }
-}
-
 /* A histogram of the labels for the root node pixels is useful to help double
  * check they roughly match the relative sizes of the different labels else
  * maybe there was a problem with generating our sample points.
@@ -2262,8 +2316,7 @@ check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
     gm_info(ctx->log, "Histogram of root node pixel labels:");
     print_label_histogram(ctx->log,
                           labels,
-                          ctx->root_pixel_nhistogram.data(),
-                          ctx->root_pixel_nhistogram.size());
+                          ctx->root_pixel_nhistogram.data());
 
     JSON_Value* hist_val = json_value_init_array();
     JSON_Array* hist = json_array(hist_val);
