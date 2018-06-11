@@ -48,7 +48,7 @@
 using half_float::half;
 
 static png_color default_palette[] = {
-    { 0xff, 0x5d, 0xaa },
+    { 0x21, 0x21, 0x21 },
     { 0xd1, 0x15, 0x40 },
     { 0xda, 0x1d, 0x0e },
     { 0xdd, 0x5d, 0x1e },
@@ -81,7 +81,7 @@ static png_color default_palette[] = {
     { 0x2b, 0x5e, 0x44 },
     { 0x00, 0x9c, 0xad },
     { 0x00, 0x40, 0xad },
-    { 0x21, 0x21, 0x21 },
+    { 0xff, 0x5d, 0xaa },
 };
 
 static png_color *palette = default_palette;
@@ -172,18 +172,27 @@ main(int argc, char **argv)
     }
 
   // Do inference
-  unsigned n_trees = argc - optind - 2;
-  RDTree** forest = rdt_forest_load_from_files(log,
-                                               (const char**)&argv[optind+2],
-                                               n_trees, NULL);
-  if (!forest)
-    {
-      return 1;
-    }
+  int n_trees = argc - optind - 2;
+  RDTree* forest[n_trees];
+
+  for (int i = 0; i < n_trees; i++) {
+      char *tree_path = argv[optind + 2 + i];
+
+      JSON_Value *js = json_parse_file(tree_path);
+      gm_assert(log, js != NULL, "Failed to parse %s as JSON", tree_path);
+
+      forest[i] = rdt_tree_load_from_json(log, js, NULL); // abort on error
+
+      json_value_free(js);
+  }
+
   float* output_pr = infer_labels<half>(forest, n_trees, depth_image,
                                         width, height);
   uint8_t n_labels = forest[0]->header.n_labels;
-  rdt_forest_destroy(forest, n_trees);
+
+  for (int i = 0; i < n_trees; i++) {
+      rdt_tree_destroy(forest[i]);
+  }
 
   // Write out png of most likely labels
   png_bytep out_labels = (png_bytep)xmalloc(width * height);
