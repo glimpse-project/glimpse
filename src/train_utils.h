@@ -61,6 +61,9 @@ gm_data_index_get_height(struct gm_data_index* data_index);
 int
 gm_data_index_get_n_labels(struct gm_data_index* data_index);
 
+const char *
+gm_data_index_get_frame_path(struct gm_data_index* data_index, int n);
+
 bool
 gm_data_index_foreach(struct gm_data_index* data_index,
                       bool (*callback)(struct gm_data_index* data_index,

@@ -172,6 +172,15 @@ gm_data_index_get_n_labels(struct gm_data_index* data_index)
     return json_object_get_number(json_object(data_index->meta), "n_labels");
 }
 
+const char *
+gm_data_index_get_frame_path(struct gm_data_index* data_index, int n)
+{
+    if (n < data_index->paths.size())
+        return data_index->paths[n];
+    else
+        return NULL;
+}
+
 bool
 gm_data_index_foreach(struct gm_data_index* data_index,
                       bool (*callback)(struct gm_data_index* data_index,
