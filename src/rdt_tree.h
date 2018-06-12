@@ -35,7 +35,7 @@
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
-#define RDT_VERSION 4
+#define RDT_VERSION 5
 
 typedef struct {
     /* XXX: Note that (at least with gcc) then uv will have a 16 byte
@@ -47,13 +47,15 @@ typedef struct {
     uint32_t label_pr_idx;  // Index into label probability table (1-based)
 } Node;
 
-typedef struct __attribute__((__packed__)) {
+typedef struct {
     char    tag[3];
     uint8_t version;
     uint8_t depth;
     uint8_t n_labels;
     uint8_t bg_label;
+    // 1 byte padding
     float   fov;
+    float   bg_depth;  // v5+
 } RDTHeader;
 
 typedef struct {
