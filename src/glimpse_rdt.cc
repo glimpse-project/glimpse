@@ -2414,7 +2414,7 @@ load_training_data(struct gm_rdt_context_impl* ctx,
     }
 
     int64_t depth_size = n_depth_pixels * 2;
-    int64_t max_depth_size = max_width * max_height * ctx->n_images * 2;
+    int64_t max_depth_size = (int64_t)max_width * max_height * ctx->n_images * 2;
     gm_info(ctx->log, "Size of cropped depth data = %" PRIu64 " bytes, reduced from %" PRIu64 " (%d%% of original size)",
             (int64_t)depth_size,
             (int64_t)max_depth_size,
