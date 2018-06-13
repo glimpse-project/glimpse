@@ -421,22 +421,32 @@ log_thread_depth_metrics(struct gm_rdt_context_impl *ctx,
 
 static void
 maybe_log_thread_depth_metrics(struct thread_state* state,
-                               int node_progress,
+                               int n_node_pixels,
                                int depth,
+                               int n_shards,
                                uint64_t current_time)
 {
-    struct gm_rdt_context_impl* ctx = state->ctx;
-
     if (current_time - state->last_metrics_log > 5000000000) {
-        char prefix[64];
-
-        snprintf(prefix, sizeof(prefix), "Thread %2d, node %2d%%, d",
-                 state->idx, node_progress);
-
+        struct gm_rdt_context_impl* ctx = state->ctx;
         uint64_t partial_work_time = current_time - state->current_work_start;
 
         struct thread_depth_metrics_raw* raw =
             &state->per_depth_metrics[depth];
+
+        // Assume an even distribution of work across threads and shards
+        // to estimate the current node progress...
+        int nodes_per_depth = 1<<depth;
+        int64_t progress = ((raw->n_pixels_accumulated/nodes_per_depth) * 100 /
+                            ((int64_t)n_node_pixels * n_shards / ctx->n_threads));
+
+        char prefix[256];
+        snprintf(prefix, sizeof(prefix), "Thread %2d, node %2d%% (%" PRIu64 "/%" PRIu64 ", %d shards), d",
+                 state->idx,
+                 (int)progress,
+                 raw->n_pixels_accumulated / nodes_per_depth,
+                 (int64_t)n_node_pixels * n_shards / ctx->n_threads,
+                 n_shards);
+
         struct thread_depth_metrics_report metrics;
 
         calculate_thread_depth_metrics_report(state, depth,
@@ -853,15 +863,10 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
             if (interrupted)
                 break;
             if (ctx->profile) {
-                // Assume an even distribution of work across threads and shards
-                // to estimate the current node progress...
-                int nodes_per_depth = 1<<node_depth;
-                int64_t progress = ((depth_metrics->n_pixels_accumulated/nodes_per_depth) * 100 /
-                                    (n_pixels * n_shards / ctx->n_threads));
-
                 maybe_log_thread_depth_metrics(state,
-                                               progress,
+                                               n_pixels,
                                                node_depth,
+                                               n_shards,
                                                get_time());
             }
         }
