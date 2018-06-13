@@ -2391,6 +2391,10 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
                       "Spurious NAN depth value in training frame %s",
                       frame_path);
 
+            gm_assert(ctx->log, !std::isinf(depth_m),
+                      "Spurious INF depth value in training frame %s",
+                      frame_path);
+
             if (depth_m >= HUGE_DEPTH)
                 dest[dest_off] = INT16_MAX;
             else {
