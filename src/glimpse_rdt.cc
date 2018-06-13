@@ -2158,12 +2158,15 @@ reload_tree(struct gm_rdt_context_impl* ctx,
     /* We track the UVT values as integers instead of float while training... */
     for (int i = 0; i < n_reload_nodes; i++) {
         Node float_node = checkpoint->nodes[i];
-        struct node fixed_node;
-        fixed_node.uvs[0] = round(float_node.uv[0] * 1000.0f);
-        fixed_node.uvs[1] = round(float_node.uv[1] * 1000.0f);
-        fixed_node.uvs[2] = round(float_node.uv[2] * 1000.0f);
-        fixed_node.uvs[3] = round(float_node.uv[3] * 1000.0f);
-        fixed_node.t_mm = round(float_node.t * 1000.0f);
+        struct node fixed_node = {};
+
+        if (float_node.label_pr_idx == 0) {
+            fixed_node.uvs[0] = roundf(float_node.uv[0] * 1000.0f);
+            fixed_node.uvs[1] = roundf(float_node.uv[1] * 1000.0f);
+            fixed_node.uvs[2] = roundf(float_node.uv[2] * 1000.0f);
+            fixed_node.uvs[3] = roundf(float_node.uv[3] * 1000.0f);
+            fixed_node.t_mm = roundf(float_node.t * 1000.0f);
+        }
         fixed_node.label_pr_idx = float_node.label_pr_idx;
         ctx->tree[i] = fixed_node;
     }
