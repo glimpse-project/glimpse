@@ -72,10 +72,12 @@ extern "C" {
 RDTree*
 rdt_tree_load_from_json(struct gm_logger* log,
                         JSON_Value* json_tree_value,
+                        bool allow_incomplete_leaves,
                         char** err);
 RDTree*
 rdt_tree_load_from_json_file(struct gm_logger* log,
                              const char* filename,
+                             bool allow_incomplete_leaves,
                              char** err);
 
 RDTree*

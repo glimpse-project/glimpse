@@ -56,46 +56,102 @@ count_pr_tables(JSON_Object* node)
         count_pr_tables(json_object_get_object(node, "r"));
 }
 
-static void
-unpack_json_tree(JSON_Object* jnode, Node* nodes, int node_index,
-                 float* pr_tables, int* table_index, int n_labels)
+static bool
+unpack_json_tree(struct gm_logger* log,
+                 JSON_Object* jnode,
+                 Node* nodes,
+                 int node_index,
+                 float* pr_tables,
+                 int* table_index,
+                 int n_labels,
+                 bool allow_incomplete_leaves,
+                 char** err)
 {
     Node* node = &nodes[node_index];
+    JSON_Array* p = NULL;
 
-    if (json_object_has_value(jnode, "p"))
-    {
-        float* pr_table = &pr_tables[(*table_index) * n_labels];
-
-        JSON_Array* p = json_object_get_array(jnode, "p");
-        for (int i = 0; i < n_labels; i++)
-        {
-            pr_table[i] = (float)json_array_get_number(p, i);
-        }
-
-        // Write out probability table
-        node->label_pr_idx = ++(*table_index);
-        return;
+    if (!jnode) {
+        gm_throw(log, err, "Spurious missing tree node %d", node_index);
+        return false;
     }
 
     JSON_Array* u = json_object_get_array(jnode, "u");
-    JSON_Array* v = json_object_get_array(jnode, "v");
 
-    if (u == NULL || v == NULL) {
+    if (u) {
+        JSON_Array* v = json_object_get_array(jnode, "v");
+        if (!v) {
+            gm_throw(log, err, "Spurious tree node %d with 'u' but no 'v'",
+                     node_index);
+            return false;
+        }
+        if (!json_object_has_value(jnode, "t")) {
+            gm_throw(log, err, "Spurious non-leaf tree node %d with no threshold",
+                     node_index);
+            return false;
+        }
+
+        if (json_object_has_value(jnode, "p")) {
+            gm_throw(log, err, "Spurious non-leaf tree node %d with probabilities table",
+                     node_index);
+            return false;
+        }
+
+
+        node->uv[0] = json_array_get_number(u, 0);
+        node->uv[1] = json_array_get_number(u, 1);
+        node->uv[2] = json_array_get_number(v, 0);
+        node->uv[3] = json_array_get_number(v, 1);
+        node->t = json_object_get_number(jnode, "t");
+        node->label_pr_idx = 0;
+
+        if (!unpack_json_tree(log,
+                              json_object_get_object(jnode, "l"),
+                              nodes,
+                              node_index * 2 + 1,
+                              pr_tables,
+                              table_index,
+                              n_labels,
+                              allow_incomplete_leaves,
+                              err))
+        {
+            return false;
+        }
+
+        if (!unpack_json_tree(log,
+                              json_object_get_object(jnode, "r"),
+                              nodes,
+                              node_index * 2 + 2,
+                              pr_tables,
+                              table_index,
+                              n_labels,
+                              allow_incomplete_leaves,
+                              err))
+        {
+            return false;
+        }
+    } else if ((p = json_object_get_array(jnode, "p"))) {
+        const char* blacklist[] = { "u", "v", "t", "l", "r" };
+        for (int i = 0; i < (int)sizeof(blacklist) / (int)sizeof(blacklist[0]); i++) {
+            if (json_object_has_value(jnode, blacklist[i])) {
+                gm_throw(log, err, "Spurious leaf node with '%s' property",
+                         blacklist[i]);
+            }
+        }
+
+        float* pr_table = &pr_tables[(*table_index) * n_labels];
+        for (int i = 0; i < n_labels; i++)
+            pr_table[i] = (float)json_array_get_number(p, i);
+
+        node->label_pr_idx = ++(*table_index);
+
+    } else if (allow_incomplete_leaves) {
         node->label_pr_idx = INT_MAX;
-        return;
+    } else {
+        gm_throw(log, err, "Incomplete node %d found while loading", node_index);
+        return false;
     }
 
-    node->uv[0] = json_array_get_number(u, 0);
-    node->uv[1] = json_array_get_number(u, 1);
-    node->uv[2] = json_array_get_number(v, 0);
-    node->uv[3] = json_array_get_number(v, 1);
-    node->t = json_object_get_number(jnode, "t");
-    node->label_pr_idx = 0;
-
-    unpack_json_tree(json_object_get_object(jnode, "l"), nodes,
-                     node_index * 2 + 1, pr_tables, table_index, n_labels);
-    unpack_json_tree(json_object_get_object(jnode, "r"), nodes,
-                     node_index * 2 + 2, pr_tables, table_index, n_labels);
+    return true;
 }
 
 void
@@ -115,6 +171,7 @@ rdt_tree_destroy(RDTree* tree)
 RDTree*
 rdt_tree_load_from_json(struct gm_logger* log,
                         JSON_Value* json_tree_value,
+                        bool allow_incomplete_leaves,
                         char** err)
 {
     assert_rdt_abi();
@@ -123,7 +180,6 @@ rdt_tree_load_from_json(struct gm_logger* log,
     if (!json_tree)
     {
         gm_throw(log, err, "Failed to find top-level tree object\n");
-        json_value_free(json_tree_value);
         return NULL;
     }
 
@@ -131,7 +187,6 @@ rdt_tree_load_from_json(struct gm_logger* log,
     if (!root)
     {
         gm_throw(log, err, "Failed to find tree root node\n");
-        json_value_free(json_tree_value);
         return NULL;
     }
 
@@ -170,15 +225,28 @@ rdt_tree_load_from_json(struct gm_logger* log,
 
     // Copy over nodes and probability tables
     int table_index = 0;
-    unpack_json_tree(root, tree->nodes, 0, tree->label_pr_tables, &table_index,
-                     tree->header.n_labels);
-
-    return tree;
+    if (!unpack_json_tree(log,
+                            root,
+                            tree->nodes,
+                            0,
+                            tree->label_pr_tables,
+                            &table_index,
+                            tree->header.n_labels,
+                            allow_incomplete_leaves,
+                            err))
+    {
+        xfree(tree);
+        xfree(tree->label_pr_tables);
+        return NULL;
+    } else {
+        return tree;
+    }
 }
 
 RDTree*
 rdt_tree_load_from_json_file(struct gm_logger* log,
                              const char* filename,
+                             bool allow_incomplete_leaves,
                              char** err)
 {
     JSON_Value *js = json_parse_file(filename);
@@ -187,7 +255,7 @@ rdt_tree_load_from_json_file(struct gm_logger* log,
         return NULL;
     }
 
-    RDTree *tree = rdt_tree_load_from_json(log, js, err);
+    RDTree *tree = rdt_tree_load_from_json(log, js, allow_incomplete_leaves, err);
     json_value_free(js);
 
     return tree;

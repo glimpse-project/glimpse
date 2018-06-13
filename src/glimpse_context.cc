@@ -4657,7 +4657,9 @@ gm_context_new(struct gm_logger *logger, char **err)
             JSON_Value *js = json_parse_string((const char *)gm_asset_get_buffer(tree_asset));
             if (js) {
                 ctx->decision_trees[i] =
-                    rdt_tree_load_from_json(ctx->log, js, &catch_err);
+                    rdt_tree_load_from_json(ctx->log, js,
+                                            false, // don't load incomplete trees
+                                            &catch_err);
                 if (!ctx->decision_trees[i]) {
                     gm_warn(ctx->log,
                             "Failed to open JSON decision tree '%s': %s",

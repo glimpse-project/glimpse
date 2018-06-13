@@ -2142,7 +2142,10 @@ reload_tree(struct gm_rdt_context_impl* ctx,
             return false;
         }
 
-        checkpoint = rdt_tree_load_from_json(ctx->log, js, err);
+        checkpoint = rdt_tree_load_from_json(ctx->log,
+                                             js,
+                                             true, // allow loading incomplete trees
+                                             err);
 
         JSON_Value* history = json_object_get_value(json_object(js), "history");
         if (history) {

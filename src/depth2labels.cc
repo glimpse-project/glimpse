@@ -176,7 +176,9 @@ main(int argc, char **argv)
         JSON_Value *js = json_parse_file(tree_path);
         gm_assert(log, js != NULL, "Failed to parse %s as JSON", tree_path);
 
-        forest[i] = rdt_tree_load_from_json(log, js, NULL); // abort on error
+        forest[i] = rdt_tree_load_from_json(log, js,
+                                            false, // don't load incomplete trees
+                                            NULL); // abort on error
 
         json_value_free(js);
     }
