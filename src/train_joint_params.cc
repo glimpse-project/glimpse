@@ -170,6 +170,7 @@ thread_body(void* userdata)
     TrainContext* ctx = data->ctx;
 
     int n_labels = ctx->forest[0]->header.n_labels;
+    float bg_depth = ctx->forest[0]->header.bg_depth;
 
     // Generate probability tables and pixel weights
     int images_per_thread =
@@ -250,7 +251,9 @@ thread_body(void* userdata)
             // Get joint positions
             InferredJoints* result =
                 infer_joints<half>(depth_image, pr_table, weights,
-                                   ctx->width, ctx->height, n_labels,
+                                   ctx->width, ctx->height,
+                                   bg_depth,
+                                   n_labels,
                                    ctx->joint_map,
                                    ctx->forest[0]->header.fov,
                                    params);

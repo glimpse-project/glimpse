@@ -80,6 +80,13 @@ infer_labels_thread(void* userdata)
     FloatT* depth_image = (FloatT*)data->depth_image;
     int n_labels = data->forest[0]->header.n_labels;
 
+    /* Bias by 2cm because half-float depth buffers can loose a lot of
+     * precision. E.g. (INT16_MAX / 1000.0) which is the bg_depth for new trees
+     * reads back as as 32.75 meters instead of 32.767 which has an error of
+     * nearly 2cm
+     */
+    float bg_depth = data->forest[0]->header.bg_depth - 0.02;
+
     int width = data->width;
     int height = data->height;
 
@@ -94,8 +101,10 @@ infer_labels_thread(void* userdata)
         float* out_pr_table = &data->output[off * n_labels];
         float depth = depth_image[off];
 
-        // TODO: Provide a configurable threshold here?
-        if (depth >= HUGE_DEPTH)
+        int16_t depth_mm = depth * 1000.0f + 0.5f;
+        int16_t half_depth_mm = depth_mm / 2;
+
+        if (depth >= bg_depth)
         {
             out_pr_table[data->forest[0]->header.bg_label] += 1.0f;
             continue;
@@ -109,19 +118,29 @@ infer_labels_thread(void* userdata)
 
             int id = 0;
             while (node.label_pr_idx == 0) {
-                Int2D u = { (int)(pixel[0] + node.uv[0] / depth),
-                            (int)(pixel[1] + node.uv[1] / depth) };
-                Int2D v = { (int)(pixel[0] + node.uv[2] / depth),
-                            (int)(pixel[1] + node.uv[3] / depth) };
-
+#if 1
+                Int2D u = { (int)(pixel[0] + roundf(node.uv[0] / depth)),
+                            (int)(pixel[1] + roundf(node.uv[1] / depth)) };
+                Int2D v = { (int)(pixel[0] + roundf(node.uv[2] / depth)),
+                            (int)(pixel[1] + roundf(node.uv[3] / depth)) };
+#if 0
                 float upixel = (u[0] >= 0 && u[0] < (int)width &&
                                 u[1] >= 0 && u[1] < (int)height) ?
-                    (float)depth_image[((u[1] * width) + u[0])] : 1000.f;
+                    (float)depth_image[((u[1] * width) + u[0])] : ((float)INT16_MAX/1000.0f);
                 float vpixel = (v[0] >= 0 && v[0] < (int)width &&
                                 v[1] >= 0 && v[1] < (int)height) ?
-                    (float)depth_image[((v[1] * width) + v[0])] : 1000.f;
+                    (float)depth_image[((v[1] * width) + v[0])] : ((float)INT16_MAX/1000.0f);
 
-                float gradient = upixel - vpixel;
+                /* XXX: because we measure gradients discretely in millimeters
+                 * while training the thresholds can be sensitive to rounding
+                 * details and this matches the training arithmetic better
+                 * than:
+                 *
+                 *   float gradient = upixel - vpixel;
+                 */
+                int16_t u_z = roundf(upixel * 1000.0f);
+                int16_t v_z = roundf(vpixel * 1000.0f);
+                float gradient = (float)(u_z - v_z) / 1000.0f;
 
                 /* NB: The nodes are arranged in breadth-first, left then
                  * right child order with the root node at index zero.
@@ -130,8 +149,71 @@ infer_labels_thread(void* userdata)
                  * ('id' here) then 2 * id + 1 is the index for the left
                  * child and 2 * id + 2 is the index for the right child...
                  */
-                //id = (gradient < (node->t / 1000.0f)) ? 2 * id + 1 : 2 * id + 2;
                 id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
+#else
+                int16_t u_z;
+                if (u[0] >= 0 && u[0] < (int)width && u[1] >= 0 && u[1] < (int)height)
+                    u_z = (float)depth_image[((u[1] * width) + u[0])] * 1000.0f + 0.5f; // round nearest
+                else
+                    u_z = INT16_MAX;
+                int16_t v_z;
+                if (v[0] >= 0 && v[0] < (int)width && v[1] >= 0 && v[1] < (int)height)
+                    v_z = (float)depth_image[((v[1] * width) + v[0])] * 1000.0f + 0.5f; // round nearest
+                else
+                    v_z = INT16_MAX;
+
+                int16_t gradient = u_z - v_z;
+                int16_t t_mm = roundf(node.t * 1000.0f);
+
+                /* NB: The nodes are arranged in breadth-first, left then
+                 * right child order with the root node at index zero.
+                 *
+                 * In this case if you have an index for any particular node
+                 * ('id' here) then 2 * id + 1 is the index for the left
+                 * child and 2 * id + 2 is the index for the right child...
+                 */
+                id = (gradient < t_mm) ? 2 * id + 1 : 2 * id + 2;
+#endif
+
+#else
+
+#define div_int_round_nearest(N, D, HALF_D) \
+    ((N < 0) ? ((N - HALF_D)/D) : ((N + HALF_D)/D))
+
+                int32_t uvs[4] = {
+                    (int32_t)roundf(node.uv[0] * 1000.0f),
+                    (int32_t)roundf(node.uv[1] * 1000.0f),
+                    (int32_t)roundf(node.uv[2] * 1000.0f),
+                    (int32_t)roundf(node.uv[3] * 1000.0f)
+                };
+                int32_t u_x = x + div_int_round_nearest(uvs[0], depth_mm, half_depth_mm);
+                int32_t u_y = y + div_int_round_nearest(uvs[1], depth_mm, half_depth_mm);
+                int32_t v_x = x + div_int_round_nearest(uvs[2], depth_mm, half_depth_mm);
+                int32_t v_y = y + div_int_round_nearest(uvs[3], depth_mm, half_depth_mm);
+
+                int16_t u_z;
+                if (u_x >= 0 && u_x < width && u_y >= 0 && u_y < height)
+                    u_z = depth_image[(u_y * width + u_x)] * 1000.0f + 0.5f; // round nearest
+                else
+                    u_z = INT16_MAX;
+                int16_t v_z;
+                if (v_x >= 0 && v_x < width && v_y >= 0 && v_y < height)
+                    v_z = depth_image[(v_y * width + v_x)] * 1000.0f + 0.5f; // round nearest
+                else
+                    v_z = INT16_MAX;
+
+                int16_t gradient = u_z - v_z;
+                int16_t t_mm = roundf(node.t * 1000.0f);
+
+                /* NB: The nodes are arranged in breadth-first, left then
+                 * right child order with the root node at index zero.
+                 *
+                 * In this case if you have an index for any particular node
+                 * ('id' here) then 2 * id + 1 is the index for the left
+                 * child and 2 * id + 2 is the index for the right child...
+                 */
+                id = (gradient < t_mm) ? 2 * id + 1 : 2 * id + 2;
+#endif
 
                 node = tree->nodes[id];
             }
@@ -509,7 +591,9 @@ template<typename FloatT>
 InferredJoints*
 infer_joints(FloatT* depth_image, float* pr_table, float* weights,
              int width, int height,
-             int n_labels, JSON_Value* joint_map,
+             float bg_depth,
+             int n_labels,
+             JSON_Value* joint_map,
              float vfov, JIParam* params)
 {
     int n_joints = json_array_get_count(json_array(joint_map));
@@ -546,7 +630,7 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
         {
             float s = (x / half_width) - 1.f;
             float depth = (float)depth_image[idx];
-            if (!std::isnormal(depth) || depth >= HUGE_DEPTH)
+            if (!std::isnormal(depth) || depth >= bg_depth)
             {
                 continue;
             }
@@ -691,11 +775,11 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
 }
 
 template InferredJoints*
-infer_joints<half>(half*, float*, float*, int, int, int,
+infer_joints<half>(half*, float*, float*, int, int, float, int,
                    JSON_Value*, float, JIParam*);
 
 template InferredJoints*
-infer_joints<float>(float*, float*, float*, int, int, int,
+infer_joints<float>(float*, float*, float*, int, int, float, int,
                     JSON_Value*, float, JIParam*);
 
 void
