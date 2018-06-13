@@ -41,6 +41,8 @@
 #include <thread>
 #include <queue>
 
+#include <png.h>
+
 #include "half.hpp"
 
 #include "xalloc.h"
@@ -72,13 +74,7 @@ using half_float::half;
             threshold; /* statement expression evaluates to this */ \
         })
 
-static void
-process_node_shards_work_cb(struct thread_state* state,
-                            void* user_data);
-
-
-static const char *interrupt_reason;
-static bool interrupted;
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
 struct bounds {
     int min_x;
@@ -234,6 +230,8 @@ struct gm_rdt_context_impl {
     pthread_mutex_t tidy_log_lock;
     bool     verbose;       // Verbose logging
     bool     profile;       // Verbose profiling
+    bool     debug_post_inference; // After training, write label inference images
+                                   // for sampled pixels across all images
 
     bool     pretty;        // Pretty JSON output
     int      seed;          // Seed for RNG
@@ -296,6 +294,52 @@ struct gm_rdt_context_impl {
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 };
+
+static void
+process_node_shards_work_cb(struct thread_state* state,
+                            void* user_data);
+
+
+static const char *interrupt_reason;
+static bool interrupted;
+
+static png_color png_label_palette[] = {
+    { 0x21, 0x21, 0x21 },
+    { 0xd1, 0x15, 0x40 },
+    { 0xda, 0x1d, 0x0e },
+    { 0xdd, 0x5d, 0x1e },
+    { 0x49, 0xa2, 0x24 },
+    { 0x29, 0xdc, 0xe3 },
+    { 0x02, 0x68, 0xc2 },
+    { 0x90, 0x29, 0xf9 },
+    { 0xff, 0x00, 0xcf },
+    { 0xef, 0xd2, 0x37 },
+    { 0x92, 0xa1, 0x3a },
+    { 0x48, 0x21, 0xeb },
+    { 0x2f, 0x93, 0xe5 },
+    { 0x1d, 0x6b, 0x0e },
+    { 0x07, 0x66, 0x4b },
+    { 0xfc, 0xaa, 0x98 },
+    { 0xb6, 0x85, 0x91 },
+    { 0xab, 0xae, 0xf1 },
+    { 0x5c, 0x62, 0xe0 },
+    { 0x48, 0xf7, 0x36 },
+    { 0xa3, 0x63, 0x0d },
+    { 0x78, 0x1d, 0x07 },
+    { 0x5e, 0x3c, 0x00 },
+    { 0x9f, 0x9f, 0x60 },
+    { 0x51, 0x76, 0x44 },
+    { 0xd4, 0x6d, 0x46 },
+    { 0xff, 0xfb, 0x7e },
+    { 0xd8, 0x4b, 0x4b },
+    { 0xa9, 0x02, 0x52 },
+    { 0x0f, 0xc1, 0x66 },
+    { 0x2b, 0x5e, 0x44 },
+    { 0x00, 0x9c, 0xad },
+    { 0x00, 0x40, 0xad },
+    { 0xff, 0x5d, 0xaa },
+};
+
 
 
 static uint64_t
@@ -1862,6 +1906,16 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.bool_state.ptr = &ctx->verbose;
     ctx->properties.push_back(prop);
 
+    ctx->debug_post_inference = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "debug_post_inference";
+    prop.desc = "Run label inference on all sampled pixels after training";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->debug_post_inference;
+    ctx->properties.push_back(prop);
+
+
     ctx->profile = false;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -2563,6 +2617,191 @@ load_training_data(struct gm_rdt_context_impl* ctx,
     return true;
 }
 
+/* Perform label inference in terms of our fixed point sampling code to help
+ * spot any discrepancies with other runtime inference implementation
+ */
+static void
+debug_infer_pixel_label(struct gm_rdt_context_impl* ctx,
+                        int16_t* depth_image,
+                        int width,
+                        int height,
+                        struct pixel px,
+                        float* pr_table_out)
+{
+    int16_t depth_mm = depth_image[px.y * width + px.x];
+    int16_t half_depth_mm = depth_mm / 2;
+
+    int id = 0;
+    struct node node = ctx->tree[0];
+    while (node.label_pr_idx == 0) {
+        int16_t gradient = sample_uv_gradient_mm(depth_image,
+                                                 width,
+                                                 height,
+                                                 px.x, px.y,
+                                                 depth_mm,
+                                                 half_depth_mm,
+                                                 node.uvs);
+
+        /* NB: The nodes are arranged in breadth-first, left then
+         * right child order with the root node at index zero.
+         *
+         * In this case if you have an index for any particular node
+         * ('id' here) then 2 * id + 1 is the index for the left
+         * child and 2 * id + 2 is the index for the right child...
+         */
+        id = (gradient < node.t_mm) ? 2 * id + 1 : 2 * id + 2;
+
+        node = ctx->tree[id];
+    }
+
+    /* NB: node->label_pr_idx is a base-one index since index zero
+     * is reserved to indicate that the node is not a leaf node
+     */
+    float* pr_table = &ctx->tree_histograms[(node.label_pr_idx - 1) *
+        ctx->n_labels];
+
+    memcpy(pr_table_out, pr_table, sizeof(float) * ctx->n_labels);
+}
+
+static bool
+debug_check_inference(struct gm_rdt_context_impl* ctx,
+                      const char* data_dir,
+                      const char* index_name,
+                      char** err)
+{
+    int n_labels = ctx->n_labels;
+
+    gm_info(ctx->log, "Re-opening training data index %s...", index_name);
+    struct gm_data_index* data_index =
+        gm_data_index_open(ctx->log,
+                           data_dir,
+                           index_name,
+                           err);
+    if (!data_index)
+        return false;
+
+    /* Re-sample the original root node pixels so we can then run label
+     * inference on those original pixels
+     */
+    struct node_data root_node;
+    root_node.id = 0;
+    root_node.pixels = (struct pixel*)xmalloc((size_t)ctx->n_images *
+                                              ctx->n_pixels *
+                                              sizeof(struct pixel));
+    root_node.n_pixels = ctx->n_images * ctx->n_pixels;
+
+    struct bounds *body_bounds = (struct bounds*)xmalloc(ctx->n_images *
+                                                         sizeof(struct bounds));
+    if (!pre_process_label_images(ctx,
+                                  data_index,
+                                  root_node.pixels,
+                                  body_bounds,
+                                  err))
+    {
+        xfree(root_node.pixels);
+        xfree(body_bounds);
+        return false;
+    }
+
+    ctx->depth_index.resize(ctx->n_images);
+
+    int max_width = gm_data_index_get_width(data_index);
+    int max_height = gm_data_index_get_height(data_index);
+    int64_t n_depth_pixels = 0;
+
+    for (int i = 0; i < ctx->n_images; i++) {
+        struct bounds bounds = body_bounds[i];
+
+        int width = bounds.max_x - bounds.min_x + 1;
+        int height = bounds.max_y - bounds.min_y + 1;
+
+        gm_assert(ctx->log, width <= max_width,
+                  "Bounded width (%d) > full width (%d)", width, max_width);
+        gm_assert(ctx->log, height <= max_height,
+                  "Bounded height (%d) > full height (%d)", height, max_height);
+
+        struct depth_meta meta;
+        meta.width = width;
+        meta.height = height;
+        meta.pixel_offset = n_depth_pixels;
+        ctx->depth_index[i] = meta;
+
+        n_depth_pixels += (width * height);
+    }
+
+    const char* top_dir = gm_data_index_get_top_dir(data_index);
+
+    for (int i = 0; i < ctx->n_images; i++) {
+        int image_pixel_off = ctx->n_pixels * i;
+        struct pixel px0 = root_node.pixels[image_pixel_off];
+
+        gm_assert(ctx->log, px0.i == i, "Inconsistent pixel indices after reload");
+
+        struct bounds bounds = body_bounds[i];
+
+        int bounds_width = bounds.max_x - bounds.min_x + 1;
+        int bounds_height = bounds.max_y - bounds.min_y + 1;
+
+        struct depth_meta depth_meta = ctx->depth_index[i];
+
+        gm_assert(ctx->log,
+                  (bounds_width == depth_meta.width &&
+                   bounds_height == depth_meta.height),
+                  "Inconsistent bounds and depth_meta for image %d after reload",
+                  i);
+
+        char out_filename[512];
+        xsnprintf(out_filename, sizeof(out_filename), "%s/labels/%s-training-check.png",
+                  top_dir, gm_data_index_get_frame_path(data_index, i));
+
+        uint8_t out[max_width * max_height];
+        memset(out, 0, sizeof(out));
+
+        int16_t* depth_image = &ctx->depth_images[depth_meta.pixel_offset];
+
+        for (int p = 0; p < ctx->n_pixels; p++) {
+            struct pixel px = root_node.pixels[image_pixel_off + p];
+            float pr_table[n_labels];
+
+            debug_infer_pixel_label(ctx,
+                                    depth_image,
+                                    depth_meta.width,
+                                    depth_meta.height,
+                                    px,
+                                    pr_table);
+
+            float best_prob = pr_table[0];
+            int best_l = 0;
+            for (int l = 1; l < n_labels; l++) {
+                float prob = pr_table[l];
+                if (prob > best_prob) {
+                    best_prob = prob;
+                    best_l = l;
+                }
+            }
+
+            int out_x = px.x + bounds.min_x;
+            int out_y = px.y + bounds.min_y;
+            out[max_width * out_y + out_x] = best_l;
+        }
+
+        int palette_size = ARRAY_LEN(png_label_palette);
+        IUImageSpec output_spec = { max_width, max_height, IU_FORMAT_U8 };
+        if (iu_write_png_to_file(out_filename, &output_spec,
+                                 out, png_label_palette, palette_size) != SUCCESS)
+        {
+            gm_error(ctx->log, "Error writing debug PNG %s",
+                     out_filename);
+        }
+        gm_info(ctx->log, "Wrote %s", out_filename);
+    }
+
+    gm_data_index_destroy(data_index);
+    data_index = NULL;
+
+    return true;
+}
+
 static int
 meter_range_to_pixelmillimeters(float fov_rad, int res_px, float meter_range)
 {
@@ -2737,6 +2976,15 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     gm_info(ctx->log, "(%s) %s\n",
             format_duration_s16(duration, buf),
             interrupt_reason ?: "Done!");
+
+    if (ctx->debug_post_inference) {
+        char* catch_err = NULL;
+        if (!debug_check_inference(ctx, data_dir, index_name, &catch_err)) {
+            gm_warn(ctx->log, "Failed to check inference after training: %s",
+                    catch_err);
+            xfree(catch_err);
+        }
+    }
 
     // Free memory that isn't needed anymore
     destroy_training_state(ctx);
