@@ -255,6 +255,9 @@ struct gm_rdt_context_impl {
     int      max_depth;     // Maximum depth to train to
     int      max_nodes;     // Maximum number of nodes to train - used for debug
                             // and testing to trigger an early exit.
+    int      batch_divider;
+    int      batch_number;
+
     int        n_pixels;      // Number of pixels to sample
     std::vector<int32_t> uvs; // The uv pairs to test ordered like:
                               // [uv0.x, uv0.y, uv1.x, uv1.y]
@@ -1448,6 +1451,21 @@ shard_results_unref(struct gm_rdt_context_impl* ctx,
 }
 
 static void
+training_queue_add_node(struct gm_rdt_context_impl* ctx,
+                        struct node_data node)
+{
+    int node_depth = id_to_depth(node.id);
+    int nodes_per_depth = 1<<node_depth;
+
+
+    if (nodes_per_depth < ctx->batch_divider ||
+        node.id % ctx->batch_divider == ctx->batch_number)
+    {
+        ctx->train_queue.push_back(node);
+    }
+}
+
+static void
 process_node_shards_work_cb(struct thread_state* state,
                             void* user_data)
 {
@@ -1541,8 +1559,8 @@ process_node_shards_work_cb(struct thread_state* state,
         rdata.pixels = r_pixels;
 
         pthread_mutex_lock(&ctx->train_queue_lock);
-        ctx->train_queue.push_back(ldata);
-        ctx->train_queue.push_back(rdata);
+        training_queue_add_node(ctx, ldata);
+        training_queue_add_node(ctx, rdata);
         pthread_mutex_unlock(&ctx->train_queue_lock);
 
         // Mark the node as a continuing node
@@ -1877,6 +1895,28 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.int_state.max = INT_MAX;
     ctx->properties.push_back(prop);
 
+    ctx->batch_divider = 1;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "batch_divider";
+    prop.desc = "Only train 1/batch_divider of the nodes (to scale across a cluster)";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->batch_divider;
+    prop.int_state.min = 1;
+    prop.int_state.max = 1000;
+    ctx->properties.push_back(prop);
+
+    ctx->batch_number = 0;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "batch_number";
+    prop.desc = "Train every Nth node (base-0) per batch (see batch_divider)";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->batch_number;
+    prop.int_state.min = 0;
+    prop.int_state.max = 1000;
+    ctx->properties.push_back(prop);
+
     ctx->seed = 0;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -1914,7 +1954,6 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->debug_post_inference;
     ctx->properties.push_back(prop);
-
 
     ctx->profile = false;
     prop = gm_ui_property();
@@ -2244,7 +2283,7 @@ reload_tree(struct gm_rdt_context_impl* ctx,
         if (node->label_pr_idx == INT_MAX)
         {
             // INT_MAX implies it wasn't trained yet..
-            ctx->train_queue.push_back(node_data);
+            training_queue_add_node(ctx, node_data);
         }
         else if (node->label_pr_idx != 0 && // leaf node
                  node_depth == (checkpoint->header.depth - 1) &&
@@ -2254,7 +2293,7 @@ reload_tree(struct gm_rdt_context_impl* ctx,
              * tree if we're training deeper now...
              */
             node->label_pr_idx = INT_MAX;
-            ctx->train_queue.push_back(node_data);
+            training_queue_add_node(ctx, node_data);
         }
         else if (node_depth == (ctx->max_depth - 1) &&
                  node->label_pr_idx == 0 && // wasn't previously a leaf node
@@ -2265,7 +2304,7 @@ reload_tree(struct gm_rdt_context_impl* ctx,
              * need to be re-trained to calculate histograms...
              */
             node->label_pr_idx = INT_MAX;
-            ctx->train_queue.push_back(node_data);
+            training_queue_add_node(ctx, node_data);
         }
         else
         {
@@ -2614,7 +2653,7 @@ load_training_data(struct gm_rdt_context_impl* ctx,
             return false;
         }
     } else {
-        ctx->train_queue.push_back(root_node);
+        training_queue_add_node(ctx, root_node);
     }
 
     return true;
@@ -2838,6 +2877,12 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     const char* out_filename = ctx->out_filename;
     if (!out_filename) {
         gm_throw(ctx->log, err, "Output filename not specified");
+        return false;
+    }
+
+    if (ctx->batch_number >= ctx->batch_divider) {
+        gm_throw(ctx->log, err, "Batch number %d not < batch divider %d (number is a base-0 index)",
+                 ctx->batch_number, ctx->batch_divider);
         return false;
     }
 
