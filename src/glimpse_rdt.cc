@@ -2041,6 +2041,13 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
     json_object_set_number(json_object(rdt), "n_labels", ctx->n_labels);
     json_object_set_number(json_object(rdt), "bg_label", 0);
 
+    /* Previous trees without a bg_depth property implicitly considered 1000.0
+     * meters to be the background depth, but since we can't represent that
+     * in millimeters in an int16_t newer trees are trained to treat 33 meters
+     * as the background depth...
+     */
+    json_object_set_number(json_object(rdt), "bg_depth", INT16_MAX / 1000.0);
+
     JSON_Value* labels = json_object_get_value(json_object(ctx->data_meta),
                                                "labels");
     labels = json_value_deep_copy(labels);
