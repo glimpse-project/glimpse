@@ -2401,7 +2401,7 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
                           "Depth value %f in training frame %s can't be represented in 16 bits",
                           depth_m, frame_path);
 
-                dest[dest_off] = depth_m * 1000.5; // round nearest with the +0.5
+                dest[dest_off] = depth_m * 1000.0f + 0.5f; // round nearest with the +0.5
             }
         }
     }
