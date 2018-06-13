@@ -2265,12 +2265,6 @@ reload_tree(struct gm_rdt_context_impl* ctx,
 
     rdt_tree_destroy(checkpoint);
 
-    if (!ctx->train_queue.size())
-    {
-        gm_throw(ctx->log, err, "Tree already fully trained.\n");
-        return false;
-    }
-
     return true;
 }
 
