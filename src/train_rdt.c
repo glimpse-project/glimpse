@@ -604,5 +604,9 @@ main(int argc, char **argv)
     json_value_free(override_props_object);
     gm_logger_destroy(data->log);
 
+    free(data_dir_opt);
+    free(index_name_opt);
+    free(out_file_opt);
+
     return 0;
 }

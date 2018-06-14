@@ -2000,6 +2000,8 @@ destroy_training_state(struct gm_rdt_context_impl* ctx)
     ctx->uvs.shrink_to_fit();
     xfree(ctx->depth_images);
     ctx->depth_images = NULL;
+    xfree(ctx->thresholds);
+    ctx->thresholds = NULL;
     if (ctx->history) {
         json_value_free(ctx->history);
         ctx->history = NULL;
@@ -2019,6 +2021,8 @@ gm_rdt_context_destroy(struct gm_rdt_context *_ctx)
 {
     struct gm_rdt_context_impl *ctx = (struct gm_rdt_context_impl *)_ctx;
     destroy_training_state(ctx);
+    gm_props_free_strings(&ctx->properties_state);
+
     delete ctx;
 }
 
@@ -2104,11 +2108,12 @@ static bool
 save_tree_json(struct gm_rdt_context_impl *ctx,
                std::vector<node> &tree,
                std::vector<float> &tree_histograms,
-               const char* filename)
+               const char* filename,
+               char** err)
 {
     JSON_Value *rdt = json_value_init_object();
 
-    JSON_Value *record_val = ctx->record;
+    JSON_Value *record_val = json_value_deep_copy(ctx->record);
     JSON_Value *history = json_value_deep_copy(ctx->history);
     if (!history) {
         history = json_value_init_array();
@@ -2155,9 +2160,10 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
         status = json_serialize_to_file_pretty(rdt, filename);
     else
         status = json_serialize_to_file(rdt, filename);
+    json_value_free(rdt);
     if (status != JSONSuccess)
     {
-        fprintf(stderr, "Failed to serialize output to JSON\n");
+        gm_throw(ctx->log, err, "Failed to serialize output to JSON\n");
         return false;
     }
 
@@ -2485,10 +2491,6 @@ load_depth_buffers_cb(struct gm_data_index* data_index,
 
             gm_assert(ctx->log, !std::isnan(depth_m),
                       "Spurious NAN depth value in training frame %s",
-                      frame_path);
-
-            gm_assert(ctx->log, !std::isinf(depth_m),
-                      "Spurious INF depth value in training frame %s",
                       frame_path);
 
             if (depth_m >= HUGE_DEPTH)
@@ -2886,6 +2888,8 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         return false;
     }
 
+    ctx->record = create_training_record(ctx);
+
     /* Loads label data, depth data and potentially loads a pre-existing
      * decision tree...
      */
@@ -2893,8 +2897,6 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
         destroy_training_state(ctx);
         return false;
     }
-
-    ctx->record = create_training_record(ctx);
 
     // Adjust uv range into pixel-millimeters, considering that our depth
     // values are in mm, and we divide uv offsets by the depth to give us depth
@@ -3015,10 +3017,15 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
             format_duration_s16(duration, buf),
             out_filename);
 
-    save_tree_json(ctx,
-                   ctx->tree,
-                   ctx->tree_histograms,
-                   out_filename);
+    if (!save_tree_json(ctx,
+                        ctx->tree,
+                        ctx->tree_histograms,
+                        out_filename,
+                        err))
+    {
+        destroy_training_state(ctx);
+        return false;
+    }
 
     duration = get_time() - ctx->start;
     gm_info(ctx->log, "(%s) %s\n",

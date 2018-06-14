@@ -320,6 +320,16 @@ gm_props_set_string(struct gm_ui_properties *props,
 }
 
 static inline void
+gm_props_free_strings(struct gm_ui_properties *props)
+{
+    for (int i = 0; i < props->n_properties; i++) {
+        struct gm_ui_property *prop = &props->properties[i];
+        if (prop->type == GM_PROPERTY_STRING)
+            gm_prop_set_string(prop, NULL);
+    }
+}
+
+static inline void
 gm_props_set_switch(struct gm_ui_properties *props,
                     const char *name)
 {
