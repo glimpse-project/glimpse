@@ -1,0 +1,8 @@
+[wrap-git]
+directory = opencv
+url = https://github.com/opencv/opencv.git
+revision = d1a598c65201966a99b3b848b2a640a23d6902d0
+
+patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
+patch_filename = opencv-wrap.tar
+patch_hash = a85c79974129050f606938d6a0ae93cefcde79e83e264d940d5473c1b56ad0df
