@@ -27,10 +27,10 @@
 
 #include <stdio.h>
 #include <stdbool.h>
+#include <stdint.h>
 
 #include <glimpse_log.h>
 
-#include "llist.h"
 #include "parson.h"
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
