@@ -31,12 +31,13 @@
 #include <vector>
 
 #include "half.hpp"
-#include "train_utils.h"
+
 #include "image_utils.h"
 #include "xalloc.h"
 #include "parson.h"
 
 #include "glimpse_log.h"
+#include "glimpse_data.h"
 
 using half_float::half;
 
@@ -397,18 +398,18 @@ load_frame_foreach_cb(struct gm_data_index* data_index,
 }
 
 JSON_Value*
-gather_train_data(struct gm_logger* log,
-                  const char* data_dir,
-                  const char* index_name,
-                  const char* joint_map_path,
-                  int* out_n_images,
-                  int* out_n_joints,
-                  int* out_width,
-                  int* out_height,
-                  half** out_depth_images,
-                  uint8_t** out_label_images,
-                  float** out_joints,
-                  char** err)
+gm_data_load_simple(struct gm_logger* log,
+                    const char* data_dir,
+                    const char* index_name,
+                    const char* joint_map_path,
+                    int* out_n_images,
+                    int* out_n_joints,
+                    int* out_width,
+                    int* out_height,
+                    half** out_depth_images,
+                    uint8_t** out_label_images,
+                    float** out_joints,
+                    char** err)
 {
     TrainData data = {};
     data.log = log;

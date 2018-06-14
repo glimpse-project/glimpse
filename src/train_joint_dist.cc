@@ -33,10 +33,10 @@
 #include <cmath>
 
 #include "xalloc.h"
-#include "train_utils.h"
 #include "parson.h"
 
 #include "glimpse_log.h"
+#include "glimpse_data.h"
 
 typedef struct {
     FILE       *log_fp;
@@ -175,17 +175,17 @@ main(int argc, char** argv)
 
     printf("Scanning training directories...\n");
     JSON_Value *meta =
-        gather_train_data(ctx.log,
-                          data_dir,
-                          index_name,
-                          joint_map_path,
-                          &ctx.n_sets,
-                          &ctx.n_joints,
-                          NULL, NULL, // width, height
-                          NULL, // depth images
-                          NULL, // label images
-                          &ctx.joints,
-                          NULL); // simply abort on error
+        gm_data_load_simple(ctx.log,
+                            data_dir,
+                            index_name,
+                            joint_map_path,
+                            &ctx.n_sets,
+                            &ctx.n_joints,
+                            NULL, NULL, // width, height
+                            NULL, // depth images
+                            NULL, // label images
+                            &ctx.joints,
+                            NULL); // simply abort on error
 
     // Create worker threads
     pthread_t threads[ctx.n_threads];

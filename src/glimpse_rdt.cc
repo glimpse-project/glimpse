@@ -47,12 +47,12 @@
 
 #include "xalloc.h"
 #include "rdt_tree.h"
-#include "train_utils.h"
 #include "image_utils.h"
 
-#include "glimpse_rdt.h"
 #include "glimpse_log.h"
 #include "glimpse_properties.h"
+#include "glimpse_data.h"
+#include "glimpse_rdt.h"
 
 #undef GM_LOG_CONTEXT
 #define GM_LOG_CONTEXT "rdt"

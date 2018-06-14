@@ -35,7 +35,6 @@
 #include <cmath>
 
 #include "xalloc.h"
-#include "train_utils.h"
 #include "rdt_tree.h"
 #include "infer.h"
 #include "parson.h"
@@ -43,6 +42,7 @@
 #include "half.hpp"
 
 #include "glimpse_log.h"
+#include "glimpse_data.h"
 
 #define JIP_VERSION 0
 #define N_SHIFTS 5
@@ -523,17 +523,17 @@ main(int argc, char** argv)
 
     printf("Scanning training directories...\n");
     JSON_Value *meta =
-        gather_train_data(ctx.log,
-                          data_dir,
-                          index_name,
-                          joint_map_path,
-                          &ctx.n_images,
-                          &ctx.n_joints,
-                          &ctx.width, &ctx.height,
-                          &ctx.depth_images,
-                          NULL, // skip label images
-                          &ctx.joints,
-                          NULL); // simply abort on error
+        gm_data_load_simple(ctx.log,
+                            data_dir,
+                            index_name,
+                            joint_map_path,
+                            &ctx.n_images,
+                            &ctx.n_joints,
+                            &ctx.width, &ctx.height,
+                            &ctx.depth_images,
+                            NULL, // skip label images
+                            &ctx.joints,
+                            NULL); // simply abort on error
 
     JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
     ctx.fov = json_object_get_number(camera, "vertical_fov");

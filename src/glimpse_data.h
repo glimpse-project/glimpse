@@ -82,16 +82,16 @@ gm_data_index_load_joints(struct gm_data_index* data_index,
                           char** err);
 
 JSON_Value*
-gather_train_data(struct gm_logger *log,
-                  const char* data_dir,
-                  const char* index_name,
-                  const char* joint_map_path,
-                  int* out_n_images,
-                  int* out_n_joints,
-                  int* out_width,
-                  int* out_height,
-                  half_float::half** out_depth_images,
-                  uint8_t** out_label_images,
-                  float** out_joints,
-                  char** err);
+gm_data_load_simple(struct gm_logger *log,
+                    const char* data_dir,
+                    const char* index_name,
+                    const char* joint_map_path,
+                    int* out_n_images,
+                    int* out_n_joints,
+                    int* out_width,
+                    int* out_height,
+                    half_float::half** out_depth_images,
+                    uint8_t** out_label_images,
+                    float** out_joints,
+                    char** err);
 

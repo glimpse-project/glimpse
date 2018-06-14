@@ -32,10 +32,11 @@
 
 #include "half.hpp"
 
-#include "train_utils.h"
+#include "png.h"
+
 #include "rdt_tree.h"
 
-#include "png.h"
+#include "glimpse_data.h"
 
 using half_float::half;
 
@@ -177,18 +178,18 @@ main(int argc, char **argv)
     uint8_t *label_images;
 
     JSON_Value *meta =
-        gather_train_data(log,
-                          data_dir,
-                          index_name,
-                          NULL, // no joint map
-                          &n_images,
-                          NULL, // n_joints
-                          &width,
-                          &height,
-                          &depth_images,
-                          &label_images,
-                          NULL, // no joint data
-                          NULL); // abort on error
+        gm_data_load_simple(log,
+                            data_dir,
+                            index_name,
+                            NULL, // no joint map
+                            &n_images,
+                            NULL, // n_joints
+                            &width,
+                            &height,
+                            &depth_images,
+                            &label_images,
+                            NULL, // no joint data
+                            NULL); // abort on error
     JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
     float vfov = json_object_get_number(camera, "vertical_fov") * (M_PI / 180.0);
 
