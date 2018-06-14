@@ -488,3 +488,44 @@ error:
 
     return NULL;
 }
+
+JSON_Value*
+gm_data_load_label_map_from_json(struct gm_logger* log,
+                                 const char* filename,
+                                 uint8_t* map,
+                                 char** err)
+{
+    JSON_Value* label_map = json_parse_file(filename);
+    if (!label_map) {
+        gm_throw(log, err, "Failed to parse label map %s", filename);
+        return NULL;
+    }
+
+    memset(map, 0, 256);
+
+    JSON_Array* label_map_array = json_array(label_map);
+    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
+        JSON_Object* mapping = json_array_get_object(label_map_array, i);
+        const char* label_name = json_object_get_string(mapping, "name");
+
+        JSON_Array* inputs = json_object_get_array(mapping, "inputs");
+        for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
+            int input = json_array_get_number(inputs, j);
+            if (input < 0 || input > 255) {
+                gm_throw(log, err, "Out of range \"%s\" label mapping from %d in %s\n",
+                         label_name, input, filename);
+                json_value_free(label_map);
+                return NULL;
+            }
+            if (map[input]) {
+                gm_throw(log, err, "Input %d sampled by multiple labels in %s\n",
+                         input, filename);
+                json_value_free(label_map);
+                return NULL;
+            }
+            map[input] = i;
+        }
+    }
+
+    return label_map;
+}
