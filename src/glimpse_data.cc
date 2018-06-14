@@ -501,7 +501,10 @@ gm_data_load_label_map_from_json(struct gm_logger* log,
         return NULL;
     }
 
-    memset(map, 0, 256);
+    /* Define invalid mappings so we can later assert that the map
+     * covers all possible input values
+     */
+    memset(map, 255, 256);
 
     JSON_Array* label_map_array = json_array(label_map);
     for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
@@ -517,7 +520,7 @@ gm_data_load_label_map_from_json(struct gm_logger* log,
                 json_value_free(label_map);
                 return NULL;
             }
-            if (map[input]) {
+            if (map[input] != 255) {
                 gm_throw(log, err, "Input %d sampled by multiple labels in %s\n",
                          input, filename);
                 json_value_free(label_map);

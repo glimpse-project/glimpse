@@ -239,9 +239,16 @@ struct gm_rdt_context_impl {
     char*    data_dir;      // Location of training data
     char*    index_name;    // Name of the frame index like <name>.index to read
     char*    out_filename;  // Filename of tree (.json or .rdt) to write
+    char*    label_map_filename;
+
+    JSON_Value* label_map_js;
+    uint8_t  label_map[256];
+
+    JSON_Value* label_names_js;
 
     float    fov;           // Camera field of view
-    int      n_labels;      // Number of labels in label images
+    int      n_data_labels; // Number of labels in label images
+    int      n_rdt_labels;  // Number of labels classified by decision tree
 
     int      n_images;      // Number of training images
 
@@ -424,7 +431,7 @@ print_label_histogram(struct gm_logger* log,
             bar_pos += len;
         }
         bar[bar_pos++] = '\0';
-        gm_info(log, "%-20s, %-3.0f%%|%s|", name, histogram[i] * 100.0f, bar);
+        gm_info(log, "%2d) %-20s, %-3.0f%%|%s|", i, name, histogram[i] * 100.0f, bar);
     }
 }
 
@@ -637,9 +644,9 @@ pre_process_label_image_cb(struct gm_data_index* data_index,
             int off = y * width + x;
             int label = (int)label_image[off];
 
-            gm_assert(ctx->log, label < ctx->n_labels,
+            gm_assert(ctx->log, label < ctx->n_data_labels,
                       "Label '%d' is bigger than expected (max %d)\n",
-                      label, ctx->n_labels - 1);
+                      label, ctx->n_data_labels - 1);
 
             if (label != 0) { // 0 = background
                 if (x < bounds.min_x)
@@ -705,7 +712,8 @@ pre_process_label_image_cb(struct gm_data_index* data_index,
         struct pixel pixel;
         pixel.x = off % width;
         pixel.y = off / width;
-        pixel.label = label_image[off];
+        int data_label = label_image[off];
+        pixel.label = ctx->label_map[data_label];
         pixel.i = index;
 
         /* Try and double check we haven't muddled up something silly... */
@@ -713,6 +721,10 @@ pre_process_label_image_cb(struct gm_data_index* data_index,
                   "Spurious background pixel (%d,%d) sampled for image %s",
                   pixel.x, pixel.y,
                   frame_path);
+
+        gm_assert(ctx->log, pixel.label < ctx->n_rdt_labels,
+                  "Out-of-range mapped label '%d' (from data label of %d)\n",
+                  pixel.label, data_label);
 
         pixel.x -= bounds.min_x;
         pixel.y -= bounds.min_y;
@@ -928,7 +940,7 @@ accumulate_uvt_lr_histograms(struct gm_rdt_context_impl* ctx,
     int node_depth = id_to_depth(data->id);
     struct depth_meta* depth_index = ctx->depth_index.data();
     int n_pixels = data->n_pixels;
-    int n_labels = ctx->n_labels;
+    int n_labels = ctx->n_rdt_labels;
     int n_thresholds = ctx->n_thresholds;
 
     struct thread_depth_metrics_raw *depth_metrics =
@@ -1046,7 +1058,7 @@ node_shard_work_cb(struct thread_state* state,
     struct node_shard_results* results = shard_work->results;
     struct node_shard_data* shard_data = &results->data[shard_work->shard_index];
 
-    int n_labels = ctx->n_labels;
+    int n_labels = ctx->n_rdt_labels;
 
     struct node_data node_data = shard_work->node_data;
 
@@ -1056,10 +1068,10 @@ node_shard_work_cb(struct thread_state* state,
     int n_uvt_combos = n_uv_combos * n_thresholds;
     if (node_data.n_pixels < UINT16_MAX) {
         state->uvt_lr_histograms_16.clear();
-        state->uvt_lr_histograms_16.resize(ctx->n_labels * n_uvt_combos * 2);
+        state->uvt_lr_histograms_16.resize(n_labels * n_uvt_combos * 2);
     } else {
         state->uvt_lr_histograms_32.clear();
-        state->uvt_lr_histograms_32.resize(ctx->n_labels * n_uvt_combos * 2);
+        state->uvt_lr_histograms_32.resize(n_labels * n_uvt_combos * 2);
     }
 
     uint16_t* uvt_lr_histograms_16 = state->uvt_lr_histograms_16.data();
@@ -1094,7 +1106,7 @@ node_shard_work_cb(struct thread_state* state,
 
         // Calculate the shannon entropy for the normalised label histogram
         float entropy = calculate_shannon_entropy(results->nhistogram,
-                                                  ctx->n_labels);
+                                                  n_labels);
 
         int n_uv_combos = shard_work->uv_end - shard_work->uv_start;
         // Calculate the gain for each combination of u,v,t and store the best
@@ -1104,7 +1116,7 @@ node_shard_work_cb(struct thread_state* state,
             for (int j = 0; j < ctx->n_thresholds && !interrupted; j++) {
                 int t_offset = j * n_labels * 2;
                 int lr_histo_base = uv_offset + t_offset;
-                float nhistogram[ctx->n_labels];
+                float nhistogram[n_labels];
                 float l_entropy, r_entropy, gain;
 
                 int l_n_pixels = 0;
@@ -1112,12 +1124,12 @@ node_shard_work_cb(struct thread_state* state,
 
                 if (node_data.n_pixels < UINT16_MAX) {
                     normalize_histogram_16(&uvt_lr_histograms_16[lr_histo_base],
-                                           ctx->n_labels, nhistogram,
+                                           n_labels, nhistogram,
                                            &l_n_pixels,
                                            &l_n_labels);
                 } else {
                     normalize_histogram_32(&uvt_lr_histograms_32[lr_histo_base],
-                                           ctx->n_labels, nhistogram,
+                                           n_labels, nhistogram,
                                            &l_n_pixels,
                                            &l_n_labels);
                 }
@@ -1125,25 +1137,25 @@ node_shard_work_cb(struct thread_state* state,
                     continue;
 
                 l_entropy = calculate_shannon_entropy(nhistogram,
-                                                      ctx->n_labels);
+                                                      n_labels);
 
                 int r_n_pixels = 0;
                 int r_n_labels = 0;
                 if (node_data.n_pixels < UINT16_MAX) {
                     normalize_histogram_16(
-                        &uvt_lr_histograms_16[lr_histo_base + ctx->n_labels],
-                        ctx->n_labels, nhistogram,
+                        &uvt_lr_histograms_16[lr_histo_base + n_labels],
+                        n_labels, nhistogram,
                         &r_n_pixels,
                         &r_n_labels);
                 } else {
                     normalize_histogram_32(
-                        &uvt_lr_histograms_32[lr_histo_base + ctx->n_labels],
-                        ctx->n_labels, nhistogram,
+                        &uvt_lr_histograms_32[lr_histo_base + n_labels],
+                        n_labels, nhistogram,
                         &r_n_pixels,
                         &r_n_labels);
                 }
                 r_entropy = calculate_shannon_entropy(nhistogram,
-                                                      ctx->n_labels);
+                                                      n_labels);
 
                 gain = calculate_gain(entropy, node_data.n_pixels,
                                       l_entropy, l_n_pixels,
@@ -1286,7 +1298,8 @@ schedule_node_work(struct thread_state* state)
 
     // We want the working set of uvt combos to be constrained enough that
     // the uvt_lr_histrograms array can be cached
-    int est_uvt_lr_hist_size = ctx->n_uvs * ctx->n_thresholds * ctx->n_labels * 4 * 2;
+    int est_uvt_lr_hist_size =
+        ctx->n_uvs * ctx->n_thresholds * ctx->n_rdt_labels * 4 * 2;
     int max_thread_uvt_lr_size =
         (std::min(ctx->uvt_histograms_mem, est_uvt_lr_hist_size) /
          ctx->n_threads);
@@ -1304,7 +1317,7 @@ schedule_node_work(struct thread_state* state)
     node_results->ref = n_shards;
 
     // Histogram for the node being processed
-    uint32_t node_histogram[ctx->n_labels];
+    uint32_t node_histogram[ctx->n_rdt_labels];
     memset(node_histogram, 0, sizeof(node_histogram));
 
     accumulate_pixels_histogram_32(ctx, &node_data, node_histogram);
@@ -1313,7 +1326,7 @@ schedule_node_work(struct thread_state* state)
     // and the number of labels in the root histogram.
     int n_node_pixels = 0;
     normalize_histogram_32(node_histogram,
-                           ctx->n_labels,
+                           ctx->n_rdt_labels,
                            node_results->nhistogram,
                            &n_node_pixels,
                            &node_results->n_node_labels);
@@ -1326,9 +1339,9 @@ schedule_node_work(struct thread_state* state)
         gm_info(ctx->log, "Scheduling node %d with %d pixels, histogram:",
                 node_data.id,
                 n_node_pixels);
-        JSON_Array* labels =
-            json_object_get_array(json_object(ctx->data_meta), "labels");
-        print_label_histogram(ctx->log, labels, node_results->nhistogram);
+        print_label_histogram(ctx->log,
+                              json_array(ctx->label_names_js),
+                              node_results->nhistogram);
     }
 
     struct work jobs[n_shards];
@@ -1589,16 +1602,19 @@ process_node_shards_work_cb(struct thread_state* state,
         float *nhistogram = results->nhistogram;
 
         // NB: 0 is reserved for non-leaf nodes
-        node->label_pr_idx = (ctx->tree_histograms.size() / ctx->n_labels) + 1;
+        node->label_pr_idx = (ctx->tree_histograms.size() /
+                              ctx->n_rdt_labels) + 1;
         int len = ctx->tree_histograms.size();
-        ctx->tree_histograms.resize(len + ctx->n_labels);
-        memcpy(&ctx->tree_histograms[len], nhistogram, ctx->n_labels * sizeof(float));
+        ctx->tree_histograms.resize(len + ctx->n_rdt_labels);
+        memcpy(&ctx->tree_histograms[len],
+               nhistogram,
+               ctx->n_rdt_labels * sizeof(float));
 
         if (ctx->verbose)
         {
             pthread_mutex_lock(&ctx->tidy_log_lock);
             gm_info(ctx->log, "  Leaf node (%d)\n", node_data.id);
-            for (int i = 0; i < ctx->n_labels; i++) {
+            for (int i = 0; i < ctx->n_rdt_labels; i++) {
                 if (nhistogram[i] > 0.f) {
                     gm_info(ctx->log, "    %02d - %f\n", i, nhistogram[i]);
                 }
@@ -1639,11 +1655,11 @@ worker_thread_cb(void* userdata)
     // combos at a time so we can allocate the memory up front...
     int max_uv_combos_per_thread = (ctx->n_uvs + ctx->n_threads/2) / ctx->n_threads;
 
-    state->uvt_lr_histograms_16.reserve(ctx->n_labels *
+    state->uvt_lr_histograms_16.reserve(ctx->n_rdt_labels *
                                         max_uv_combos_per_thread *
                                         ctx->n_thresholds *
                                         2);
-    state->uvt_lr_histograms_32.reserve(ctx->n_labels *
+    state->uvt_lr_histograms_32.reserve(ctx->n_rdt_labels *
                                         max_uv_combos_per_thread *
                                         ctx->n_thresholds *
                                         2);
@@ -1813,6 +1829,15 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.desc = "Filename of pre-existing tree to reload";
     prop.type = GM_PROPERTY_STRING;
     prop.string_state.ptr = &ctx->reload;
+    ctx->properties.push_back(prop);
+
+    ctx->label_map_filename = NULL;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "label_map";
+    prop.desc = "Filename of .json mapping from data-set labels to training labels";
+    prop.type = GM_PROPERTY_STRING;
+    prop.string_state.ptr = &ctx->label_map_filename;
     ctx->properties.push_back(prop);
 
     ctx->n_pixels = 2000;
@@ -2010,6 +2035,14 @@ destroy_training_state(struct gm_rdt_context_impl* ctx)
         json_value_free(ctx->record);
         ctx->record = NULL;
     }
+    if (ctx->label_names_js) {
+        json_value_free(ctx->label_names_js);
+        ctx->label_names_js = NULL;
+    }
+    if (ctx->label_map_js) {
+        json_value_free(ctx->label_map_js);
+        ctx->label_map_js = NULL;
+    }
     if (ctx->data_meta) {
         json_value_free(ctx->data_meta);
         ctx->data_meta = NULL;
@@ -2087,9 +2120,9 @@ recursive_build_tree(struct gm_rdt_context_impl* ctx,
          * reserved to indicate that the node is not a leaf node
          */
         float* pr_table = &ctx->tree_histograms[(node->label_pr_idx - 1) *
-            ctx->n_labels];
+            ctx->n_rdt_labels];
 
-        for (int i = 0; i < ctx->n_labels; i++)
+        for (int i = 0; i < ctx->n_rdt_labels; i++)
         {
             json_array_append_number(probs, pr_table[i]);
         }
@@ -2136,7 +2169,7 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
      * probabilities for a background label, or perhaps assume the caller
      * knows to ignore background pixels.
      */
-    json_object_set_number(json_object(rdt), "n_labels", ctx->n_labels);
+    json_object_set_number(json_object(rdt), "n_labels", ctx->n_rdt_labels);
     json_object_set_number(json_object(rdt), "bg_label", 0);
 
     /* Previous trees without a bg_depth property implicitly considered 1000.0
@@ -2146,9 +2179,7 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
      */
     json_object_set_number(json_object(rdt), "bg_depth", INT16_MAX / 1000.0);
 
-    JSON_Value* labels = json_object_get_value(json_object(ctx->data_meta),
-                                               "labels");
-    labels = json_value_deep_copy(labels);
+    JSON_Value* labels = json_value_deep_copy(ctx->label_names_js);
     json_object_set_value(json_object(rdt), "labels", labels);
 
     JSON_Value *nodes = recursive_build_tree(ctx, &tree[0], 0, 0);
@@ -2204,10 +2235,10 @@ reload_tree(struct gm_rdt_context_impl* ctx,
             JSON_Array* rlabels_array = json_array(rlabels);
             int n_labels = json_array_get_count(labels_array);
             int n_rlabels = json_array_get_count(rlabels_array);
-            if (n_labels != n_rlabels || n_labels != ctx->n_labels) {
+            if (n_labels != n_rlabels || n_labels != ctx->n_rdt_labels) {
                 gm_throw(ctx->log, err, "%s has %d labels, expected %d\n",
                          filename,
-                         n_rlabels, ctx->n_labels);
+                         n_rlabels, ctx->n_rdt_labels);
                 return false;
             }
             for (int i = 0; i < n_labels; i++) {
@@ -2231,11 +2262,11 @@ reload_tree(struct gm_rdt_context_impl* ctx,
         return false;
 
     // Do some basic validation
-    if (checkpoint->header.n_labels != ctx->n_labels)
+    if (checkpoint->header.n_labels != ctx->n_rdt_labels)
     {
         gm_throw(ctx->log, err, "%s has %d labels, expected %d\n",
                  filename,
-                 (int)checkpoint->header.n_labels, ctx->n_labels);
+                 (int)checkpoint->header.n_labels, ctx->n_rdt_labels);
         return false;
     }
 
@@ -2319,18 +2350,18 @@ reload_tree(struct gm_rdt_context_impl* ctx,
             if (node->label_pr_idx != 0)
             {
                 float* pr_table = &checkpoint->
-                    label_pr_tables[ctx->n_labels * (node->label_pr_idx - 1)];
+                    label_pr_tables[ctx->n_rdt_labels * (node->label_pr_idx - 1)];
 
                 /* Note: we make no assumption about the ordering of histograms
                  * in the loaded tree, but the indices aren't necessarily
                  * preserved as we copy them across to tree_histograms...
                  */
                 int len = ctx->tree_histograms.size();
-                ctx->tree_histograms.resize(len + ctx->n_labels);
-                memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_labels * sizeof(float));
+                ctx->tree_histograms.resize(len + ctx->n_rdt_labels);
+                memcpy(&ctx->tree_histograms[len], pr_table, ctx->n_rdt_labels * sizeof(float));
 
                 // NB: 0 is reserved for non-leaf nodes
-                node->label_pr_idx = (len / ctx->n_labels) + 1;
+                node->label_pr_idx = (len / ctx->n_rdt_labels) + 1;
             } else {
                 // If the node isn't a leaf-node, calculate which pixels should
                 // go to the next two nodes and add them to the reload
@@ -2407,26 +2438,24 @@ check_root_pixels_histogram(struct gm_rdt_context_impl* ctx,
                             struct node_data* root_node)
 {
     gm_info(ctx->log, "Calculating root node pixel histogram");
-    ctx->root_pixel_histogram.resize(ctx->n_labels);
-    ctx->root_pixel_nhistogram.resize(ctx->n_labels);
+    ctx->root_pixel_histogram.resize(ctx->n_rdt_labels);
+    ctx->root_pixel_nhistogram.resize(ctx->n_rdt_labels);
     accumulate_pixels_histogram_32(ctx, root_node, ctx->root_pixel_histogram.data());
     int n_root_pixels = 0;
     int n_root_labels = 0;
     normalize_histogram_32(ctx->root_pixel_histogram.data(),
-                           ctx->n_labels,
+                           ctx->n_rdt_labels,
                            ctx->root_pixel_nhistogram.data(),
                            &n_root_pixels,
                            &n_root_labels);
-    JSON_Array* labels = json_object_get_array(json_object(ctx->data_meta),
-                                               "labels");
     gm_info(ctx->log, "Histogram of root node pixel labels:");
     print_label_histogram(ctx->log,
-                          labels,
+                          json_array(ctx->label_names_js),
                           ctx->root_pixel_nhistogram.data());
 
     JSON_Value* hist_val = json_value_init_array();
     JSON_Array* hist = json_array(hist_val);
-    for (int i = 0; i < ctx->n_labels; i++) {
+    for (int i = 0; i < ctx->n_rdt_labels; i++) {
         json_array_append_number(hist, ctx->root_pixel_nhistogram[i]);
     }
 
@@ -2521,6 +2550,22 @@ load_training_data(struct gm_rdt_context_impl* ctx,
                    const char* index_name,
                    char** err)
 {
+
+    if (ctx->label_map_filename) {
+        ctx->label_map_js = gm_data_load_label_map_from_json(ctx->log,
+                                                             ctx->label_map_filename,
+                                                             ctx->label_map,
+                                                             err);
+        if (!ctx->label_map_js)
+            return false;
+        ctx->n_rdt_labels = json_array_get_count(json_array(ctx->label_map_js));
+        ctx->label_names_js = json_value_deep_copy(ctx->label_map_js);
+    } else {
+        /* Create a NOP mapping if we didn't load a mapping from .json */
+        for (int i = 0; i < (int)ARRAY_LEN(ctx->label_map); i++)
+            ctx->label_map[i] = i;
+    }
+
     gm_info(ctx->log, "Opening training data index %s...", index_name);
     struct gm_data_index* data_index =
         gm_data_index_open(ctx->log,
@@ -2540,9 +2585,23 @@ load_training_data(struct gm_rdt_context_impl* ctx,
     ctx->fov = json_object_get_number(meta_camera, "vertical_fov");
     ctx->fov *= (M_PI / 180.0);
 
-    ctx->n_labels = json_object_get_number(json_object(ctx->data_meta), "n_labels");
+    ctx->n_data_labels = json_object_get_number(json_object(ctx->data_meta),
+                                                "n_labels");
 
-    gm_assert(ctx->log, ctx->n_labels <= MAX_LABELS,
+    if (!ctx->label_map_js) {
+        ctx->n_rdt_labels = ctx->n_data_labels;
+        JSON_Value* label_names =
+            json_object_get_value(json_object(ctx->data_meta), "labels");
+        ctx->label_names_js = json_value_deep_copy(label_names);
+    }
+
+    int n_label_names = json_array_get_count(json_array(ctx->label_names_js));
+    gm_assert(ctx->log,
+              n_label_names == ctx->n_rdt_labels,
+              "Found array of %d label names, but expected %d",
+              n_label_names, ctx->n_rdt_labels);
+
+    gm_assert(ctx->log, ctx->n_data_labels <= MAX_LABELS,
               "Can't handle training with more than %d labels",
               MAX_LABELS);
     gm_assert(ctx->log, (uint64_t)ctx->n_pixels * ctx->n_images < INT_MAX,
@@ -2702,9 +2761,9 @@ debug_infer_pixel_label(struct gm_rdt_context_impl* ctx,
      * is reserved to indicate that the node is not a leaf node
      */
     float* pr_table = &ctx->tree_histograms[(node.label_pr_idx - 1) *
-        ctx->n_labels];
+        ctx->n_rdt_labels];
 
-    memcpy(pr_table_out, pr_table, sizeof(float) * ctx->n_labels);
+    memcpy(pr_table_out, pr_table, sizeof(float) * ctx->n_rdt_labels);
 }
 
 static bool
@@ -2713,7 +2772,7 @@ debug_check_inference(struct gm_rdt_context_impl* ctx,
                       const char* index_name,
                       char** err)
 {
-    int n_labels = ctx->n_labels;
+    int n_labels = ctx->n_rdt_labels;
 
     gm_info(ctx->log, "Re-opening training data index %s...", index_name);
     struct gm_data_index* data_index =
