@@ -15,45 +15,101 @@ Pre-process rendered images
 
 Before starting training we process the images rendered by Blender so we can
 increase the amount of training data we have by e.g. mirroring images and we
-e.g add noise to make the data more represented of images captured by a
+e.g add noise to make the data more representative of images captured by a
 camera instead of being rendered.
 
-If we have rendered data via glimpse-cli.py under
-`/path/to/glimpse-training-data/render/generated/test-render` then these images
+If we have rendered data via `glimpse-cli.py` under
+`/path/to/glimpse-training-data/renders/test-render` then these images
 can be processed as follows:
 
 ```
 ./image-pre-processor \
-    /path/to/glimpse-training-data/render/generated/test-render \
-    /path/to/glimpse-training-data/render/pre-processed/test-render
+    /path/to/glimpse-training-data/renders/test-render \
+    /path/to/glimpse-training-data/pre-processed/test-render \
+    src/label-map.json
 ```
+
+The `src/label-map.json` argument defines a mapping from the label values found
+within .png images under the `labels/` subdirectory of the rendered training
+data and the packed/sequential indices that will be used while training.
+
+The file follows a schema like:
+```
+[
+    {
+        "name": "background",
+        "inputs": [ 64 ]
+    },
+    {
+        "name": "head left",
+        "inputs": [ 7 ],
+        "opposite": "head right"
+    },
+    {
+        "name": "head right",
+        "inputs": [ 15 ],
+        "opposite": "head left"
+    },
+    {
+        "name": "head top left",
+        "inputs": [ 22 ],
+        "opposite": "head top right"
+    },
+    {
+        "name": "head top right",
+        "inputs": [ 29 ],
+        "opposite": "head top left"
+    },
+    {
+        "name": "neck",
+        "inputs": [ 36 ]
+    },
+    ...
+]
+```
+
+*Note: the "opposite" property allows the image-pre-processor to automatically
+flip images horizonally*
+
+
+Normally `src/label-map.json` can be used.
 
 
 Index frames to train with
 ==========================
 
 For specifying which frames to train with, an index should be created with the
-indexer.py script.
+`src/indexer.py` script.
 
 This script builds an index of all available rendered frames in a given
 directory and can then split that into multiple sub sets with no overlap. For
 example you could index three sets of 300k images out of a larger set of 1
 million images for training three separate decision trees.
 
-For example to create a single 'tree0' index of 100000 images you could run:
+For example to create a 'test' index of 10000 images you could run:
 ```
-./indexer.py -i tree0 100000 /path/to/glimpse-training-data/render/pre-processed/test-render
+indexer.py -i test 10000 /path/to/glimpse-training-data/pre-processed/test-render
 ```
+(*Note: this will also automatically create an `index.full` file*)
 
-This would create an `index.full` and `index.tree0` under the
-`pre-processed/test-render/` directory.
-
+and then create three tree index files (sampled with replacement, but excluding
+the test set images):
+```
+indexer.py \
+    -e test \
+    -i tree0 100000 \
+    -i tree1 100000 \
+    -i tree2 100000 \
+    /path/to/glimpse-training-data/pre-processed/test-render
+```
+*Note: there may be overlapping frames listed in tree0, tree1 and tree1 but
+none of them will contain test-set frames. See --help for details.*
 
 Training a decision tree
 ========================
 
 Run the tool 'train_rdt' to train a tree. Running it with no parameters, or
-with the -h/--help parameter will print usage details, with details about the
+with the `-h/--help` parameter will print usage details, with details about the
 default parameters.
 
 For example, if you have an index.tree0 file at the top of your training data
@@ -102,7 +158,7 @@ Training joint inference parameters
 ===================================
 
 Run the tool 'train_joint_params' to train joint parameters. Running it with no
-parameters, or with the -h/--help parameter will print usage details, with
+parameters, or with the `-h/--help` parameter will print usage details, with
 details about the default parameters.
 
 Note that this tool doesn't currently scale to handling as many images as
@@ -110,12 +166,31 @@ the decision tree training tool so it's recommended to create a smaller
 dedicated index for training joint params.
 
 For example, if you have an `index.joint-param-training` file then to train
-joint parameters from a decision forest of two trees named 'tree0.rdt' and
-'tree1.rdt' you could run:
+joint parameters from a decision forest of two trees named 'tree0.json' and
+'tree1.json' you could run:
 
 ```
 train_joint_params path-to-training-data \
                    joint-param-training \
                    src/joint-map.json \
-                   output.jip -- tree0.rdt tree1.rdt
+                   output.jip -- tree0.json tree1.json
 ```
+
+
+Convert .json trees to .rdt for runtime usage
+=============================================
+
+To allow faster loading of decision trees at runtime we have a simple binary
+`.rdt` file format for trees.
+
+For example, to create an `tree0.rdt` file from a `tree0.json` you can run:
+```
+json-to-rdt tree0.json tree0.rdt
+```
+
+*Note: `.rdt` files only include the information needed at runtime and so
+training tools don't support loading these files.*
+
+*Note: We don't aim to support forwards compatibility for `.rdt` besides having
+a version check that lets us recognise incompatibility. Newer versions of
+Glimpse may require you to recreate `.rdt` files.
