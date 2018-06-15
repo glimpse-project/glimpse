@@ -2179,6 +2179,19 @@ save_tree_json(struct gm_rdt_context_impl *ctx,
      */
     json_object_set_number(json_object(rdt), "bg_depth", INT16_MAX / 1000.0);
 
+    /* These track some noteable difference between the sampler code now and
+     * earlier versions. This should theoretically allow us to continue
+     * comparing the accuracy of old and new trees by making sure we sample
+     * precisely according to how the tree was originally trained:
+     */
+    // Round relative UV offests to the nearst discrete pixel offest (after
+    // dividing by depth) instead of flooring.
+    json_object_set_boolean(json_object(rdt), "sample_uv_offsets_nearest", true);
+    // Before calculating the gradient and comparing with the node's threshold,
+    // round the U and V depth values to the nearest discrete value in
+    // millimeters
+    json_object_set_boolean(json_object(rdt), "sample_uv_z_in_mm", true);
+
     JSON_Value* labels = json_value_deep_copy(ctx->label_names_js);
     json_object_set_value(json_object(rdt), "labels", labels);
 
