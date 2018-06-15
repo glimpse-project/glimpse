@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <inttypes.h>
 
+#include <atomic>
 #include <random>
 #include <thread>
 #include <queue>
@@ -137,7 +138,7 @@ enum {
 #endif
 
 struct node_shard_results {
-    int ref;
+    std::atomic_int ref;
     pthread_mutex_t check_lock; // Use to avoid processing results more than
                                 // once. Take lock and enumerate each data entry
                                 // to see that they are all complete.
