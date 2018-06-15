@@ -124,9 +124,9 @@ logger_abort_cb(struct gm_logger *logger, void *user_data)
 }
 
 static void
-usage(struct gm_ui_properties *ctx_props)
+usage(struct gm_ui_properties *ctx_props, FILE *fp)
 {
-    fprintf(stderr,
+    fprintf(fp,
 "Usage:\n"
 "  train_rdt [options] -q <run-queue.json> [<index_name>] [<results.json>]\n"
 "  train_rdt [options] -q '[{ \"prop\": \"value\", ...}, ...]' \\\n"
@@ -186,39 +186,39 @@ usage(struct gm_ui_properties *ctx_props)
 "\n"
 "    NOTE: -p and -v options must be used in pairs\n"
 "\n"
-);
+    );
 
-    fprintf(stderr, "    Available parameters:\n");
+    fprintf(fp, "    Available parameters:\n");
     for (int i = 0; i < ctx_props->n_properties; i++) {
         struct gm_ui_property *prop = &ctx_props->properties[i];
         const char *str;
 
-        fprintf(stderr, "    %-15s - %s ", prop->name, prop->desc);
+        fprintf(fp, "    %-15s - %s ", prop->name, prop->desc);
         switch (prop->type) {
         case GM_PROPERTY_INT:
-            fprintf(stderr, "\n    %18s(default=%d)\n", "", gm_prop_get_int(prop));
+            fprintf(fp, "\n    %18s(default=%d)\n", "", gm_prop_get_int(prop));
             break;
         case GM_PROPERTY_FLOAT:
-            fprintf(stderr, "\n    %18s(default=%.2f)\n", "", gm_prop_get_float(prop));
+            fprintf(fp, "\n    %18s(default=%.2f)\n", "", gm_prop_get_float(prop));
             break;
         case GM_PROPERTY_BOOL:
-            fprintf(stderr, "\n    %18s(default=%s)\n", "",
+            fprintf(fp, "\n    %18s(default=%s)\n", "",
                     gm_prop_get_bool(prop) ? "true" : "false");
             break;
         case GM_PROPERTY_STRING:
             str = gm_prop_get_string(prop);
             if (str)
-                fprintf(stderr, "\n    %18s(default=%s)\n", "", str);
+                fprintf(fp, "\n    %18s(default=%s)\n", "", str);
             else
-                fprintf(stderr, "\n");
+                fprintf(fp, "\n");
             break;
         default:
-            fprintf(stderr, "\n");
+            fprintf(fp, "\n");
             break;
         }
     }
 
-    fprintf(stderr,
+    fprintf(fp,
 "\n"
 "  -c, --continue             Continue attempting to process training runs,\n"
 "                             even if there's a training run failure.\n"
@@ -232,7 +232,8 @@ usage(struct gm_ui_properties *ctx_props)
 "      --verbose              Verbose output.\n"
 "      --profile              Profiling output.\n"
 "  -h, --help                 Display this message.\n");
-    exit(1);
+
+    exit(fp == stderr);
 }
 
 
@@ -478,10 +479,10 @@ main(int argc, char **argv)
             continue_opt = true;
             break;
         case 'h':
-            usage(ctx_props);
+            usage(ctx_props, stdout);
             break;
         default:
-            usage(ctx_props);
+            usage(ctx_props, stderr);
             break;
         }
     }
@@ -493,7 +494,7 @@ main(int argc, char **argv)
 
     if (argc - optind > 2) {
         fprintf(stderr, "ERROR: Too many arguments:\n\n");
-        usage(ctx_props);
+        usage(ctx_props, stderr);
     }
 
     if (!work_queue) {
