@@ -4,6 +4,11 @@
         "inputs": [ 64 ]
     },
     {
+        "name": "head left",
+        "inputs": [ 7 ],
+        "opposite": "head right"
+    },
+    {
         "name": "head right",
         "inputs": [ 15 ],
         "opposite": "head left"
@@ -161,10 +166,5 @@
         "name": "right waist",
         "inputs": [ 240 ],
         "opposite": "left waist"
-    },
-    {
-        "name": "head left",
-        "inputs": [ 7 ],
-        "opposite": "head right"
     }
 ]
