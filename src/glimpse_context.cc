@@ -541,6 +541,14 @@ struct gm_context
     float floor_threshold;
     float cluster_tolerance;
 
+    float cluster_min_width;
+    float cluster_min_height;
+    float cluster_min_depth;
+
+    float cluster_max_width;
+    float cluster_max_height;
+    float cluster_max_depth;
+
     bool motion_detection;
     float seg_tb;
     float seg_tf;
@@ -562,6 +570,7 @@ struct gm_context
     float bone_length_variance;
     float bone_rotation_variance;
 
+    bool skeleton_validation;
     float skeleton_min_confidence;
     float skeleton_max_distance;
 
@@ -2954,15 +2963,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
         int fh = height / 8;
 
         float fz = FLT_MAX;
-        //float line_x = 0;
-        //float line_y = 0;
-
         int fr_i = 0;
         struct focal_point {
             float fz;
             int idx;
         } focal_region[fw * fh];
-
 
         int x0 = fx - fw / 2;
         int y0 = fy - fh / 2;
@@ -3050,9 +3055,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
             pcl::PointXYZL &pcl_pt =
                 tracking->depth_class->points[idx];
 
-            // TODO: Make these values configurable?
-            if (fabsf(focus_pt.x - pcl_pt.x) > 0.5f ||
-                fabsf(focus_pt.z - pcl_pt.z) > 0.75f) {
+            if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width ||
+                fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth) {
                 continue;
             }
 
@@ -3180,10 +3184,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
         Eigen::Vector4f min, max;
         pcl::getMinMax3D(*tracking->depth_class, points, min, max);
         Eigen::Vector4f diff = max - min;
-        // TODO: Make these limits configurable
-        if (diff[0] < 0.15f || diff[0] > 2.0f ||
-            diff[1] < 0.8f || diff[1] > 2.45f ||
-            diff[2] < 0.05f || diff[2] > 1.5f) {
+        if (diff[0] < ctx->cluster_min_width ||
+            diff[0] > ctx->cluster_max_width ||
+            diff[1] < ctx->cluster_min_height ||
+            diff[1] > ctx->cluster_max_height ||
+            diff[2] < ctx->cluster_min_depth ||
+            diff[2] > ctx->cluster_max_depth) {
             continue;
         }
         LOGI("Cluster with %d points, (%.2fx%.2fx%.2f)\n",
@@ -3411,9 +3417,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
         xfree(depth_img);
     }
 
-    bool tracked =
-        tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
-        tracking->skeleton.distance <= ctx->skeleton_max_distance;
+    bool tracked = !ctx->skeleton_validation ||
+        (tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
+         tracking->skeleton.distance <= ctx->skeleton_max_distance);
 
     // Update the depth classification so it knows which pixels are tracked
     // TODO: We should actually use the label cluster points, which may not
@@ -5021,6 +5027,72 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
+    ctx->cluster_min_width = 0.15f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_min_width";
+    prop.desc = "Minimum width of a human cluster";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_min_width;
+    prop.float_state.min = 0.1f;
+    prop.float_state.max = 1.0f;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_min_height = 0.8f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_min_height";
+    prop.desc = "Minimum height of a human cluster";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_min_height;
+    prop.float_state.min = 0.1f;
+    prop.float_state.max = 1.5f;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_min_depth = 0.05f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_min_depth";
+    prop.desc = "Minimum depth of a human cluster";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_min_depth;
+    prop.float_state.min = 0.05f;
+    prop.float_state.max = 0.5f;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_max_width = 2.0f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_max_width";
+    prop.desc = "Maximum width of a human cluster";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_max_width;
+    prop.float_state.min = 0.5f;
+    prop.float_state.max = 3.0f;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_max_height = 2.45f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_max_height";
+    prop.desc = "Maximum height of a human cluster";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_max_height;
+    prop.float_state.min = 1.0f;
+    prop.float_state.max = 4.0f;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_max_depth = 1.5f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_max_depth";
+    prop.desc = "Maximum depth of a human cluster";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_max_depth;
+    prop.float_state.min = 0.5f;
+    prop.float_state.max = 3.0f;
+    ctx->properties.push_back(prop);
+
     ctx->joint_refinement = true;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -5133,6 +5205,16 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->joint_scale_threshold;
     prop.float_state.min = 1.5f;
     prop.float_state.max = 20.f;
+    ctx->properties.push_back(prop);
+
+    ctx->skeleton_validation = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "skeleton_validation";
+    prop.desc = "Whether to validate if inferred skeletons are likely to be "
+                "human.";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->skeleton_validation;
     ctx->properties.push_back(prop);
 
     ctx->skeleton_min_confidence = 1000.f;
