@@ -3111,6 +3111,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
+            pcl::PointXYZL &pcl_pt =
+                tracking->depth_class->points[idx];
+
+            // Avoid building a cloud that would be considered invalid. We
+            // assume the focus point is somewhere near the center of the body,
+            // but not the exact center (so we divide by 1.75 and not 2).
+            if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width / 1.75f ||
+                fabsf(focus_pt.y - pcl_pt.y) > ctx->cluster_max_height / 1.75f ||
+                fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth / 1.75f) {
+                continue;
+            }
+
             float aligned_y = ctx->depth_pose.valid ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_class->points[idx].y;
