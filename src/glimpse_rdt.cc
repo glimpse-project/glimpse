@@ -296,6 +296,7 @@ struct gm_rdt_context_impl {
     int                 n_idle; // number of threads currently waiting for work
 
     std::vector<node>   tree; // The decision tree being built
+    pthread_mutex_t     tree_histograms_lock;
     std::vector<float>  tree_histograms; // label histograms for leaf nodes
 
     std::vector<uint32_t>  root_pixel_histogram; // label histogram for initial pixels
@@ -1601,6 +1602,8 @@ process_node_shards_work_cb(struct thread_state* state,
     {
         float *nhistogram = results->nhistogram;
 
+        pthread_mutex_lock(&ctx->tree_histograms_lock);
+
         // NB: 0 is reserved for non-leaf nodes
         node->label_pr_idx = (ctx->tree_histograms.size() /
                               ctx->n_rdt_labels) + 1;
@@ -1609,6 +1612,8 @@ process_node_shards_work_cb(struct thread_state* state,
         memcpy(&ctx->tree_histograms[len],
                nhistogram,
                ctx->n_rdt_labels * sizeof(float));
+
+        pthread_mutex_unlock(&ctx->tree_histograms_lock);
 
         if (ctx->verbose)
         {
@@ -1797,6 +1802,8 @@ gm_rdt_context_new(struct gm_logger *log)
     // To help with verbose logging so we can log multiple lines together
     // without interleaving with messages between threads.
     pthread_mutex_init(&ctx->tidy_log_lock, NULL);
+
+    pthread_mutex_init(&ctx->tree_histograms_lock, NULL);
 
     ctx->data_dir = strdup(cwd);
     prop = gm_ui_property();
