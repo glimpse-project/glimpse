@@ -153,6 +153,7 @@ client_api_src = [
     'src/glimpse_mem_pool.cc',
     'src/glimpse_log.c',
     'src/glimpse_gl.c',
+    'src/glimpse_target.cc',
 
     'src/infer_labels.cc',
     'src/infer_joints.cc',

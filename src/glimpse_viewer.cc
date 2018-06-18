@@ -101,6 +101,7 @@
 #include "glimpse_record.h"
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
+#include "glimpse_target.h"
 
 #undef GM_LOG_CONTEXT
 #ifdef __ANDROID__
@@ -142,6 +143,13 @@ typedef struct {
     float z;
     uint32_t rgba;
 } XYZRGBA;
+
+typedef struct {
+    GLuint joints_bo;
+    GLuint bones_bo;
+    int n_joints;
+    int n_bones;
+} GLSkeleton;
 
 typedef struct _Data
 {
@@ -209,10 +217,6 @@ typedef struct _Data
     /* The size of the labels visualisation texture */
     int labels_rgb_width;
     int labels_rgb_height;
-
-    /* A convenience for accessing number of joints in latest tracking */
-    int n_joints;
-    int n_bones;
 
     glm::vec3 focal_point;
     float camera_rot_yx[2];
@@ -302,8 +306,16 @@ typedef struct _Data
     GLint lines_attr_col;
     int n_lines;
 
-    GLuint skel_joints_bo;
-    GLuint skel_bones_bo;
+    GLSkeleton skel_gl;
+
+    struct gm_target *target;
+    float target_error;
+    bool target_progress;
+    GLSkeleton target_skel_gl;
+
+    int selected_target;
+    std::vector<char *> targets;
+    std::vector<char *> target_names;
 
     GLuint video_rgb_tex;
 
@@ -406,10 +418,11 @@ intrinsics_to_project_matrix(const struct gm_intrinsics *intrinsics,
 }
 
 static bool
-index_recordings_recursive(Data *data,
-                           const char *recordings_path, const char *rel_path,
-                           std::vector<char *> &files,
-                           std::vector<char *> &names, char **err)
+index_files_recursive(Data *data,
+                      const char *match,
+                      const char *root, const char *subdir,
+                      std::vector<char *> &files,
+                      std::vector<char *> &names, char **err)
 {
     struct dirent *entry;
     struct stat st;
@@ -417,7 +430,7 @@ index_recordings_recursive(Data *data,
     bool ret = true;
 
     char full_path[512];
-    xsnprintf(full_path, sizeof(full_path), "%s/%s", recordings_path, rel_path);
+    xsnprintf(full_path, sizeof(full_path), "%s/%s", root, subdir);
     if (!(dir = opendir(full_path))) {
         gm_throw(data->log, err, "Failed to open directory %s\n", full_path);
         return false;
@@ -425,29 +438,29 @@ index_recordings_recursive(Data *data,
 
     while ((entry = readdir(dir)) != NULL) {
         char cur_full_path[512];
-        char next_rel_path[512];
+        char cur_rel_path[512];
 
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
             continue;
 
         xsnprintf(cur_full_path, sizeof(cur_full_path), "%s/%s/%s",
-                  recordings_path, rel_path, entry->d_name);
-        xsnprintf(next_rel_path, sizeof(next_rel_path), "%s/%s",
-                  rel_path, entry->d_name);
+                  root, subdir, entry->d_name);
+        xsnprintf(cur_rel_path, sizeof(cur_rel_path), "%s/%s",
+                  subdir, entry->d_name);
 
         stat(cur_full_path, &st);
         if (S_ISDIR(st.st_mode)) {
-            if (!index_recordings_recursive(data, recordings_path,
-                                            next_rel_path, files, names, err))
+            if (!index_files_recursive(data, match, root,
+                                       cur_rel_path, files, names, err))
             {
                 ret = false;
                 break;
             }
-        } else if (strlen(rel_path) &&
-                   strcmp(entry->d_name, "glimpse_recording.json") == 0) {
-            files.push_back(strdup(rel_path));
-            char *record_dir = basename(dirname(cur_full_path));
-            names.push_back(strdup(record_dir));
+        } else if (strlen(subdir) &&
+                   strcmp(entry->d_name, match) == 0) {
+            files.push_back(strdup(cur_rel_path));
+            char *cur_dir = basename(dirname(cur_full_path));
+            names.push_back(strdup(cur_dir));
         }
     }
 
@@ -463,14 +476,35 @@ index_recordings(Data *data)
     data->recording_names.clear();
 
     char *index_err = NULL;
-    index_recordings_recursive(data,
-                               glimpse_recordings_path,
-                               "", // relative path
-                               data->recordings,
-                               data->recording_names,
-                               &index_err);
+    index_files_recursive(data,
+                          "glimpse_recording.json",
+                          glimpse_recordings_path,
+                          "", // subdirectory
+                          data->recordings,
+                          data->recording_names,
+                          &index_err);
     if (index_err) {
         gm_error(data->log, "Failed to index recordings: %s", index_err);
+        free(index_err);
+    }
+}
+
+static void
+index_targets(Data *data)
+{
+    data->targets.clear();
+    data->target_names.clear();
+
+    char *index_err = NULL;
+    index_files_recursive(data,
+                          "glimpse_target.index",
+                          gm_get_assets_root(),
+                          "targets",
+                          data->targets,
+                          data->target_names,
+                          &index_err);
+    if (index_err) {
+        gm_error(data->log, "Failed to index targets: %s", index_err);
         free(index_err);
     }
 }
@@ -669,12 +703,301 @@ get_oldest_ar_video_tex(Data *data)
     }
 }
 
+static void
+update_target_skeleton_wireframe_gl_bos(Data *data)
+{
+    if (!data->target ||
+        gm_target_get_n_frames(data->target) == 0) {
+        return;
+    }
+
+    const struct gm_skeleton *skeleton = gm_target_get_skeleton(data->target);
+
+    data->target_skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
+
+    XYZRGBA colored_joints[data->target_skel_gl.n_joints];
+    for (int i = 0; i < data->target_skel_gl.n_joints; i++) {
+        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+        colored_joints[i].x = joint->x;
+        colored_joints[i].y = joint->y;
+        colored_joints[i].z = joint->z;
+        colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.joints_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(XYZRGBA) * data->target_skel_gl.n_joints,
+                 colored_joints, GL_DYNAMIC_DRAW);
+
+    data->target_skel_gl.n_bones = gm_skeleton_get_n_bones(skeleton);
+    XYZRGBA colored_bones[data->target_skel_gl.n_bones * 2];
+    for (int b = 0; b < data->target_skel_gl.n_bones; ++b) {
+        const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
+        colored_bones[b*2] = colored_joints[gm_bone_get_head(bone)];
+        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(bone)];
+    }
+
+    glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.bones_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(XYZRGBA) * data->target_skel_gl.n_bones * 2,
+                 colored_bones, GL_DYNAMIC_DRAW);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+}
+
+static bool
+update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
+{
+    if (!data->latest_tracking) {
+        return false;
+    }
+
+    /*
+     * Update labelled point cloud
+     */
+    struct gm_prediction *prediction =
+        gm_context_get_prediction(data->ctx, timestamp);
+    if (!prediction) {
+        return false;
+    }
+    const struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
+
+    // TODO: Take confidence into account to decide whether or not to show
+    //       a particular joint position.
+    data->skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
+
+    // Reformat and copy over joint data
+    XYZRGBA colored_joints[data->skel_gl.n_joints];
+    for (int i = 0; i < data->skel_gl.n_joints; i++) {
+        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+        colored_joints[i].x = joint->x;
+        colored_joints[i].y = joint->y;
+        colored_joints[i].z = joint->z;
+        colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.joints_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(XYZRGBA) * data->skel_gl.n_joints,
+                 colored_joints, GL_DYNAMIC_DRAW);
+
+    // Reformat and copy over bone data
+    data->skel_gl.n_bones = gm_skeleton_get_n_bones(skeleton);
+    XYZRGBA colored_bones[data->skel_gl.n_bones * 2];
+    for (int b = 0; b < data->skel_gl.n_bones; ++b) {
+        const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
+        colored_bones[b*2] = colored_joints[gm_bone_get_head(bone)];
+        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(bone)];
+
+        if (!data->target) {
+            continue;
+        }
+
+        // Colourise bone depending on how close it is to the test target
+        float intensity = gm_target_get_error(data->target, bone);
+        uint8_t red = (uint8_t)(intensity * 255.f);
+        uint8_t green = (uint8_t)((1.f-intensity) * 255.f);
+        colored_bones[b*2].rgba =
+            (0xFF)|(green<<16)|(red<<24);
+        colored_bones[b*2+1].rgba = colored_bones[b*2].rgba;
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.bones_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(XYZRGBA) * data->skel_gl.n_bones * 2,
+                 colored_bones, GL_DYNAMIC_DRAW);
+
+    // Clean-up
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    // Update target skeleton
+    if (data->target) {
+        if (data->target_progress &&
+            gm_target_get_cumulative_error(data->target, skeleton) <=
+            data->target_error) {
+            unsigned int frame = gm_target_get_frame(data->target);
+            if (frame < gm_target_get_n_frames(data->target) - 1) {
+                gm_target_set_frame(data->target, frame + 1);
+            } else {
+                gm_target_set_frame(data->target, 0);
+            }
+        }
+        update_target_skeleton_wireframe_gl_bos(data);
+    }
+
+    gm_prediction_unref(prediction);
+
+    return true;
+}
+
+static void
+viewer_close_playback_device(Data *data)
+{
+    gm_device_stop(data->playback_device);
+
+    unref_device_frames(data);
+
+    if (data->latest_tracking) {
+        gm_tracking_unref(data->latest_tracking);
+        data->latest_tracking = nullptr;
+    }
+
+    // Flush old device-dependent data from the context
+    gm_context_flush(data->ctx, NULL);
+    data->tracking_ready = false;
+
+    gm_device_close(data->playback_device);
+    data->playback_device = nullptr;
+
+    data->active_device = data->recording_device;
+    deinit_device_opengl(data);
+}
+
+static void
+draw_target_controls(Data *data)
+{
+    ImGui::Combo("Skeleton target",
+                 &data->selected_target,
+                 data->target_names.data(),
+                 data->target_names.size());
+
+    if (ImGui::Button(data->target ? "Unload###target_load" :
+                                     "Load###target_load")) {
+        if (data->target) {
+            gm_target_free(data->target);
+            data->target = NULL;
+        } else {
+            char *err = NULL;
+            gm_debug(data->log, "XXX Attempting to load target '%s'",
+                     data->targets.at(data->selected_target));
+            data->target =
+                gm_target_new_from_index(data->ctx, data->log, &err,
+                                         data->targets.at(data->selected_target));
+            if (!data->target) {
+                gm_warn(data->log, "XXX Failed to load target: %s", err);
+                free(err);
+            } else {
+                gm_debug(data->log, "XXX Target loaded with %u frames",
+                         gm_target_get_n_frames(data->target));
+            }
+        }
+    }
+
+    if (!data->target) {
+        return;
+    }
+
+    ImGui::SliderFloat("Error target", &data->target_error, 0.f, 1.f);
+    if (ImGui::Button("<<###target_prev")) {
+        unsigned int frame = gm_target_get_frame(data->target);
+        if (frame > 0) {
+            gm_target_set_frame(data->target, frame - 1);
+        } else {
+            gm_target_set_frame(data->target,
+                                gm_target_get_n_frames(data->target) - 1);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(data->target_progress ? "||###target_pause" :
+                                              ">###target_play")) {
+        data->target_progress = !data->target_progress;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(">>###target_next")) {
+        unsigned int frame = gm_target_get_frame(data->target);
+        if (frame < gm_target_get_n_frames(data->target) - 1) {
+            gm_target_set_frame(data->target, frame + 1);
+        } else {
+            gm_target_set_frame(data->target, 0);
+        }
+    }
+}
+
+static void
+draw_playback_controls(Data *data)
+{
+    if (ImGui::Button(data->recording ? "Stop" : "Record")) {
+        if (data->recording) {
+            gm_recording_close(data->recording);
+            data->recording = NULL;
+            index_recordings(data);
+        } else if (!data->playback_device) {
+            const char *rel_path = NULL;
+            bool overwrite = false;
+            if (data->overwrite_recording && data->recordings.size()) {
+                rel_path = data->recordings.at(data->selected_playback_recording);
+                overwrite = true;
+            }
+
+            data->recording = gm_recording_init(data->log,
+                                                data->recording_device,
+                                                glimpse_recordings_path,
+                                                rel_path,
+                                                overwrite);
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button(data->playback_device ?
+                      "Unload###load_record" : "Load###load_record") &&
+        !data->recording)
+    {
+        if (data->playback_device) {
+            viewer_close_playback_device(data);
+
+            // Wake up the recording device again
+            handle_device_ready(data, data->recording_device);
+        } else if (data->recordings.size()) {
+            gm_device_stop(data->recording_device);
+
+            unref_device_frames(data);
+
+            if (data->latest_tracking) {
+                gm_tracking_unref(data->latest_tracking);
+                data->latest_tracking = nullptr;
+            }
+
+            gm_context_flush(data->ctx, NULL);
+            data->tracking_ready = false;
+
+            struct gm_device_config config = {};
+            config.type = GM_DEVICE_RECORDING;
+
+            char idx_path[1024];
+            snprintf(idx_path, 1024, "%s/%s",
+                     gm_get_assets_root(),
+                     data->recordings.at(data->selected_playback_recording));
+            config.recording.path = dirname(idx_path);
+
+            char *open_err = NULL;
+            data->playback_device = gm_device_open(data->log, &config, &open_err);
+
+            if (data->playback_device) {
+                gm_device_set_event_callback(data->playback_device,
+                                             on_device_event_cb, data);
+                data->active_device = data->playback_device;
+                deinit_device_opengl(data);
+
+                gm_device_commit_config(data->playback_device, NULL);
+            } else {
+                gm_error(data->log, "Failed to start recording playback: %s",
+                         open_err);
+                free(open_err);
+                // Wake up the recording device again
+                handle_device_ready(data, data->recording_device);
+            }
+        }
+    }
+
+    ImGui::Spacing();
+
+    if (!data->recording_names.empty()) {
+        ImGui::Combo("Recording Path",
+                     &data->selected_playback_recording,
+                     data->recording_names.data(),
+                     data->recording_names.size());
+    }
+}
 
 static bool
 draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 {
-    struct gm_ui_properties *dev_props =
-        gm_device_get_ui_properties(data->active_device);
     struct gm_ui_properties *ctx_props =
         gm_context_get_ui_properties(data->ctx);
 
@@ -727,11 +1050,29 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     ImGui::Spacing();
     ImGui::Separator();
+    ImGui::TextDisabled("Playback controls...");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    draw_playback_controls(data);
+
+    if (!data->targets.empty()) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::TextDisabled("Target controls...");
+        ImGui::Separator();
+        ImGui::Spacing();
+
+        draw_target_controls(data);
+    }
+
+    ImGui::Spacing();
+    ImGui::Separator();
     ImGui::TextDisabled("Device properties...");
     ImGui::Separator();
     ImGui::Spacing();
 
-    draw_properties(dev_props);
+    draw_properties(gm_device_get_ui_properties(data->active_device));
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -785,145 +1126,6 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::End();
 
     return focused;
-}
-
-static void
-viewer_close_playback_device(Data *data)
-{
-    gm_device_stop(data->playback_device);
-
-    unref_device_frames(data);
-
-    if (data->latest_tracking) {
-        gm_tracking_unref(data->latest_tracking);
-        data->latest_tracking = nullptr;
-    }
-
-    // Flush old device-dependent data from the context
-    gm_context_flush(data->ctx, NULL);
-    data->tracking_ready = false;
-
-    gm_device_close(data->playback_device);
-    data->playback_device = nullptr;
-
-    data->active_device = data->recording_device;
-    deinit_device_opengl(data);
-}
-
-static void
-draw_playback_controls(Data *data, const ImVec4 &bounds)
-{
-    ImGui::Begin("Playback controls", NULL,
-                 //ImGuiWindowFlags_NoTitleBar|
-                 ImGuiWindowFlags_NoResize|
-                 ImGuiWindowFlags_ShowBorders|
-                 ImGuiWindowFlags_NoBringToFrontOnFocus);
-
-    ImGui::Spacing();
-
-    if (ImGui::Button(data->recording ? "Stop" : "Record")) {
-        if (data->recording) {
-            gm_recording_close(data->recording);
-            data->recording = NULL;
-            index_recordings(data);
-        } else if (!data->playback_device) {
-            const char *rel_path = NULL;
-            bool overwrite = false;
-            if (data->overwrite_recording && data->recordings.size()) {
-                rel_path = data->recordings.at(data->selected_playback_recording);
-                overwrite = true;
-            }
-
-            data->recording = gm_recording_init(data->log,
-                                                data->recording_device,
-                                                glimpse_recordings_path,
-                                                rel_path,
-                                                overwrite);
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(data->playback_device ? "Unload" : "Load") &&
-        !data->recording)
-    {
-        if (data->playback_device) {
-            viewer_close_playback_device(data);
-
-            // Wake up the recording device again
-            handle_device_ready(data, data->recording_device);
-        } else if (data->recordings.size()) {
-            gm_device_stop(data->recording_device);
-
-            unref_device_frames(data);
-
-            if (data->latest_tracking) {
-                gm_tracking_unref(data->latest_tracking);
-                data->latest_tracking = nullptr;
-            }
-
-            gm_context_flush(data->ctx, NULL);
-            data->tracking_ready = false;
-
-            struct gm_device_config config = {};
-            config.type = GM_DEVICE_RECORDING;
-
-            const char *rel_path = data->recordings.at(data->selected_playback_recording);
-            char full_path[1024];
-            xsnprintf(full_path, sizeof(full_path), "%s/%s",
-                      glimpse_recordings_path, rel_path);
-            config.recording.path = full_path;
-
-            char *open_err = NULL;
-            data->playback_device = gm_device_open(data->log, &config, &open_err);
-
-            if (data->playback_device) {
-                gm_device_set_event_callback(data->playback_device,
-                                             on_device_event_cb, data);
-                data->active_device = data->playback_device;
-                deinit_device_opengl(data);
-
-                gm_device_commit_config(data->playback_device, NULL);
-            } else {
-                gm_error(data->log, "Failed to start recording playback: %s",
-                         open_err);
-                free(open_err);
-                // Wake up the recording device again
-                handle_device_ready(data, data->recording_device);
-            }
-        }
-    }
-
-    ImGui::Spacing();
-
-    if (data->recording_names.size()) {
-        ImGui::Combo("Recording Path",
-                     &data->selected_playback_recording,
-                     data->recording_names.data(),
-                     data->recording_names.size());
-    }
-
-    ImGui::SetWindowSize(ImVec2(0, 0), ImGuiCond_Always);
-
-    ImVec2 size = ImGui::GetWindowSize();
-    ImGui::SetWindowPos(ImVec2(bounds.x + (bounds.z - size.x) / 2, 16.f),
-                        ImGuiCond_FirstUseEver);
-
-    // Make sure the window stays within bounds
-    ImVec2 pos = ImGui::GetWindowPos();
-
-    if (pos.x + size.x > bounds.x + bounds.z) {
-        pos.x = (bounds.x + bounds.z) - size.x;
-    } else if (pos.x < bounds.x) {
-        pos.x = bounds.x;
-    }
-    if (pos.y + size.y > bounds.y + bounds.w) {
-        pos.y = (bounds.y + bounds.w) - size.y;
-    } else if (pos.y < bounds.y) {
-        pos.y = bounds.y;
-    }
-
-    ImGui::SetWindowPos(pos, ImGuiCond_Always);
-
-    ImGui::End();
 }
 
 static bool
@@ -1000,95 +1202,10 @@ draw_visualisation(Data *data, int x, int y, int width, int height,
     return focused;
 }
 
-static bool
-update_skeleton_wireframe_gl_bos(Data *data,
-                                 uint64_t timestamp,
-                                 int *n_joints_ret,
-                                 int *n_bones_ret)
-{
-    int n_bones = data->n_bones;
-    int n_joints;
-
-    *n_joints_ret = 0;
-    *n_bones_ret = 0;
-
-    if (!data->latest_tracking) {
-        return false;
-    }
-
-    /*
-     * Update labelled point cloud
-     */
-    struct gm_prediction *prediction =
-        gm_context_get_prediction(data->ctx, timestamp);
-    if (!prediction) {
-        return false;
-    }
-    const struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
-
-    // TODO: Take confidence into account to decide whether or not to show
-    //       a particular joint position.
-    n_joints = gm_skeleton_get_n_joints(skeleton);
-
-    assert(n_joints == data->n_joints);
-
-    // Reformat and copy over joint data
-    XYZRGBA colored_joints[n_joints];
-    for (int i = 0; i < n_joints; i++) {
-        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        colored_joints[i].x = joint->x;
-        colored_joints[i].y = joint->y;
-        colored_joints[i].z = joint->z;
-        colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, data->skel_joints_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * n_joints,
-                 colored_joints, GL_DYNAMIC_DRAW);
-
-    // Reformat and copy over bone data
-    // TODO: Don't parse this JSON structure here
-    XYZRGBA colored_bones[data->n_bones * 2];
-    for (int i = 0, b = 0; i < data->n_joints; i++) {
-        JSON_Object *joint =
-            json_array_get_object(json_array(data->joint_map), i);
-        JSON_Array *connections =
-            json_object_get_array(joint, "connections");
-        for (size_t c = 0; c < json_array_get_count(connections); c++) {
-            const char *joint_name = json_array_get_string(connections, c);
-            for (int j = 0; j < n_joints; j++) {
-                JSON_Object *joint2 = json_array_get_object(
-                    json_array(data->joint_map), j);
-                if (strcmp(joint_name,
-                           json_object_get_string(joint2, "joint")) == 0) {
-                    colored_bones[b++] = colored_joints[i];
-                    colored_bones[b++] = colored_joints[j];
-                    break;
-                }
-            }
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, data->skel_bones_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * n_bones * 2,
-                 colored_bones, GL_DYNAMIC_DRAW);
-
-    // Clean-up
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    gm_prediction_unref(prediction);
-
-    *n_joints_ret = n_joints;
-    *n_bones_ret = n_bones;
-
-    return true;
-}
-
 static void
-draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
-                        float pt_size,
-                        int n_joints,
-                        int n_bones)
+draw_skeleton_wireframe(Data *data, GLSkeleton *skel,
+                        glm::mat4 mvp,
+                        float pt_size)
 {
     glUseProgram(data->cloud_program);
 
@@ -1099,7 +1216,7 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
     glEnableVertexAttribArray(data->cloud_attr_pos);
     glEnableVertexAttribArray(data->cloud_attr_col);
 
-    glBindBuffer(GL_ARRAY_BUFFER, data->skel_bones_bo);
+    glBindBuffer(GL_ARRAY_BUFFER, skel->bones_bo);
 
     glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
                           GL_FALSE, sizeof(XYZRGBA), nullptr);
@@ -1107,11 +1224,11 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
                           GL_TRUE, sizeof(XYZRGBA),
                           (void *)offsetof(XYZRGBA, rgba));
 
-    glDrawArrays(GL_LINES, 0, n_bones * 2);
+    glDrawArrays(GL_LINES, 0, skel->n_bones * 2);
 
     glUniform1f(data->cloud_uniform_pt_size, pt_size * 3.f);
 
-    glBindBuffer(GL_ARRAY_BUFFER, data->skel_joints_bo);
+    glBindBuffer(GL_ARRAY_BUFFER, skel->joints_bo);
 
     glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
                           GL_FALSE, sizeof(XYZRGBA), nullptr);
@@ -1120,7 +1237,7 @@ draw_skeleton_wireframe(Data *data, glm::mat4 mvp,
                           (void *)offsetof(XYZRGBA, rgba));
 
     glEnable(GL_PROGRAM_POINT_SIZE);
-    glDrawArrays(GL_POINTS, 0, n_joints);
+    glDrawArrays(GL_POINTS, 0, skel->n_joints);
     glDisable(GL_PROGRAM_POINT_SIZE);
 
     glDisableVertexAttribArray(data->cloud_attr_pos);
@@ -1251,14 +1368,15 @@ draw_tracking_scene_to_texture(Data *data,
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glUseProgram(0);
 
-        int n_joints = 0;
-        int n_bones = 0;
         if (update_skeleton_wireframe_gl_bos(data,
-                                             gm_tracking_get_timestamp(data->latest_tracking),
-                                             &n_joints,
-                                             &n_bones))
+                                             gm_tracking_get_timestamp(data->latest_tracking)))
         {
-            draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
+            if (data->target) {
+                glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
+                mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
+                draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
+            }
+            draw_skeleton_wireframe(data, &data->skel_gl, mvp, pt_size);
         }
 
         draw_debug_lines(data, mvp);
@@ -1368,10 +1486,6 @@ draw_ui(Data *data)
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
     bool skip_controls = false;
-    if (current_view != 0) {
-        // Draw playback controls if UI controls isn't the main view
-        draw_playback_controls(data, ImVec4(0, 0, win_size.x, win_size.y));
-    }
     if (win_size.x >= 1024 && win_size.y >= 600 && !data->realtime_ar_mode) {
         // Draw control panel on the left if we have a large window
         draw_controls(data, origin.x, origin.y,
@@ -1628,15 +1742,16 @@ draw_ar_video(Data *data)
         glm::mat4 proj = intrinsics_to_project_matrix(&rotated_intrinsics, 0.01f, 10);
         glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, -aspect_y_scale, -1.0));
 
-        int n_joints = 0;
-        int n_bones = 0;
         if (update_skeleton_wireframe_gl_bos(data,
                                              data->last_video_frame->timestamp -
-                                             data->prediction_delay,
-                                             &n_joints,
-                                             &n_bones))
+                                             data->prediction_delay))
         {
-            draw_skeleton_wireframe(data, mvp, pt_size, n_joints, n_bones);
+            if (data->target) {
+                glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
+                mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
+                draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
+            }
+            draw_skeleton_wireframe(data, &data->skel_gl, mvp, pt_size);
         }
     }
 }
@@ -1994,8 +2109,9 @@ handle_context_tracking_updates(Data *data)
 
     data->tracking_ready = false;
 
-    if (data->latest_tracking)
+    if (data->latest_tracking) {
         gm_tracking_unref(data->latest_tracking);
+    }
 
     data->latest_tracking = gm_context_get_latest_tracking(data->ctx);
 
@@ -2098,7 +2214,6 @@ handle_context_event(Data *data, struct gm_event *event)
 {
     switch (event->type) {
     case GM_EVENT_REQUEST_FRAME:
-        gm_debug(data->log, "Requesting frame\n");
         data->context_needs_frame = true;
         request_device_frame(data,
                              (GM_REQUEST_FRAME_DEPTH |
@@ -2441,8 +2556,11 @@ init_viewer_opengl(Data *data)
     glUseProgram(0);
 
     glGenBuffers(1, &data->lines_bo);
-    glGenBuffers(1, &data->skel_bones_bo);
-    glGenBuffers(1, &data->skel_joints_bo);
+    glGenBuffers(1, &data->skel_gl.bones_bo);
+    glGenBuffers(1, &data->skel_gl.joints_bo);
+
+    glGenBuffers(1, &data->target_skel_gl.bones_bo);
+    glGenBuffers(1, &data->target_skel_gl.joints_bo);
 
     // Generate texture objects
     glGenTextures(1, &gl_depth_rgb_tex);
@@ -2782,7 +2900,9 @@ viewer_destroy(Data *data)
 
     gm_device_close(data->recording_device);
 
-    json_value_free(data->joint_map);
+    if (data->target) {
+        gm_target_free(data->target);
+    }
 
     gm_logger_destroy(data->log);
 
@@ -2828,32 +2948,6 @@ viewer_init(Data *data)
     const char *n_frames_env = getenv("GLIMPSE_RECORD_N_JOINT_FRAMES");
     if (n_frames_env)
         data->requested_recording_len = strtoull(n_frames_env, NULL, 10);
-
-    // TODO: Might be nice to be able to retrieve this information via the API
-    //       rather than reading it separately here.
-    struct gm_asset *joint_map_asset = gm_asset_open(data->log,
-                                                     "joint-map.json",
-                                                     GM_ASSET_MODE_BUFFER,
-                                                     &open_err);
-    if (joint_map_asset) {
-        const void *buf = gm_asset_get_buffer(joint_map_asset);
-        data->joint_map = json_parse_string((const char *)buf);
-        gm_asset_close(joint_map_asset);
-    } else {
-        gm_error(data->log, "%s", open_err);
-        exit(1);
-    }
-
-    // Count the number of bones defined by connections in the joint map.
-    data->n_bones = 0;
-    for (size_t i = 0; i < json_array_get_count(json_array(data->joint_map));
-         i++) {
-        JSON_Object *joint =
-            json_array_get_object(json_array(data->joint_map), i);
-        data->n_bones += json_array_get_count(
-            json_object_get_array(joint, "connections"));
-    }
-    data->n_joints = json_array_get_count(json_array(data->joint_map));
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
@@ -2914,6 +3008,9 @@ viewer_init(Data *data)
     }
 
     update_ar_video_queue_len(data, 6);
+
+    data->target_error = 0.1f;
+    data->target_progress = true;
 
     data->initialized = true;
 }
@@ -3042,6 +3139,8 @@ main(int argc, char **argv)
         recordings_path = gm_get_assets_root();
     glimpse_recordings_path = strdup(recordings_path);
     index_recordings(data);
+
+    index_targets(data);
 
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
