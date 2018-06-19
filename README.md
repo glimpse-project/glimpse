@@ -135,7 +135,7 @@ An optimized build can be compiled as follows:
 ```
 mkdir build-release
 cd build-release
-CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson.py --buildtype=release ..
+CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson --buildtype=release ..
 ninja
 ```
 
