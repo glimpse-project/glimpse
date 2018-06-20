@@ -37,6 +37,7 @@
 #include "xalloc.h"
 #include "rdt_tree.h"
 #include "infer_labels.h"
+#include "infer_joints.h"
 #include "parson.h"
 
 #include "half.hpp"

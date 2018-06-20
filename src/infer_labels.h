@@ -28,23 +28,8 @@
 #include <stdbool.h>
 
 #include "rdt_tree.h"
-#include "jip.h"
-#include "llist.h"
-#include "parson.h"
 
 #define HUGE_DEPTH 1000.f
-
-typedef struct {
-    float x;
-    float y;
-    float z;
-    float confidence;
-} Joint;
-
-typedef struct {
-    int     n_joints;
-    LList** joints;
-} InferredJoints;
 
 template<typename FloatT>
 float* infer_labels(struct gm_logger* log,
@@ -55,56 +40,3 @@ float* infer_labels(struct gm_logger* log,
                     int height,
                     float* out_labels = NULL,
                     bool use_threads = false);
-
-template<typename FloatT>
-float* calc_pixel_weights(FloatT* depth_image,
-                          float* pr_table,
-                          int width,
-                          int height,
-                          int n_labels,
-                          JSON_Value* joint_map,
-                          float* out_weights = NULL);
-
-template<typename FloatT>
-InferredJoints* infer_joints_fast(FloatT* depth_image,
-                                  float* pr_table,
-                                  float* weights,
-                                  int width,
-                                  int height,
-                                  int n_labels,
-                                  JSON_Value* joint_map,
-                                  float vfov,
-                                  JIParam* params);
-
-template<typename FloatT>
-InferredJoints* infer_joints(FloatT* depth_image,
-                             float* pr_table,
-                             float* weights,
-                             int width,
-                             int height,
-                             float bg_depth,
-                             int n_labels,
-                             JSON_Value* joint_map,
-                             float vfov,
-                             JIParam* params);
-
-void free_joints(InferredJoints* joints);
-
-template<typename FloatT>
-float* reproject(FloatT* depth_image,
-                 int width,
-                 int height,
-                 float vfov,
-                 float threshold,
-                 int* n_points,
-                 float* out_points = NULL);
-
-template<typename FloatT>
-FloatT* project(float* point_cloud,
-                int n_points,
-                int width,
-                int height,
-                float vfov,
-                float background = 0.f,
-                FloatT* out_depth = NULL);
-

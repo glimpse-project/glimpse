@@ -25,6 +25,122 @@
 #include "glimpse_python.h"
 #include "xalloc.h"
 
+template<typename FloatT>
+static FloatT*
+project(float* point_cloud, int n_points, int width, int height,
+        float vfov, float background, FloatT* out_depth)
+{
+    float half_width = width / 2.f;
+    float half_height = height / 2.f;
+    float aspect = half_width / half_height;
+
+    float vfov_rad = vfov * M_PI / 180.f;
+    float tan_half_vfov = tanf(vfov_rad / 2.f);
+    float tan_half_hfov = tan_half_vfov * aspect;
+
+    FloatT* depth_image = out_depth ? out_depth :
+        (FloatT*)xmalloc(width * height * sizeof(FloatT));
+    FloatT bg_half = (FloatT)background;
+    for (int i = 0; i < width * height; i++)
+    {
+        depth_image[i] = bg_half;
+    }
+
+    for (int i = 0, idx = 0; i < n_points; i++, idx += 3)
+    {
+        float* point = &point_cloud[idx];
+
+        float x = point[0] / (tan_half_hfov * point[2]);
+        if (x < -1.0f || x >= 1.0f)
+        {
+            continue;
+        }
+
+        float y = -point[1] / (tan_half_vfov * point[2]);
+        if (y < -1.0f || y >= 1.0f)
+        {
+            continue;
+        }
+
+        x = (x + 1.0f) * half_width;
+        y = (y + 1.0f) * half_height;
+
+        int col = x;
+        int row = y;
+
+        depth_image[row * width + col] = (FloatT)point[2];
+    }
+
+    return depth_image;
+}
+
+template half*
+project<half>(float*, int, int, int, float, float, half*);
+
+template float*
+project<float>(float*, int, int, int, float, float, float*);
+
+template<typename FloatT>
+float*
+reproject(FloatT* depth_image, int width, int height,
+          float vfov, float threshold, int* n_points, float* out_cloud)
+{
+    float half_width = width / 2.f;
+    float half_height = height / 2.f;
+    float aspect = half_width / half_height;
+
+    float vfov_rad = vfov * M_PI / 180.f;
+    float tan_half_vfov = tanf(vfov_rad / 2.f);
+    float tan_half_hfov = tan_half_vfov * aspect;
+
+    float* point_cloud = out_cloud ? out_cloud :
+        (float*)xmalloc(width * height * 3 * sizeof(float));
+
+    *n_points = 0;
+    int ty = -1;
+    for (int y = 0, idx = 0; y < height; y++)
+    {
+        float t;
+        for (int x = 0; x < width; x++, idx++)
+        {
+            float depth = (float)depth_image[idx];
+            if (!std::isnormal(depth) || depth > threshold)
+            {
+                continue;
+            }
+
+            float s = (x / half_width) - 1.f;
+            if (ty != y)
+            {
+                t = -((y / half_height) - 1.f);
+                ty = y;
+            }
+            int cloud_idx = (*n_points) * 3;
+
+            point_cloud[cloud_idx] = (tan_half_hfov * depth) * s;
+            point_cloud[cloud_idx + 1] = (tan_half_vfov * depth) * t;
+            point_cloud[cloud_idx + 2] = depth;
+
+            (*n_points)++;
+        }
+    }
+
+    if (!out_cloud)
+    {
+        point_cloud = (float*)
+            xrealloc(point_cloud, (*n_points) * 3 * sizeof(float));
+    }
+
+    return point_cloud;
+}
+
+template float*
+reproject<half>(half*, int, int, float, float, int*, float*);
+
+template float*
+reproject<float>(float*, int, int, float, float, int*, float*);
+
+
 namespace Glimpse {
 
 using half_float::half;

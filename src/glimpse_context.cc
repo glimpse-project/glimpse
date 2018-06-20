@@ -78,6 +78,7 @@
 #include "xalloc.h"
 #include "wrapper_image.h"
 #include "infer_labels.h"
+#include "infer_joints.h"
 #include "rdt_tree.h"
 #include "jip.h"
 #include "image_utils.h"
