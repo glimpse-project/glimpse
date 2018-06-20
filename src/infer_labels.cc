@@ -33,7 +33,7 @@
 
 #include "half.hpp"
 
-#include "infer.h"
+#include "infer_labels.h"
 #include "xalloc.h"
 #include "rdt_tree.h"
 #include "jip.h"

@@ -41,7 +41,7 @@
 #include "image_utils.h"
 #include "xalloc.h"
 #include "rdt_tree.h"
-#include "infer.h"
+#include "infer_labels.h"
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 

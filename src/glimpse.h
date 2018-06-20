@@ -27,4 +27,4 @@
 
 #include "image_utils.h"
 #include "rdt_tree.h"
-#include "infer.h"
+#include "infer_labels.h"

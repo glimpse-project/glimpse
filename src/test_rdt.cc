@@ -77,7 +77,7 @@
 #include "half.hpp"
 
 #include "rdt_tree.h"
-#include "infer.h"
+#include "infer_labels.h"
 #include "image_utils.h"
 
 #include <glimpse_rdt.h>
