@@ -113,7 +113,6 @@ infer_labels_2018_06_discrete_mm(void* userdata)
             continue;
         }
 
-        Int2D pixel = { x, y };
         for (int i = 0; i < data->n_trees; ++i)
         {
             RDTree* tree = data->forest[i];
@@ -121,11 +120,11 @@ infer_labels_2018_06_discrete_mm(void* userdata)
 
             int id = 0;
             while (node.label_pr_idx == 0) {
-#if 1
-                Int2D u = { (int)(pixel[0] + roundf(node.uv[0] / depth)),
-                            (int)(pixel[1] + roundf(node.uv[1] / depth)) };
-                Int2D v = { (int)(pixel[0] + roundf(node.uv[2] / depth)),
-                            (int)(pixel[1] + roundf(node.uv[3] / depth)) };
+#if 0
+                Int2D u = { (int)(x + roundf(node.uv[0] / depth)),
+                            (int)(y + roundf(node.uv[1] / depth)) };
+                Int2D v = { (int)(x + roundf(node.uv[2] / depth)),
+                            (int)(y + roundf(node.uv[3] / depth)) };
 #if 0
                 float upixel = (u[0] >= 0 && u[0] < (int)width &&
                                 u[1] >= 0 && u[1] < (int)height) ?
