@@ -1245,7 +1245,7 @@ main(int argc, char **argv)
 
     JSON_Value *label_map = json_parse_file(label_map_file);
     if (!label_map) {
-        fprintf(stderr, "Failed to parse joint map %s\n", optarg);
+        fprintf(stderr, "Failed to parse label map %s\n", optarg);
         exit(1);
     }
 
