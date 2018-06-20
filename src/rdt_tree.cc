@@ -38,7 +38,7 @@
 static void
 assert_rdt_abi()
 {
-    static_assert(sizeof(RDTHeader) == 16, "RDT ABI Breakage");
+    static_assert(sizeof(RDTHeader) == 20, "RDT ABI Breakage");
     static_assert(sizeof(Node) == 32,      "RDT ABI Breakage");
     static_assert(offsetof(Node, t) == 16, "RDT ABI Breakage");
 }
@@ -205,6 +205,18 @@ rdt_tree_load_from_json(struct gm_logger* log,
         tree->header.bg_depth = json_object_get_number(json_tree, "bg_depth");
     else
         tree->header.bg_depth = 1000.0;
+
+    if (json_object_has_value(json_tree, "sample_uv_offsets_nearest")) {
+        tree->header.sample_uv_offsets_nearest =
+            json_object_get_number(json_tree, "sample_uv_offsets_nearest");
+    } else
+        tree->header.sample_uv_offsets_nearest = false;
+
+    if (json_object_has_value(json_tree, "sample_uv_z_in_mm")) {
+        tree->header.sample_uv_z_in_mm =
+            json_object_get_number(json_tree, "sample_uv_z_in_mm");
+    } else
+        tree->header.sample_uv_z_in_mm = false;
 
     // Count probability arrays
     int n_pr_tables = root ? count_pr_tables(root) : 0;
