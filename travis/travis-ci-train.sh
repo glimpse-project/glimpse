@@ -17,10 +17,11 @@ ninja --version
 pip3 install git+https://github.com/glimpse-project/meson
 export PATH=$HOME/.local/bin:$PATH
 
-# Actually we rely on the cached, rendered, training images so we don't
-# currently need the training data repo here....
+git clone --depth=1 https://github.com/glimpse-project/glimpse-training-data
+
+# We rely on the cached, rendered, training images so we don't currently need
+# the unpack training data here....
 #
-#git clone --depth=1 https://github.com/glimpse-project/glimpse-training-data
 #pushd glimpse-training-data
 #    ./unpack.sh
 #popd
@@ -56,8 +57,10 @@ popd
 export PATH=$PWD/src:$PATH
 export PATH=$PWD/build:$PATH
 
-image-pre-processor rendered-training-data/generated/test-render \
-    rendered-training-data/pre-processed/test-render src/label-map.json
+image-pre-processor \
+    rendered-training-data/generated/test-render \
+    rendered-training-data/pre-processed/test-render \
+    glimpse-training-data/label-maps/2018-06-render-to-2018-06-rdt-map.json
 
 indexer.py rendered-training-data/pre-processed/test-render
 
