@@ -68,7 +68,7 @@ and in the glimpse-models repo run:
 cd glimpse-models
 ./unpack.sh
 ```
-*(to decompress the CMU motion capture data)*
+*(to decompress the decision trees)*
 
 # Environment variable
 
