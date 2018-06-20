@@ -23,15 +23,16 @@ If we have rendered data via `glimpse-cli.py` under
 can be processed as follows:
 
 ```
-./image-pre-processor \
+image-pre-processor \
     /path/to/glimpse-training-data/renders/test-render \
     /path/to/glimpse-training-data/pre-processed/test-render \
-    src/label-map.json
+    /path/to/glimpse-training-data/label-maps/2018-06-render-to-2018-06-rdt-map.json
 ```
 
-The `src/label-map.json` argument defines a mapping from the label values found
-within .png images under the `labels/` subdirectory of the rendered training
-data and the packed/sequential indices that will be used while training.
+The `2018-06-render-to-2018-06-rdt-map.json` argument defines a mapping from
+the label values found within .png images under the `labels/` subdirectory of
+the rendered training data and the packed/sequential indices that will be used
+while training.
 
 The file follows a schema like:
 ```
@@ -71,8 +72,8 @@ The file follows a schema like:
 *Note: the "opposite" property allows the image-pre-processor to automatically
 flip images horizonally*
 
-
-Normally `src/label-map.json` can be used.
+Normally `glimpse-training-data/label-maps/2018-06-render-to-2018-06-rdt-map.json`
+can be used.
 
 
 Index frames to train with
@@ -108,7 +109,7 @@ none of them will contain test-set frames. See --help for details.*
 Training a decision tree
 ========================
 
-Run the tool 'train_rdt' to train a tree. Running it with no parameters, or
+Run the tool `train_rdt` to train a tree. Running it with no parameters, or
 with the `-h/--help` parameter will print usage details, with details about the
 default parameters.
 
@@ -116,7 +117,7 @@ For example, if you have an index.tree0 file at the top of your training data
 you can train a decision tree like:
 
 ```
-train_rdt path-training-data tree0 tree0.rdt
+train_rdt path-training-data tree0 tree0.json
 ```
 
 Creating a joint map
@@ -157,7 +158,7 @@ By default the revision controlled `src/joint-map.json` file should be used
 Training joint inference parameters
 ===================================
 
-Run the tool 'train_joint_params' to train joint parameters. Running it with no
+Run the tool `train_joint_params` to train joint parameters. Running it with no
 parameters, or with the `-h/--help` parameter will print usage details, with
 details about the default parameters.
 
@@ -166,11 +167,11 @@ the decision tree training tool so it's recommended to create a smaller
 dedicated index for training joint params.
 
 For example, if you have an `index.joint-param-training` file then to train
-joint parameters from a decision forest of two trees named 'tree0.json' and
-'tree1.json' you could run:
+joint parameters from a decision forest of two trees named `tree0.json` and
+`tree1.json` you could run:
 
 ```
-train_joint_params path-to-training-data \
+train_joint_params /path/to/glimpse-training-data/pre-processed/test-render \
                    joint-param-training \
                    src/joint-map.json \
                    output.jip -- tree0.json tree1.json
