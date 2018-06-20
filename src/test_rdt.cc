@@ -733,7 +733,7 @@ main(int argc, char **argv)
     if (infer_fixed_point) {
         gm_assert(log, (forest[0]->header.bg_depth > (((float)INT16_MAX / 1000.0f) - 0.001) &&
                         forest[0]->header.bg_depth < (((float)INT16_MAX / 1000.0f) + 0.001)),
-                  "Expected tree requiring fixed-point sampling to have bg_depth = 3.27m, not %f",
+                  "Expected tree requiring fixed-point sampling to have bg_depth = 32.7m, not %f",
                   forest[0]->header.bg_depth);
         printf("Testing with fixed-point UV sampling\n");
     } else {
@@ -834,7 +834,8 @@ main(int argc, char **argv)
         memset(image_best_label_matches, 0, sizeof(image_best_label_matches));
 
 #if 0
-        infer_labels<half>(forest,
+        infer_labels<half>(log,
+                           forest,
                            n_trees,
                            depth_image,
                            width,

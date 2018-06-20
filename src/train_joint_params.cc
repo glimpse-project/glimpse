@@ -182,7 +182,8 @@ thread_body(void* userdata)
     for (int i = i_start, idx = ctx->width * ctx->height * i_start;
          i < i_end; i++, idx += ctx->width * ctx->height)
     {
-        ctx->inferred[i] = infer_labels<half>(ctx->forest, ctx->n_trees,
+        ctx->inferred[i] = infer_labels<half>(ctx->log,
+                                              ctx->forest, ctx->n_trees,
                                               &ctx->depth_images[idx],
                                               ctx->width, ctx->height);
 

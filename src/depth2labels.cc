@@ -201,7 +201,8 @@ main(int argc, char **argv)
         }
     }
 
-    float* output_pr = infer_labels<half>(forest, n_trees, depth_image,
+    float* output_pr = infer_labels<half>(log,
+                                          forest, n_trees, depth_image,
                                           width, height);
 
     // Write out png of most likely labels

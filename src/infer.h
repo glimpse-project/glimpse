@@ -47,7 +47,8 @@ typedef struct {
 } InferredJoints;
 
 template<typename FloatT>
-float* infer_labels(RDTree** forest,
+float* infer_labels(struct gm_logger* log,
+                    RDTree** forest,
                     int n_trees,
                     FloatT* depth_image,
                     int width,

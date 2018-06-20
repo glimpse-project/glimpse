@@ -72,9 +72,12 @@ typedef struct {
 
 typedef vector(int, 2) Int2D;
 
+/* Used with newer trees that were trained with fixed-point arithmetic when
+ * sampling and testing UV gradients...
+ */
 template<typename FloatT>
 static void*
-infer_labels_thread(void* userdata)
+infer_labels_2018_06_discrete_mm(void* userdata)
 {
     InferThreadData* data = (InferThreadData*)userdata;
     FloatT* depth_image = (FloatT*)data->depth_image;
@@ -243,10 +246,112 @@ infer_labels_thread(void* userdata)
     return NULL;
 }
 
+/* Use this inference implementation with legacy decision trees that
+ * were trained using floor() rounding when normalizing uv offsets
+ * and measured gradients in floating point with meter units.
+ */
+template<typename FloatT>
+static void*
+infer_labels_2017_floor_uv_float_m(void* userdata)
+{
+    InferThreadData* data = (InferThreadData*)userdata;
+    FloatT* depth_image = (FloatT*)data->depth_image;
+    int n_labels = data->forest[0]->header.n_labels;
+
+    /* Bias by 2cm because half-float depth buffers can loose a lot of
+     * precision. E.g. (INT16_MAX / 1000.0) which is the bg_depth for new trees
+     * reads back as as 32.75 meters instead of 32.767 which has an error of
+     * nearly 2cm
+     */
+    float bg_depth = data->forest[0]->header.bg_depth - 0.02;
+
+    int width = data->width;
+    int height = data->height;
+
+    // Accumulate probability map
+    for (int off = data->thread;
+         off < width * height;
+         off += data->n_threads)
+    {
+        int y = off / data->width;
+        int x = off % data->width;
+
+        float* out_pr_table = &data->output[off * n_labels];
+        float depth = depth_image[off];
+
+        if (depth >= bg_depth)
+        {
+            out_pr_table[data->forest[0]->header.bg_label] += 1.0f;
+            continue;
+        }
+
+        Int2D pixel = { x, y };
+        for (int i = 0; i < data->n_trees; ++i)
+        {
+            RDTree* tree = data->forest[i];
+            Node node = tree->nodes[0];
+
+            int id = 0;
+            while (node.label_pr_idx == 0) {
+                Int2D u = { (int)(pixel[0] + node.uv[0] / depth),
+                            (int)(pixel[1] + node.uv[1] / depth) };
+                Int2D v = { (int)(pixel[0] + node.uv[2] / depth),
+                            (int)(pixel[1] + node.uv[3] / depth) };
+
+                float upixel = (u[0] >= 0 && u[0] < (int)width &&
+                                u[1] >= 0 && u[1] < (int)height) ?
+                    (float)depth_image[((u[1] * width) + u[0])] : 1000.f;
+                float vpixel = (v[0] >= 0 && v[0] < (int)width &&
+                                v[1] >= 0 && v[1] < (int)height) ?
+                    (float)depth_image[((v[1] * width) + v[0])] : 1000.f;
+
+                float gradient = upixel - vpixel;
+
+                /* NB: The nodes are arranged in breadth-first, left then
+                 * right child order with the root node at index zero.
+                 *
+                 * In this case if you have an index for any particular node
+                 * ('id' here) then 2 * id + 1 is the index for the left
+                 * child and 2 * id + 2 is the index for the right child...
+                 */
+                id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
+
+                node = tree->nodes[id];
+            }
+
+            /* NB: node->label_pr_idx is a base-one index since index zero
+             * is reserved to indicate that the node is not a leaf node
+             */
+            float* pr_table =
+                &tree->label_pr_tables[(node.label_pr_idx - 1) * n_labels];
+            for (int n = 0; n < n_labels; ++n)
+            {
+                out_pr_table[n] += pr_table[n];
+            }
+        }
+
+        for (int n = 0; n < n_labels; ++n)
+        {
+            out_pr_table[n] /= (float)data->n_trees;
+        }
+    }
+
+    if (data->n_threads > 1)
+    {
+        pthread_exit(NULL);
+    }
+
+    return NULL;
+}
+
 template<typename FloatT>
 float*
-infer_labels(RDTree** forest, int n_trees, FloatT* depth_image,
-             int width, int height, float* out_labels,
+infer_labels(struct gm_logger* log,
+             RDTree** forest,
+             int n_trees,
+             FloatT* depth_image,
+             int width, int height,
+             float* out_labels,
              bool use_threads)
 {
     int n_labels = (int)forest[0]->header.n_labels;
@@ -254,11 +359,37 @@ infer_labels(RDTree** forest, int n_trees, FloatT* depth_image,
     float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
     memset(output_pr, 0, output_size);
 
+    void* (*infer_labels_callback)(void* userdata);
+
+    if (forest[0]->header.sample_uv_offsets_nearest &&
+        forest[0]->header.sample_uv_z_in_mm)
+    {
+        gm_assert(log,
+                  (forest[0]->header.bg_depth > (((float)INT16_MAX / 1000.0f) - 0.001) &&
+                   forest[0]->header.bg_depth < (((float)INT16_MAX / 1000.0f) + 0.001)),
+                  "Expected tree requiring discrete mm unit sampling to have bg_depth = 32.7m, not %f",
+                  forest[0]->header.bg_depth);
+
+        infer_labels_callback = infer_labels_2018_06_discrete_mm<FloatT>;
+    } else {
+        gm_assert(log,
+                  (forest[0]->header.sample_uv_offsets_nearest == false &&
+                   forest[0]->header.sample_uv_z_in_mm == false),
+                  "Unsupported decision tree sampling requirement");
+        gm_assert(log,
+                  forest[0]->header.bg_depth == 1000.0,
+                  "Expected legacy decision tree to have bg_depth of 1000.0m");
+        infer_labels_callback = infer_labels_2017_floor_uv_float_m<FloatT>;
+    }
+
     int n_threads = std::thread::hardware_concurrency();
     if (!use_threads || n_threads <= 1)
     {
-        InferThreadData data = { 1, 1, forest, n_trees, (void*)depth_image, width, height, output_pr};
-        infer_labels_thread<FloatT>((void*)(&data));
+        InferThreadData data = {
+            1, 1, forest, n_trees,
+            (void*)depth_image, width, height, output_pr
+        };
+        infer_labels_callback((void*)(&data));
     }
     else
     {
@@ -269,11 +400,11 @@ infer_labels(RDTree** forest, int n_trees, FloatT* depth_image,
         {
             data[i] = { i, n_threads, forest, n_trees,
                 (void*)depth_image, width, height, output_pr };
-            if (pthread_create(&threads[i], NULL, infer_labels_thread<FloatT>,
+            if (pthread_create(&threads[i], NULL, infer_labels_callback,
                                (void*)(&data[i])) != 0)
             {
-                fprintf(stderr,
-                        "Error creating thread, results will be incomplete.\n");
+                gm_error(log,
+                         "Error creating thread, results will be incomplete.\n");
                 n_threads = i;
                 break;
             }
@@ -282,9 +413,7 @@ infer_labels(RDTree** forest, int n_trees, FloatT* depth_image,
         for (int i = 0; i < n_threads; ++i)
         {
             if (pthread_join(threads[i], NULL) != 0)
-            {
-                fprintf(stderr, "Error joining thread, trying to continue...\n");
-            }
+                gm_error(log, "Error joining thread, trying to continue...\n");
         }
     }
 
@@ -292,10 +421,12 @@ infer_labels(RDTree** forest, int n_trees, FloatT* depth_image,
 }
 
 template float*
-infer_labels<half>(RDTree**, int, half*, int, int, float*,
+infer_labels<half>(struct gm_logger* log,
+                   RDTree**, int, half*, int, int, float*,
                    bool);
 template float*
-infer_labels<float>(RDTree**, int, float*, int, int, float*,
+infer_labels<float>(struct gm_logger* log,
+                    RDTree**, int, float*, int, int, float*,
                     bool);
 
 /* We don't want to be making lots of function calls or dereferencing

@@ -3340,7 +3340,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         // Do inference
         lstart = get_time();
-        infer_labels<float>(ctx->decision_trees, ctx->n_decision_trees,
+        infer_labels<float>(ctx->log,
+                            ctx->decision_trees, ctx->n_decision_trees,
                             depth_img, width, height, label_probs, true);
         lend = get_time();
         lduration = lend - lstart;
