@@ -266,7 +266,7 @@ static const char *rotation_names[] = {
 };
 
 #ifdef USE_TANGO
-static pthread_mutex_t jni_lock;
+static pthread_mutex_t jni_lock = PTHREAD_MUTEX_INITIALIZER;
 static jobject early_tango_service_binder;
 
 /* For our JNI callbacks we assume there can only be a single device...
@@ -409,6 +409,8 @@ device_frame_alloc(struct gm_mem_pool *pool, void *user_data)
 
     frame->base.api = &frame->vtable;
 
+    pthread_mutex_init(&frame->trail_lock, NULL);
+
     return frame;
 }
 
@@ -472,6 +474,8 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     }
     buf->base.data = xmalloc(buf->base.len);
 
+    pthread_mutex_init(&buf->trail_lock, NULL);
+
     return buf;
 }
 
@@ -519,6 +523,8 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         break;
     }
     buf->base.data = xmalloc(buf->base.len);
+
+    pthread_mutex_init(&buf->trail_lock, NULL);
 
     return buf;
 }
@@ -2453,6 +2459,9 @@ gm_device_open(struct gm_logger *log,
 {
     struct gm_device *dev = new gm_device();
     bool status = false;
+
+    pthread_mutex_init(&dev->request_buffers_mask_lock, NULL);
+    pthread_mutex_init(&dev->swap_buffers_lock, NULL);
 
     dev->log = log;
     dev->type = config->type;

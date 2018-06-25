@@ -4572,8 +4572,13 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     ctx->log = logger;
 
+    pthread_mutex_init(&ctx->liveness_lock, NULL);
+    pthread_mutex_init(&ctx->debug_viz_mutex, NULL);
     pthread_cond_init(&ctx->skel_track_cond, NULL);
     pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
+    pthread_mutex_init(&ctx->tracking_swap_mutex, NULL);
+    pthread_mutex_init(&ctx->frame_ready_mutex, NULL);
+    pthread_cond_init(&ctx->frame_ready_cond, NULL);
 
     ctx->tracking_pool = mem_pool_alloc(logger,
                                         "tracking",
