@@ -5929,7 +5929,7 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 
     int parent_head = 0;
     uint64_t closest_timestamp =
-        ctx->tracking_history[closest_frame]->frame->timestamp;
+        prediction->tracking_history[closest_frame]->frame->timestamp;
     if (timestamp != closest_timestamp && prediction->n_tracking > 1) {
         // Work out the two nearest frames and the interpolation value
         int h1;
@@ -5941,8 +5941,8 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
         }
         int h2 = h1 + 1;
 
-        struct gm_tracking_impl *frame1 = ctx->tracking_history[h1];
-        struct gm_tracking_impl *frame2 = ctx->tracking_history[h2];
+        struct gm_tracking_impl *frame1 = prediction->tracking_history[h1];
+        struct gm_tracking_impl *frame2 = prediction->tracking_history[h2];
         float t = (timestamp - frame2->frame->timestamp) /
                   (float)(frame1->frame->timestamp - frame2->frame->timestamp);
 
