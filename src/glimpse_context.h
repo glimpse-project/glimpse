@@ -25,6 +25,7 @@
 #pragma once
 
 #include <assert.h>
+#include <stdatomic.h>
 
 #include "glimpse_properties.h"
 #include "glimpse_log.h"
@@ -151,7 +152,7 @@ struct gm_buffer_vtable
 
 struct gm_buffer
 {
-    int ref;
+    atomic_int ref;
 
     struct gm_buffer_vtable *api;
 
@@ -176,7 +177,7 @@ gm_buffer_ref(struct gm_buffer *buffer)
 {
     assert(buffer->ref >= 0); // implies use after free!
     gm_buffer_add_breadcrumb(buffer, "ref");
-    buffer->ref++;
+    atomic_fetch_add(&buffer->ref, 1);
     return buffer;
 }
 
@@ -184,7 +185,7 @@ inline void
 gm_buffer_unref(struct gm_buffer *buffer)
 {
     gm_buffer_add_breadcrumb(buffer, "unref");
-    if (__builtin_expect(--(buffer->ref) < 1, 0))
+    if (__builtin_expect(atomic_fetch_sub(&buffer->ref, 1) <= 1, 0))
         buffer->api->free(buffer);
 }
 
@@ -220,7 +221,7 @@ struct gm_frame_vtable
 
 struct gm_frame
 {
-    int ref;
+    atomic_int ref;
 
     struct gm_frame_vtable *api;
 
@@ -251,7 +252,7 @@ gm_frame_ref(struct gm_frame *frame)
 {
     assert(frame->ref >= 0); // implies use after free!
     gm_frame_add_breadcrumb(frame, "ref");
-    frame->ref++;
+    atomic_fetch_add(&frame->ref, 1);
     return frame;
 }
 
@@ -259,7 +260,7 @@ inline void
 gm_frame_unref(struct gm_frame *frame)
 {
     gm_frame_add_breadcrumb(frame, "unref");
-    if (__builtin_expect(--(frame->ref) < 1, 0))
+    if (__builtin_expect(atomic_fetch_sub(&frame->ref, 1) <= 1, 0))
         frame->api->free(frame);
 }
 
@@ -274,21 +275,21 @@ struct gm_tracking_vtable
 
 struct gm_tracking
 {
-    int ref;
+    atomic_int ref;
     struct gm_tracking_vtable *api;
 };
 
 inline struct gm_tracking *
 gm_tracking_ref(struct gm_tracking *tracking)
 {
-    tracking->ref++;
+    atomic_fetch_add(&tracking->ref, 1);
     return tracking;
 }
 
 inline void
 gm_tracking_unref(struct gm_tracking *tracking)
 {
-    if (__builtin_expect(--(tracking->ref) < 1, 0))
+    if (__builtin_expect(atomic_fetch_sub(&tracking->ref, 1) <= 1, 0))
         tracking->api->free(tracking);
 }
 
@@ -313,21 +314,21 @@ struct gm_prediction_vtable {
 };
 
 struct gm_prediction {
-    int ref;
+    atomic_int ref;
     struct gm_prediction_vtable *api;
 };
 
 inline struct gm_prediction *
 gm_prediction_ref(struct gm_prediction *prediction)
 {
-    prediction->ref++;
+    atomic_fetch_add(&prediction->ref, 1);
     return prediction;
 }
 
 inline void
 gm_prediction_unref(struct gm_prediction *prediction)
 {
-    if (__builtin_expect(--(prediction->ref) < 1, 0))
+    if (__builtin_expect(atomic_fetch_sub(&prediction->ref, 1) <= 1, 0))
         prediction->api->free(prediction);
 }
 

@@ -3871,7 +3871,10 @@ mem_pool_acquire_tracking(struct gm_mem_pool *pool)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)
         mem_pool_acquire_resource(pool);
-    tracking->base.ref = 1;
+    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
+              "Tracking object in pool with non-zero ref-count");
+
+    atomic_store(&tracking->base.ref, 1);
 
     tracking->success = false;
 
@@ -3883,7 +3886,11 @@ mem_pool_acquire_prediction(struct gm_mem_pool *pool)
 {
     struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)
         mem_pool_acquire_resource(pool);
-    prediction->base.ref = 1;
+    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
+              "Prediction object in pool with non-zero ref-count");
+
+    atomic_store(&prediction->base.ref, 1);
+
     return prediction;
 }
 
@@ -4100,7 +4107,7 @@ detector_thread_cb(void *data)
             if (ctx->tracking_history[0]) {
                 gm_debug(ctx->log, "pushing %p out of tracking history fifo (ref = %d)\n",
                          ctx->tracking_history[0],
-                         ctx->tracking_history[0]->base.ref);
+                         atomic_load(&ctx->tracking_history[0]->base.ref));
                 gm_tracking_unref(&ctx->tracking_history[0]->base);
             }
             ctx->tracking_history[0] = (struct gm_tracking_impl *)
@@ -4108,7 +4115,7 @@ detector_thread_cb(void *data)
 
             gm_debug(ctx->log, "adding %p to tracking history fifo (ref = %d)\n",
                      ctx->tracking_history[0],
-                     ctx->tracking_history[0]->base.ref);
+                     atomic_load(&ctx->tracking_history[0]->base.ref));
 
             if (ctx->n_tracking < TRACK_FRAMES)
                 ctx->n_tracking++;
@@ -4117,7 +4124,7 @@ detector_thread_cb(void *data)
             for (int i = 0; i < ctx->n_tracking; i++) {
                 gm_debug(ctx->log, "%d) %p (ref = %d)", i,
                          ctx->tracking_history[i],
-                         ctx->tracking_history[i]->base.ref);
+                         atomic_load(&ctx->tracking_history[i]->base.ref));
             }
         }
 
@@ -4168,7 +4175,7 @@ tracking_state_recycle(struct gm_tracking *self)
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
     struct gm_mem_pool *pool = tracking->pool;
 
-    gm_assert(tracking->ctx->log, tracking->base.ref == 0,
+    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
               "Unbalanced tracking unref");
 
     gm_frame_unref(tracking->frame);
@@ -4185,7 +4192,7 @@ tracking_add_breadcrumb(struct gm_tracking *self, const char *tag)
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
     struct trail_crumb crumb;
 
-    gm_assert(tracking->ctx->log, tracking->base.ref >= 0,
+    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) >= 0,
               "Use of frame after free");
 
     snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
@@ -4205,7 +4212,7 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     struct gm_context *ctx = (struct gm_context *)user_data;
     struct gm_tracking_impl *tracking = new gm_tracking_impl();
 
-    tracking->base.ref = 1;
+    atomic_store(&tracking->base.ref, 0);
     tracking->base.api = &tracking->vtable;
 
     tracking->vtable.free = tracking_state_recycle;
@@ -4266,10 +4273,8 @@ prediction_free(struct gm_mem_pool *pool,
 {
     struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
 
-    for (int i = 0; i < prediction->n_tracking; ++i) {
-        gm_tracking_unref((struct gm_tracking *)
-                          prediction->tracking_history[i]);
-    }
+    gm_assert(prediction->ctx->log, prediction->n_tracking == 0,
+              "Freeing prediction that has tracking references");
 
     delete prediction;
 }
@@ -4280,7 +4285,7 @@ prediction_recycle(struct gm_prediction *self)
     struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
     struct gm_mem_pool *pool = prediction->pool;
 
-    gm_assert(prediction->ctx->log, prediction->base.ref == 0,
+    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
               "Unbalanced prediction unref");
 
     for (int i = 0; i < prediction->n_tracking; ++i) {
@@ -4300,7 +4305,7 @@ prediction_add_breadcrumb(struct gm_prediction *self, const char *tag)
     struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
     struct trail_crumb crumb;
 
-    gm_assert(prediction->ctx->log, prediction->base.ref >= 0,
+    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) >= 0,
               "Use of frame after free");
 
     snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
@@ -4320,7 +4325,7 @@ prediction_alloc(struct gm_mem_pool *pool, void *user_data)
     struct gm_context *ctx = (struct gm_context *)user_data;
     struct gm_prediction_impl *prediction = new gm_prediction_impl();
 
-    prediction->base.ref = 1;
+    atomic_store(&prediction->base.ref, 0);
     prediction->base.api = &prediction->vtable;
 
     prediction->vtable.free = prediction_recycle;
@@ -4329,6 +4334,7 @@ prediction_alloc(struct gm_mem_pool *pool, void *user_data)
     prediction->pool = pool;
 
     prediction->ctx = ctx;
+    prediction->n_tracking = 0;
 
     return (void *)prediction;
 }
@@ -4369,8 +4375,7 @@ print_tracking_info_cb(struct gm_mem_pool *pool,
 
     gm_assert(ctx->log, tracking != NULL, "Spurious NULL tracking resource");
     gm_error(ctx->log, "Unreleased tracking object %p, ref count = %d, paper trail len = %d",
-             tracking,
-             tracking->base.ref,
+             tracking, atomic_load(&tracking->base.ref),
              (int)tracking->trail.size());
 
     if (tracking->trail.size())
@@ -5858,7 +5863,7 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
 
         gm_debug(ctx->log, "get_latest_tracking = %p (ref = %d)\n",
                  ctx->latest_tracking,
-                 ctx->latest_tracking->base.ref);
+                 atomic_load(&ctx->latest_tracking->base.ref));
     }
     pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
