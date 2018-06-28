@@ -104,6 +104,8 @@ if use_system_libs
         pcl_deps += pcl_sp.get_variable('common_dep')
         pcl_deps += pcl_sp.get_variable('segmentation_dep')
     endif
+
+    epoxy_dep = dependency('epoxy', fallback: [ 'libepoxy', 'libepoxy_dep' ])
 else
     glm_sp = subproject('glm')
     glm_dep = glm_sp.get_variable('glm_dep')
@@ -115,6 +117,9 @@ else
     pcl_deps = []
     pcl_deps += pcl_sp.get_variable('common_dep')
     pcl_deps += pcl_sp.get_variable('segmentation_dep')
+
+    epoxy_sp = subproject('libepoxy')
+    epoxy_dep = epoxy_sp.get_variable('libepoxy_dep')
 endif
 
 uw_dep = dependency('libunwind', required: false)
@@ -167,12 +172,26 @@ client_api_deps = [
     dlib_dep,
     pcl_deps,
     freenect_dep,
+    epoxy_dep,
 ]
 
-#if platform_ios == false
-    epoxy_dep = dependency('epoxy', fallback: [ 'libepoxy', 'libepoxy_dep' ])
-    client_api_deps += epoxy_dep
-#endif
+# When building the Unity plugin for iOS we have to explicitly make
+# sure to link a monolithic static library instead of declaring
+# dependencies that would normally only be resolved when linking
+# an executable
+if platform_ios
+    ios_client_api_libs = []
+
+    # In this case we can assume we didn't find pacakges via pkg-config
+    # and so the subproject variables should be valid...
+    ios_client_api_libs += png_sp.get_variable('libpng')
+    ios_client_api_libs += dlib_sp.get_variable('lib')
+    ios_client_api_libs += freenect_sp.get_variable('fakenect_lib')
+    ios_client_api_libs += pcl_sp.get_variable('common_lib')
+    ios_client_api_libs += pcl_sp.get_variable('segmentation_lib')
+#ios_client_api_libs += epoxy_sp.get_variable('libepoxy_static')
+
+endif
 
 if uw_dep.found()
     client_api_deps += uw_dep
@@ -183,31 +202,33 @@ unity_enabled = false
 if get_option('unity_project') != ''
     unity_enabled = true
 
-    if compiler.get_define('__ANDROID__') != '' and get_option('unity_editor') == ''
-        unity_enabled = false
-        warning('')
-        warning('')
-        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-        warning('☠                                                                                     ☠')
-        warning('☠ -Dunity_editor=<prefix> must be used for build to find .jar class package for Unity ☠')
-        warning('☠                                                                                     ☠')
-        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-        warning('')
-        warning('')
+    if compiler.get_define('__ANDROID__') != ''
+        if get_option('unity_editor') == ''
+            unity_enabled = false
+            warning('')
+            warning('')
+            warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+            warning('☠                                                                                     ☠')
+            warning('☠ -Dunity_editor=<prefix> must be used for build to find .jar class package for Unity ☠')
+            warning('☠                                                                                     ☠')
+            warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+            warning('')
+            warning('')
+        endif
+        if host_machine.cpu_family() == 'arm64'
+            unity_enabled = false
+            warning('')
+            warning('')
+            warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+            warning('☠                                                                              ☠')
+            warning('☠ Unity doesn\'t support arm64 currently, so not building Glimpse Unity Plugin  ☠')
+            warning('☠                                                                              ☠')
+            warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
+            warning('')
+            warning('')
+        endif
     endif
 
-    if host_machine.cpu_family() == 'arm64'
-        unity_enabled = false
-        warning('')
-        warning('')
-        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-        warning('☠                                                                              ☠')
-        warning('☠ Unity doesn\'t support arm64 currently, so not building Glimpse Unity Plugin  ☠')
-        warning('☠                                                                              ☠')
-        warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
-        warning('')
-        warning('')
-    endif
 endif
 
 tango_enabled = false
@@ -248,12 +269,33 @@ if unity_enabled
         plugin_deps = client_api_deps
         plugin_defines = client_api_defines
     endif
-    plugin_lib = shared_library('glimpse-unity-plugin',
-                                [ 'src/glimpse_unity.cc' ] + client_api_src,
-                                include_directories: inc,
-                                dependencies: plugin_deps,
-                                c_args: plugin_defines,
-                                cpp_args: plugin_defines)
+
+    unity_plugin_src = [ 'src/glimpse_unity.cc' ] + client_api_src
+    if platform_ios == true
+        unity_plugin_src += [ 'src/ios_utils.m' ]
+    endif
+
+    # We want a single monolithic library if linking statically...
+    if get_option('default_library') == 'static'
+        dep_objects = []
+        foreach d: ios_client_api_libs
+            dep_objects += d.extract_all_objects()
+        endforeach
+        plugin_lib = library('glimpse-unity-plugin',
+                                     unity_plugin_src,
+                                     include_directories: inc,
+                                     objects: dep_objects,
+                                     dependencies: plugin_deps,
+                                     c_args: plugin_defines,
+                                     cpp_args: plugin_defines)
+    else
+        plugin_lib = library('glimpse-unity-plugin',
+                             unity_plugin_src,
+                             include_directories: inc,
+                             dependencies: plugin_deps,
+                             c_args: plugin_defines,
+                             cpp_args: plugin_defines)
+    endif
 endif
 
 need_glimpse_native_jar = false
@@ -293,7 +335,7 @@ if platform_ios == true
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
     viewer_deps = client_api_deps + [ glfm_dep ]
-    viewer_defines = client_api_defines + [ '-DUSE_GLFM', '-DUSE_AVF' ]
+    viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
 
     imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
 
@@ -521,6 +563,8 @@ if unity_enabled
             install_deps += [ unity_java_jar ]
         endif
         install_deps += [ unity_java_jar ]
+    elif platform_ios
+        plugin_lib_dir = join_paths('Assets', 'Plugins', 'iOS')
     else
         plugin_lib_dir = join_paths('Assets', 'Plugins', host_machine.cpu_family())
     endif
