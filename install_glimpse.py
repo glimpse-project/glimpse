@@ -39,7 +39,7 @@ parser.add_argument('plugin_libdir',
 args = parser.parse_args()
 
 introspect_cmd = os.environ['MESONINTROSPECT'].split()
-targets_json = subprocess.check_output(introspect_cmd + [ '--targets' ])
+targets_json = subprocess.check_output(introspect_cmd + [ '--targets', '.' ])
 
 targets = json.loads(targets_json)
 libs_blacklist = {
@@ -90,10 +90,8 @@ def install_jar_target(jar_target_name, dst):
                        os.path.join(dst, basename))
 
 
-def install_unity_plugin(unity_project):
-    unity_plugin_libs_dir = os.path.join(unity_project, args.plugin_libdir)
-    os.makedirs(unity_plugin_libs_dir, exist_ok=True)
-    install_shared_lib_targets(unity_plugin_libs_dir, libs_blacklist)
+def install_unity_plugin_so(dst, unity_project):
+    install_shared_lib_targets(dst, libs_blacklist)
 
     if args.android_ndk_arch:
         unity_plugin_jar_dir = os.path.join(unity_project, args.plugin_jardir)
@@ -103,21 +101,44 @@ def install_unity_plugin(unity_project):
         libcxx_shared_path = os.path.join(args.android_ndk,
                 'sources/cxx-stl/llvm-libc++/libs',
                 args.android_ndk_arch, 'libc++_shared.so')
-        do_install(libcxx_shared_path, unity_plugin_libs_dir)
+        do_install(libcxx_shared_path, dst)
 
         if args.tango_libs:
             tango_libs = [ 'libtango_support_api.so' ]
             for lib in tango_libs:
                 do_install(os.path.join(args.tango_libs, 'lib', args.android_ndk_arch, lib),
-                           unity_plugin_libs_dir)
+                           dst)
 
     # To avoid needing to set LD_LIBRARY_PATH for the plugin to load its
     # dependencies we update the RPATH to look in the same directory as
     # the plugin itself...
-    os.chdir(unity_plugin_libs_dir)
+    os.chdir(dst)
     chrpath_cmd = [ 'chrpath', '-r', '$ORIGIN', 'libglimpse-unity-plugin.so' ]
     print(" ".join(chrpath_cmd))
     subprocess.check_call(chrpath_cmd)
 
 
-install_unity_plugin(args.unity_project)
+def install_unity_plugin_a(dst, target_name):
+    for target in targets:
+        if target['name'] == target_name:
+            basename = os.path.basename(target['filename'])
+            parts = basename.split('.')
+
+            do_install(os.path.join(build_dir, target['filename']),
+                       os.path.join(dst, parts[0] + '.a'), lib_strip_args)
+            return
+
+
+shared_plugin = True
+for target in targets:
+    if target['name'] == "glimpse-unity-plugin" and target['type'] == 'static library':
+        shared_plugin = False
+        break
+
+unity_plugin_libs_dir = os.path.join(args.unity_project, args.plugin_libdir)
+os.makedirs(unity_plugin_libs_dir, exist_ok=True)
+if shared_plugin:
+    install_unity_plugin_so(unity_plugin_libs_dir, args.unity_project)
+else:
+    install_unity_plugin_a(unity_plugin_libs_dir, "glimpse-unity-plugin")
+    install_unity_plugin_a(unity_plugin_libs_dir, "epoxy")
