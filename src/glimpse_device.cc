@@ -642,7 +642,8 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 }
 
 static bool
-kinect_open(struct gm_device *dev, struct gm_device_config *config, char **err)
+kinect_open(struct gm_device *dev, const struct gm_device_config *config,
+            char **err)
 {
     if (freenect_init(&dev->kinect.fctx, NULL) < 0) {
         gm_throw(dev->log, err, "Failed to init libfreenect\n");
@@ -1014,7 +1015,7 @@ recording_step_forward(struct gm_ui_property *prop)
 
 static bool
 recording_open(struct gm_device *dev,
-               struct gm_device_config *config, char **err)
+               const struct gm_device_config *config, char **err)
 {
     const char *recording_name = "glimpse_recording.json";
     size_t json_path_size = strlen(config->recording.path) +
@@ -1615,7 +1616,8 @@ notify_device_ready(struct gm_device *dev)
 
 #ifdef USE_TANGO
 static bool
-tango_open(struct gm_device *dev, struct gm_device_config *config, char **err)
+tango_open(struct gm_device *dev, const struct gm_device_config *config,
+           char **err)
 {
     gm_debug(dev->log, "Tango Device Open");
 
@@ -2397,7 +2399,8 @@ on_avf_depth_cb(struct ios_av_session *session,
 }
 
 static bool
-avf_open(struct gm_device *dev, struct gm_device_config *config, char **err)
+avf_open(struct gm_device *dev, const struct gm_device_config *config,
+         char **err)
 {
     gm_debug(dev->log, "AVFrameworks Device Open");
 
@@ -2462,7 +2465,7 @@ avf_stop(struct gm_device *dev)
 
 struct gm_device *
 gm_device_open(struct gm_logger *log,
-               struct gm_device_config *config,
+               const struct gm_device_config *config,
                char **err)
 {
     struct gm_device *dev = new gm_device();

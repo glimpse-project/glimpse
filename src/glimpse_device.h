@@ -80,7 +80,7 @@ extern "C" {
 
 struct gm_device *
 gm_device_open(struct gm_logger *log,
-               struct gm_device_config *config,
+               const struct gm_device_config *config,
                char **err);
 
 enum gm_device_type
