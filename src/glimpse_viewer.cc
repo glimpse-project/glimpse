@@ -1372,7 +1372,7 @@ draw_ui(Data *data)
         // Draw playback controls if UI controls isn't the main view
         draw_playback_controls(data, ImVec4(0, 0, win_size.x, win_size.y));
     }
-    if (win_size.x >= 1024 && win_size.y >= 600) {
+    if (win_size.x >= 1024 && win_size.y >= 600 && !data->realtime_ar_mode) {
         // Draw control panel on the left if we have a large window
         draw_controls(data, origin.x, origin.y,
                       TOOLBAR_WIDTH + origin.x, win_size.y - origin.y, false);
@@ -2697,9 +2697,6 @@ init_winsys_glfw(Data *data)
         exit(1);
     }
 
-    data->win_width = 1280;
-    data->win_height = 720;
-
 #if TARGET_OS_OSX == 1
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
@@ -2711,16 +2708,16 @@ init_winsys_glfw(Data *data)
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
 #endif
 
-    data->window = glfwCreateWindow(data->win_width,
-                                    data->win_height,
-                                    "Glimpse Viewer", NULL, NULL);
+    data->window = glfwCreateWindow(1280, 720, "Glimpse Viewer", NULL, NULL);
     if (!data->window) {
         fprintf(stderr, "Failed to create window\n");
         exit(1);
     }
 
+
     glfwSetWindowUserPointer(data->window, data);
 
+    glfwGetFramebufferSize(data->window, &data->win_width, &data->win_height);
     glfwSetFramebufferSizeCallback(data->window, on_window_fb_size_change_cb);
 
     glfwMakeContextCurrent(data->window);
