@@ -207,6 +207,13 @@ This will be created by Android Studio, but can be created manually with the fol
 keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
 ```
 
+# Building for OSX
+
+Assuming you use `brew` to install third-party tools then the Glimpse build will
+first require:
+
+`brew install pkg-config libpng glfw3`
+
 # Building for iOS
 
 This is mostly the same as building for Android, except XCode needs to be
