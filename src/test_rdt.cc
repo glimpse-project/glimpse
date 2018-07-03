@@ -347,94 +347,6 @@ check_consistent_tree_labels(JSON_Value *expected_labels,
 }
 
 /*
- * Use this inference implementation when decision tree was loaded with:
- *   "sample_uv_offsets_nearest": true,
- *   "sample_uv_z_in_mm": true
- *
- * Note: don't call for background pixels
- */
-static void
-infer_pixel_label_probs_fixed(struct gm_logger *log,
-                              RDTree **trees,
-                              int n_trees,
-                              half *depth_image,
-                              int width,
-                              int height,
-                              int x,
-                              int y,
-                              float *pr_table_out)
-{
-    int n_rdt_labels = trees[0]->header.n_labels;
-    int off = y * width + x;
-
-    float depth = depth_image[off];
-
-    int16_t depth_mm = depth * 1000.0f + 0.5f;
-    int16_t half_depth_mm = depth_mm / 2;
-
-    memset(pr_table_out, 0, sizeof(float) * n_rdt_labels);
-
-    for (int i = 0; i < n_trees; i++) {
-        RDTree *tree = trees[i];
-
-        int id = 0;
-        Node node = tree->nodes[0];
-        while (node.label_pr_idx == 0)
-        {
-#define div_int_round_nearest(N, D, HALF_D) \
-    ((N < 0) ? ((N - HALF_D)/D) : ((N + HALF_D)/D))
-
-            int32_t uvs[4] = {
-                (int32_t)roundf(node.uv[0] * 1000.0f),
-                (int32_t)roundf(node.uv[1] * 1000.0f),
-                (int32_t)roundf(node.uv[2] * 1000.0f),
-                (int32_t)roundf(node.uv[3] * 1000.0f)
-            };
-            int32_t u_x = x + div_int_round_nearest(uvs[0], depth_mm, half_depth_mm);
-            int32_t u_y = y + div_int_round_nearest(uvs[1], depth_mm, half_depth_mm);
-            int32_t v_x = x + div_int_round_nearest(uvs[2], depth_mm, half_depth_mm);
-            int32_t v_y = y + div_int_round_nearest(uvs[3], depth_mm, half_depth_mm);
-
-            int16_t u_z;
-            if (u_x >= 0 && u_x < width && u_y >= 0 && u_y < height)
-                u_z = depth_image[(u_y * width + u_x)] * 1000.0f + 0.5f; // round nearest
-            else
-                u_z = INT16_MAX;
-            int16_t v_z;
-            if (v_x >= 0 && v_x < width && v_y >= 0 && v_y < height)
-                v_z = depth_image[(v_y * width + v_x)] * 1000.0f + 0.5f; // round nearest
-            else
-                v_z = INT16_MAX;
-
-            int16_t gradient = u_z - v_z;
-            int16_t t_mm = roundf(node.t * 1000.0f);
-
-            /* NB: The nodes are arranged in breadth-first, left then
-             * right child order with the root node at index zero.
-             *
-             * In this case if you have an index for any particular node
-             * ('id' here) then 2 * id + 1 is the index for the left
-             * child and 2 * id + 2 is the index for the right child...
-             */
-            id = (gradient < t_mm) ? 2 * id + 1 : 2 * id + 2;
-
-            node = tree->nodes[id];
-        }
-
-        /* NB: node->label_pr_idx is a base-one index since index zero
-         * is reserved to indicate that the node is not a leaf node
-         */
-        float *pr_table =
-            &tree->label_pr_tables[(node.label_pr_idx - 1) * n_rdt_labels];
-        for (int n = 0; n < n_rdt_labels; n++)
-            pr_table_out[n] += pr_table[n];
-    }
-
-    for (int i = 0; i < n_rdt_labels; i++)
-        pr_table_out[i] /= (float)n_trees;
-}
-
-/*
  * Use this inference implementation with legacy decision trees that
  * were trained using floor() rounding when normalizing uv offsets
  * and measured gradients in floating point.
@@ -442,19 +354,21 @@ infer_pixel_label_probs_fixed(struct gm_logger *log,
  * Note: don't call for background pixels
  */
 static void
-infer_pixel_label_probs_float(struct gm_logger *log,
-                              RDTree **trees,
-                              int n_trees,
-                              half *depth_image,
-                              int width,
-                              int height,
-                              int x,
-                              int y,
-                              float *pr_table_out)
+infer_pixel_label_probs(struct gm_logger *log,
+                        RDTree **trees,
+                        int n_trees,
+                        half *depth_image,
+                        int width,
+                        int height,
+                        int x,
+                        int y,
+                        float *pr_table_out)
 {
     int n_rdt_labels = trees[0]->header.n_labels;
     int off = y * width + x;
     float depth = depth_image[off];
+
+    float bg_depth = trees[0]->header.bg_depth;
 
     memset(pr_table_out, 0, sizeof(float) * n_rdt_labels);
 
@@ -466,16 +380,16 @@ infer_pixel_label_probs_float(struct gm_logger *log,
         while (node.label_pr_idx == 0)
         {
             int32_t u[2] = { (int32_t)(x + node.uv[0] / depth),
-                (int32_t)(y + node.uv[1] / depth) };
+                             (int32_t)(y + node.uv[1] / depth) };
             int32_t v[2] = { (int32_t)(x + node.uv[2] / depth),
-                (int32_t)(y + node.uv[3] / depth) };
+                             (int32_t)(y + node.uv[3] / depth) };
 
             float upixel = (u[0] >= 0 && u[0] < (int32_t)width &&
                             u[1] >= 0 && u[1] < (int32_t)height) ?
-                (float)depth_image[((u[1] * width) + u[0])] : 1000.0f;
+                (float)depth_image[((u[1] * width) + u[0])] : bg_depth;
             float vpixel = (v[0] >= 0 && v[0] < (int32_t)width &&
                             v[1] >= 0 && v[1] < (int32_t)height) ?
-                (float)depth_image[((v[1] * width) + v[0])] : 1000.0f;
+                (float)depth_image[((v[1] * width) + v[0])] : bg_depth;
 
             float gradient = upixel - vpixel;
 
@@ -665,6 +579,9 @@ main(int argc, char **argv)
     end = get_time();
     uint64_t load_forest_duration = end - start;
 
+    printf("Decision trees expect background depth of %fm\n",
+           forest[0]->header.bg_depth);
+
     JSON_Value *expected_labels =
         json_object_get_value(json_object(forest_js[0]), "labels");
     for (int i = 1; i < n_trees; i++) {
@@ -726,23 +643,6 @@ main(int argc, char **argv)
                   "Unsupported tree sampling requirements");
     }
 
-    bool infer_fixed_point = false;
-    if (sample_uv_offsets_nearest && sample_uv_z_in_mm)
-        infer_fixed_point = true;
-
-    if (infer_fixed_point) {
-        gm_assert(log, (forest[0]->header.bg_depth > (((float)INT16_MAX / 1000.0f) - 0.001) &&
-                        forest[0]->header.bg_depth < (((float)INT16_MAX / 1000.0f) + 0.001)),
-                  "Expected tree requiring fixed-point sampling to have bg_depth = 32.7m, not %f",
-                  forest[0]->header.bg_depth);
-        printf("Testing with fixed-point UV sampling\n");
-    } else {
-        gm_assert(log, forest[0]->header.bg_depth == 1000.0f,
-                  "Expected legacy tree requiring floating-point sampling to have bg_depth = 1000m, not %f",
-                  forest[0]->header.bg_depth);
-        printf("Testing with floating-point UV sampling\n");
-    }
-
     start = get_time();
 
     struct data_loader loader;
@@ -758,7 +658,7 @@ main(int argc, char **argv)
                                                height *
                                                n_images);
 
-    gm_info(log, "Loading test data...");
+    printf("Loading test data...\n");
     if (!gm_data_index_foreach(data_index,
                                load_test_data_cb,
                                &loader,
@@ -857,25 +757,14 @@ main(int argc, char **argv)
                 uint8_t out_label = test_to_out_map[test_label];
 
                 float rdt_pr_table[n_rdt_labels];
-                if (infer_fixed_point) {
-                    infer_pixel_label_probs_fixed(log,
-                                                  forest,
-                                                  n_trees,
-                                                  depth_image,
-                                                  width,
-                                                  height,
-                                                  x, y,
-                                                  rdt_pr_table);
-                } else {
-                    infer_pixel_label_probs_float(log,
-                                                  forest,
-                                                  n_trees,
-                                                  depth_image,
-                                                  width,
-                                                  height,
-                                                  x, y,
-                                                  rdt_pr_table);
-                }
+                infer_pixel_label_probs(log,
+                                        forest,
+                                        n_trees,
+                                        depth_image,
+                                        width,
+                                        height,
+                                        x, y,
+                                        rdt_pr_table);
 
                 //float *rdt_pr_table = &rdt_probs[off * n_rdt_labels];
                 float test_pr_table[n_test_labels];

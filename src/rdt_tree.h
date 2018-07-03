@@ -35,7 +35,7 @@
 
 #define vector(type,size) type __attribute__ ((vector_size(sizeof(type)*(size))))
 
-#define RDT_VERSION 6
+#define RDT_VERSION 5
 
 typedef struct {
     /* XXX: Note that (at least with gcc) then uv will have a 16 byte
@@ -56,8 +56,6 @@ typedef struct {
     // 1 byte padding
     float   fov;
     float   bg_depth; // v5+
-    uint8_t sample_uv_offsets_nearest; // v6+
-    uint8_t sample_uv_z_in_mm; // v6+
 } RDTHeader;
 
 typedef struct {
