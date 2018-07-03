@@ -355,33 +355,6 @@ if platform_ios == true
               ])
 endif
 
-if platform_ios == true
-    glfm_sp = subproject('glfm')
-    glfm_dep = glfm_sp.get_variable('glfm_dep')
-
-    imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
-
-    executable('Test',
-               [
-                    'src/ios_utils.m',
-                    'src/ios_hello.cc',
-                    'src/glimpse_log.c',
-                    'src/glimpse_assets.c',
-                    'src/xalloc.c',
-               ] + imgui_src,
-               include_directories: inc,
-               dependencies: [ glfm_dep, epoxy_dep ],
-               c_args: ['-D__IOS__'],
-               cpp_args: ['-D__IOS__'],
-               link_args: [
-                    '-framework', 'Foundation',
-                    '-framework', 'OpenGLES',
-                    '-framework', 'CoreGraphics',
-                    '-framework', 'QuartzCore',
-                    '-framework', 'UIKit'
-              ])
-endif
-
 if not meson.is_cross_build()
 
 executable('image-pre-processor',
