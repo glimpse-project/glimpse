@@ -47,8 +47,17 @@
 #include <glm/gtx/quaternion.hpp>
 #endif
 
-#ifdef USE_AVF
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#else
+#define TARGET_OS_MAC 0
+#define TARGET_OS_IOS 0
+#define TARGET_OS_OSX 0
+#endif
+
+#if TARGET_OS_IOS == 1
 #include "ios_utils.h"
+#define USE_AVF 1
 #endif
 
 #include "parson.h"
@@ -187,8 +196,6 @@ struct gm_device
 #ifdef USE_TANGO
         struct {
             TangoConfig tango_config;
-            enum gm_rotation display_rotation;
-            enum gm_rotation display_to_camera_rotation;
         } tango;
 #endif
 
@@ -199,8 +206,9 @@ struct gm_device
 #endif
     };
 
-    int camera_rotation; // enum gm_rotation
-    int camera_rotation_prop_id;
+    enum gm_rotation display_rotation;
+    enum gm_rotation display_to_camera_rotation;
+    int user_camera_rotation; // user override property (enum gm_rotation)
 
     int max_depth_pixels;
     int max_video_pixels;
@@ -557,6 +565,21 @@ maybe_notify_frame_locked(struct gm_device *dev)
     {
         notify_frame_locked(dev);
     }
+}
+
+static enum gm_rotation
+device_get_camera_rotation(struct gm_device *dev)
+{
+#if TARGET_OS_IOS == 1
+    int camera_rotation = (int)ios_get_device_rotation();
+#else
+    int camera_rotation = (int)dev->display_rotation;
+#endif
+
+    camera_rotation += (int)dev->display_to_camera_rotation;
+    camera_rotation += (int)dev->user_camera_rotation;
+
+    return (enum gm_rotation)(camera_rotation % 4);
 }
 
 #ifdef USE_FREENECT
@@ -1232,7 +1255,6 @@ swap_recorded_frame(struct gm_device *dev,
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
         dev->recording.last_camera_rotation = camera_rotation;
-        dev->camera_rotation = camera_rotation;
 
         dev->frame_time = timestamp;
         dev->frame_pose = pose;
@@ -1650,7 +1672,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         TANGO_COORDINATE_FRAME_START_OF_SERVICE,
         TANGO_SUPPORT_ENGINE_OPENGL,
         TANGO_SUPPORT_ENGINE_OPENGL,
-        (TangoSupportRotation)dev->tango.display_rotation,
+        (TangoSupportRotation)dev->display_rotation,
         &pose);
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
@@ -1957,22 +1979,6 @@ tango_infer_camera_orientation(struct gm_device *dev)
 }
 
 static void
-tango_set_display_rotation(struct gm_device *dev, enum gm_rotation display_rotation)
-{
-    dev->tango.display_rotation = display_rotation;
-
-    int camera_rotation = (int)display_rotation;
-    camera_rotation += dev->tango.display_to_camera_rotation;
-    camera_rotation %= 4;
-
-    gm_debug(dev->log, "Tango camera is rotated %d degrees, relative to current display orientation (rotated %d degrees)",
-             90 * camera_rotation,
-             ((int)display_rotation)*90);
-
-    dev->camera_rotation = camera_rotation;
-}
-
-static void
 print_basis_and_rotated_intrinsics(struct gm_device *dev,
                                    const char *name,
                                    TangoCameraId camera_id,
@@ -2204,8 +2210,8 @@ tango_connect(struct gm_device *dev, char **err)
          DEGREES(ir_hfov), DEGREES(ir_vfov));
 #endif
 
-    dev->tango.display_to_camera_rotation = tango_infer_camera_orientation(dev);
-    tango_set_display_rotation(dev, dev->tango.display_rotation);
+    dev->display_to_camera_rotation = tango_infer_camera_orientation(dev);
+    dev->display_rotation = tango_display_rotation;
 
     return true;
 }
@@ -2407,6 +2413,8 @@ avf_open(struct gm_device *dev, struct gm_device_config *config, char **err)
     dev->depth_format = GM_FORMAT_Z_F32_M;
     dev->max_depth_pixels = 640 * 480;
 
+    dev->display_to_camera_rotation = GM_ROTATION_270;
+
     dev->avf.session = ios_util_av_session_new(dev->log,
                                                on_avf_configure_finished_cb,
                                                on_avf_depth_cb,
@@ -2533,9 +2541,9 @@ gm_device_open(struct gm_logger *log,
     prop = gm_ui_property();
     prop.object = dev;
     prop.name = "rotation";
-    prop.desc = "Rotation of camera images relative to current display orientation";
+    prop.desc = "Override rotation of camera images relative to current display orientation";
     prop.type = GM_PROPERTY_ENUM;
-    prop.enum_state.ptr = &dev->camera_rotation;
+    prop.enum_state.ptr = &dev->user_camera_rotation;
     //prop.read_only = true;
 
     for (int i = 0; i < 4; i++) {
@@ -2547,7 +2555,6 @@ gm_device_open(struct gm_logger *log,
     }
     prop.enum_state.n_enumerants = dev->rotation_enumerants.size();
     prop.enum_state.enumerants = dev->rotation_enumerants.data();
-    dev->camera_rotation_prop_id = dev->properties.size();
     dev->properties.push_back(prop);
 
     dev->properties_state.n_properties = dev->properties.size();
@@ -2754,6 +2761,10 @@ gm_device_start(struct gm_device *dev)
         return;
     }
 
+#if TARGET_OS_IOS == 1
+    ios_begin_generating_device_orientation_notifications();
+#endif
+
     switch (dev->type) {
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
@@ -2774,6 +2785,12 @@ gm_device_start(struct gm_device *dev)
 #endif
         break;
     }
+
+#if TARGET_OS_IOS == 1
+    if (!dev->running) {
+        ios_end_generating_device_orientation_notifications();
+    }
+#endif
 }
 
 void
@@ -2809,6 +2826,10 @@ gm_device_stop(struct gm_device *dev)
 #endif
         break;
     }
+
+#if TARGET_OS_IOS == 1
+    ios_end_generating_device_orientation_notifications();
+#endif
 }
 
 int
@@ -2821,19 +2842,6 @@ int
 gm_device_get_max_video_pixels(struct gm_device *dev)
 {
     return dev->max_video_pixels;
-}
-
-enum gm_rotation
-gm_device_get_camera_rotation(struct gm_device *dev)
-{
-    switch (dev->type) {
-#ifdef USE_TANGO
-    case GM_DEVICE_TANGO:
-        return dev->tango.display_to_camera_rotation;
-#endif
-    default:
-        return GM_ROTATION_0;
-    }
 }
 
 struct gm_extrinsics *
@@ -2931,7 +2939,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     frame->base.timestamp = dev->frame_time;
     frame->base.pose = dev->frame_pose;
-    frame->base.camera_rotation = (enum gm_rotation)dev->camera_rotation;
+    frame->base.camera_rotation = device_get_camera_rotation(dev);
 
     dev->frame_ready_buffers_mask = 0;
 
@@ -3001,7 +3009,7 @@ handle_jni_OnDisplayRotate(jint rotation)
     tango_display_rotation = (enum gm_rotation)rotation;
 
     if (tango_singleton_dev) {
-        tango_set_display_rotation(tango_singleton_dev, (enum gm_rotation)rotation);
+        dev->display_rotation = tango_display_rotation;
     } else {
         __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onDisplayRotate JNI");
     }

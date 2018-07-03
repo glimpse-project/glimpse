@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include <glimpse_log.h>
+#include <glimpse_properties.h>
 #include <glimpse_context.h>
 
 #include "xalloc.h"
@@ -46,6 +47,36 @@ void
 ios_log(const char *msg)
 {
     NSLog(@"%@", @(msg));
+}
+
+enum gm_rotation
+ios_get_device_rotation(void)
+{
+    switch ([[UIDevice currentDevice] orientation]) {
+    case UIDeviceOrientationUnknown:
+    case UIDeviceOrientationPortrait:
+        return GM_ROTATION_0;
+    case UIDeviceOrientationLandscapeRight:
+        return GM_ROTATION_90;
+    case UIDeviceOrientationPortraitUpsideDown:
+        return GM_ROTATION_180;
+    case UIDeviceOrientationLandscapeLeft:
+        return GM_ROTATION_270;
+    default:
+        return GM_ROTATION_0;
+    }
+}
+
+void
+ios_begin_generating_device_orientation_notifications(void)
+{
+    [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+}
+
+void
+ios_end_generating_device_orientation_notifications(void)
+{
+    [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
 }
 
 @interface IOSAVSession : NSObject <AVCaptureDepthDataOutputDelegate,
@@ -436,5 +467,6 @@ ios_util_session_destroy(struct ios_av_session *session)
 {
     CFBridgingRelease(session);
 }
-
 @end
+
+

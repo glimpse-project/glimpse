@@ -107,13 +107,6 @@ gm_device_get_max_video_pixels(struct gm_device *dev);
 struct gm_extrinsics *
 gm_device_get_depth_to_video_extrinsics(struct gm_device *dev);
 
-/* Based on the device's natural orientation the camera module might be
- * physically rotated such that the 'top' of a camera frame might be sideways
- * compared to the top of the display.
- */
-enum gm_rotation
-gm_device_get_camera_rotation(struct gm_device *dev);
-
 /* It's expected that events aren't synchronously handled within the above
  * event callback considering that it's undefined what thread the callback
  * is invoked on and it's undefined what locks might be held during the

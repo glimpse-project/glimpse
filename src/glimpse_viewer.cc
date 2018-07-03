@@ -57,8 +57,16 @@
 #    include <jni.h>
 #endif
 
-#ifdef __IOS__
-#include "ios_utils.h"
+#if defined(__APPLE__)
+#    include <TargetConditionals.h>
+#else
+#    define TARGET_OS_MAC 0
+#    define TARGET_OS_IOS 0
+#    define TARGET_OS_OSX 0
+#endif
+
+#if TARGET_OS_IOS == 1
+#    include "ios_utils.h"
 #endif
 
 #ifdef USE_GLFM
@@ -72,7 +80,7 @@
 #    include <getopt.h>
 #endif
 
-#if defined(__APPLE__) && !defined(__IOS__)
+#if TARGET_OS_OSX == 1
 #define GLSL_SHADER_VERSION "#version 400\n"
 #else
 #define GLSL_SHADER_VERSION "#version 300 es\n"
@@ -2380,7 +2388,7 @@ init_basic_opengl(Data *data)
     glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
 #endif
 
-#if defined(__APPLE__) && !defined(__IOS__)
+#if TARGET_OS_OSX == 1
     // In the forwards-compatible context, there's no default vertex array.
     GLuint vertex_array;
     glGenVertexArrays(1, &vertex_array);
@@ -2615,7 +2623,7 @@ logger_cb(struct gm_logger *logger,
             }
 
             fprintf(data->log_fp, "%s\n", msg);
-#ifdef __IOS__
+#if TARGET_OS_IOS == 1
             ios_log(msg);
 #endif
 
@@ -2692,7 +2700,7 @@ init_winsys_glfw(Data *data)
     data->win_width = 1280;
     data->win_height = 720;
 
-#if defined(__APPLE__) && !defined(__IOS__)
+#if TARGET_OS_OSX == 1
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
@@ -2878,7 +2886,7 @@ viewer_init(Data *data)
     struct gm_device_config config = {};
 #ifdef USE_TANGO
     config.type = GM_DEVICE_TANGO;
-#elif defined(USE_AVF)
+#elif TARGET_OS_IOS == 1
     config.type = GM_DEVICE_AVF;
 #else
     config.type = device_type_opt;
@@ -2989,7 +2997,7 @@ main(int argc, char **argv)
 {
     Data *data = new Data();
     const char *recordings_path = NULL;
-#ifdef __IOS__
+#if TARGET_OS_IOS == 1
     char *assets_root = ios_util_get_documents_path();
     char log_filename_tmp[PATH_MAX];
     snprintf(log_filename_tmp, sizeof(log_filename_tmp),

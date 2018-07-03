@@ -1,6 +1,8 @@
 
 #pragma once
 
+#include "glimpse_properties.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,6 +15,15 @@ ios_util_get_resources_path(void);
 
 void
 ios_log(const char *msg);
+
+enum gm_rotation
+ios_get_device_rotation(void);
+
+void
+ios_begin_generating_device_orientation_notifications(void);
+
+void
+ios_end_generating_device_orientation_notifications(void);
 
 struct ios_av_session;
 

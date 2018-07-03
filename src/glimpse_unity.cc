@@ -50,16 +50,34 @@
 #include "glimpse_gl.h"
 #include "glimpse_assets.h"
 
+#ifdef __APPLE__
+#include <TargetConditionals.h>
+#else
+#define TARGET_OS_MAC 0
+#define TARGET_OS_IOS 0
+#define TARGET_OS_OSX 0
+#endif
+
+#if TARGET_OS_IOS == 1
+#include "ios_utils.h"
+#endif
+
 #undef GM_LOG_CONTEXT
 
 #ifdef __ANDROID__
 #define GM_LOG_CONTEXT "Glimpse Plugin"
-#define GLSL_SHADER_VERSION "#version 300 es\n"
 #include <android/log.h>
 #include <jni.h>
 #else
 #define GM_LOG_CONTEXT "unity_plugin"
+#endif
+
+#if defined(__ANDROID__) || TARGET_OS_IOS == 1
+#define GLSL_SHADER_VERSION "#version 300 es\n"
+#define USE_GLES 1
+#else
 #define GLSL_SHADER_VERSION "#version 150\n"
+#define USE_CORE_GL 1
 #endif
 
 #ifdef USE_TANGO
@@ -224,6 +242,8 @@ logger_cb(struct gm_logger *logger,
             __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
             break;
         }
+#elif TARGET_OS_IOS == 1
+        ios_log(msg);
 #else
         if (unity_log_function)
             unity_log_function(level, context, msg);
@@ -579,6 +599,8 @@ gm_unity_process_events(void)
     process_events(plugin_data);
 }
 
+#ifdef USE_GLES
+
 static GLuint
 gen_ar_video_texture(struct glimpse_data *data)
 {
@@ -741,9 +763,12 @@ draw_video(struct glimpse_data *data,
 
     GLuint ar_video_tex = get_oldest_ar_video_tex(data);
     GLenum target = GL_TEXTURE_2D;
-#ifdef __ANDROID__
+
+#ifdef USE_GLES
+#ifdef USE_TANGO
     if (data->device_type == GM_DEVICE_TANGO)
         target = GL_TEXTURE_EXTERNAL_OES;
+#endif
     glBindTexture(target, ar_video_tex);
 #else
     glBindTextureUnit(0, ar_video_tex);
@@ -833,7 +858,7 @@ render_ar_video_background(struct glimpse_data *data)
                 switch (video_format) {
                 case GM_FORMAT_LUMINANCE_U8:
                     gm_debug(data->log, "uploading U8 %dx%d", video_width, video_height);
-#ifdef __ANDROID__
+#ifdef USE_GLES
                     /* Annoyingly it doesn't seem to work on GLES3 + Android to
                      * upload a GL_RED texture + set a swizzle like we need to do
                      * for core GL (even though it looks like component swizzling
@@ -874,10 +899,10 @@ render_ar_video_background(struct glimpse_data *data)
                     break;
                 case GM_FORMAT_BGRX_U8:
                 case GM_FORMAT_BGRA_U8:
-                    gm_debug(data->log, "uploading RGBA8 %dx%d", video_width, video_height);
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA,
+                    gm_debug(data->log, "uploading BGRAA8 %dx%d", video_width, video_height);
+                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                                  video_width, video_height,
-                                 0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
+                                 0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, video_front);
                     break;
 
                 case GM_FORMAT_UNKNOWN:
@@ -998,10 +1023,12 @@ on_khr_debug_message_cb(GLenum source,
         break;
     }
 }
+#endif // USE_GLES
 
 static void UNITY_INTERFACE_API
 on_render_event_cb(int event)
 {
+#ifdef USE_GLES
     /* Holding this lock while rendering implies it's not possible to start
      * terminating the plugin state during a render event callback...
      */
@@ -1017,6 +1044,7 @@ on_render_event_cb(int event)
 
     gm_debug(plugin_data->log, "Render Event %d DEBUG\n", event);
 
+#if TARGET_OS_MAC == 0// (OSX AND IOS)
     /* We just assume Unity isn't registering a GL debug callback and
      * cross our fingers...
      */
@@ -1039,6 +1067,7 @@ on_render_event_cb(int event)
         glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, plugin_data);
         plugin_data->registered_gl_debug_callback = true;
     }
+#endif
 
     switch (event) {
     case 0:
@@ -1050,6 +1079,7 @@ on_render_event_cb(int event)
     }
 
     pthread_mutex_unlock(&life_cycle_lock);
+#endif // USE_GLES
 }
 
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1191,6 +1221,10 @@ gm_unity_terminate(void)
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_init(char *config_json)
 {
+#if TARGET_OS_IOS == 1
+    ios_log("gm_unity_init\n");
+#endif
+
     if (plugin_data) {
         gm_info(plugin_data->log, "gm_unity_init lite init, returning existing plugin_data");
         return (intptr_t )plugin_data;
@@ -1207,29 +1241,58 @@ gm_unity_init(char *config_json)
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
-#ifdef __ANDROID__
+#if TARGET_OS_IOS == 1
+    char *assets_root = ios_util_get_documents_path();
+    char log_filename_tmp[PATH_MAX];
+    snprintf(log_filename_tmp, sizeof(log_filename_tmp),
+             "%s/glimpse.log", assets_root);
+    data->log_fp = fopen(log_filename_tmp, "w");
+#elif defined(__ANDROID__)
     // During development on Android we are manually uploading recording and
     // training models to /sdcard on test devices so that build+upload cycles
     // of packages built via Unity can be as quick as possible by reducing
     // the size of .apk we have to repeatedly upload.
     //
-#define ANDROID_ASSETS_ROOT "/sdcard/Glimpse"
-    setenv("GLIMPSE_ASSETS_ROOT", ANDROID_ASSETS_ROOT, true);
-    setenv("GLIMPSE_RECORDING_PATH", ANDROID_ASSETS_ROOT "/ViewerRecording",
-           true);
-    setenv("FAKENECT_PATH", ANDROID_ASSETS_ROOT "/FakeRecording", true);
-    data->log_fp = fopen(ANDROID_ASSETS_ROOT "/glimpse.log", "w");
+    char *assets_root = strdup("/sdcard/Glimpse");
+    char log_filename_tmp[PATH_MAX];
+    snprintf(log_filename_tmp, sizeof(log_filename_tmp),
+             "%s/glimpse.log", assets_root);
+    data->log_fp = fopen(log_filename_tmp, "w");
+    gm_assert(data->log, android_jvm_singleton != NULL,
+              "Expected to have discovered JavaVM before gm_unity_init()");
 #else
+    const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
+    char *assets_root = strdup(assets_root_env ? assets_root_env : ".");
     data->log_fp = fopen("glimpse.log", "w");
 #endif
 
+    const char *assets_path_override =
+        json_object_get_string(data->config, "assetsPath");
+    if (assets_path_override && strlen(assets_path_override) != 0) {
+        gm_set_assets_root(data->log, assets_path_override);
+    } else {
+        gm_set_assets_root(data->log, assets_root);
+    }
+
+    char recordings_path_tmp[PATH_MAX];
+    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
+             "%s/ViewerRecording", assets_root);
+    const char *recordings_path = recordings_path_tmp;
+
+    const char *recordings_path_override =
+        json_object_get_string(data->config, "recordingsPath");
+    if (recordings_path_override && strlen(recordings_path_override) != 0)
+        recordings_path = recordings_path_override;
+
+    if (!getenv("FAKENECT_PATH")) {
+        char fakenect_path[PATH_MAX];
+        snprintf(fakenect_path, sizeof(fakenect_path),
+                 "%s/FakeRecording", assets_root);
+        setenv("FAKENECT_PATH", fakenect_path, true);
+    }
+
     gm_debug(data->log, "Init");
     gm_debug(data->log, "Config:\n%s", config_json);
-
-#ifdef __ANDROID__
-    gm_assert(data->log, android_jvm_singleton != NULL,
-              "Expected to have discovered JavaVM before gm_unity_init()");
-#endif
 
     switch (unity_renderer_type) {
     case kUnityGfxRendererOpenGLES20:
@@ -1247,20 +1310,6 @@ gm_unity_init(char *config_json)
         break;
     }
 
-    const char *assets_path = json_object_get_string(data->config, "assetsPath");
-    if (assets_path && strlen(assets_path) != 0) {
-        gm_set_assets_root(data->log, assets_path);
-    } else {
-        gm_set_assets_root(data->log, getenv("GLIMPSE_ASSETS_ROOT"));
-    }
-
-    const char *recordings_path = json_object_get_string(data->config, "recordingsPath");
-    if (recordings_path == NULL || strlen(recordings_path) == 0)
-        recordings_path = getenv("GLIMPSE_RECORDING_PATH");
-    if (!recordings_path)
-        recordings_path = gm_get_assets_root();
-    if (!recordings_path)
-        recordings_path = "glimpse_viewer_recording";
     gm_debug(data->log, "Recording Path set to: %s", recordings_path);
 
     bool have_recording = false;
@@ -1319,6 +1368,8 @@ gm_unity_init(char *config_json)
     case 0: // Auto
 #ifdef USE_TANGO
         config.type = GM_DEVICE_TANGO;
+#elif TARGET_OS_IOS == 1
+        config.type = GM_DEVICE_AVF;
 #else
         if (have_recording) {
             config.type = GM_DEVICE_RECORDING;
@@ -1550,6 +1601,9 @@ gm_unity_stop(void)
 extern "C" void	UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 UnityPluginLoad(IUnityInterfaces *interfaces)
 {
+#if TARGET_OS_IOS == 1
+    ios_log("UnityPluginLoad");
+#endif
     unity_interfaces = interfaces;
     unity_graphics = interfaces->Get<IUnityGraphics>();
     unity_graphics->RegisterDeviceEventCallback(on_graphics_device_event_cb);
@@ -1560,6 +1614,9 @@ UnityPluginLoad(IUnityInterfaces *interfaces)
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 UnityPluginUnload(void)
 {
+#if TARGET_OS_IOS == 1
+    ios_log("UnityPluginUnload");
+#endif
     unity_graphics->UnregisterDeviceEventCallback(on_graphics_device_event_cb);
 }
 
