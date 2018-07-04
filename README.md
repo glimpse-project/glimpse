@@ -223,5 +223,8 @@ installed rather than the Android SDK/NDK, and the iOS cross file
 When configuring, append the option `--default-library=static`, as dynamic
 libraries are not supported on iOS.
 
-Building will produce binaries that can be imported into an XCode project and
-run on device.
+Copy a built `glimpse_viewer` binary to
+`xcode/GlimpseViewer/GlimpseViewer/Glimpse Viewer` and open
+`xcode/GlimpseViewer` in XCode to package and run on an iPhone X.
+
+For the Unity plugin, use `ninja install_plugin` as with other platform builds.
