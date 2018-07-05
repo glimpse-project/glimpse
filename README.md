@@ -111,29 +111,17 @@ running:
 pip3 install --user --upgrade meson
 ```
 
-For cross-compiling to Android you currently need to use [this branch of
-meson](https://github.com/glimpse-project/meson) which knows not to use shared
-library versioning on Android:
+For cross-compiling to Android or iOS you currently need to use [this branch of
+meson](https://github.com/glimpse-project/meson) which e.g. knows not to use
+shared library versioning on Android:
 
 ```
 pip3 install --user --upgrade git+https://github.com/glimpse-project/meson
 ```
-The version should have `glimpse` in the suffix like:
+The version should have `glimpse-devX` in the suffix like:
 ```
 $ meson --version
-0.45.0.glimpse-dev1
-```
-
-For cross-compiling to iOS, you may need to use [this branch of
-meson](https://github.com/glimpse-project/meson/tree/wip/rib/ios):
-
-```
-pip3 install --user --upgrade git+https://github.com/glimpse-project/meson@wip/rib/ios
-```
-The version should have `glimpse` in the suffix like:
-```
-$ meson --version
-0.46.0.glimpse-dev1
+0.46.0.glimpse-dev2
 ```
 
 ## Debug
