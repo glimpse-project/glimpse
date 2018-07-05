@@ -2749,11 +2749,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
     bool motion_detection = ctx->motion_detection;
 
     if (ctx->depth_seg.size() != depth_class_size ||
-        (!ctx->depth_pose.valid && tracking->frame->pose.valid))
+        (ctx->depth_pose.type != tracking->frame->pose.type))
     {
         gm_debug(ctx->log, "XXX: Resetting pose");
         reset_pose = true;
-    } else if (tracking->frame->pose.valid) {
+    } else if (tracking->frame->pose.type == GM_POSE_TO_START) {
         // Check if the angle or distance between the current frame and the
         // reference frame exceeds a certain threshold, and in that case,
         // reset motion tracking.
@@ -2793,11 +2793,18 @@ gm_context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    glm::mat4 to_start;
-    if (tracking->frame->pose.valid) {
+    glm::mat4 to_ground(1.0);
+    glm::mat4 to_start(1.0);
+    switch (tracking->frame->pose.type) {
+    case GM_POSE_INVALID:
+        break;
+    case GM_POSE_TO_START:
         to_start = pose_to_matrix(tracking->frame->pose);
-    } else {
-        to_start = glm::mat4(1.0);
+        to_ground = to_start;
+        break;
+    case GM_POSE_TO_GROUND:
+        to_ground = pose_to_matrix(tracking->frame->pose);
+        break;
     }
 
     if (reset_pose) {
@@ -2807,7 +2814,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         ctx->depth_pose = tracking->frame->pose;
         ctx->start_to_depth_pose = glm::inverse(to_start);
 
-        if (!tracking->frame->pose.valid)
+        if (tracking->frame->pose.type != GM_POSE_TO_START)
             gm_debug(ctx->log, "XXX: No tracking pose");
     }
 
@@ -2816,7 +2823,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
     }
-    if (ctx->depth_pose.valid) {
+    if (ctx->depth_pose.type != GM_POSE_INVALID) {
         tracking->ground_cloud->width = tracking->depth_class->width;
         tracking->ground_cloud->height = tracking->depth_class->height;
         tracking->ground_cloud->points.resize(depth_class_size);
@@ -2832,7 +2839,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
             }
 
             glm::vec4 pt(point.x, point.y, point.z, 1.f);
-            pt = (to_start * pt);
+            pt = (to_ground * pt);
 
             tracking->ground_cloud->points[off].x = pt.x;
             tracking->ground_cloud->points[off].y = pt.y;
@@ -2844,7 +2851,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
         {
             add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
                                                           tracking->depth_class,
-                                                          to_start);
+                                                          to_ground);
             colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
         }
     } else {
@@ -3104,7 +3111,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
-            float aligned_y = ctx->depth_pose.valid ?
+            float aligned_y = (ctx->depth_pose.type != GM_POSE_INVALID) ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_class->points[idx].y;
             if (aligned_y > lowest_point) {
@@ -3167,7 +3174,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 continue;
             }
 
-            float aligned_y = ctx->depth_pose.valid ?
+            float aligned_y = (ctx->depth_pose.type != GM_POSE_INVALID) ?
                 tracking->ground_cloud->points[idx].y :
                 tracking->depth_class->points[idx].y;
             if (aligned_y > lowest_point - ctx->floor_threshold) {

@@ -114,8 +114,15 @@ struct gm_event
     };
 };
 
+enum gm_pose_type
+{
+    GM_POSE_INVALID,    // Pose is invalid
+    GM_POSE_TO_START,   // Pose transforms to a ground-aligned 'starting' pose.
+    GM_POSE_TO_GROUND   // Pose orients to align with the ground.
+};
+
 struct gm_pose {
-    bool valid;
+    enum gm_pose_type type;
     float orientation[4];
     float translation[3];
 };
