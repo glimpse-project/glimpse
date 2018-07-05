@@ -18,20 +18,38 @@ runtime motion capture is under the permissive
 
 # Status
 
-![](https://raw.githubusercontent.com/wiki/glimpse-project/glimpse/images/screenshot-2017-12-07.png)
-
 The early direction of this project has been to implement some of the
 capabilities demoed in our
 ['Glimpse — a sneak peek into your creative self'](https://medium.com/impossible/glimpse-a-sneak-peak-into-your-creative-self-29bd2e656ff6)
 teaser video.
 
-The current focus is on skeletal tracking and on reproducing the capabilities
-of Microsoft's Kinect based skeletal tracking, but using mobile phones instead
-of the Kinect sensor.
+It's early days but we already have an end-to-end MoCap system working,
+including:
 
-See this paper on [Real-Time Human Pose Recognition in Parts from Single Depth
-Images](https://www.microsoft.com/en-us/research/wp-content/uploads/2016/02/BodyPartRecognition.pdf)
-before delving into the code for more details on our initial approach.
+* A rendering pipeline implemented using Blender to create large sets of
+  training data along with a post-processing tool that helps model the
+  artefacts of real-world cameras.
+* A custom framework for training a forest of random decision trees that's
+  tailored and optimized for our needs such that we can efficiently train trees
+  with more than 1M images on very modest PC hardware.
+* A runtime engine useable on Linux, OSX, Android and iOS supporting:
+  *  Multiple camera device backends (Kinect, Tango, AVFoundation)
+  *  Real-time segmentation of people from the background (including support
+     for a moving camera)
+  *  Real-time inference of per-pixel, body part labels (currently 34)
+  *  Real-time inference of a 3D skeleton based on body part labels
+* Development tooling to capture recordings for offline testing and
+  visualizing the tracking engine state including 3D point cloud views of camera
+  data and wireframes of inferred skeletons.
+* A native Unity plugin and editor extensions to facilitate easily creating
+  content based on the skeltal data from Glimpse.
+
+Here's a recording from March 2018 of Glimpse running on an Android, Zenfone AR:
+[![](http://i.vimeocdn.com/video/686380376_640.jpg)](https://vimeo.com/258250667)
+
+and a screenshot of the Glimpse Viewer debug tool:
+![](https://raw.githubusercontent.com/wiki/glimpse-project/glimpse/images/screenshot-2018-07-05.png)
+
 
 # Fetching
 
