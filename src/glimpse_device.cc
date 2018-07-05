@@ -1335,7 +1335,12 @@ recording_io_thread_cb(void *userdata)
         for (int i = 0; i < 3; ++i) {
             pose.translation[i] = (float)json_array_get_number(translation, i);
         }
-        pose.valid = true;
+
+        if (json_object_has_value(json_pose, "type")) {
+            pose.type = (enum gm_pose_type)
+                round(json_object_get_number(json_pose, "type"));
+        }
+        pose.type = GM_POSE_TO_START;
     }
 
     /* Even though the recording loops and the playback can be paused
@@ -1452,9 +1457,9 @@ recording_io_thread_cb(void *userdata)
                 pose.translation[i] = (float)
                     json_array_get_number(translation, i);
             }
-            pose.valid = true;
+            pose.type = GM_POSE_TO_START;
         } else {
-            pose.valid = false;
+            pose.type = GM_POSE_INVALID;
         }
 
         /* XXX: Skip frames if we're > 33ms behind */
@@ -1693,7 +1698,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         };
     } else {
         gm_debug(dev->log, "tango_point_cloud_cb invalid pose");
-        dev->frame_pose.valid = false;
+        dev->frame_pose.type = GM_POSE_INVALID;
     }
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
     gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);

@@ -311,7 +311,7 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
     json_object_set_number(json_object(frame_meta), "timestamp",
                            (double)frame->timestamp);
 
-    if (frame->pose.valid) {
+    if (frame->pose.type != GM_POSE_INVALID) {
         // Write out frame pose data
         JSON_Value *pose = json_value_init_object();
         JSON_Value *orientation = json_value_init_array();
@@ -326,6 +326,8 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
         }
         json_object_set_value(json_object(pose), "orientation", orientation);
         json_object_set_value(json_object(pose), "translation", translation);
+        json_object_set_number(json_object(pose), "type",
+                               (double)frame->pose.type);
 
         json_object_set_value(json_object(frame_meta), "pose", pose);
     }
