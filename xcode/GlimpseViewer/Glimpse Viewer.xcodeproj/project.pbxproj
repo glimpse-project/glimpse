@@ -8,8 +8,6 @@
 
 /* Begin PBXBuildFile section */
 		C4140B742065CDA100682471 /* Glimpse Viewer in Resources */ = {isa = PBXBuildFile; fileRef = C4140B732065CA9300682471 /* Glimpse Viewer */; };
-		C4140B772074ECA500682471 /* simple.frag in Resources */ = {isa = PBXBuildFile; fileRef = C4140B752074ECA500682471 /* simple.frag */; };
-		C4140B782074ECA500682471 /* simple.vert in Resources */ = {isa = PBXBuildFile; fileRef = C4140B762074ECA500682471 /* simple.vert */; };
 		C4140B7C207510C900682471 /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = C4140B7B207510C900682471 /* LaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
 
@@ -17,8 +15,6 @@
 		C4140B592065B40600682471 /* Glimpse Viewer.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Glimpse Viewer.app"; sourceTree = BUILT_PRODUCTS_DIR; };
 		C4140B6A2065B40600682471 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		C4140B732065CA9300682471 /* Glimpse Viewer */ = {isa = PBXFileReference; lastKnownFileType = "compiled.mach-o.executable"; name = "Glimpse Viewer"; path = "GlimpseViewer/Glimpse Viewer"; sourceTree = "<group>"; };
-		C4140B752074ECA500682471 /* simple.frag */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.glsl; name = simple.frag; path = GlimpseViewer/simple.frag; sourceTree = "<group>"; };
-		C4140B762074ECA500682471 /* simple.vert */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.glsl; name = simple.vert; path = GlimpseViewer/simple.vert; sourceTree = "<group>"; };
 		C4140B7B207510C900682471 /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = GlimpseViewer/LaunchScreen.storyboard; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -37,8 +33,6 @@
 			isa = PBXGroup;
 			children = (
 				C4140B7B207510C900682471 /* LaunchScreen.storyboard */,
-				C4140B752074ECA500682471 /* simple.frag */,
-				C4140B762074ECA500682471 /* simple.vert */,
 				C4140B5B2065B40600682471 /* GlimpseViewer */,
 				C4140B732065CA9300682471 /* Glimpse Viewer */,
 				C4140B5A2065B40600682471 /* Products */,
@@ -119,8 +113,6 @@
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				C4140B772074ECA500682471 /* simple.frag in Resources */,
-				C4140B782074ECA500682471 /* simple.vert in Resources */,
 				C4140B7C207510C900682471 /* LaunchScreen.storyboard in Resources */,
 				C4140B742065CDA100682471 /* Glimpse Viewer in Resources */,
 			);
