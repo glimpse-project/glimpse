@@ -47,11 +47,33 @@ endif
 
 if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
     add_languages('objc')
-    platform_ios = true
+
     client_api_defines += [ '-D__IOS__' ]
     if get_option('default_library') != 'static'
         error('IOS doesn\'t support shared libraries, so you must configure with --default-library=static')
     endif
+
+    # WARNING WARNING:
+    # We have lost/wasted a lot of time investigating issues with UI rotation
+    # breaking and for some currently-unfathomable reason it seems to come
+    # down to whether the -isysroot points directly to the iPhoneOS.sdk directory
+    # or instead points to the same directory via a symlink such as
+    # iPhoneOS11.4.sdk -> iPhoneOS.sdk. Things only work as expected if we point
+    # at the symlink but that makes it awkward to put in our cross-file if it
+    # needs to change regularly and may need to differ depending on how up to
+    # date your installation of Xcode is. Using xcrun to query the absolute path
+    # of the latest version works around this problem...
+
+    xcrun = find_program('xcrun')
+    ios_sdk_path = run_command(xcrun, '--sdk', 'iphoneos', '--show-sdk-path').stdout().strip()
+    add_global_arguments([ '-miphoneos-version-min=11.4',
+                           '-isysroot', ios_sdk_path ],
+                         language: ['c', 'cpp', 'objc'])
+    add_global_link_arguments([ '-miphoneos-version-min=11.4',
+                                '-isysroot', ios_sdk_path ],
+                              language: ['c', 'cpp', 'objc'])
+
+    platform_ios = true
 else
     platform_ios = false
 endif
