@@ -324,7 +324,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     AVCaptureDepthDataOutput *doutput = [[AVCaptureDepthDataOutput alloc] init];
-    //doutput.filteringEnabled = false;
+    doutput.filteringEnabled = false;
     if ([self->session canAddOutput:doutput]) {
 
         [self->session addOutput:doutput];
