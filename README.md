@@ -218,7 +218,7 @@ keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -s
 Assuming you use `brew` to install third-party tools then the Glimpse build will
 first require:
 
-`brew install pkg-config libpng glfw3`
+`brew install pkg-config libpng glfw3 libfreenect`
 
 # Building for iOS
 
