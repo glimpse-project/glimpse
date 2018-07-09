@@ -961,7 +961,7 @@ draw_playback_controls(Data *data)
 
             char idx_path[1024];
             snprintf(idx_path, 1024, "%s/%s",
-                     gm_get_assets_root(),
+                     glimpse_recordings_path,
                      data->recordings.at(data->selected_playback_recording));
             config.recording.path = dirname(idx_path);
 
