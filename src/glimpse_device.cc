@@ -56,6 +56,7 @@
 #endif
 
 #if TARGET_OS_IOS == 1
+#include <glm/gtx/quaternion.hpp>
 #include "ios_utils.h"
 #define USE_AVF 1
 #endif
@@ -2358,6 +2359,7 @@ on_avf_video_cb(struct ios_av_session *session,
 static void
 on_avf_depth_cb(struct ios_av_session *session,
                 struct gm_intrinsics *intrinsics,
+                float *acceleration,
                 int stride,
                 float *disparity,
                 void *user_data)
@@ -2385,6 +2387,21 @@ on_avf_depth_cb(struct ios_av_session *session,
     pthread_mutex_lock(&dev->swap_buffers_lock);
 
     dev->depth_intrinsics = *intrinsics;
+
+    memset(&dev->frame_pose, 0, sizeof(struct gm_pose));
+    dev->frame_pose.type = GM_POSE_TO_GROUND;
+
+    glm::vec3 ground(0.f, -1.f, 0.f);
+    glm::vec3 current = glm::normalize(
+        glm::vec3(acceleration[0], acceleration[1], acceleration[2]));
+    glm::vec3 axis = glm::normalize(glm::cross(ground, current));
+    float angle = acosf(glm::dot(ground, current));
+    glm::quat orientation = glm::angleAxis(angle, axis);
+
+    dev->frame_pose.orientation[0] = orientation.x;
+    dev->frame_pose.orientation[1] = orientation.y;
+    dev->frame_pose.orientation[2] = orientation.z;
+    dev->frame_pose.orientation[3] = orientation.w;
 
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = depth_buf_back;

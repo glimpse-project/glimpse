@@ -2,6 +2,7 @@
 
 @import UIKit;
 @import AVFoundation;
+@import CoreMotion;
 
 #include <string.h>
 
@@ -97,9 +98,12 @@ ios_end_generating_device_orientation_notifications(void)
     AVCaptureDepthDataOutput *depth_output;
     AVCaptureVideoDataOutput *video_output;
 
+    CMMotionManager *motion_manager;
+
     void (*configured_cb)(struct ios_av_session *session, void *user_data);
     void (*depth_cb)(struct ios_av_session *session,
                      struct gm_intrinsics *intrinsics,
+                     float *acceleration,
                      int stride,
                      float *disparity,
                      void *user_data);
@@ -176,8 +180,16 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     intrinsics.cx = calib.intrinsicMatrix.columns[2][0] * scale_x;
     intrinsics.cy = calib.intrinsicMatrix.columns[2][1] * scale_y;
 
+    // Calculate the rotation to align with the ground
+    CMAccelerometerData *data = self->motion_manager.accelerometerData;
+    float acceleration[3];
+    acceleration[0] = data.acceleration.x;
+    acceleration[1] = data.acceleration.y;
+    acceleration[2] = data.acceleration.z;
+
     self->depth_cb((__bridge struct ios_av_session *)self,
                    &intrinsics,
+                   acceleration,
                    stride,
                    (float *)base,
                    self->user_data);
@@ -353,6 +365,14 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     }
 
     [self->session commitConfiguration];
+
+    self->motion_manager = [[CMMotionManager alloc] init];
+
+    if ([self->motion_manager isAccelerometerAvailable]) {
+        self->motion_manager.accelerometerUpdateInterval = 0.01; // 100Hz updates
+    } else {
+        gm_debug(self->log, "Accelerometer unavailable");
+    }
 }
 
 struct ios_av_session *
@@ -360,6 +380,7 @@ ios_util_av_session_new(struct gm_logger *log,
                         void (*configured_cb)(struct ios_av_session *session, void *user_data),
                         void (*depth_cb)(struct ios_av_session *session,
                                          struct gm_intrinsics *intrinsics,
+                                         float *acceleration,
                                          int stride,
                                          float *disparity,
                                          void *user_data),
@@ -448,6 +469,8 @@ ios_util_session_start(struct ios_av_session *_session)
                        gm_debug(session->log, "startRunning");
                        [session->session startRunning];
                    });
+
+    [session->motion_manager startAccelerometerUpdates];
 }
 
 void
@@ -460,6 +483,8 @@ ios_util_session_stop(struct ios_av_session *_session)
                        gm_debug(session->log, "stopRunning");
                        [session->session stopRunning];
                    });
+
+    [session->motion_manager stopAccelerometerUpdates];
 }
 
 void
