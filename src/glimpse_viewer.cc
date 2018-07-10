@@ -3090,17 +3090,12 @@ main(int argc, char **argv)
 #endif
 {
     Data *data = new Data();
-    const char *recordings_path = NULL;
 #if TARGET_OS_IOS == 1
     char *assets_root = ios_util_get_documents_path();
     char log_filename_tmp[PATH_MAX];
     snprintf(log_filename_tmp, sizeof(log_filename_tmp),
              "%s/glimpse.log", assets_root);
     data->log_fp = fopen(log_filename_tmp, "w");
-    char recordings_path_tmp[PATH_MAX];
-    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
-             "%s/ViewerRecording", assets_root);
-    recordings_path = recordings_path_tmp;
     permissions_check_passed = true;
 #elif defined(__ANDROID__)
     char *assets_root = strdup("/sdcard/Glimpse");
@@ -3108,25 +3103,13 @@ main(int argc, char **argv)
     snprintf(log_filename_tmp, sizeof(log_filename_tmp),
              "%s/glimpse.log", assets_root);
     data->log_fp = fopen(log_filename_tmp, "w");
-    char recordings_path_tmp[PATH_MAX];
-    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
-             "%s/ViewerRecording", assets_root);
-    recordings_path = recordings_path_tmp;
 #else
     parse_args(data, argc, argv);
 
     const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
     char *assets_root = strdup(assets_root_env ? assets_root_env : "");
     data->log_fp = stderr;
-    recordings_path = getenv("GLIMPSE_RECORDING_PATH");
 #endif
-
-    if (!getenv("FAKENECT_PATH")) {
-        char fakenect_path[PATH_MAX];
-        snprintf(fakenect_path, sizeof(fakenect_path),
-                 "%s/FakeRecording", assets_root);
-        setenv("FAKENECT_PATH", fakenect_path, true);
-    }
 
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
@@ -3135,11 +3118,19 @@ main(int argc, char **argv)
 
     gm_set_assets_root(data->log, assets_root);
 
-    if (!recordings_path)
-        recordings_path = gm_get_assets_root();
-    glimpse_recordings_path = strdup(recordings_path);
-    index_recordings(data);
+    if (!getenv("FAKENECT_PATH")) {
+        char fakenect_path[PATH_MAX];
+        snprintf(fakenect_path, sizeof(fakenect_path),
+                 "%s/FakeRecording", assets_root);
+        setenv("FAKENECT_PATH", fakenect_path, true);
+    }
 
+    char recordings_path_tmp[PATH_MAX];
+    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
+             "%s/ViewerRecording", assets_root);
+    glimpse_recordings_path = strdup(recordings_path_tmp);
+
+    index_recordings(data);
     index_targets(data);
 
     data->events_front = new std::vector<struct event>();

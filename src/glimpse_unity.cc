@@ -1269,10 +1269,10 @@ gm_unity_init(char *config_json)
     const char *assets_path_override =
         json_object_get_string(data->config, "assetsPath");
     if (assets_path_override && strlen(assets_path_override) != 0) {
-        gm_set_assets_root(data->log, assets_path_override);
-    } else {
-        gm_set_assets_root(data->log, assets_root);
+        free(assets_root);
+        assets_root = strdup(assets_path_override);
     }
+    gm_set_assets_root(data->log, assets_root);
 
     char recordings_path_tmp[PATH_MAX];
     snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
