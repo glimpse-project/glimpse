@@ -163,6 +163,9 @@ struct gm_device
             int frame;
             bool loop;
             int max_frame;
+            bool frame_skip;
+
+            int next_frame;
 
             /* Used to break out of pause for skipping frames back and forth */
             bool ignore_loop;
@@ -224,6 +227,7 @@ struct gm_device
     /* What data is required for the next frame?
      * E.g. _DEPTH | _VIDEO
      */
+    pthread_cond_t request_buffers_cond;
     pthread_mutex_t request_buffers_mask_lock;
     uint64_t frame_request_buffers_mask;
     uint64_t frame_ready_buffers_mask;
@@ -537,33 +541,26 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     return buf;
 }
 
-/* XXX: the request_buffers_mask_lock must be held while calling this.
- *
- * Note: this implies that it's not currently safe for the reciever of the
- * event to synchronously request a new frame or call any device api that
- * might affect this buffers_mask (needing the same lock)
- */
-static void
-notify_frame_locked(struct gm_device *dev)
-{
-    struct gm_device_event *event =
-        device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
-
-    gm_debug(dev->log, "notify_frame_locked (buffers_mask = 0x%" PRIx64,
-             dev->frame_request_buffers_mask);
-
-    event->frame_ready.buffers_mask = dev->frame_ready_buffers_mask;
-    dev->frame_request_buffers_mask &= ~dev->frame_ready_buffers_mask;
-
-    dev->event_callback(event, dev->callback_data);
-}
-
 static void
 maybe_notify_frame_locked(struct gm_device *dev)
 {
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     if (dev->frame_request_buffers_mask & dev->frame_ready_buffers_mask)
     {
-        notify_frame_locked(dev);
+        struct gm_device_event *event =
+            device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
+
+        gm_debug(dev->log, "notify_frame_locked (buffers_mask = 0x%" PRIx64,
+                 dev->frame_request_buffers_mask);
+
+        event->frame_ready.buffers_mask = dev->frame_ready_buffers_mask;
+        dev->frame_request_buffers_mask &= ~dev->frame_ready_buffers_mask;
+
+        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+
+        dev->event_callback(event, dev->callback_data);
+    } else {
+        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
     }
 }
 
@@ -608,9 +605,7 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void
@@ -636,9 +631,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -1081,6 +1074,7 @@ recording_open(struct gm_device *dev,
         round(json_object_get_number(meta, "video_format"));
 
     dev->recording.frame = 0;
+    dev->recording.frame_skip = !config->recording.disable_frame_skip;
 
     JSON_Array *frames =
         json_object_get_array(json_object(dev->recording.json), "frames");
@@ -1256,6 +1250,7 @@ swap_recorded_frame(struct gm_device *dev,
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
         dev->display_rotation = camera_rotation;
+        dev->recording.frame = dev->recording.next_frame;
         dev->frame_time = timestamp;
         dev->frame_pose = pose;
 
@@ -1303,9 +1298,7 @@ swap_recorded_frame(struct gm_device *dev,
 
         pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-        pthread_mutex_lock(&dev->request_buffers_mask_lock);
         maybe_notify_frame_locked(dev);
-        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void *
@@ -1370,7 +1363,8 @@ recording_io_thread_cb(void *userdata)
             std::min(dev->recording.max_frame + 1, n_recorded_frames) :
             n_recorded_frames;
 
-        if (dev->recording.frame >= (n_frames - 1)) {
+        dev->recording.next_frame = dev->recording.frame;
+        if (dev->recording.next_frame >= (n_frames - 1)) {
 
             /* Enter paused state if looping has been disabled... */
             while (dev->running && dev->recording.loop == false &&
@@ -1420,16 +1414,16 @@ recording_io_thread_cb(void *userdata)
             n_frames = dev->recording.max_frame >= 0 ?
                 std::min(dev->recording.max_frame + 1, n_recorded_frames) :
                 n_recorded_frames;
-            if (dev->recording.frame >= n_frames - 1) {
+            if (dev->recording.next_frame >= n_frames - 1) {
                 /* Note: the subtraction makes it look like the loop closure
                  * from end to re-start takes some time.
                  */
                 loop_start = get_time();
                 loop_prev_frame_timestamp = frame0_timestamp - 16000000;
-                dev->recording.frame = 0;
+                dev->recording.next_frame = 0;
             }
         } else
-            dev->recording.frame++;
+            dev->recording.next_frame++;
 
         /* This is only used to break out of the while loop above when loop
          * is set to false. It's safe to reset it after that loop.
@@ -1439,7 +1433,8 @@ recording_io_thread_cb(void *userdata)
         uint64_t time = get_time();
         uint64_t real_progress = time - loop_start;
 
-        JSON_Object *frame = json_array_get_object(frames, dev->recording.frame);
+        JSON_Object *frame = json_array_get_object(frames,
+                                                   dev->recording.next_frame);
         uint64_t frame_timestamp = (uint64_t)
             json_object_get_number(frame, "timestamp");
         uint64_t recording_progress = frame_timestamp - frame0_timestamp;
@@ -1469,12 +1464,13 @@ recording_io_thread_cb(void *userdata)
         }
 
         /* XXX: Skip frames if we're > 33ms behind */
-        if (recording_progress < (real_progress - 33333333)) {
+        if (recording_progress < (real_progress - 33333333) &&
+            dev->recording.frame_skip) {
             gm_warn(dev->log, "slow playback, skipping recorded frames");
 
             int last_depth = -1;
             int i;
-            for (i = dev->recording.frame + 1;
+            for (i = dev->recording.next_frame + 1;
                  i < n_frames && (recording_progress < real_progress);
                  i++)
             {
@@ -1506,19 +1502,19 @@ recording_io_thread_cb(void *userdata)
                  * consider a special case that can continue; before hitting
                  * the swap_buffers below.
                  */
-                dev->recording.frame = n_frames - 1;
+                dev->recording.next_frame = n_frames - 1;
             } else if (last_depth > 0 && last_depth != i) {
                 /* jump back if we need to prioritize an earlier depth frame */
-                dev->recording.frame = last_depth;
+                dev->recording.next_frame = last_depth;
                 frame = json_array_get_object(frames, last_depth);
                 frame_timestamp = (uint64_t)
                     json_object_get_number(frame, "timestamp");
                 recording_progress = frame_timestamp - frame0_timestamp;
             } else
-                dev->recording.frame = i;
+                dev->recording.next_frame = i;
         }
 
-        gm_debug(dev->log, "replaying frame %d", dev->recording.frame);
+        gm_debug(dev->log, "replaying frame %d", dev->recording.next_frame);
 
         uint64_t frame_delta;
         if (frame_timestamp < loop_prev_frame_timestamp) {
@@ -1556,6 +1552,14 @@ recording_io_thread_cb(void *userdata)
                                                            dev->video_buf_pool);
         enum gm_rotation rotation = (enum gm_rotation)
             json_object_get_number(frame, "camera_rotation");
+
+        // Wait until a frame has been requested before swapping buffers
+        pthread_mutex_lock(&dev->request_buffers_mask_lock);
+        while (dev->running && !dev->frame_request_buffers_mask) {
+            pthread_cond_wait(&dev->request_buffers_cond,
+                              &dev->request_buffers_mask_lock);
+        }
+        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 
         swap_recorded_frame(dev,
                             monotonic_clock,
@@ -1599,6 +1603,12 @@ recording_stop(struct gm_device *dev)
     /* After setting running = false we expect the thread to exit within a
      * finite amount of time */
     dev->running = false;
+
+    // Signal that the request_buffers_mask has changed in case we're
+    // waiting on it
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    pthread_cond_signal(&dev->request_buffers_cond);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 
     int ret = pthread_join(dev->recording.io_thread, &retval);
     if (ret < 0) {
@@ -1714,9 +1724,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 // This function does nothing. TangoService_connectOnTextureAvailable
@@ -1796,9 +1804,7 @@ tango_frame_available_cb(void *context,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -2354,9 +2360,7 @@ on_avf_video_cb(struct ios_av_session *session,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void
@@ -2418,9 +2422,7 @@ on_avf_depth_cb(struct ios_av_session *session,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -2496,6 +2498,7 @@ gm_device_open(struct gm_logger *log,
     struct gm_device *dev = new gm_device();
     bool status = false;
 
+    pthread_cond_init(&dev->request_buffers_cond, NULL);
     pthread_mutex_init(&dev->request_buffers_mask_lock, NULL);
     pthread_mutex_init(&dev->swap_buffers_lock, NULL);
 
@@ -2769,6 +2772,10 @@ gm_device_close(struct gm_device *dev)
                      dev);
     mem_pool_free(dev->video_buf_pool);
 
+    pthread_cond_destroy(&dev->request_buffers_cond);
+    pthread_mutex_destroy(&dev->request_buffers_mask_lock);
+    pthread_mutex_destroy(&dev->swap_buffers_lock);
+
     delete dev;
 }
 
@@ -2887,8 +2894,10 @@ gm_device_request_frame(struct gm_device *dev, uint64_t buffers_mask)
 
     pthread_mutex_lock(&dev->request_buffers_mask_lock);
     dev->frame_request_buffers_mask |= buffers_mask;
-    maybe_notify_frame_locked(dev);
+    pthread_cond_signal(&dev->request_buffers_cond);
     pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+
+    maybe_notify_frame_locked(dev);
 }
 
 #if 0

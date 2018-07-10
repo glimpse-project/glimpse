@@ -25,7 +25,7 @@
 #include <string.h>
 #include <vector>
 
-#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/quaternion.hpp>
 
 #include "glimpse_target.h"
 #include "glimpse_assets.h"

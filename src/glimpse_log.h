@@ -47,6 +47,7 @@ enum gm_log_level {
     GM_LOG_WARN,
     GM_LOG_ERROR,
     GM_LOG_ASSERT,
+    GM_LOG_MESSAGE,
 };
 
 /* A given backtrace include instruction pointers for each frame and can
@@ -155,6 +156,10 @@ gm_log(struct gm_logger *logger,
 
 #define gm_error(logger, args...) do { \
     gm_log(logger, GM_LOG_ERROR, GM_LOG_CONTEXT, args); \
+} while(0)
+
+#define gm_message(logger, args...) do { \
+    gm_log(logger, GM_LOG_MESSAGE, GM_LOG_CONTEXT, args); \
 } while(0)
 
 #define gm_assert(logger, condition, args...) do { \

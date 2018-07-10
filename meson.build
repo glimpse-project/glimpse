@@ -462,6 +462,11 @@ executable('depth2labels',
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
+executable('recording2target',
+           [ 'src/recording2target.cc' ] + client_api_src,
+           include_directories: inc,
+           dependencies: client_api_deps)
+
 executable('exr-to-pfm',
            [ 'src/exr-to-pfm.cc',
              'src/tinyexr.cc' ],
