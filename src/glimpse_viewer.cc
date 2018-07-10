@@ -3009,7 +3009,7 @@ viewer_init(Data *data)
 
     update_ar_video_queue_len(data, 6);
 
-    data->target_error = 0.1f;
+    data->target_error = 0.25f;
     data->target_progress = true;
 
     data->initialized = true;

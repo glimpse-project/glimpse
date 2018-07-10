@@ -39,7 +39,7 @@
 #include <pthread.h>
 
 #include <glm/gtc/matrix_access.hpp>
-#include <glm/gtx/quaternion.hpp>
+#include <glm/gtc/quaternion.hpp>
 #include <glm/vec4.hpp>
 #include <glm/mat4x4.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -1444,6 +1444,7 @@ build_skeleton(struct gm_context *ctx,
             }
 
             skeleton.confidence += tail->confidence;
+            skeleton.joints[joint_no].name = joint_name(joint_no);
             skeleton.joints[joint_no].x = tail->x;
             skeleton.joints[joint_no].y = tail->y;
             skeleton.joints[joint_no].z = tail->z;
@@ -1454,6 +1455,7 @@ build_skeleton(struct gm_context *ctx,
             // full skeletons, so add some large amount to the distance
             skeleton.distance += 10.f;
             skeleton.joints[joint_no].confidence = 0;
+            skeleton.joints[joint_no].name = NULL;
         }
     }
 
@@ -1501,6 +1503,7 @@ refine_skeleton(struct gm_context *ctx,
             candidate_skeleton.timestamp = skeleton.timestamp;
 
             Joint *joint = (Joint *)l->data;
+            candidate_skeleton.joints[j].name = joint_name(j);
             candidate_skeleton.joints[j].x = joint->x;
             candidate_skeleton.joints[j].y = joint->y;
             candidate_skeleton.joints[j].z = joint->z;
@@ -5817,6 +5820,14 @@ gm_tracking_get_timestamp(struct gm_tracking *_tracking)
     return tracking->frame->timestamp;
 }
 
+bool
+gm_tracking_was_successful(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->success;
+}
+
 struct gm_skeleton *
 gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints,
                 float confidence, float distance, uint64_t timestamp)
@@ -5874,6 +5885,7 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
     struct gm_joint joints[ctx->n_joints];
     memset(joints, 0, ctx->n_joints * sizeof(struct gm_joint));
     for (int j = 0; j < ctx->n_joints; ++j) {
+        joints[j].name = joint_name(j);
         char *bone_name = strdup(joint_name(j));
         char *bone_part = strchr(bone_name, (int)'.');
         if (bone_part) {
@@ -5893,7 +5905,7 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
                         joints[j].y = (float)
                             json_array_get_number(joint_array, 1);
                         joints[j].z = (float)
-                            -json_array_get_number(joint_array, 2);
+                            json_array_get_number(joint_array, 2);
                         joints[j].confidence = 1000.f;
                         found = true;
                         break;

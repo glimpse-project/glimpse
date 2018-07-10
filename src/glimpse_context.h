@@ -296,6 +296,7 @@ gm_tracking_unref(struct gm_tracking *tracking)
 struct gm_context;
 
 struct gm_joint {
+    const char *name;
     float x;
     float y;
     float z;
@@ -442,6 +443,9 @@ gm_tracking_get_skeleton(struct gm_tracking *tracking);
 
 uint64_t
 gm_tracking_get_timestamp(struct gm_tracking *tracking);
+
+bool
+gm_tracking_was_successful(struct gm_tracking *tracking);
 
 /* Creates an RGB visualisation of the label map. */
 void
