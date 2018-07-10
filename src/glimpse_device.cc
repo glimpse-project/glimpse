@@ -1027,7 +1027,7 @@ recording_open(struct gm_device *dev,
     dev->recording.path = strdup(config->recording.path);
     dev->recording.json = json_parse_file(json_path);
     if (!dev->recording.json) {
-        gm_throw(dev->log, err, "Failed to open recording metadata");
+        gm_throw(dev->log, err, "Failed to open recording metadata %s", json_path);
         return false;
     }
 
