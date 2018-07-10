@@ -167,7 +167,6 @@ struct gm_device
             bool ignore_loop;
 
             /* State in case playback is paused: */
-            enum gm_rotation last_camera_rotation;
             struct gm_buffer *last_depth_buf;
             struct gm_buffer *last_video_buf;
 
@@ -1255,8 +1254,7 @@ swap_recorded_frame(struct gm_device *dev,
 {
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
-        dev->recording.last_camera_rotation = camera_rotation;
-
+        dev->display_rotation = camera_rotation;
         dev->frame_time = timestamp;
         dev->frame_pose = pose;
 
@@ -1398,7 +1396,7 @@ recording_io_thread_cb(void *userdata)
                 swap_recorded_frame(dev,
                                     monotonic_clock,
                                     pose,
-                                    dev->recording.last_camera_rotation,
+                                    dev->display_rotation, // keep existing state
                                     depth_buffer,
                                     &dev->depth_intrinsics,
                                     video_buffer,
