@@ -1339,8 +1339,8 @@ recording_io_thread_cb(void *userdata)
         if (json_object_has_value(json_pose, "type")) {
             pose.type = (enum gm_pose_type)
                 round(json_object_get_number(json_pose, "type"));
-        }
-        pose.type = GM_POSE_TO_START;
+        } else
+            pose.type = GM_POSE_TO_START;
     }
 
     /* Even though the recording loops and the playback can be paused
@@ -1457,7 +1457,12 @@ recording_io_thread_cb(void *userdata)
                 pose.translation[i] = (float)
                     json_array_get_number(translation, i);
             }
-            pose.type = GM_POSE_TO_START;
+
+            if (json_object_has_value(json_pose, "type")) {
+                pose.type = (enum gm_pose_type)
+                    round(json_object_get_number(json_pose, "type"));
+            } else
+                pose.type = GM_POSE_TO_START;
         } else {
             pose.type = GM_POSE_INVALID;
         }
