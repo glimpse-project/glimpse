@@ -30,6 +30,7 @@
 #include <locale.h>
 #include <assert.h>
 #include <time.h>
+#include <ctype.h>
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -113,7 +114,7 @@
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 #define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
 
-#define TOOLBAR_WIDTH 300
+#define TOOLBAR_WIDTH 400
 #define MAX_VIEWS 5
 
 #define xsnprintf(dest, n, fmt, ...) do { \
@@ -143,6 +144,17 @@ typedef struct {
     float z;
     uint32_t rgba;
 } XYZRGBA;
+
+struct debug_image {
+    GLuint gl_tex;
+    int width;
+    int height;
+};
+
+#define MAX_IMAGES_PER_STAGE 5
+struct stage_textures {
+    struct debug_image images[MAX_IMAGES_PER_STAGE];
+};
 
 typedef struct {
     GLuint joints_bo;
@@ -324,6 +336,8 @@ typedef struct _Data
     int ar_video_queue_len;
     int ar_video_queue_pos;
 
+    std::vector<struct stage_textures> stage_textures;
+    int current_stage;
 } Data;
 
 #ifdef __ANDROID__
@@ -355,10 +369,6 @@ static GLuint gl_depth_rgb_tex;
 static GLuint gl_classify_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
 
-static const char *views[] = {
-    "Controls", "Video Buffer", "Depth Buffer",
-    "Depth classification", "Candidate clusters", "Labels", "Cloud" };
-
 static bool pause_profile;
 
 #ifdef USE_GLFM
@@ -379,6 +389,61 @@ static void deinit_device_opengl(Data *data);
 static void handle_device_ready(Data *data, struct gm_device *dev);
 static void on_device_event_cb(struct gm_device_event *device_event,
                                void *user_data);
+
+
+/* Copied from glimpse_rdt.cc
+ *
+ * The longest format is like "00:00:00" which needs up to 9 bytes but notably
+ * gcc complains if buf < 14 bytes, so rounding up to power of two for neatness.
+ */
+char *
+format_duration_s16(uint64_t duration_ns, char buf[16])
+{
+    if (duration_ns > 1000000000) {
+        const uint64_t hour_ns = 1000000000ULL*60*60;
+        const uint64_t min_ns = 1000000000ULL*60;
+        const uint64_t sec_ns = 1000000000ULL;
+
+        uint64_t hours = duration_ns / hour_ns;
+        duration_ns -= hours * hour_ns;
+        uint64_t minutes = duration_ns / min_ns;
+        duration_ns -= minutes * min_ns;
+        uint64_t seconds = duration_ns / sec_ns;
+        snprintf(buf, 16, "%02d:%02d:%02d", (int)hours, (int)minutes, (int)seconds);
+    } else if (duration_ns > 1000000) {
+        uint64_t ms = duration_ns / 1000000;
+        snprintf(buf, 16, "%dms", (int)ms);
+    } else if (duration_ns > 1000) {
+        uint64_t us = duration_ns / 1000;
+        snprintf(buf, 16, "%dus", (int)us);
+    } else {
+        snprintf(buf, 16, "%dns", (int)duration_ns);
+    }
+
+    return buf;
+}
+
+static void
+make_readable_name(const char *symbolic_name,
+                   char *readable_dst,
+                   int readable_dst_len)
+{
+    int n_end = readable_dst_len - 1;
+    bool seen_space = true;
+    int n = 0;
+    for (n = 0; n < n_end && symbolic_name[n]; n++) {
+        int c = symbolic_name[n];
+        if (c == '_' || c == '-' || c == ' ') {
+            seen_space = true;
+            readable_dst[n] = ' ';
+        } else if (seen_space) {
+            readable_dst[n] = toupper(c);
+            seen_space = false;
+        } else
+            readable_dst[n] = c;
+    }
+    readable_dst[n] = '\0';
+}
 
 static void
 unref_device_frames(Data *data)
@@ -523,11 +588,15 @@ draw_properties(struct gm_ui_properties *props)
             ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
         }
 
+        const char *prop_name = prop->name;
+        char readable_name[64];
+        make_readable_name(prop_name, readable_name, sizeof(readable_name));
+
         switch (prop->type) {
         case GM_PROPERTY_INT:
             {
                 int current_val = gm_prop_get_int(prop), save_val = current_val;
-                ImGui::SliderInt(prop->name, &current_val,
+                ImGui::SliderInt(readable_name, &current_val,
                                  prop->int_state.min, prop->int_state.max);
                 if (current_val != save_val)
                     gm_prop_set_int(prop, current_val);
@@ -550,7 +619,7 @@ draw_properties(struct gm_ui_properties *props)
                     labels[j] = prop->enum_state.enumerants[j].name;
                 }
 
-                ImGui::Combo(prop->name, &current_enumerant, labels.data(),
+                ImGui::Combo(readable_name, &current_enumerant, labels.data(),
                              labels.size());
 
                 if (current_enumerant != save_enumerant) {
@@ -563,7 +632,7 @@ draw_properties(struct gm_ui_properties *props)
             {
                 bool current_val = gm_prop_get_bool(prop),
                      save_val = current_val;
-                ImGui::Checkbox(prop->name, &current_val);
+                ImGui::Checkbox(readable_name, &current_val);
                 if (current_val != save_val)
                     gm_prop_set_bool(prop, current_val);
             }
@@ -573,7 +642,7 @@ draw_properties(struct gm_ui_properties *props)
                 if (i && props->properties[i-1].type == GM_PROPERTY_SWITCH) {
                     ImGui::SameLine();
                 }
-                if (ImGui::Button(prop->name)) {
+                if (ImGui::Button(readable_name)) {
                     gm_prop_set_switch(prop);
                 }
             }
@@ -581,7 +650,7 @@ draw_properties(struct gm_ui_properties *props)
         case GM_PROPERTY_FLOAT:
             {
                 float current_val = gm_prop_get_float(prop), save_val = current_val;
-                ImGui::SliderFloat(prop->name, &current_val,
+                ImGui::SliderFloat(readable_name, &current_val,
                                    prop->float_state.min, prop->float_state.max);
                 if (current_val != save_val)
                     gm_prop_set_float(prop, current_val);
@@ -589,7 +658,7 @@ draw_properties(struct gm_ui_properties *props)
             break;
         case GM_PROPERTY_FLOAT_VEC3:
             if (prop->read_only) {
-                ImGui::LabelText(prop->name, "%.3f,%.3f,%.3f",
+                ImGui::LabelText(readable_name, "%.3f,%.3f,%.3f",
                                  //prop->vec3_state.components[0],
                                  prop->vec3_state.ptr[0],
                                  //prop->vec3_state.components[1],
@@ -600,6 +669,9 @@ draw_properties(struct gm_ui_properties *props)
             break;
         // FIXME: Handle GM_PROPERTY_STRING
         }
+
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", prop->desc);
 
         if (prop->read_only) {
             ImGui::PopStyleVar();
@@ -1000,6 +1072,101 @@ draw_playback_controls(Data *data)
 }
 
 static bool
+draw_image_in_bounds(Data *data,
+                     GLuint image_tex,
+                     int image_width, int image_height, // only for aspect ratio
+                     int bounds_width, int bounds_height,
+                     enum gm_rotation rotation)
+{
+    ImVec2 uv0, uv1, uv2, uv3;
+
+    switch (rotation) {
+    case GM_ROTATION_0:
+        uv0 = ImVec2(0, 0);
+        uv1 = ImVec2(1, 0);
+        uv2 = ImVec2(1, 1);
+        uv3 = ImVec2(0, 1);
+        break;
+    case GM_ROTATION_90:
+        uv0 = ImVec2(1, 0);
+        uv1 = ImVec2(1, 1);
+        uv2 = ImVec2(0, 1);
+        uv3 = ImVec2(0, 0);
+        std::swap(image_width, image_height);
+        break;
+    case GM_ROTATION_180:
+        uv0 = ImVec2(1, 1);
+        uv1 = ImVec2(0, 1);
+        uv2 = ImVec2(0, 0);
+        uv3 = ImVec2(1, 0);
+        break;
+    case GM_ROTATION_270:
+        uv0 = ImVec2(0, 1);
+        uv1 = ImVec2(0, 0);
+        uv2 = ImVec2(1, 0);
+        uv3 = ImVec2(1, 1);
+        std::swap(image_width, image_height);
+        break;
+    }
+
+    ImVec2 area_size(bounds_width, bounds_height);
+    adjust_aspect(area_size, image_width, image_height);
+
+    ImVec2 cur = ImGui::GetCursorScreenPos();
+
+    ImGui::BeginGroup();
+    ImDrawList *draw_list = ImGui::GetWindowDrawList();
+    draw_list->PushTextureID((void *)(intptr_t)image_tex);
+    draw_list->PrimReserve(6, 4);
+    draw_list->PrimQuadUV(ImVec2(cur.x, cur.y),
+                          ImVec2(cur.x+area_size.x, cur.y),
+                          ImVec2(cur.x+area_size.x, cur.y+area_size.y),
+                          ImVec2(cur.x, cur.y+area_size.y),
+                          uv0,
+                          uv1,
+                          uv2,
+                          uv3,
+                          ImGui::GetColorU32(ImVec4(1,1,1,1)));
+    draw_list->PopTextureID();
+    ImGui::EndGroup();
+
+    return true;
+}
+
+static bool
+draw_visualisation(Data *data, int x, int y, int width, int height,
+                   int aspect_width, int aspect_height,
+                   const char *name, GLuint tex,
+                   enum gm_rotation rotation)
+{
+    ImGui::SetNextWindowPos(ImVec2(x, y));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::Begin(name, NULL,
+                 ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse |
+                 ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+    bool focused = ImGui::IsWindowFocused();
+    if (tex == 0) {
+        return focused;
+    }
+
+#if 1
+    ImVec2 area_size = ImGui::GetContentRegionAvail();
+    draw_image_in_bounds(data,
+                         tex,
+                         aspect_width, aspect_height,
+                         area_size.x, area_size.y,
+                         rotation);
+#endif
+
+    return focused;
+}
+
+
+static bool
 draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 {
     struct gm_ui_properties *ctx_props =
@@ -1007,11 +1174,16 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     ImGui::SetNextWindowPos(ImVec2(x, y));
     ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::SetNextWindowContentSize(ImVec2(width - ImGui::GetStyle().ScrollbarSize, 0));
     ImGui::Begin("Controls", NULL,
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize|
                  ImGuiWindowFlags_NoMove|
+                 ImGuiWindowFlags_AlwaysVerticalScrollbar|
                  ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    ImGui::PushItemWidth(ImGui::GetContentRegionAvailWidth() * 0.5);
+    //ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.5);
 
     if (disabled) {
         ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
@@ -1039,7 +1211,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
             gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
         }
     }
-
+#if 1
     ImGui::Checkbox("Show profiler", &data->show_profiler);
 
     int queue_len = data->ar_video_queue_len;
@@ -1088,6 +1260,104 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     ImGui::Spacing();
     ImGui::Separator();
+    ImGui::TextDisabled("Tracking Pipeline...");
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    for (int i = 0; i < n_stages; i++) {
+        const char *stage_name = gm_context_get_stage_name(data->ctx, i);
+        struct gm_ui_properties *stage_props =
+            gm_context_get_stage_ui_properties(data->ctx, i);
+        bool show_props = false;
+
+        char readable_stage_name[64];
+        make_readable_name(stage_name,
+                           readable_stage_name,
+                           sizeof(readable_stage_name));
+
+        if (stage_props && stage_props->n_properties) {
+            char stage_label[64];
+            xsnprintf(stage_label, sizeof(stage_label),
+                      "%sStage: %s###%s",
+                      i == data->current_stage ? "* " : "",
+                      readable_stage_name,
+                      stage_name);
+
+            show_props = ImGui::CollapsingHeader(stage_label);
+        } else {
+            ImGui::TextDisabled("%sStage: %s",
+                                i == data->current_stage ? "* " : "",
+                                readable_stage_name);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s", gm_context_get_stage_description(data->ctx, i));
+        }
+        if (ImGui::IsItemClicked()) {
+            data->current_stage = i;
+            gm_prop_set_enum(find_prop(ctx_props, "debug_stage"), i);
+        }
+
+        struct stage_textures &stage_textures = data->stage_textures[i];
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+        bool any_created_images = false;
+
+        for (int n = 0; n < n_images; n++) {
+            if (stage_textures.images[n].gl_tex) {
+                any_created_images = true;
+                break;
+            }
+        }
+
+        if (any_created_images) {
+            int max_width = ImGui::GetContentRegionAvailWidth();
+            int w = max_width / n_images;
+            int h = height / 5;
+
+            int save_x = ImGui::GetCursorPosX();
+
+            for (int n = 0; n < n_images; n++) {
+                struct debug_image &debug_image = stage_textures.images[n];
+
+                if (debug_image.gl_tex) {
+                    GLuint view_tex = debug_image.gl_tex;
+                    int view_tex_width = debug_image.width;
+                    int view_tex_height = debug_image.height;
+
+                    draw_image_in_bounds(data,
+                                         view_tex,
+                                         view_tex_width, view_tex_height, // aspect ratio of texture
+                                         w, h,
+                                         GM_ROTATION_0);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + w);
+                }
+            }
+            ImGui::SetCursorPosX(save_x);
+            ImGui::SetCursorPosY(ImGui::GetCursorPosY() + h);
+        }
+
+        if (data->latest_tracking) {
+            uint64_t duration_ns = gm_tracking_get_duration(data->latest_tracking);
+            uint64_t stage_duration_ns =
+                gm_tracking_get_stage_duration(data->latest_tracking, i);
+            float fraction = (double)stage_duration_ns / duration_ns;
+
+            char duration_s16[16];
+            format_duration_s16(stage_duration_ns, duration_s16);
+            char buf[32];
+            xsnprintf(buf, sizeof(buf), "%3.f%%/%s", (fraction * 100.f), duration_s16);
+
+            ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), buf);
+        }
+
+        if (show_props) {
+            draw_properties(stage_props);
+        }
+
+        ImGui::Spacing();
+        ImGui::Separator();
+    }
+
 
     if (ImGui::Button("Save config")) {
         JSON_Value *props_object = json_value_init_object();
@@ -1122,85 +1392,13 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
         free(json);
     }
+#endif
 
     if (disabled) {
         ImGui::PopItemFlag();
     }
+    ImGui::PopItemWidth();
 
-    ImGui::End();
-
-    return focused;
-}
-
-static bool
-draw_visualisation(Data *data, int x, int y, int width, int height,
-                   int aspect_width, int aspect_height,
-                   const char *name, GLuint tex,
-                   enum gm_rotation rotation)
-{
-    ImGui::SetNextWindowPos(ImVec2(x, y));
-    ImGui::SetNextWindowSize(ImVec2(width, height));
-    ImGui::Begin(name, NULL,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse |
-                 ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus);
-    bool focused = ImGui::IsWindowFocused();
-    if (tex == 0) {
-        return focused;
-    }
-
-    ImVec2 uv0, uv1, uv2, uv3;
-
-    switch (rotation) {
-    case GM_ROTATION_0:
-        uv0 = ImVec2(0, 0);
-        uv1 = ImVec2(1, 0);
-        uv2 = ImVec2(1, 1);
-        uv3 = ImVec2(0, 1);
-        break;
-    case GM_ROTATION_90:
-        uv0 = ImVec2(1, 0);
-        uv1 = ImVec2(1, 1);
-        uv2 = ImVec2(0, 1);
-        uv3 = ImVec2(0, 0);
-        std::swap(aspect_width, aspect_height);
-        break;
-    case GM_ROTATION_180:
-        uv0 = ImVec2(1, 1);
-        uv1 = ImVec2(0, 1);
-        uv2 = ImVec2(0, 0);
-        uv3 = ImVec2(1, 0);
-        break;
-    case GM_ROTATION_270:
-        uv0 = ImVec2(0, 1);
-        uv1 = ImVec2(0, 0);
-        uv2 = ImVec2(1, 0);
-        uv3 = ImVec2(1, 1);
-        std::swap(aspect_width, aspect_height);
-        break;
-    }
-
-    ImVec2 area_size = ImGui::GetContentRegionAvail();
-    adjust_aspect(area_size, aspect_width, aspect_height);
-
-    ImDrawList *draw_list = ImGui::GetWindowDrawList();
-    ImVec2 cur = ImGui::GetCursorScreenPos();
-    draw_list->PushTextureID((void *)(intptr_t)tex);
-
-    draw_list->PrimReserve(6, 4);
-    draw_list->PrimQuadUV(ImVec2(cur.x, cur.y),
-                          ImVec2(cur.x+area_size.x, cur.y),
-                          ImVec2(cur.x+area_size.x, cur.y+area_size.y),
-                          ImVec2(cur.x, cur.y+area_size.y),
-                          uv0,
-                          uv1,
-                          uv2,
-                          uv3,
-                          ImGui::GetColorU32(ImVec4(1,1,1,1)));
-    draw_list->PopTextureID();
     ImGui::End();
 
     return focused;
@@ -1393,6 +1591,9 @@ static bool
 draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
                          int x, int y, int width, int height)
 {
+    if (!data->latest_tracking)
+        return false;
+
     const struct gm_intrinsics *depth_intrinsics =
         gm_tracking_get_depth_camera_intrinsics(data->latest_tracking);
     int depth_width = depth_intrinsics->width;
@@ -1402,6 +1603,7 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
                                       depth_width, depth_height,
                                       "Cloud", 0, GM_ROTATION_0);
 
+#if 1
     ImVec2 win_size = ImGui::GetContentRegionMax();
     adjust_aspect(win_size, depth_width, depth_height);
     draw_tracking_scene_to_texture(data, data->latest_tracking, win_size, uiScale);
@@ -1418,67 +1620,16 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
         }
     }
 
+#endif
+
     ImGui::End();
 
     return focused;
 }
 
-static bool
-draw_view(Data *data, int view, ImVec2 &uiScale,
-          int x, int y, int width, int height, bool disabled)
-{
-    switch(view) {
-    case 0:
-        return draw_controls(data, x, y, width, height, disabled);
-    case 1: {
-        return draw_visualisation(data, x, y, width, height,
-                                  data->video_rgb_width,
-                                  data->video_rgb_height,
-                                  views[view], data->video_rgb_tex,
-                                  GM_ROTATION_0);
-    }
-    case 2:
-        return draw_visualisation(data, x, y, width, height,
-                                  data->depth_rgb_width,
-                                  data->depth_rgb_height,
-                                  views[view], gl_depth_rgb_tex,
-                                  GM_ROTATION_0);
-    case 3:
-        return draw_visualisation(data, x, y, width, height,
-                                  data->classify_rgb_width,
-                                  data->classify_rgb_height,
-                                  views[view], gl_classify_rgb_tex,
-                                  GM_ROTATION_0);
-    case 4:
-        return draw_visualisation(data, x, y, width, height,
-                                  data->cclusters_rgb_width,
-                                  data->cclusters_rgb_height,
-                                  views[view], gl_cclusters_rgb_tex,
-                                  GM_ROTATION_0);
-    case 5:
-        return draw_visualisation(data, x, y, width, height,
-                                  data->labels_rgb_width,
-                                  data->labels_rgb_height,
-                                  views[view], gl_labels_tex,
-                                  GM_ROTATION_0);
-    case 6:
-        if (!data->latest_tracking) {
-            return false;
-        }
-        return draw_cloud_visualisation(data, uiScale,
-                                        x, y, width, height);
-    }
-
-    return false;
-}
-
 static void
 draw_ui(Data *data)
 {
-    static int cloud_view = ARRAY_LEN(views) - 1;
-    static int main_view = 1;
-    int current_view = main_view;
-
     ProfileScopedSection(DrawIMGUI, ImGuiControl::Profiler::Dark);
 
     ImGuiIO& io = ImGui::GetIO();
@@ -1489,108 +1640,116 @@ draw_ui(Data *data)
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
-    bool skip_controls = false;
-    if (win_size.x >= 1024 && win_size.y >= 600 && !data->realtime_ar_mode) {
-        // Draw control panel on the left if we have a large window
-        draw_controls(data, origin.x, origin.y,
-                      TOOLBAR_WIDTH + origin.x, win_size.y - origin.y, false);
+    int main_x = origin.x;
+    int main_y = origin.y;
+    ImVec2 main_area_size = win_size;
 
-        win_size.x -= TOOLBAR_WIDTH;
-        origin.x += TOOLBAR_WIDTH;
+    bool show_controls_button = false;
+    int controls_x = origin.x;
+    int controls_y = origin.y;
+    int controls_width = main_area_size.x;
+    int controls_height = main_area_size.y;
 
-        skip_controls = true;
-    }
-#if 1
     if (data->realtime_ar_mode) {
+        show_controls_button = true;
+    }
+
+    if (win_size.x < 1024 || win_size.y < 600) {
+        show_controls_button = true;
+    } else {
+        controls_width = TOOLBAR_WIDTH;
+        main_x += controls_width;
+        main_area_size.x -= controls_width;
+    }
+
+    /* NB: we don't use imgui to render the video background while in
+     * real-time mode
+     */
+#if 1
+    if (!data->realtime_ar_mode) {
+        draw_cloud_visualisation(data,
+                                 uiScale,
+                                 main_x, main_y,
+                                 main_area_size.x,
+                                 main_area_size.y);
+    }
+#endif
+
+    static bool show_controls = false;
+
+    if (show_controls_button) {
         // Draw a view-picker at the top
         ImGui::SetNextWindowPos(origin);
-        ImGui::SetNextWindowSizeConstraints(ImVec2(win_size.x, 0),
-                                            ImVec2(win_size.x, win_size.y));
-        ImGui::Begin("View picker", NULL,
+        //ImGui::SetNextWindowContentSize(ImVec2(0, 0));
+        //ImGui::SetNextWindowSizeConstraints(ImVec2(0, 0),
+        //                                    ImVec2(0, 0));
+        //ImGui::SetNextWindowSizeConstraints(ImVec2(win_size.x, 0),
+        //                                    ImVec2(win_size.x, win_size.y));
+        ImGui::Begin("Controls Toggle", NULL,
                      ImGuiWindowFlags_NoTitleBar|
                      ImGuiWindowFlags_NoResize|
-                     ImGuiWindowFlags_NoMove|
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+                     ImGuiWindowFlags_NoScrollbar |
+                     ImGuiWindowFlags_AlwaysAutoResize|
+                     ImGuiWindowFlags_NoMove);
         /* XXX: assuming that "Controls" and "Video Buffer" are the first two
          * entries, we only want to expose these two options in
          * realtime_ar_mode, while we aren't uploading any other debug textures
          */
-        if (ImGui::Button((main_view == 0) ? "Close" : "Properties")) {
-            main_view = (main_view == 0) ? 1 : 0;
+        if (ImGui::Button(show_controls ? "Close" : "Properties")) {
+            show_controls = !show_controls;
         }
 
-        int x = origin.x;
-        int y = ImGui::GetWindowHeight() + origin.y;
-        ImVec2 main_area_size = ImVec2(win_size.x,
-                                       win_size.y - ImGui::GetWindowHeight());
+        controls_y = origin.y + ImGui::GetWindowHeight();
+        controls_height -= ImGui::GetWindowHeight();
 
         ImGui::End();
+    } else
+        show_controls = true;
 
-        /* We only need to consider drawing the controls while in this mode
-         * since we don't use imgui to render the video background while in
-         * real-time mode
-         */
-        if (current_view == 0 && skip_controls == false) {
-            draw_view(data, current_view, uiScale, x, y,
-                      main_area_size.x, main_area_size.y, false);
-        }
-    } else {
-        // Draw sub-views on the axis with the most space
-        float depth_aspect = data->depth_rgb_height ?
-            data->depth_rgb_width / (float)data->depth_rgb_height : 1.f;
-        int view = skip_controls ? 1 : 0;
-        int n_views = ARRAY_LEN(views) - (skip_controls ? 1 : 0);
-        for (int s = 0; s <= (n_views - 1) / MAX_VIEWS; ++s) {
-            int subview_width, subview_height;
-            float win_aspect = win_size.x / (float)win_size.y;
-            if (win_aspect > depth_aspect) {
-                subview_height = win_size.y / MAX_VIEWS;
-                subview_width = data->depth_rgb_height ?
-                    subview_height * (data->depth_rgb_width /
-                                      (float)data->depth_rgb_height) :
-                    subview_height;
-            } else {
-                subview_width = win_size.x / MAX_VIEWS;
-                subview_height = data->depth_rgb_width ?
-                    subview_width * (data->depth_rgb_height /
-                                     (float)data->depth_rgb_width) :
-                    subview_width;
-            }
-            for (int i = 0; i < MAX_VIEWS; ++i, ++view) {
-                if (view == current_view) {
-                    ++view;
-                }
-                if (view >= (int)ARRAY_LEN(views)) {
-                    break;
-                }
-
-                int x, y;
-                if (win_aspect > depth_aspect) {
-                    x = origin.x + win_size.x - subview_width;
-                    y = origin.y + (subview_height * i);
-                } else {
-                    y = origin.y + (win_size.y - subview_height);
-                    x = origin.x + (subview_width * i);
-                }
-
-                if (draw_view(data, view, uiScale, x, y,
-                              subview_width, subview_height, view == 0)) {
-                    main_view = view;
-                }
-            }
-
-            if (win_aspect > depth_aspect) {
-                win_size.x -= subview_width;
-            } else {
-                win_size.y -= subview_height;
-            }
-        }
-
-        // Draw the main view in the remaining space in the center
-        draw_view(data, current_view, uiScale, origin.x, origin.y,
-                  win_size.x, win_size.y, false);
+    if (show_controls) {
+        draw_controls(data, origin.x, controls_y,
+                      controls_width, controls_height,
+                      false); // enabled
     }
+
+    else {
+        //int stage_index = data->current_stage;
+
+        //if (win_size.x >= 1024 && win_size.y >= 600) {
+            // Draw control panel on the left if we have a large window
+            //draw_controls(data, origin.x, origin.y,
+            //              TOOLBAR_WIDTH + origin.x, win_size.y - origin.y, false);
+
+       //     win_size.x -= TOOLBAR_WIDTH;
+       //     origin.x += TOOLBAR_WIDTH;
+       // }
+
+
+#if 0
+        const char *view_name =
+            gm_context_get_stage_name(data->ctx, stage_index);
+
+        struct debug_image &stage_texture = data->stage_textures[stage_index];
+
+        if (stage_texture.gl_tex) {
+            GLuint view_tex = stage_texture.gl_tex;
+            int view_tex_width = stage_texture.width;
+            int view_tex_height = stage_texture.height;
+
+            draw_visualisation(data,
+                               origin.x, origin.y,
+                               win_size.x, win_size.y, // width, height
+                               view_tex_width, view_tex_height, // aspect ratio of texture
+                               view_name,
+                               view_tex,
+                               GM_ROTATION_0);
+            ImGui::End();
+        } else
 #endif
+        {
+        }
+    }
+
     ImGui::PopStyleVar();
 
     if (data->show_profiler) {
@@ -1601,13 +1760,6 @@ draw_ui(Data *data)
     }
 
     ImGui::Render();
-
-    // If we've toggled between the cloud view, invalidate the texture so
-    // it gets recreated at the right size next time it's displayed.
-    if (main_view != current_view &&
-        (main_view == cloud_view || current_view == cloud_view)) {
-        data->cloud_fbo_valid = false;
-    }
 }
 
 static void
@@ -1950,6 +2102,56 @@ upload_tracking_textures(Data *data)
         return;
 
     ProfileScopedSection(UploadTrackingBufs);
+
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    gm_assert(data->log, n_stages == data->stage_textures.size(),
+              "stage_textures size doesn't match number of stages");
+
+    for (int i = 0; i < n_stages; i++) {
+        int width;
+        int height;
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+        struct stage_textures &stage_textures = data->stage_textures[i];
+
+        for (int n = 0; n < n_images; n++) {
+            struct debug_image &debug_image = stage_textures.images[n];
+            uint8_t *rgb_data = NULL;
+
+            if (gm_tracking_create_stage_rgb_image(data->latest_tracking,
+                                                   i,
+                                                   n,
+                                                   &width,
+                                                   &height,
+                                                   &rgb_data))
+            {
+                if (!debug_image.gl_tex) {
+                    glGenTextures(1, &debug_image.gl_tex);
+                    glBindTexture(GL_TEXTURE_2D, debug_image.gl_tex);
+
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+                }
+
+                glBindTexture(GL_TEXTURE_2D, debug_image.gl_tex);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                             width, height,
+                             0, GL_RGB, GL_UNSIGNED_BYTE, rgb_data);
+                debug_image.width = width;
+                debug_image.height = height;
+
+                free(rgb_data);
+                rgb_data = NULL;
+            } else {
+                glDeleteTextures(1, &debug_image.gl_tex);
+                debug_image.gl_tex = 0;
+                debug_image.width = 0;
+                debug_image.height = 0;
+            }
+        }
+    }
 
     /*
      * Update the RGB visualization of the depth buffer
@@ -2566,6 +2768,26 @@ init_viewer_opengl(Data *data)
     glGenBuffers(1, &data->target_skel_gl.bones_bo);
     glGenBuffers(1, &data->target_skel_gl.joints_bo);
 
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    data->stage_textures.resize(n_stages);
+
+    for (int i = 0; i < n_stages; i++) {
+        struct stage_textures &stage_textures = data->stage_textures[i];
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+
+        gm_assert(data->log, n_images < MAX_IMAGES_PER_STAGE,
+                  "Can't handle more than %d debug images per stage",
+                  MAX_IMAGES_PER_STAGE);
+
+        for (int n = 0; n < n_images; n++) {
+            struct debug_image &debug_image = stage_textures.images[n];
+
+            debug_image.gl_tex = 0;
+            debug_image.width = 0;
+            debug_image.height = 0;
+        }
+    }
+
     // Generate texture objects
     glGenTextures(1, &gl_depth_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
@@ -2693,6 +2915,22 @@ deinit_device_opengl(Data *data)
 
     update_ar_video_queue_len(data, 0);
 
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    for (int i = 0; i < n_stages; i++) {
+        struct stage_textures &stage_textures = data->stage_textures[i];
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+
+        for (int n = 0; n < n_images; n++) {
+            struct debug_image &debug_image = stage_textures.images[n];
+
+            if (debug_image.gl_tex)
+                glDeleteTextures(1, &debug_image.gl_tex);
+            debug_image.gl_tex = 0;
+            debug_image.width = 0;
+            debug_image.height = 0;
+        }
+    }
+
     // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
     data->cloud_fbo_valid = false;
 
@@ -2803,10 +3041,15 @@ init_winsys_glfm(Data *data, GLFMDisplay *display)
     glfmSetAppFocusFunc(display, app_focus_cb);
     glfmSetMainLoopFunc(display, frame_cb);
 
+    ImGui::CreateContext();
     ImGui_ImplGlfmGLES3_Init(display, true);
 
     // Quick hack to make scrollbars a bit more usable on small devices
     ImGui::GetStyle().ScrollbarSize *= 2;
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 ui_scale = io.DisplayFramebufferScale;
+    ImGui::GetStyle().ScaleAllSizes(ui_scale.x);
 }
 #endif
 
@@ -2847,7 +3090,12 @@ init_winsys_glfw(Data *data)
 
     glfwSetErrorCallback(on_glfw_error_cb);
 
+    ImGui::CreateContext();
     ImGui_ImplGlfwGLES3_Init(data->window, false /* don't install callbacks */);
+
+    ImGuiIO& io = ImGui::GetIO();
+    ImVec2 ui_scale = io.DisplayFramebufferScale;
+    ImGui::GetStyle().ScaleAllSizes(ui_scale.x);
 
     /* will chain on to ImGui_ImplGlfwGLES3_KeyCallback... */
     glfwSetKeyCallback(data->window, on_key_input_cb);
@@ -2915,6 +3163,7 @@ viewer_destroy(Data *data)
 
 #ifdef USE_GLFW
     ImGui_ImplGlfwGLES3_Shutdown();
+    ImGui::DestroyContext();
     glfwDestroyWindow(data->window);
     glfwTerminate();
 #endif
@@ -2928,6 +3177,8 @@ static void
 viewer_init(Data *data)
 {
     ImGuiIO& io = ImGui::GetIO();
+
+    ImGui::StyleColorsClassic();
 
     char *open_err = NULL;
     struct gm_asset *font_asset = gm_asset_open(data->log,

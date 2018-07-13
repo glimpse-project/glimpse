@@ -417,7 +417,6 @@ bool    ImGui_ImplGlfmGLES3_Init(GLFMDisplay* display, bool install_callbacks)
 void ImGui_ImplGlfmGLES3_Shutdown()
 {
     ImGui_ImplGlfmGLES3_InvalidateDeviceObjects();
-    ImGui::Shutdown();
 }
 
 void ImGui_ImplGlfmGLES3_NewFrame(GLFMDisplay* display, double frametime)

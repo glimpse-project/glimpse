@@ -407,6 +407,37 @@ gm_context_event_free(struct gm_event *event);
 void
 gm_context_render_thread_hook(struct gm_context *ctx);
 
+int
+gm_context_get_n_stages(struct gm_context *ctx);
+
+const char *
+gm_context_get_stage_name(struct gm_context *ctx,
+                          int stage);
+
+const char *
+gm_context_get_stage_description(struct gm_context *ctx,
+                                 int stage);
+
+int
+gm_context_get_stage_n_images(struct gm_context *ctx,
+                              int stage);
+
+const char *
+gm_context_get_stage_nth_image_name(struct gm_context *ctx,
+                                    int stage,
+                                    int n);
+
+const char *
+gm_context_get_stage_nth_image_description(struct gm_context *ctx,
+                                           int stage,
+                                           int n);
+
+struct gm_ui_properties *
+gm_context_get_stage_ui_properties(struct gm_context *ctx, int stage);
+
+uint64_t
+gm_context_get_average_stage_duration(struct gm_context *ctx,
+                                      int stage);
 
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
@@ -443,6 +474,32 @@ const struct gm_point_rgba *
 gm_tracking_get_debug_lines(struct gm_tracking *tracking,
                             int *n_lines);
 
+uint64_t
+gm_tracking_get_duration(struct gm_tracking *tracking);
+uint64_t
+gm_tracking_get_stage_duration(struct gm_tracking *tracking,
+                               int stage);
+
+#if 0
+const struct gm_point_rgba *
+gm_tracking_get_stage_debug_point_cloud(struct gm_tracking *tracking,
+                                        int stage,
+                                        int *n_points);
+
+const struct gm_point_rgba *
+gm_tracking_get_stage_debug_lines(struct gm_tracking *tracking,
+                                  int stage,
+                                  int *n_lines);
+#endif
+
+bool
+gm_tracking_create_stage_rgb_image(struct gm_tracking *tracking,
+                                   int stage,
+                                   int image_id,
+                                   int *width,
+                                   int *height,
+                                   uint8_t **output);
+
 /* Deprecated */
 const float *
 gm_tracking_get_joint_positions(struct gm_tracking *tracking,
@@ -461,39 +518,44 @@ bool
 gm_tracking_was_successful(struct gm_tracking *tracking);
 
 /* Creates an RGB visualisation of the label map. */
-void
+bool
 gm_tracking_create_rgb_label_map(struct gm_tracking *tracking,
                                  int *width,
                                  int *height,
                                  uint8_t **output);
 
+
 /* Creates an RGB visualisation of the depth buffer. */
-void
+bool
 gm_tracking_create_rgb_depth(struct gm_tracking *tracking,
                              int *width,
                              int *height,
                              uint8_t **output);
 
 /* Creates an RGB visualisation of the video buffer. */
-void
+bool
 gm_tracking_create_rgb_video(struct gm_tracking *tracking,
                              int *width,
                              int *height,
                              uint8_t **output);
 
 /* Creates an RGB visualisation of the depth pixel classification. */
-void
+bool
 gm_tracking_create_rgb_depth_classification(struct gm_tracking *tracking,
                                             int *width,
                                             int *height,
                                             uint8_t **output);
 
 /* Creates an RGB visualisation of the candidate person clusters. */
-void
+bool
 gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *tracking,
                                           int *width,
                                           int *height,
                                           uint8_t **output);
+
+const struct gm_point_rgba *
+gm_tracking_get_pipeline_stage_data(struct gm_tracking *tracking,
+                                    int *n_points);
 
 struct gm_skeleton *
 gm_skeleton_new(struct gm_context *ctx,

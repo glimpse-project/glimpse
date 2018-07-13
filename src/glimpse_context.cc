@@ -181,12 +181,28 @@ enum tracking_stage {
     TRACKING_STAGE_GAP_FILLED,
     TRACKING_STAGE_DOWNSAMPLED,
     TRACKING_STAGE_GROUND_SPACE,
-    TRACKING_STAGE_CODEBOOK_SPACE,
-    TRACKING_STAGE_CLASSIFIED,
+
     TRACKING_STAGE_NAIVE_FLOOR,
-    TRACKING_STAGE_NAIVE_FINAL,
-    TRACKING_STAGE_BEST_PERSON_BUF,
-    TRACKING_STAGE_BEST_PERSON_CLOUD,
+    TRACKING_STAGE_NAIVE_CLUSTER,
+
+    TRACKING_STAGE_CODEBOOK_SPACE,
+    TRACKING_STAGE_CODEBOOK_CLASSIFY,
+    TRACKING_STAGE_CODEBOOK_CLUSTER,
+
+    TRACKING_STAGE_FILTER_CLUSTERS,
+    TRACKING_STAGE_PROJECT_CLUSTERS,
+
+    TRACKING_STAGE_SELECT_CANDIDATE_CLUSTER,
+    TRACKING_STAGE_LABEL_INFERENCE,
+    TRACKING_STAGE_JOINT_WEIGHTS,
+    TRACKING_STAGE_JOINT_INFERENCE,
+    TRACKING_STAGE_REFINE_SKELETON,
+
+    TRACKING_STAGE_SANITIZE_SKELETON,
+
+    TRACKING_STAGE_UPDATE_CODEBOOK,
+
+    N_TRACKING_STAGES
 };
 
 enum image_format {
@@ -290,6 +306,39 @@ struct gm_skeleton {
       distance(0.f) {}
 };
 
+struct image_generator {
+    const char *name;
+    const char *desc;
+    bool (*create_rgb_image)(struct gm_tracking *tracking,
+                             int *width,
+                             int *height,
+                             uint8_t **output);
+};
+
+struct gm_pipeline_stage {
+    enum tracking_stage stage_id;
+    const char *name;
+    const char *desc;
+
+    uint64_t total_time_ns;
+    int n_invocations;
+
+    std::vector<image_generator> images;
+
+    struct gm_ui_properties properties_state;
+    std::vector<struct gm_ui_property> properties;
+};
+
+/* A pipeline_stage maintains global information about a stage while
+ * _stage_data can track information about a specific tracking run
+ */
+struct gm_pipeline_stage_data {
+    uint64_t duration_ns;
+
+    //std::vector<struct gm_point_rgba> debug_point_cloud;
+    //std::vector<struct gm_point_rgba> debug_lines;
+};
+
 struct gm_prediction_impl
 {
     struct gm_prediction base;
@@ -384,6 +433,10 @@ struct gm_tracking_impl
      */
     pthread_mutex_t trail_lock;
     std::vector<struct trail_crumb> trail;
+
+    std::vector<gm_pipeline_stage_data> stage_data;
+
+    uint64_t duration_ns;
 };
 
 struct gm_context
@@ -415,8 +468,14 @@ struct gm_context
     struct gm_extrinsics basis_depth_to_video_extrinsics;
     bool basis_extrinsics_set;
 
-    struct gm_pose depth_pose;
-    glm::mat4 start_to_depth_pose;
+    /* These stages represent the processing pipeline for skeletal tracking
+     * and let us group statistics and UI properties
+     */
+    std::vector<struct gm_pipeline_stage> stages;
+
+    bool reset_codebook;
+    struct gm_pose codebook_pose;
+    glm::mat4 start_to_codebook;
     std::vector<std::vector<struct seg_codeword>> depth_seg;
     std::vector<struct seg_codeword *> depth_seg_bg;
 
@@ -497,8 +556,8 @@ struct gm_context
      */
     int debug_label;
 
+    int debug_pipeline_stage;
     int debug_cloud_mode;
-    int debug_cloud_stage;
 
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
@@ -531,7 +590,6 @@ struct gm_context
     struct joint_info *joint_stats;
     int n_joints;
 
-    bool depth_gap_fill;
     bool apply_depth_distortion;
 
     float min_depth;
@@ -2536,6 +2594,7 @@ depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
     }
 }
 
+/* Used to colour the debug cloud for most pipeline stages... */
 static void
 colour_debug_cloud(struct gm_context *ctx,
                    struct gm_tracking_impl *tracking,
@@ -2556,7 +2615,7 @@ colour_debug_cloud(struct gm_context *ctx,
         uint8_t *vid_rgb = NULL;
         gm_tracking_create_rgb_video(&tracking->base, &vid_width, &vid_height, &vid_rgb);
         if (vid_rgb) {
-            if (indices.size()) {
+            if (indexed_pcl_cloud && indices.size()) {
                 for (unsigned i = 0; i < indices.size(); i++) {
                     float x = indexed_pcl_cloud->points[indices[i]].x;
                     float y = indexed_pcl_cloud->points[indices[i]].y;
@@ -2567,8 +2626,8 @@ colour_debug_cloud(struct gm_context *ctx,
 
                     // Reproject the depth coordinates into video space
                     // TODO: Support extrinsics
-                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width);
-                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height);
+                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width - 1);
+                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height - 1);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
                     debug_cloud[i].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
@@ -2587,8 +2646,8 @@ colour_debug_cloud(struct gm_context *ctx,
 
                     // Reproject the depth coordinates into video space
                     // TODO: Support extrinsics
-                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width);
-                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height);
+                    int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width - 1);
+                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height - 1);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
                     debug_cloud[off].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
@@ -2632,62 +2691,82 @@ colour_debug_cloud(struct gm_context *ctx,
     }
 }
 
-static bool
-gm_context_track_skeleton(struct gm_context *ctx,
-                          struct gm_tracking_impl *tracking)
+
+struct PointCmp {
+    int x;
+    int y;
+    int lx;
+    int ly;
+};
+
+struct pipeline_scratch_state
 {
-    uint64_t start, end, duration;
+    glm::mat4 to_start;
+    glm::mat4 to_ground;
 
-    if (ctx->debug_cloud_mode) {
-        tracking->debug_cloud.resize(0);
-        tracking->debug_cloud_indices.resize(0);
-        tracking->debug_lines.resize(0);
-    }
+    // naive or codebook segmentation/clustering
+    std::vector<pcl::PointIndices> cluster_indices;
 
-    float nan = std::numeric_limits<float>::quiet_NaN();
-    pcl::PointXYZL invalid_pt;
-    invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
-    invalid_pt.label = -1;
+    // naive segmentation
+    int naive_fx;
+    int naive_fy;
+    std::vector<bool> done_mask;
+    std::queue<struct PointCmp> flood_fill;
+    float naive_floor_y;
 
-    // X increases to the right
-    // Y increases downwards
-    // Z increases outwards
+    // cluster_select
+    std::vector<pcl::PointIndices> persons;
 
-    if (ctx->debug_cloud_stage == TRACKING_STAGE_START &&
-        ctx->debug_cloud_mode)
-    {
-        add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                                 tracking->depth,
-                                                 &tracking->depth_camera_intrinsics);
-        colour_debug_cloud(ctx, tracking, NULL, false);
-    }
+    // cluster_project
+    std::vector<float*> depth_images;
 
-    start = get_time();
+    // per-cluster inference
+    float *depth_image;
+    float *weights;
+    float *label_probs;
+    InferredJoints *joints_candidate;
+    struct gm_skeleton candidate_skeleton;
+
+    int best_person;
+
+    pipeline_scratch_state(int n_joints) :
+      candidate_skeleton(n_joints) {}
+};
+
+static void
+stage_gap_fill_cb(struct gm_tracking_impl *tracking,
+                  struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
     if (!tracking->depth_cloud) {
         tracking->depth_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
     }
 
-    pcl_xyzl_cloud_from_buf_with_fill_and_threshold(ctx, tracking,
+    pcl_xyzl_cloud_from_buf_with_fill_and_threshold(ctx,
+                                                    tracking,
                                                     tracking->depth_cloud,
                                                     tracking->depth,
                                                     &tracking->
                                                      depth_camera_intrinsics);
+}
 
-    end = get_time();
-    duration = end - start;
-    gm_info(ctx->log,
-            "Depth buffer to point cloud projection (+gap fill +thresholding) took %.3f%s",
-            get_duration_ns_print_scale(duration),
-            get_duration_ns_print_scale_suffix(duration));
+static void
+stage_gap_fill_debug_cb(struct gm_tracking_impl *tracking,
+                        struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
-    if (ctx->debug_cloud_stage == TRACKING_STAGE_GAP_FILLED &&
-        ctx->debug_cloud_mode)
-    {
-        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_cloud);
-        colour_debug_cloud(ctx, tracking, tracking->depth_cloud, false);
-    }
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_cloud);
+    colour_debug_cloud(ctx, tracking, tracking->depth_cloud, false);
+}
+
+static void
+stage_downsample_cb(struct gm_tracking_impl *tracking,
+                    struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
     // Person detection can happen in a sparser cloud made from a downscaled
     // version of the depth buffer. This is significantly cheaper than using a
@@ -2697,8 +2776,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
     if (seg_res == 1) {
         tracking->depth_class = tracking->depth_cloud;
     } else {
-        start = get_time();
-
         if (!tracking->depth_class ||
             tracking->depth_class == tracking->depth_cloud) {
             tracking->depth_class = pcl::PointCloud<pcl::PointXYZL>::Ptr(
@@ -2727,113 +2804,47 @@ gm_context_track_skeleton(struct gm_context *ctx,
                 ++n_lores_points;
             }
         }
-
-        end = get_time();
-        duration = end - start;
-        LOGI("Cloud down-scaling (%d points) took %.3f%s",
-             n_lores_points,
-             get_duration_ns_print_scale(duration),
-             get_duration_ns_print_scale_suffix(duration));
     }
+}
 
-    if (ctx->debug_cloud_stage == TRACKING_STAGE_DOWNSAMPLED &&
-        ctx->debug_cloud_mode)
-    {
-        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
-        colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
-    }
+static void
+stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
+                          struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
-    unsigned depth_class_size = tracking->depth_class->points.size();
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
+}
 
-    // Classify depth pixels
-    start = get_time();
-
-    bool reset_pose = false;
-    bool motion_detection = ctx->motion_detection;
-
-    if (ctx->depth_seg.size() != depth_class_size ||
-        (ctx->depth_pose.type != tracking->frame->pose.type))
-    {
-        gm_debug(ctx->log, "XXX: Resetting pose");
-        reset_pose = true;
-    } else if (tracking->frame->pose.type == GM_POSE_TO_START) {
-        // Check if the angle or distance between the current frame and the
-        // reference frame exceeds a certain threshold, and in that case,
-        // reset motion tracking.
-        float angle = glm::degrees(glm::angle(
-            glm::normalize(glm::quat(ctx->depth_pose.orientation[3],
-                                     ctx->depth_pose.orientation[0],
-                                     ctx->depth_pose.orientation[1],
-                                     ctx->depth_pose.orientation[2])) *
-            glm::inverse(glm::normalize(glm::quat(
-                tracking->frame->pose.orientation[3],
-                tracking->frame->pose.orientation[0],
-                tracking->frame->pose.orientation[1],
-                tracking->frame->pose.orientation[2])))));
-        while (angle > 180.f) angle -= 360.f;
-
-        float distance = glm::distance(
-            glm::vec3(ctx->depth_pose.translation[0],
-                      ctx->depth_pose.translation[1],
-                      ctx->depth_pose.translation[2]),
-            glm::vec3(tracking->frame->pose.translation[0],
-                      tracking->frame->pose.translation[1],
-                      tracking->frame->pose.translation[2]));
-
-        gm_debug(ctx->log, "XXX: Angle: %.2f, "
-                 "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
-                 tracking->frame->pose.translation[0] -
-                 ctx->depth_pose.translation[0],
-                 tracking->frame->pose.translation[1] -
-                 ctx->depth_pose.translation[1],
-                 tracking->frame->pose.translation[2] -
-                 ctx->depth_pose.translation[2]);
-        if (angle > 10.f || distance > 0.3f) {
-            // We've strayed too far from the initial pose, reset
-            // segmentation and use this as the home pose.
-            gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
-            reset_pose = true;
-        }
-    }
-
-    glm::mat4 to_ground(1.0);
-    glm::mat4 to_start(1.0);
-    switch (tracking->frame->pose.type) {
-    case GM_POSE_INVALID:
-        break;
-    case GM_POSE_TO_START:
-        to_start = pose_to_matrix(tracking->frame->pose);
-        to_ground = to_start;
-        break;
-    case GM_POSE_TO_GROUND:
-        to_ground = pose_to_matrix(tracking->frame->pose);
-        break;
-    }
-
-    if (reset_pose) {
-        ctx->depth_seg.clear();
-        ctx->depth_seg.resize(depth_class_size);
-        ctx->depth_seg_bg.resize(depth_class_size);
-        ctx->depth_pose = tracking->frame->pose;
-        ctx->start_to_depth_pose = glm::inverse(to_start);
-
-        if (tracking->frame->pose.type != GM_POSE_TO_START)
-            gm_debug(ctx->log, "XXX: No tracking pose");
-    }
+static void
+stage_ground_project_cb(struct gm_tracking_impl *tracking,
+                        struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    glm::mat4 to_ground = state->to_ground;
 
     // Transform the cloud into ground-aligned space if we have a valid pose
     if (!tracking->ground_cloud) {
         tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
     }
-    if (ctx->depth_pose.type != GM_POSE_INVALID) {
+    if (ctx->codebook_pose.type != GM_POSE_INVALID) {
+        unsigned depth_class_size = tracking->depth_class->points.size();
+
         tracking->ground_cloud->width = tracking->depth_class->width;
         tracking->ground_cloud->height = tracking->depth_class->height;
         tracking->ground_cloud->points.resize(depth_class_size);
         tracking->ground_cloud->is_dense = false;
 
+        float nan = std::numeric_limits<float>::quiet_NaN();
+        pcl::PointXYZL invalid_pt;
+        invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
+        invalid_pt.label = -1;
+
         foreach_xy_off(tracking->depth_class->width,
-                       tracking->depth_class->height) {
+                       tracking->depth_class->height)
+        {
             pcl::PointXYZL &point =
                 tracking->depth_class->points[off];
             if (std::isnan(point.z)) {
@@ -2848,401 +2859,486 @@ gm_context_track_skeleton(struct gm_context *ctx,
             tracking->ground_cloud->points[off].y = pt.y;
             tracking->ground_cloud->points[off].z = pt.z;
         }
-
-        if (ctx->debug_cloud_stage == TRACKING_STAGE_GROUND_SPACE &&
-            ctx->debug_cloud_mode)
-        {
-            add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
-                                                          tracking->depth_class,
-                                                          to_ground);
-            colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
-        }
     } else {
         tracking->ground_cloud->resize(0);
     }
+}
 
-    glm::mat4 start_to_codebook;
-    if (motion_detection) {
-        start_to_codebook = ctx->start_to_depth_pose;
+static void
+stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
+                              struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
-        if (ctx->debug_cloud_stage == TRACKING_STAGE_CODEBOOK_SPACE &&
-            ctx->debug_cloud_mode)
-        {
-            add_debug_cloud_xyz_of_codebook_space(
-                ctx, tracking, tracking->depth_class, to_start,
-                start_to_codebook, &tracking->depth_camera_intrinsics, seg_res);
-            colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
-        }
-
-        // Remove depth classification old codewords
-        for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
-            std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
-            ctx->depth_seg_bg[off] = NULL;
-            for (unsigned i = 0; i < codewords.size();) {
-                struct seg_codeword &codeword = codewords[i];
-                if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
-                    ctx->seg_timeout) {
-                    std::swap(codeword, codewords.back());
-                    codewords.pop_back();
-                } else {
-                    if (!ctx->depth_seg_bg[off] ||
-                        codeword.n > ctx->depth_seg_bg[off]->n) {
-                        ctx->depth_seg_bg[off] = &codeword;
-                    }
-                    ++i;
-                }
-            }
-        }
-
-        // Do classification of depth buffer
-        for (unsigned depth_off = 0;
-             depth_off < depth_class_size; ++depth_off) {
-            pcl::PointXYZL point =
-                tracking->depth_class->points[depth_off];
-
-            if (std::isnan(point.z)) {
-                // We'll never cluster a nan value, so we can immediately
-                // classify it as background.
-                tracking->depth_class->points[depth_off].label = BG;
-                continue;
-            } else {
-                int off = project_point_into_codebook(
-                    &point, to_start, start_to_codebook,
-                    &tracking->depth_camera_intrinsics, seg_res);
-
-                // Falls outside of codebook so we can't classify...
-                if (off < 0)
-                    continue;
-
-                // At this point z has been projected into the coordinate space
-                // of the codebook
-                float depth = point.z;
-
-                const uint64_t t = tracking->frame->timestamp;
-                const float tb = ctx->seg_tb;
-                const float tf = ctx->seg_tf;
-                const int b = ctx->seg_b;
-                const int gamma = (float)ctx->seg_gamma;
-                const int alpha = ctx->seg_alpha;
-                const float psi = ctx->seg_psi;
-
-                // Look to see if this pixel falls into an existing codeword
-                struct seg_codeword *codeword = NULL;
-                struct seg_codeword *bg_codeword = ctx->depth_seg_bg[off];
-
-                std::vector<struct seg_codeword> &codewords =
-                    ctx->depth_seg[off];
-                for (std::vector<struct seg_codeword>::iterator it =
-                     codewords.begin(); it != codewords.end(); ++it) {
-                    struct seg_codeword &candidate = *it;
-
-                    float dist = fabsf(depth - candidate.m);
-                    if (dist < tb) {
-                        codeword = &candidate;
-                        break;
-                    }
-                }
-
-                assert(bg_codeword || (!bg_codeword && !codeword));
-
-                // Classify this depth value
-                const float frame_time = ctx->n_tracking ?
-                    (float)(t - ctx->tracking_history[0]->frame->timestamp) :
-                    100000000.f;
-
-                if (!codeword) {
-                    tracking->depth_class->points[depth_off].label = FG;
-                } else if (codeword->n == bg_codeword->n) {
-                    tracking->depth_class->points[depth_off].label = BG;
-                } else {
-                    bool flat = false, flickering = false;
-                    float mean_diff = fabsf(codeword->m - bg_codeword->m);
-                    if ((tb < mean_diff) && (mean_diff <= tf)) {
-                        flat = true;
-                    }
-                    if ((b * codeword->nc) > codeword->n &&
-                        (int)(((t - codeword->ts) / frame_time) / gamma) <=
-                        codeword->nc) {
-                        flickering = true;
-                    }
-                    if (flat || flickering) {
-                        tracking->depth_class->points[depth_off].label =
-                            (flat && flickering) ?
-                                FL_FLK : (flat ?  FL : FLK);
-                    } else {
-                        if (codeword->n > alpha &&
-                            ((codeword->tl - codeword->ts) / frame_time) /
-                            (float)codeword->n >= psi) {
-                            tracking->depth_class->points[depth_off].label = TB;
-                        } else {
-                            tracking->depth_class->points[depth_off].label = FG;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    end = get_time();
-    duration = end - start;
-    LOGI("Pose reprojection + Depth value classification took %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
-
-    if (ctx->debug_cloud_stage == TRACKING_STAGE_CLASSIFIED &&
-        ctx->debug_cloud_mode)
-    {
-        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
-        colour_debug_cloud(ctx, tracking, tracking->depth_class, motion_detection);
-    }
-
-    start = get_time();
-
-    std::vector<pcl::PointIndices> cluster_indices;
-    if (!motion_detection || !ctx->latest_tracking ||
-        !ctx->latest_tracking->success || reset_pose) {
-        // If we've not tracked a human yet, the depth classification may not
-        // be reliable - just use a simple clustering technique to find a
-        // human and separate them from the floor, then rely on motion detection
-        // for subsequent frames.
-        int width = (int)tracking->depth_class->width;
-        int height = (int)tracking->depth_class->height;
-        int fx = width / 2;
-        int fy = height / 2;
-        int fidx = fy * width + fx;
-
-        // First search a small box in the center of the image and pick the
-        // nearest point to start our flood-fill from.
-        int fw = width / 8; // TODO: make box size configurable
-        int fh = height / 8;
-
-        float fz = FLT_MAX;
-        int fr_i = 0;
-        struct focal_point {
-            float fz;
-            int idx;
-        } focal_region[fw * fh];
-
-        int x0 = fx - fw / 2;
-        int y0 = fy - fh / 2;
-        for (int y = y0; y < (y0 + fh); y++) {
-            for (int x = x0; x < (x0 + fw); x++) {
-                int idx = y * width + x;
-                pcl::PointXYZL &point =
-                    tracking->depth_class->points[idx];
-                if (!std::isnan(point.z))
-                    focal_region[fr_i++] = { point.z, idx };
-            }
-        }
-
-        //gm_assert(ctx->log, fr_i == fw * fh, "Flibble");
-        // Use the median point as our focal point
-        //
-        // XXX: We tried a simpler approach of selecting the nearest point
-        // previously but with noisy data we would somtimes select a
-        // disconnected point that then wouldn't cluster with anything
-        //
-        // XXX: we could calculate the median more optimally if this
-        // shows up in any profiling...
-        std::sort(focal_region, focal_region + fr_i,
-                  [](focal_point a, focal_point b) { return a.fz < b.fz; });
-        fr_i /= 2;
-
-        int idx = focal_region[fr_i].idx;
-        fx = idx % width;
-        fy = idx / width;
-        fz = focal_region[fr_i].fz;
-
-        if (ctx->debug_cloud_mode) {
-            // Draw the lines of focus...
-            if (fz != FLT_MAX) {
-                float line_x = tracking->depth_class->points[focal_region[fr_i].idx].x;
-                float line_y = tracking->depth_class->points[focal_region[fr_i].idx].y;
-                tracking_draw_line(tracking,
-                                   0, 0, 0,
-                                   0, 0, 4,
-                                   0x808080ff);
-                tracking_draw_line(tracking,
-                                   0, 0, 0,
-                                   line_x, line_y, fz,
-                                   0x00ff00ff);
-
-            } else {
-                tracking_draw_line(tracking,
-                                   0, 0, 0,
-                                   0, 0, 4,
-                                   0xff0000ff);
-            }
-        }
-
-        // Flood-fill downwards from the focal point, with a limit on the x and
-        // z axes for how far a point can be from the focus. This will allow
-        // us to hopefully find the floor level and establish a y limit before
-        // then flood-filling again without the x and z limits.
-
-        struct PointCmp {
-            int x;
-            int y;
-            int lx;
-            int ly;
-        };
-        std::queue<struct PointCmp> flood_fill;
-        flood_fill.push({ fx, fy, fx, fy });
-        std::vector<bool> done_mask(depth_class_size, false);
-
-        pcl::PointXYZL &focus_pt =
-            tracking->depth_class->points[fidx];
-
-        float lowest_point = -FLT_MAX;
-        while (!flood_fill.empty()) {
-            struct PointCmp point = flood_fill.front();
-            flood_fill.pop();
-
-            int idx = point.y * width + point.x;
-
-            if (point.x < 0 || point.y < fy ||
-                point.x >= width || point.y >= height ||
-                done_mask[idx]) {
-                continue;
-            }
-
-            pcl::PointXYZL &pcl_pt =
-                tracking->depth_class->points[idx];
-
-            if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width ||
-                fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth) {
-                continue;
-            }
-
-            float aligned_y = (ctx->depth_pose.type != GM_POSE_INVALID) ?
-                tracking->ground_cloud->points[idx].y :
-                tracking->depth_class->points[idx].y;
-            if (aligned_y > lowest_point) {
-                lowest_point = aligned_y;
-            }
-
-            if (gm_compare_depth(tracking->depth_class,
-                                 point.x, point.y, point.lx, point.ly,
-                                 ctx->cluster_tolerance)) {
-                done_mask[idx] = true;
-                flood_fill.push({ point.x - 1, point.y, point.x, point.y });
-                flood_fill.push({ point.x + 1, point.y, point.x, point.y });
-                flood_fill.push({ point.x, point.y - 1, point.x, point.y });
-                flood_fill.push({ point.x, point.y + 1, point.x, point.y });
-
-
-                // TODO: move outside loop, and instead iterate flood_fill
-                // queue when done
-                if (ctx->debug_cloud_stage == TRACKING_STAGE_NAIVE_FLOOR &&
-                    ctx->debug_cloud_mode)
-                {
-                    struct gm_point_rgba debug_point;
-
-                    debug_point.x = tracking->depth_class->points[idx].x;
-                    debug_point.y = -tracking->depth_class->points[idx].y; // FIXME
-                    debug_point.z = tracking->depth_class->points[idx].z;
-                    debug_point.rgba = 0xffffffff;
-
-                    tracking->debug_cloud.push_back(debug_point);
-                    tracking->debug_cloud_indices.push_back(idx);
-                }
-            }
-        }
-
-        pcl::PointIndices person_indices;
-        flood_fill.push({ fx, fy, fx, fy });
-        std::fill(done_mask.begin(), done_mask.end(), false);
-
-        while (!flood_fill.empty()) {
-            struct PointCmp point = flood_fill.front();
-            flood_fill.pop();
-
-            int idx = point.y * width + point.x;
-
-            if (point.x < 0 || point.y < 0 ||
-                point.x >= width || point.y >= height ||
-                done_mask[idx]) {
-                continue;
-            }
-
-            pcl::PointXYZL &pcl_pt =
-                tracking->depth_class->points[idx];
-
-            // Avoid building a cloud that would be considered invalid. We
-            // assume the focus point is somewhere near the center of the body,
-            // but not the exact center (so we divide by 1.75 and not 2).
-            if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width / 1.75f ||
-                fabsf(focus_pt.y - pcl_pt.y) > ctx->cluster_max_height / 1.75f ||
-                fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth / 1.75f) {
-                continue;
-            }
-
-            float aligned_y = (ctx->depth_pose.type != GM_POSE_INVALID) ?
-                tracking->ground_cloud->points[idx].y :
-                tracking->depth_class->points[idx].y;
-            if (aligned_y > lowest_point - ctx->floor_threshold) {
-                continue;
-            }
-
-            if (gm_compare_depth(tracking->depth_class,
-                                 point.x, point.y, point.lx, point.ly,
-                                 ctx->cluster_tolerance)) {
-                done_mask[idx] = true;
-                person_indices.indices.push_back(idx);
-                flood_fill.push({ point.x - 1, point.y, point.x, point.y });
-                flood_fill.push({ point.x + 1, point.y, point.x, point.y });
-                flood_fill.push({ point.x, point.y - 1, point.x, point.y });
-                flood_fill.push({ point.x, point.y + 1, point.x, point.y });
-
-                // TODO: move outside loop, and instead iterate flood_fill
-                // queue when done
-                if (ctx->debug_cloud_stage == TRACKING_STAGE_NAIVE_FINAL &&
-                    ctx->debug_cloud_mode)
-                {
-                    struct gm_point_rgba debug_point;
-
-                    debug_point.x = tracking->depth_class->points[idx].x;
-                    debug_point.y = -tracking->depth_class->points[idx].y; // FIXME
-                    debug_point.z = tracking->depth_class->points[idx].z;
-                    debug_point.rgba = 0xffffffff;
-
-                    tracking->debug_cloud.push_back(debug_point);
-                    tracking->debug_cloud_indices.push_back(idx);
-                }
-            }
-        }
-
-        if (ctx->debug_cloud_mode &&
-            (ctx->debug_cloud_stage == TRACKING_STAGE_NAIVE_FLOOR ||
-             ctx->debug_cloud_stage == TRACKING_STAGE_NAIVE_FINAL))
-        {
-            colour_debug_cloud(ctx, tracking, tracking->depth_class, true);
-        }
-
-        if (!person_indices.indices.empty()) {
-            cluster_indices.push_back(person_indices);
-        }
+    if (ctx->codebook_pose.type != GM_POSE_INVALID) {
+        add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
+                                                      tracking->depth_class,
+                                                      state->to_ground);
+        colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
     } else {
-        // Use depth clustering to split the cloud into possible human clusters
-        // based on depth and classification.
-        LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
-            new LabelComparator<pcl::PointXYZL>);
-        label_cluster->setInputCloud(tracking->depth_class);
-        label_cluster->setDepthThreshold(ctx->cluster_tolerance);
-
-        tracking->cluster_labels =
-            pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
-        pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
-            depth_connector(label_cluster);
-        depth_connector.setInputCloud(tracking->depth_class);
-        depth_connector.segment(*tracking->cluster_labels, cluster_indices);
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+        colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
     }
+}
+
+static void
+stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
+                                struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    glm::mat4 to_start = state->to_start;
+    glm::mat4 start_to_codebook = ctx->start_to_codebook;
+    int seg_res = ctx->seg_res;
+
+    add_debug_cloud_xyz_of_codebook_space(
+        ctx, tracking, tracking->depth_class, to_start,
+        start_to_codebook, &tracking->depth_camera_intrinsics, seg_res);
+    colour_debug_cloud(ctx, tracking, tracking->depth_class, false);
+}
+
+static void
+stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
+                           struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    glm::mat4 to_start = state->to_start;
+    glm::mat4 start_to_codebook = ctx->start_to_codebook;
+    unsigned depth_class_size = tracking->depth_class->points.size();
+    int seg_res = ctx->seg_res;
+
+    // Remove depth classification old codewords
+    for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
+        std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        ctx->depth_seg_bg[off] = NULL;
+        for (unsigned i = 0; i < codewords.size();) {
+            struct seg_codeword &codeword = codewords[i];
+            if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
+                ctx->seg_timeout)
+            {
+                std::swap(codeword, codewords.back());
+                codewords.pop_back();
+            } else {
+                if (!ctx->depth_seg_bg[off] ||
+                    codeword.n > ctx->depth_seg_bg[off]->n) {
+                    ctx->depth_seg_bg[off] = &codeword;
+                }
+                ++i;
+            }
+        }
+    }
+
+    // Do classification of depth buffer
+    for (unsigned depth_off = 0; depth_off < depth_class_size; ++depth_off)
+    {
+        pcl::PointXYZL point =
+            tracking->depth_class->points[depth_off];
+
+        if (std::isnan(point.z)) {
+            // We'll never cluster a nan value, so we can immediately
+            // classify it as background.
+            tracking->depth_class->points[depth_off].label = BG;
+            continue;
+        } else {
+            int off = project_point_into_codebook(
+                &point, to_start, start_to_codebook,
+                &tracking->depth_camera_intrinsics, seg_res);
+
+            // Falls outside of codebook so we can't classify...
+            if (off < 0)
+                continue;
+
+            // At this point z has been projected into the coordinate space
+            // of the codebook
+            float depth = point.z;
+
+            const uint64_t t = tracking->frame->timestamp;
+            const float tb = ctx->seg_tb;
+            const float tf = ctx->seg_tf;
+            const int b = ctx->seg_b;
+            const int gamma = (float)ctx->seg_gamma;
+            const int alpha = ctx->seg_alpha;
+            const float psi = ctx->seg_psi;
+
+            // Look to see if this pixel falls into an existing codeword
+            struct seg_codeword *codeword = NULL;
+            struct seg_codeword *bg_codeword = ctx->depth_seg_bg[off];
+
+            std::vector<struct seg_codeword> &codewords =
+                ctx->depth_seg[off];
+            for (std::vector<struct seg_codeword>::iterator it =
+                 codewords.begin(); it != codewords.end(); ++it) {
+                struct seg_codeword &candidate = *it;
+
+                float dist = fabsf(depth - candidate.m);
+                if (dist < tb) {
+                    codeword = &candidate;
+                    break;
+                }
+            }
+
+            assert(bg_codeword || (!bg_codeword && !codeword));
+
+            // Classify this depth value
+            const float frame_time = ctx->n_tracking ?
+                (float)(t - ctx->tracking_history[0]->frame->timestamp) :
+                100000000.f;
+
+            if (!codeword) {
+                tracking->depth_class->points[depth_off].label = FG;
+            } else if (codeword->n == bg_codeword->n) {
+                tracking->depth_class->points[depth_off].label = BG;
+            } else {
+                bool flat = false, flickering = false;
+                float mean_diff = fabsf(codeword->m - bg_codeword->m);
+                if ((tb < mean_diff) && (mean_diff <= tf)) {
+                    flat = true;
+                }
+                if ((b * codeword->nc) > codeword->n &&
+                    (int)(((t - codeword->ts) / frame_time) / gamma) <=
+                    codeword->nc) {
+                    flickering = true;
+                }
+                if (flat || flickering) {
+                    tracking->depth_class->points[depth_off].label =
+                        (flat && flickering) ?
+                            FL_FLK : (flat ?  FL : FLK);
+                } else {
+                    if (codeword->n > alpha &&
+                        ((codeword->tl - codeword->ts) / frame_time) /
+                        (float)codeword->n >= psi) {
+                        tracking->depth_class->points[depth_off].label = TB;
+                    } else {
+                        tracking->depth_class->points[depth_off].label = FG;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void
+stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
+                                 struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, tracking, tracking->depth_class,
+                       true); // classification done
+}
+
+static void
+stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
+                            struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    unsigned depth_class_size = tracking->depth_class->points.size();
+    enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
+
+    // If we've not tracked a human yet, the depth classification may not
+    // be reliable - just use a simple clustering technique to find a
+    // human and separate them from the floor, then rely on motion detection
+    // for subsequent frames.
+    int width = (int)tracking->depth_class->width;
+    int height = (int)tracking->depth_class->height;
+    int fx = width / 2;
+    int fy = height / 2;
+    int fidx = fy * width + fx;
+
+    // First search a small box in the center of the image and pick the
+    // nearest point to start our flood-fill from.
+    int fw = width / 8; // TODO: make box size configurable
+    int fh = height / 8;
+
+    float fz = FLT_MAX;
+    int fr_i = 0;
+    struct focal_point {
+        float fz;
+        int idx;
+    } focal_region[fw * fh];
+
+    int x0 = fx - fw / 2;
+    int y0 = fy - fh / 2;
+    for (int y = y0; y < (y0 + fh); y++) {
+        for (int x = x0; x < (x0 + fw); x++) {
+            int idx = y * width + x;
+            pcl::PointXYZL &point =
+                tracking->depth_class->points[idx];
+            if (!std::isnan(point.z))
+                focal_region[fr_i++] = { point.z, idx };
+        }
+    }
+
+    //gm_assert(ctx->log, fr_i == fw * fh, "Flibble");
+    // Use the median point as our focal point
+    //
+    // XXX: We tried a simpler approach of selecting the nearest point
+    // previously but with noisy data we would somtimes select a
+    // disconnected point that then wouldn't cluster with anything
+    //
+    // XXX: we could calculate the median more optimally if this
+    // shows up in any profiling...
+    std::sort(focal_region, focal_region + fr_i,
+              [](focal_point a, focal_point b) { return a.fz < b.fz; });
+    fr_i /= 2;
+
+    int idx = focal_region[fr_i].idx;
+    fx = idx % width;
+    fy = idx / width;
+    fz = focal_region[fr_i].fz;
+
+    if (ctx->debug_cloud_mode) {
+        // Draw the lines of focus...
+        if (fz != FLT_MAX) {
+            float line_x = tracking->depth_class->points[focal_region[fr_i].idx].x;
+            float line_y = tracking->depth_class->points[focal_region[fr_i].idx].y;
+            tracking_draw_line(tracking,
+                               0, 0, 0,
+                               0, 0, 4,
+                               0x808080ff);
+            tracking_draw_line(tracking,
+                               0, 0, 0,
+                               line_x, line_y, fz,
+                               0x00ff00ff);
+        } else {
+            tracking_draw_line(tracking,
+                               0, 0, 0,
+                               0, 0, 4,
+                               0xff0000ff);
+        }
+    }
+
+    state->naive_fx = fx;
+    state->naive_fy = fy;
+
+    // Flood-fill downwards from the focal point, with a limit on the x and
+    // z axes for how far a point can be from the focus. This will allow
+    // us to hopefully find the floor level and establish a y limit before
+    // then flood-filling again without the x and z limits.
+
+    std::queue<struct PointCmp> &flood_fill = state->flood_fill;
+    flood_fill.push({ fx, fy, fx, fy });
+
+    std::vector<bool> &done_mask = state->done_mask;
+    done_mask.resize(depth_class_size, false);
+
+    pcl::PointXYZL &focus_pt =
+        tracking->depth_class->points[fidx];
+
+    float lowest_point = -FLT_MAX;
+    while (!flood_fill.empty()) {
+        struct PointCmp point = flood_fill.front();
+        flood_fill.pop();
+
+        int idx = point.y * width + point.x;
+
+        if (point.x < 0 || point.y < fy ||
+            point.x >= width || point.y >= height ||
+            done_mask[idx]) {
+            continue;
+        }
+
+        pcl::PointXYZL &pcl_pt =
+            tracking->depth_class->points[idx];
+
+        if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width ||
+            fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth) {
+            continue;
+        }
+
+        float aligned_y = (ctx->codebook_pose.type != GM_POSE_INVALID) ?
+            tracking->ground_cloud->points[idx].y :
+            tracking->depth_class->points[idx].y;
+        if (aligned_y > lowest_point) {
+            lowest_point = aligned_y;
+        }
+
+        if (gm_compare_depth(tracking->depth_class,
+                             point.x, point.y, point.lx, point.ly,
+                             ctx->cluster_tolerance))
+        {
+            done_mask[idx] = true;
+            flood_fill.push({ point.x - 1, point.y, point.x, point.y });
+            flood_fill.push({ point.x + 1, point.y, point.x, point.y });
+            flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+            flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+
+            // TODO: move outside loop, and instead iterate flood_fill
+            // queue when done
+            if (debug_stage_id == TRACKING_STAGE_NAIVE_FLOOR &&
+                ctx->debug_cloud_mode)
+            {
+                struct gm_point_rgba debug_point;
+
+                debug_point.x = tracking->depth_class->points[idx].x;
+                debug_point.y = -tracking->depth_class->points[idx].y; // FIXME
+                debug_point.z = tracking->depth_class->points[idx].z;
+                debug_point.rgba = 0xffffffff;
+
+                tracking->debug_cloud.push_back(debug_point);
+                tracking->debug_cloud_indices.push_back(idx);
+            }
+        }
+    }
+
+    state->naive_floor_y = lowest_point;
+}
+
+static void
+stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
+                                  struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    // Note: the actual debug cloud is updated as part of
+    // stage_naive_cluster_cb above, so we just need the color..
+    colour_debug_cloud(ctx, tracking, tracking->depth_class, true);
+}
+
+static void
+stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
+                       struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
+
+    int width = (int)tracking->depth_class->width;
+    int height = (int)tracking->depth_class->height;
+
+    int fx = state->naive_fx;
+    int fy = state->naive_fy;
+
+    int fidx = fy * width + fx;
+    pcl::PointXYZL &focus_pt = tracking->depth_class->points[fidx];
+
+    float lowest_point = state->naive_floor_y;
+
+    std::queue<struct PointCmp> &flood_fill = state->flood_fill;
+    std::vector<bool> &done_mask = state->done_mask;
+
+    flood_fill.push({ fx, fy, fx, fy });
+    std::fill(done_mask.begin(), done_mask.end(), false);
+
+    pcl::PointIndices person_indices;
+
+    while (!flood_fill.empty()) {
+        struct PointCmp point = flood_fill.front();
+        flood_fill.pop();
+
+        int idx = point.y * width + point.x;
+
+        if (point.x < 0 || point.y < 0 ||
+            point.x >= width || point.y >= height ||
+            done_mask[idx]) {
+            continue;
+        }
+
+        pcl::PointXYZL &pcl_pt =
+            tracking->depth_class->points[idx];
+
+        // Avoid building a cloud that would be considered invalid. We
+        // assume the focus point is somewhere near the center of the body,
+        // but not the exact center (so we divide by 1.75 and not 2).
+        if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width / 1.75f ||
+            fabsf(focus_pt.y - pcl_pt.y) > ctx->cluster_max_height / 1.75f ||
+            fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth / 1.75f) {
+            continue;
+        }
+
+        float aligned_y = (ctx->codebook_pose.type != GM_POSE_INVALID) ?
+            tracking->ground_cloud->points[idx].y :
+            tracking->depth_class->points[idx].y;
+        if (aligned_y > lowest_point - ctx->floor_threshold) {
+            continue;
+        }
+
+        if (gm_compare_depth(tracking->depth_class,
+                             point.x, point.y, point.lx, point.ly,
+                             ctx->cluster_tolerance)) {
+            done_mask[idx] = true;
+            person_indices.indices.push_back(idx);
+            flood_fill.push({ point.x - 1, point.y, point.x, point.y });
+            flood_fill.push({ point.x + 1, point.y, point.x, point.y });
+            flood_fill.push({ point.x, point.y - 1, point.x, point.y });
+            flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+
+            // TODO: move outside loop, and instead iterate flood_fill
+            // queue when done
+            if (debug_stage_id == TRACKING_STAGE_NAIVE_CLUSTER &&
+                ctx->debug_cloud_mode)
+            {
+                struct gm_point_rgba debug_point;
+
+                debug_point.x = tracking->depth_class->points[idx].x;
+                debug_point.y = -tracking->depth_class->points[idx].y; // FIXME
+                debug_point.z = tracking->depth_class->points[idx].z;
+                debug_point.rgba = 0xffffffff;
+
+                tracking->debug_cloud.push_back(debug_point);
+                tracking->debug_cloud_indices.push_back(idx);
+            }
+        }
+    }
+
+    if (!person_indices.indices.empty()) {
+        std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
+        cluster_indices.push_back(person_indices);
+    }
+}
+
+static void
+stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
+                             struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    // Note: the actual debug cloud is updated as part of
+    // stage_naive_cluster_cb above, so we just need the color..
+    colour_debug_cloud(ctx, tracking, tracking->depth_class, true);
+}
+
+static void
+stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
+                          struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
+
+    LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
+        new LabelComparator<pcl::PointXYZL>);
+    label_cluster->setInputCloud(tracking->depth_class);
+    label_cluster->setDepthThreshold(ctx->cluster_tolerance);
+
+    tracking->cluster_labels =
+        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
+    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
+        depth_connector(label_cluster);
+    depth_connector.setInputCloud(tracking->depth_class);
+    depth_connector.segment(*tracking->cluster_labels, cluster_indices);
+}
+
+static void
+stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
+                                struct pipeline_scratch_state *state)
+{
+    //struct gm_context *ctx = tracking->ctx;
+
+}
+
+static void
+stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
+                        struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
 
     // Assume the any cluster that has roughly human dimensions and
     // contains its centroid may be a person.
 
     //const float centroid_tolerance = 0.1f;
-    std::vector<pcl::PointIndices> persons;
+    std::vector<pcl::PointIndices> &persons = state->persons;
     for (unsigned i = 0; i < cluster_indices.size(); ++i) {
         pcl::PointIndices &points = cluster_indices[i];
 
@@ -3258,8 +3354,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
             diff[2] > ctx->cluster_max_depth) {
             continue;
         }
-        LOGI("Cluster with %d points, (%.2fx%.2fx%.2f)\n",
-             (int)(points).indices.size(), diff[0], diff[1], diff[2]);
+        gm_info(ctx->log,
+                "Cluster with %d points, (%.2fx%.2fx%.2f)\n",
+                (int)(points).indices.size(), diff[0], diff[1], diff[2]);
 
 #if 0
         // Work out the centroid of the cloud and see if there's a point
@@ -3298,39 +3395,42 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         persons.push_back(points);
     }
+}
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Clustering and people detection took %.3f%s",
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+static void
+stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
+                              struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
-    if (persons.size() == 0) {
-        if (motion_detection) {
-            update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
-                                  seg_res);
-        }
-        LOGI("Skipping detection: Could not find a person cluster");
-        return false;
-    }
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, tracking, tracking->depth_class,
+                       true); // classification done
+}
 
-    start = get_time();
+static void
+stage_project_clusters_cb(struct gm_tracking_impl *tracking,
+                         struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int seg_res = ctx->seg_res;
+
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
 
-    std::vector<float*> depth_images;
-    for (std::vector<pcl::PointIndices>::iterator p_it = persons.begin();
-         p_it != persons.end(); ++p_it) {
+    std::vector<float*> &depth_images = state->depth_images;
 
+    std::vector<pcl::PointIndices> &persons = state->persons;
+
+    for (auto &person : persons) {
         float *depth_img = (float *)xmalloc(width * height * sizeof(float));
         for (int i = 0; i < width * height; ++i) {
             depth_img[i] = HUGE_DEPTH;
         }
 
-        for (std::vector<int>::const_iterator it = (*p_it).indices.begin();
-             it != (*p_it).indices.end (); ++it) {
-            int lx = (*it) % tracking->depth_class->width;
-            int ly = (*it) / tracking->depth_class->width;
+        for (int idx : person.indices) {
+            int lx = idx % tracking->depth_class->width;
+            int ly = idx / tracking->depth_class->width;
             for (int hy = (int)(ly * seg_res), ey = 0;
                  hy < (int)tracking->depth_cloud->height && ey < seg_res;
                  ++hy, ++ey) {
@@ -3369,120 +3469,522 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
         depth_images.push_back(depth_img);
     }
+}
 
+static void
+stage_project_clusters_debug_cb(struct gm_tracking_impl *tracking,
+                               struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Re-projecting %d %dx%d point clouds took %.3f%s",
-         (int)persons.size(), (int)width, (int)height,
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, tracking, tracking->depth_class,
+                       true); // classification done
+}
 
-    start = get_time();
+static void
+stage_label_inference_cb(struct gm_tracking_impl *tracking,
+                         struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    int width = tracking->training_camera_intrinsics.width;
+    int height = tracking->training_camera_intrinsics.height;
+
+    infer_labels<float>(ctx->log,
+                        ctx->decision_trees,
+                        ctx->n_decision_trees,
+                        state->depth_image,
+                        width, height,
+                        state->label_probs,
+                        true); // multi-threaded
+}
+
+static void
+stage_joint_weights_cb(struct gm_tracking_impl *tracking,
+                       struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    int width = tracking->training_camera_intrinsics.width;
+    int height = tracking->training_camera_intrinsics.height;
+
+    calc_pixel_weights<float>(state->depth_image,
+                              state->label_probs,
+                              width, height,
+                              ctx->n_labels,
+                              ctx->joint_map,
+                              state->weights);
+}
+
+static void
+stage_joint_inference_cb(struct gm_tracking_impl *tracking,
+                         struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    int width = tracking->training_camera_intrinsics.width;
+    int height = tracking->training_camera_intrinsics.height;
 
     float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
                                tracking->training_camera_intrinsics.fy));
-    float *weights = (float*)
-        xmalloc(width * height * ctx->n_joints * sizeof(float));
-    float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
-                                         sizeof(float));
-    unsigned best_person = 0;
-    for (unsigned i = 0; i < depth_images.size(); ++i) {
-        float *depth_img = depth_images[i];
 
-        uint64_t lstart, lend, lduration;
-
-        // Do inference
-        lstart = get_time();
-        infer_labels<float>(ctx->log,
-                            ctx->decision_trees, ctx->n_decision_trees,
-                            depth_img, width, height, label_probs, true);
-        lend = get_time();
-        lduration = lend - lstart;
-        LOGI("\tLabel inference took %.3f%s",
-             get_duration_ns_print_scale(lduration),
-             get_duration_ns_print_scale_suffix(lduration));
-
-        lstart = get_time();
-        calc_pixel_weights<float>(depth_img, label_probs, width, height,
-                                  ctx->n_labels, ctx->joint_map, weights);
-        lend = get_time();
-        lduration = lend - lstart;
-        LOGI("\tCalculating pixel weights took %.3f%s",
-             get_duration_ns_print_scale(lduration),
-             get_duration_ns_print_scale_suffix(lduration));
-
-        lstart = get_time();
-        InferredJoints *candidate =
-            infer_joints_fast<float>(depth_img, label_probs, weights,
-                                     width, height, ctx->n_labels,
+    state->joints_candidate =
+            infer_joints_fast<float>(state->depth_image,
+                                     state->label_probs,
+                                     state->weights,
+                                     width, height,
+                                     ctx->n_labels,
                                      ctx->joint_map,
-                                     vfov, ctx->joint_params->joint_params);
-        lend = get_time();
-        lduration = lend - lstart;
-        LOGI("\tJoint inference took %.3f%s",
-             get_duration_ns_print_scale(lduration),
-             get_duration_ns_print_scale_suffix(lduration));
+                                     vfov,
+                                     ctx->joint_params->joint_params);
+}
 
-        assert(candidate->n_joints == ctx->n_joints);
+static void
+stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
+                         struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
-        // Build and refine skeleton
-        lstart = get_time();
-        struct gm_skeleton candidate_skeleton(ctx->n_joints);
-        build_skeleton(ctx, candidate, candidate_skeleton);
-        candidate_skeleton.timestamp = tracking->frame->timestamp;
-        build_bones(ctx, candidate_skeleton);
-        refine_skeleton(ctx, candidate, candidate_skeleton);
+    build_skeleton(ctx, state->joints_candidate, state->candidate_skeleton);
+    state->candidate_skeleton.timestamp = tracking->frame->timestamp;
 
-        free_joints(candidate);
+    build_bones(ctx, state->candidate_skeleton);
+    refine_skeleton(ctx, state->joints_candidate, state->candidate_skeleton);
+}
+
+static void
+stage_sanitize_skeleton_cb(struct gm_tracking_impl *tracking,
+                           struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    sanitise_skeleton(ctx, tracking->skeleton,
+                      tracking->frame->timestamp);
+}
+
+static void
+add_debug_cloud_person_masks_except(struct gm_tracking_impl *tracking,
+                                    struct pipeline_scratch_state *state,
+                                    int except_person)
+
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    /* Also show other failed candidates... */
+    for (int i = 0; i < (int)state->persons.size(); i++) {
+        if (i == except_person)
+            continue;
+        add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                      tracking->depth_class,
+                                                      state->persons[i].indices);
+    }
+}
+
+static void
+add_best_person_depth_image_debug_cb(struct gm_tracking_impl *tracking,
+                                      struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    float *depth_img = state->depth_images[state->best_person];
+
+    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
+                                             depth_img,
+                                             &tracking->training_camera_intrinsics);
+    colour_debug_cloud(ctx, tracking, NULL, false);
+
+    add_debug_cloud_person_masks_except(tracking, state, state->best_person);
+}
+
+static void
+stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
+                                        struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->depth_class,
+                                                  state->persons[state->best_person].indices);
+    colour_debug_cloud(ctx, tracking, tracking->depth_class, true);
+
+    add_debug_cloud_person_masks_except(tracking, state, state->best_person);
+}
+
+static void
+stage_update_codebook_cb(struct gm_tracking_impl *tracking,
+                         struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    update_depth_codebook(ctx, tracking,
+                          state->to_start, ctx->start_to_codebook,
+                          ctx->seg_res);
+}
+
+#if 0
+static void
+stage__cb(struct gm_tracking_impl *tracking,
+                struct pipeline_scratch_state *state)
+{
+    //struct gm_context *ctx = tracking->ctx;
+
+}
+
+static void
+stage__debug_cb(struct gm_tracking_impl *tracking,
+                      struct pipeline_scratch_state *state)
+{
+    //struct gm_context *ctx = tracking->ctx;
+
+}
+#endif
+
+static void
+run_stage_debug(struct gm_tracking_impl *tracking,
+                enum tracking_stage stage_id,
+                void (*stage_debug_callback)(struct gm_tracking_impl *tracking,
+                                             struct pipeline_scratch_state *state),
+                struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    if (ctx->debug_cloud_mode &&
+        ctx->debug_pipeline_stage == stage_id &&
+        stage_debug_callback)
+    {
+        stage_debug_callback(tracking, state);
+    }
+}
+
+static void
+run_stage(struct gm_tracking_impl *tracking,
+          enum tracking_stage stage_id,
+          void (*stage_callback)(struct gm_tracking_impl *tracking,
+                                 struct pipeline_scratch_state *state),
+          void (*stage_debug_callback)(struct gm_tracking_impl *tracking,
+                                       struct pipeline_scratch_state *state),
+          struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_id];
+
+    uint64_t duration;
+
+    if (stage_callback) {
+        uint64_t start = get_time();
+
+        stage_callback(tracking, state);
+
+        uint64_t end = get_time();
+        duration = end - start;
+    } else
+        duration = 0;
+
+    // Note: we use += here because a stage may be used multiple times
+    // during tracking and we reset the per-stage durations when we
+    // start gm_context_track_skeleton()
+    stage_data.duration_ns += duration;
+
+    stage.total_time_ns += duration;
+    stage.n_invocations++;
+
+    gm_info(ctx->log,
+            "Stage: %s took %.3f%s",
+            stage.name,
+            get_duration_ns_print_scale(duration),
+            get_duration_ns_print_scale_suffix(duration));
+
+    run_stage_debug(tracking, stage_id, stage_debug_callback, state);
+}
+
+static bool
+gm_context_track_skeleton(struct gm_context *ctx,
+                          struct gm_tracking_impl *tracking)
+{
+    uint64_t start, end, duration;
+    enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
+    struct pipeline_scratch_state state(ctx->n_joints);
+
+    for (int i = 0; i < tracking->stage_data.size(); i++) {
+        tracking->stage_data[i].duration_ns = 0;
+    }
+
+    if (ctx->debug_cloud_mode) {
+        tracking->debug_cloud.resize(0);
+        tracking->debug_cloud_indices.resize(0);
+        tracking->debug_lines.resize(0);
+    }
+
+    float nan = std::numeric_limits<float>::quiet_NaN();
+    pcl::PointXYZL invalid_pt;
+    invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
+    invalid_pt.label = -1;
+
+    // X increases to the right
+    // Y increases downwards
+    // Z increases outwards
+
+    if (debug_stage_id == TRACKING_STAGE_START &&
+        ctx->debug_cloud_mode)
+    {
+        add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
+                                                 tracking->depth,
+                                                 &tracking->depth_camera_intrinsics);
+        colour_debug_cloud(ctx, tracking, NULL, false);
+    }
+
+    run_stage(tracking,
+              TRACKING_STAGE_GAP_FILLED,
+              stage_gap_fill_cb,
+              stage_gap_fill_debug_cb,
+              &state);
+
+    run_stage(tracking,
+              TRACKING_STAGE_DOWNSAMPLED,
+              stage_downsample_cb,
+              stage_downsample_debug_cb,
+              &state);
+
+    unsigned depth_class_size = tracking->depth_class->points.size();
+    bool motion_detection = ctx->motion_detection;
+
+
+    ctx->reset_codebook = false;
+
+    if (ctx->depth_seg.size() != depth_class_size ||
+        (ctx->codebook_pose.type != tracking->frame->pose.type))
+    {
+        gm_debug(ctx->log, "XXX: Resetting pose");
+        ctx->reset_codebook = true;
+    } else if (tracking->frame->pose.type == GM_POSE_TO_START) {
+        // Check if the angle or distance between the current frame and the
+        // reference frame exceeds a certain threshold, and in that case,
+        // reset motion tracking.
+        float angle = glm::degrees(glm::angle(
+            glm::normalize(glm::quat(ctx->codebook_pose.orientation[3],
+                                     ctx->codebook_pose.orientation[0],
+                                     ctx->codebook_pose.orientation[1],
+                                     ctx->codebook_pose.orientation[2])) *
+            glm::inverse(glm::normalize(glm::quat(
+                tracking->frame->pose.orientation[3],
+                tracking->frame->pose.orientation[0],
+                tracking->frame->pose.orientation[1],
+                tracking->frame->pose.orientation[2])))));
+        while (angle > 180.f) angle -= 360.f;
+
+        float distance = glm::distance(
+            glm::vec3(ctx->codebook_pose.translation[0],
+                      ctx->codebook_pose.translation[1],
+                      ctx->codebook_pose.translation[2]),
+            glm::vec3(tracking->frame->pose.translation[0],
+                      tracking->frame->pose.translation[1],
+                      tracking->frame->pose.translation[2]));
+
+        gm_debug(ctx->log, "XXX: Angle: %.2f, "
+                 "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
+                 tracking->frame->pose.translation[0] -
+                 ctx->codebook_pose.translation[0],
+                 tracking->frame->pose.translation[1] -
+                 ctx->codebook_pose.translation[1],
+                 tracking->frame->pose.translation[2] -
+                 ctx->codebook_pose.translation[2]);
+        if (angle > 10.f || distance > 0.3f) {
+            // We've strayed too far from the initial pose, reset
+            // segmentation and use this as the home pose.
+            gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
+            ctx->reset_codebook = true;
+        }
+    }
+
+    state.to_start = glm::mat4(1.0);
+    state.to_ground = glm::mat4(1.0);
+    switch (tracking->frame->pose.type) {
+    case GM_POSE_INVALID:
+        break;
+    case GM_POSE_TO_START:
+        state.to_start = pose_to_matrix(tracking->frame->pose);
+        state.to_ground = state.to_start;
+        break;
+    case GM_POSE_TO_GROUND:
+        state.to_ground = pose_to_matrix(tracking->frame->pose);
+        break;
+    }
+
+    if (ctx->reset_codebook) {
+        ctx->depth_seg.clear();
+        ctx->depth_seg.resize(depth_class_size);
+        ctx->depth_seg_bg.resize(depth_class_size);
+        ctx->codebook_pose = tracking->frame->pose;
+        ctx->start_to_codebook = glm::inverse(state.to_start);
+
+        if (tracking->frame->pose.type != GM_POSE_TO_START)
+            gm_debug(ctx->log, "XXX: No tracking pose");
+    }
+
+    run_stage(tracking,
+              TRACKING_STAGE_GROUND_SPACE,
+              stage_ground_project_cb,
+              stage_ground_project_debug_cb,
+              &state);
+
+    if (motion_detection) {
+        // This is only a logical debug stage, since the projection
+        // is actually combined with the classification
+        run_stage(tracking,
+                  TRACKING_STAGE_CODEBOOK_SPACE,
+                  NULL, // no real work to do
+                  stage_codebook_project_debug_cb,
+                  &state);
+
+        run_stage(tracking,
+                  TRACKING_STAGE_CODEBOOK_CLASSIFY,
+                  stage_codebook_classify_cb,
+                  stage_codebook_classify_debug_cb,
+                  &state);
+    }
+
+
+    if (!motion_detection ||
+        !ctx->latest_tracking ||
+        !ctx->latest_tracking->success ||
+        ctx->reset_codebook)
+    {
+        run_stage(tracking,
+                  TRACKING_STAGE_NAIVE_FLOOR,
+                  stage_naive_detect_floor_cb,
+                  stage_naive_detect_floor_debug_cb,
+                  &state);
+
+        run_stage(tracking,
+                  TRACKING_STAGE_NAIVE_CLUSTER,
+                  stage_naive_cluster_cb,
+                  stage_naive_cluster_debug_cb,
+                  &state);
+    } else {
+        run_stage(tracking,
+                  TRACKING_STAGE_CODEBOOK_CLUSTER,
+                  stage_codebook_cluster_cb,
+                  stage_codebook_cluster_debug_cb,
+                  &state);
+    }
+
+    run_stage(tracking,
+              TRACKING_STAGE_FILTER_CLUSTERS,
+              stage_filter_clusters_cb,
+              stage_filter_clusters_debug_cb,
+              &state);
+
+    if (state.persons.size() == 0) {
+        if (ctx->motion_detection) {
+            update_depth_codebook(ctx, tracking,
+                                  state.to_start,
+                                  ctx->start_to_codebook,
+                                  ctx->seg_res);
+        }
+        gm_info(ctx->log, "Skipping detection: Could not find a person cluster");
+        return false;
+    }
+
+    run_stage(tracking,
+              TRACKING_STAGE_PROJECT_CLUSTERS,
+              stage_project_clusters_cb,
+              stage_project_clusters_debug_cb,
+              &state);
+
+
+    int width = tracking->training_camera_intrinsics.width;
+    int height = tracking->training_camera_intrinsics.height;
+    std::vector<float*> &depth_images = state.depth_images;
+    state.weights = (float*)
+        xmalloc(width * height * ctx->n_joints * sizeof(float));
+    state.label_probs = (float*)xmalloc(width * height * ctx->n_labels *
+                                         sizeof(float));
+    state.best_person = 0;
+    for (int i = 0; i < (int)depth_images.size(); i++) {
+        state.depth_image = depth_images[i];
+
+        run_stage(tracking,
+                  TRACKING_STAGE_LABEL_INFERENCE,
+                  stage_label_inference_cb,
+                  NULL,
+                  &state);
+
+        run_stage(tracking,
+                  TRACKING_STAGE_JOINT_WEIGHTS,
+                  stage_joint_weights_cb,
+                  NULL,
+                  &state);
+
+        run_stage(tracking,
+                  TRACKING_STAGE_JOINT_INFERENCE,
+                  stage_joint_inference_cb,
+                  NULL,
+                  &state);
+        assert(state.joints_candidate->n_joints == ctx->n_joints);
+
+        run_stage(tracking,
+                  TRACKING_STAGE_REFINE_SKELETON,
+                  stage_refine_skeleton_cb,
+                  NULL,
+                  &state);
 
         // If this skeleton has higher confidence than the last, keep it
         if (i == 0 ||
-            compare_skeletons(candidate_skeleton, tracking->skeleton)) {
-            std::swap(tracking->skeleton, candidate_skeleton);
-            std::swap(tracking->label_probs, label_probs);
-            best_person = i;
-        }
-        lend = get_time();
-        lduration = lend - lstart;
-        LOGI("\tSkeleton building took %.3f%s",
-             get_duration_ns_print_scale(lduration),
-             get_duration_ns_print_scale_suffix(lduration));
-    }
-    xfree(label_probs);
-    xfree(weights);
-
-    if (ctx->debug_cloud_mode &&
-        (ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON_BUF ||
-         ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON_CLOUD))
-    {
-        if (ctx->debug_cloud_stage == TRACKING_STAGE_BEST_PERSON_BUF) {
-            float *depth_img = depth_images[best_person];
-            add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                                     depth_img,
-                                                     &tracking->training_camera_intrinsics);
-            colour_debug_cloud(ctx, tracking, NULL, false);
-        } else {
-            add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                          tracking->depth_class,
-                                                          persons[best_person].indices);
-            colour_debug_cloud(ctx, tracking, tracking->depth_class, true);
+            compare_skeletons(state.candidate_skeleton, tracking->skeleton))
+        {
+            std::swap(tracking->skeleton, state.candidate_skeleton);
+            std::swap(tracking->label_probs, state.label_probs);
+            state.best_person = i;
         }
 
-        /* Also show other failed candidates... */
-        for (unsigned i = 0; i < persons.size(); i++) {
-            if (i == best_person)
-                continue;
-            add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                          tracking->depth_class,
-                                                          persons[i].indices);
-        }
+        free_joints(state.joints_candidate);
+        state.joints_candidate = NULL;
     }
+    xfree(state.label_probs);
+    state.label_probs = NULL;
+    xfree(state.weights);
+    state.weights = NULL;
+
+    // Only a logical stage since selection is part of the
+    // iteration above but we want to see the point cloud
+    // view of the best_person candidate before they were
+    // projected into a depth image used for label
+    // inference...
+    run_stage_debug(tracking,
+                    TRACKING_STAGE_SELECT_CANDIDATE_CLUSTER,
+                    stage_select_best_person_cloud_debug_cb,
+                    &state);
+
+    // We want the cloud view for these stages to represent the
+    // depth_image of the best_person candidate, so we wait until
+    // we've processed all candiates before updating the debug
+    // state...
+    //
+    // TODO: each stage should have a custom callback to e.g.
+    // handle colouring the points according to inferred labels
+    run_stage_debug(tracking,
+                    TRACKING_STAGE_LABEL_INFERENCE,
+                    add_best_person_depth_image_debug_cb,
+                    &state);
+    run_stage_debug(tracking,
+                    TRACKING_STAGE_JOINT_WEIGHTS,
+                    add_best_person_depth_image_debug_cb,
+                    &state);
+    run_stage_debug(tracking,
+                    TRACKING_STAGE_JOINT_INFERENCE,
+                    add_best_person_depth_image_debug_cb,
+                    &state);
+    run_stage_debug(tracking,
+                    TRACKING_STAGE_REFINE_SKELETON,
+                    add_best_person_depth_image_debug_cb,
+                    &state);
 
     for (unsigned i = 0; i < depth_images.size(); ++i) {
-        float *depth_img = depth_images[i];
-        xfree(depth_img);
+        xfree(depth_images[i]);
+        depth_images[i] = NULL;
     }
+    depth_images.clear();
 
     bool tracked = !ctx->skeleton_validation ||
         (tracking->skeleton.confidence >= ctx->skeleton_min_confidence &&
@@ -3491,19 +3993,14 @@ gm_context_track_skeleton(struct gm_context *ctx,
     // Update the depth classification so it knows which pixels are tracked
     // TODO: We should actually use the label cluster points, which may not
     //       consist of this entire cloud.
-    pcl::PointIndices &person = persons[best_person];
+    std::vector<pcl::PointIndices> &persons = state.persons;
+    pcl::PointIndices &person = persons[state.best_person];
     int tracked_label = tracked ? TRK : CAN;
     for (std::vector<int>::const_iterator it = person.indices.begin();
          it != person.indices.end(); ++it) {
         tracking->depth_class->points[*it].label = tracked_label;
     }
 
-    end = get_time();
-    duration = end - start;
-    LOGI("Inference on %d clouds took %.3f%s",
-         (int)depth_images.size(),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
 
     if (tracked) {
         start = get_time();
@@ -3552,8 +4049,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
         //       probably establish some thresholds and spit out multiple
         //       skeletons.
         if (ctx->bone_sanitisation) {
-            sanitise_skeleton(ctx, tracking->skeleton,
-                              tracking->frame->timestamp);
+            run_stage(tracking,
+                      TRACKING_STAGE_SANITIZE_SKELETON,
+                      stage_sanitize_skeleton_cb,
+                      NULL,
+                      &state);
         }
         for (int j = 0; j < ctx->n_joints; j++) {
             int idx = j * 3;
@@ -3569,8 +4069,11 @@ gm_context_track_skeleton(struct gm_context *ctx,
              get_duration_ns_print_scale_suffix(duration));
 
         if (motion_detection) {
-            update_depth_codebook(ctx, tracking, to_start, start_to_codebook,
-                                  seg_res);
+            run_stage(tracking,
+                      TRACKING_STAGE_UPDATE_CODEBOOK,
+                      stage_update_codebook_cb,
+                      NULL,
+                      &state);
         }
     }
 
@@ -4138,6 +4641,7 @@ detector_thread_cb(void *data)
         gm_debug(ctx->log, "Skeletal tracking took %.3f%s",
                  get_duration_ns_print_scale(duration),
                  get_duration_ns_print_scale_suffix(duration));
+        tracking->duration_ns = duration;
 
         pthread_mutex_lock(&ctx->tracking_swap_mutex);
 
@@ -4299,6 +4803,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     gm_assert(ctx->log, ctx->max_video_pixels,
               "Undefined maximum number of video pixels");
+
+    tracking->stage_data.resize(N_TRACKING_STAGES, {});
 
 #if 0
     tracking->face_detect_buf =
@@ -4940,56 +5446,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
-    ctx->depth_gap_fill = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "depth_gap_fill";
-    prop.desc = "Fill small gaps in the depth buffers";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->depth_gap_fill;
-    ctx->properties.push_back(prop);
-
-    ctx->apply_depth_distortion = false;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "apply_depth_distortion";
-    prop.desc = "Apply the distortion model of depth camera";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->apply_depth_distortion;
-    ctx->properties.push_back(prop);
-
-    ctx->min_depth = 0.5;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "min_depth";
-    prop.desc = "throw away points nearer than this";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->min_depth;
-    prop.float_state.min = 0.0;
-    prop.float_state.max = 10;
-    ctx->properties.push_back(prop);
-
-    ctx->max_depth = 3.5;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "max_depth";
-    prop.desc = "throw away points further than this";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->max_depth;
-    prop.float_state.min = 0.5;
-    prop.float_state.max = 10;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_res = 1;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_res";
-    prop.desc = "Resolution divider for running human segmentation";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_res;
-    prop.int_state.min = 1;
-    prop.int_state.max = 4;
-    ctx->properties.push_back(prop);
 
     ctx->motion_detection = true;
     prop = gm_ui_property();
@@ -5000,183 +5456,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.bool_state.ptr = &ctx->motion_detection;
     ctx->properties.push_back(prop);
 
-    ctx->seg_tb = 0.05f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_tb";
-    prop.desc = "Segmentation bucket threshold";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_tb;
-    prop.float_state.min = 0.001f;
-    prop.float_state.max = 0.1f;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_tf = 0.2f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_tf";
-    prop.desc = "Segmentation flickering threshold";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_tf;
-    prop.float_state.min = 0.05f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_N = 100;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_N";
-    prop.desc = "Segmentation max existing mean weight";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_N;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_b = 3;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_b";
-    prop.desc = "Segmentation flickering frame consecutiveness threshold";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_b;
-    prop.int_state.min = 1;
-    prop.int_state.max = 10;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_gamma = 100;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_gamma";
-    prop.desc = "Segmentation max flickering frame occurence";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_gamma;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_alpha = 200;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_alpha";
-    prop.desc = "Segmentation frame-time for uninteresting objects";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->seg_alpha;
-    prop.int_state.min = 10;
-    prop.int_state.max = 500;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_psi = 0.8f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_psi";
-    prop.desc = "Segmentation ratio for uninteresting object matches";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_psi;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 1.f;
-    ctx->properties.push_back(prop);
-
-    ctx->seg_timeout = 3.0f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "seg_timeout";
-    prop.desc = "Unused segmentation codeword recycle timeout";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->seg_timeout;
-    prop.float_state.min = 0.2f;
-    prop.float_state.max = 10.f;
-    ctx->properties.push_back(prop);
-
-    ctx->floor_threshold = 0.1f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "floor_threshold";
-    prop.desc = "The threshold from the lowest points of a potential person "
-                "cluster to filter out when looking for the floor.";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->floor_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.3f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_tolerance = 0.10f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_tolerance";
-    prop.desc = "Distance threshold when clustering points";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_tolerance;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_min_width = 0.15f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_min_width";
-    prop.desc = "Minimum width of a human cluster";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_min_width;
-    prop.float_state.min = 0.1f;
-    prop.float_state.max = 1.0f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_min_height = 0.8f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_min_height";
-    prop.desc = "Minimum height of a human cluster";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_min_height;
-    prop.float_state.min = 0.1f;
-    prop.float_state.max = 1.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_min_depth = 0.05f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_min_depth";
-    prop.desc = "Minimum depth of a human cluster";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_min_depth;
-    prop.float_state.min = 0.05f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_max_width = 2.0f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_max_width";
-    prop.desc = "Maximum width of a human cluster";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_max_width;
-    prop.float_state.min = 0.5f;
-    prop.float_state.max = 3.0f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_max_height = 2.45f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_max_height";
-    prop.desc = "Maximum height of a human cluster";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_max_height;
-    prop.float_state.min = 1.0f;
-    prop.float_state.max = 4.0f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_max_depth = 1.5f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_max_depth";
-    prop.desc = "Maximum depth of a human cluster";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_max_depth;
-    prop.float_state.min = 0.5f;
-    prop.float_state.max = 3.0f;
-    ctx->properties.push_back(prop);
-
     ctx->joint_refinement = true;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -5185,18 +5464,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                 "to a statistical joint position model better";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->joint_refinement;
-    ctx->properties.push_back(prop);
-
-    ctx->max_joint_predictions = 4;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "max_joint_predictions";
-    prop.desc = "Maximum number of absolute joint position predictions to make "
-                "across tracking history";
-    prop.type = GM_PROPERTY_INT;
-    prop.int_state.ptr = &ctx->max_joint_predictions;
-    prop.int_state.min = 0;
-    prop.int_state.max = TRACK_FRAMES - 1;
     ctx->properties.push_back(prop);
 
     ctx->max_prediction_delta = 100.f;
@@ -5231,64 +5498,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                 "unexpected changes.";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->bone_sanitisation;
-    ctx->properties.push_back(prop);
-
-    ctx->bone_length_variance = 0.05f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "bone_length_variance";
-    prop.desc = "Maximum allowed variance of bone length between frames";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->bone_length_variance;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 0.2f;
-    ctx->properties.push_back(prop);
-
-    ctx->bone_rotation_variance = 360.f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "bone_rotation_variance";
-    prop.desc = "Maximum allowed rotation of a bone (degrees/s)";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->bone_rotation_variance;
-    prop.float_state.min = 100.f;
-    prop.float_state.max = 1500.f;
-    ctx->properties.push_back(prop);
-
-    ctx->joint_move_threshold = 1.5f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "joint_move_threshold";
-    prop.desc = "Minimum travel distance (m/s) "
-                "before considering joint prediction";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->joint_move_threshold;
-    prop.float_state.min = 0.3f;
-    prop.float_state.max = 3.0f;
-    ctx->properties.push_back(prop);
-
-    ctx->joint_max_travel = 3.0f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "joint_max_travel";
-    prop.desc = "Maximum travel distance (m/s) "
-                "before considering joint prediction";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->joint_max_travel;
-    prop.float_state.min = 1.0f;
-    prop.float_state.max = 5.0f;
-    ctx->properties.push_back(prop);
-
-    ctx->joint_scale_threshold = 2.5f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "joint_scale_threshold";
-    prop.desc = "Maximum growth difference (x/s) "
-                "before considering joint prediction";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->joint_scale_threshold;
-    prop.float_state.min = 1.5f;
-    prop.float_state.max = 20.f;
     ctx->properties.push_back(prop);
 
     ctx->skeleton_validation = true;
@@ -5390,76 +5599,675 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.enum_state.enumerants = ctx->cloud_mode_enumerants.data();
     ctx->properties.push_back(prop);
 
-    ctx->debug_cloud_stage = TRACKING_STAGE_START;
+    /*
+     * XXX: note we have to be careful with the initialization of stage
+     * elements. Unlike the properties above, stages contain vectors so if we
+     * were to use a local variable for temporary stage initialization (like
+     * with the properties) then once the variable goes out of scope it will
+     * result in the vector being destroyed.
+     */
+
+
+    ctx->stages.resize(N_TRACKING_STAGES);
+    for (int i = 0; i < N_TRACKING_STAGES; i++) {
+        ctx->stages[i].stage_id = TRACKING_STAGE_START;
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_START;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "acquire";
+        stage.desc = "Captures a new frame to process for tracking";
+
+        stage.images.push_back((struct image_generator)
+                               {
+                                   "video",
+                                   "Video frame acquired from camera",
+                                   gm_tracking_create_rgb_video,
+                               });
+
+        stage.images.push_back((struct image_generator)
+                               {
+                                   "depth",
+                                   "Depth frame acquired from camera",
+                                   gm_tracking_create_rgb_depth,
+                               });
+
+        ctx->apply_depth_distortion = false;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "apply_depth_distortion";
+        prop.desc = "Apply the distortion model of depth camera";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->apply_depth_distortion;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_GAP_FILLED;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "gap_fill";
+        stage.desc = "Fill gaps and apply min/max depth thresholding";
+
+        ctx->min_depth = 0.5;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "min_depth";
+        prop.desc = "throw away points nearer than this";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->min_depth;
+        prop.float_state.min = 0.0;
+        prop.float_state.max = 10;
+        stage.properties.push_back(prop);
+
+        ctx->max_depth = 3.5;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_depth";
+        prop.desc = "throw away points further than this";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->max_depth;
+        prop.float_state.min = 0.5;
+        prop.float_state.max = 10;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_DOWNSAMPLED;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "downsample";
+        stage.desc = "Downsamples the native-resolution depth data";
+
+        ctx->seg_res = 1;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_res";
+        prop.desc = "Resolution divider for running human segmentation";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->seg_res;
+        prop.int_state.min = 1;
+        prop.int_state.max = 4;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_GROUND_SPACE;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "ground_align";
+        stage.desc = "Projects depth into ground-aligned space";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_SPACE;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "codebook_align";
+        stage.desc = "Project into stable 'codebook' space for motion analysis";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_FLOOR;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "naive_find_floor";
+        stage.desc = "Find floor to attempt naive single-person segmentation";
+
+        ctx->floor_threshold = 0.1f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "floor_threshold";
+        prop.desc = "The threshold from the lowest points of a potential person "
+            "cluster to filter out when looking for the floor.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->floor_threshold;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.3f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_CLUSTER;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "naive_cluster";
+        stage.desc = "Cluster based on assumptions about single-person tracking";
+
+        ctx->cluster_tolerance = 0.10f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_tolerance";
+        prop.desc = "Distance threshold when clustering points";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_tolerance;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_width = 0.15f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_min_width";
+        prop.desc = "Minimum width of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_width;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 1.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_height = 0.8f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_min_height";
+        prop.desc = "Minimum height of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_height;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 1.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_depth = 0.05f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_min_depth";
+        prop.desc = "Minimum depth of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_depth;
+        prop.float_state.min = 0.05f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_width = 2.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_max_width";
+        prop.desc = "Maximum width of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_width;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_height = 2.45f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_max_height";
+        prop.desc = "Maximum height of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_height;
+        prop.float_state.min = 1.0f;
+        prop.float_state.max = 4.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_depth = 1.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_max_depth";
+        prop.desc = "Maximum depth of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_depth;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_CLASSIFY;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "codebook_classify";
+        stage.desc = "Analyse and classify motion in codebook space for segmentation";
+        stage.images.push_back((struct image_generator)
+                               {
+                                   "codebook_classifications",
+                                   "Codebook classifications from motion analysis",
+                                   gm_tracking_create_rgb_depth_classification,
+                               });
+
+        ctx->seg_tb = 0.05f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_tb";
+        prop.desc = "Segmentation bucket threshold";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->seg_tb;
+        prop.float_state.min = 0.001f;
+        prop.float_state.max = 0.1f;
+        stage.properties.push_back(prop);
+
+        ctx->seg_tf = 0.2f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_tf";
+        prop.desc = "Segmentation flickering threshold";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->seg_tf;
+        prop.float_state.min = 0.05f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->seg_N = 100;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_N";
+        prop.desc = "Segmentation max existing mean weight";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->seg_N;
+        prop.int_state.min = 10;
+        prop.int_state.max = 500;
+        stage.properties.push_back(prop);
+
+        ctx->seg_b = 3;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_b";
+        prop.desc = "Segmentation flickering frame consecutiveness threshold";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->seg_b;
+        prop.int_state.min = 1;
+        prop.int_state.max = 10;
+        stage.properties.push_back(prop);
+
+        ctx->seg_gamma = 100;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_gamma";
+        prop.desc = "Segmentation max flickering frame occurence";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->seg_gamma;
+        prop.int_state.min = 10;
+        prop.int_state.max = 500;
+        stage.properties.push_back(prop);
+
+        ctx->seg_alpha = 200;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_alpha";
+        prop.desc = "Segmentation frame-time for uninteresting objects";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->seg_alpha;
+        prop.int_state.min = 10;
+        prop.int_state.max = 500;
+        stage.properties.push_back(prop);
+
+        ctx->seg_psi = 0.8f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_psi";
+        prop.desc = "Segmentation ratio for uninteresting object matches";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->seg_psi;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 1.f;
+        stage.properties.push_back(prop);
+
+        ctx->seg_timeout = 3.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "seg_timeout";
+        prop.desc = "Unused segmentation codeword recycle timeout";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->seg_timeout;
+        prop.float_state.min = 0.2f;
+        prop.float_state.max = 10.f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_CLUSTER;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "codebook_cluster";
+        stage.desc = "Cluster based on motion-based codebook classifications";
+        stage.images.push_back((struct image_generator)
+                               {
+                                   "candidate_cluster",
+                                   "All candidate clusters found, before selection",
+                                   gm_tracking_create_rgb_candidate_clusters,
+                               });
+
+        ctx->cluster_tolerance = 0.10f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_tolerance";
+        prop.desc = "Distance threshold when clustering points";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_tolerance;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_width = 0.15f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_min_width";
+        prop.desc = "Minimum width of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_width;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 1.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_height = 0.8f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_min_height";
+        prop.desc = "Minimum height of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_height;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 1.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_depth = 0.05f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_min_depth";
+        prop.desc = "Minimum depth of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_depth;
+        prop.float_state.min = 0.05f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_width = 2.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_max_width";
+        prop.desc = "Maximum width of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_width;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_height = 2.45f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_max_height";
+        prop.desc = "Maximum height of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_height;
+        prop.float_state.min = 1.0f;
+        prop.float_state.max = 4.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_depth = 1.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cb_cluster_max_depth";
+        prop.desc = "Maximum depth of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_depth;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_FILTER_CLUSTERS;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "filter_clusters";
+        stage.desc = "Filter plausible person clusters";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_PROJECT_CLUSTERS;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "project_clusters";
+        stage.desc = "Project plausible person clusters into 2D depth buffers";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_SELECT_CANDIDATE_CLUSTER;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "select_cluster";
+        stage.desc = "Select cluster to run label inferrence on (points before projection into depth image)";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_LABEL_INFERENCE;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "label_inference";
+        stage.desc = "Infer per-pixel body part labels";
+        stage.images.push_back((struct image_generator)
+                               {
+                                   "labels",
+                                   "Inferred labels",
+                                   gm_tracking_create_rgb_label_map,
+                               });
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_JOINT_WEIGHTS;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "joint_weights";
+        stage.desc = "Map body-part labels to per-joint weights";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_JOINT_INFERENCE;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "joint_inference";
+        stage.desc = "Infer position of skeleton joints";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_REFINE_SKELETON;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "refine_skeleton";
+        stage.desc = "Try and clean up issues with the inferred skeleton joints";
+
+        ctx->bone_length_variance = 0.05f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "bone_length_variance";
+        prop.desc = "Maximum allowed variance of bone length between frames";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->bone_length_variance;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 0.2f;
+        stage.properties.push_back(prop);
+
+        ctx->bone_rotation_variance = 360.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "bone_rotation_variance";
+        prop.desc = "Maximum allowed rotation of a bone (degrees/s)";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->bone_rotation_variance;
+        prop.float_state.min = 100.f;
+        prop.float_state.max = 1500.f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_SANITIZE_SKELETON;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "sanitize_skeleton";
+        stage.desc = "Try and clean up issues with the inferred skeleton joints";
+
+        ctx->max_joint_predictions = 4;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_joint_predictions";
+        prop.desc = "Maximum number of absolute joint position predictions to make "
+            "across tracking history";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->max_joint_predictions;
+        prop.int_state.min = 0;
+        prop.int_state.max = TRACK_FRAMES - 1;
+        stage.properties.push_back(prop);
+
+        ctx->joint_move_threshold = 1.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "joint_move_threshold";
+        prop.desc = "Minimum travel distance (m/s) "
+            "before considering joint prediction";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->joint_move_threshold;
+        prop.float_state.min = 0.3f;
+        prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        ctx->joint_max_travel = 3.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "joint_max_travel";
+        prop.desc = "Maximum travel distance (m/s) "
+            "before considering joint prediction";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->joint_max_travel;
+        prop.float_state.min = 1.0f;
+        prop.float_state.max = 5.0f;
+        stage.properties.push_back(prop);
+
+        ctx->joint_scale_threshold = 2.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "joint_scale_threshold";
+        prop.desc = "Maximum growth difference (x/s) "
+            "before considering joint prediction";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->joint_scale_threshold;
+        prop.float_state.min = 1.5f;
+        prop.float_state.max = 20.f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_UPDATE_CODEBOOK;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "update_codebook";
+        stage.desc = "Update the codebook state ready for processing motion of future frames";
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    for (int i = 1; i < N_TRACKING_STAGES; i++) {
+        gm_assert(ctx->log, ctx->stages[i].stage_id != TRACKING_STAGE_START,
+                  "Uninititialized stage description %d", i);
+    }
+
+
+    ctx->debug_pipeline_stage = TRACKING_STAGE_START;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "cloud_stage";
-    prop.desc = "tracking stage to create debug cloud";
+    prop.name = "debug_stage";
+    prop.desc = "tracking pipeline stage to inspect";
     prop.type = GM_PROPERTY_ENUM;
-    prop.enum_state.ptr = &ctx->debug_cloud_stage;
+    prop.enum_state.ptr = &ctx->debug_pipeline_stage;
 
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "start";
-    enumerant.desc = "Earliest stage";
-    enumerant.val = TRACKING_STAGE_START;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "gap filled";
-    enumerant.desc = "After gap filling";
-    enumerant.val = TRACKING_STAGE_GAP_FILLED;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "downsampled";
-    enumerant.desc = "AFter downsampling depth";
-    enumerant.val = TRACKING_STAGE_DOWNSAMPLED;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "ground space";
-    enumerant.desc = "Projected into ground aligned space";
-    enumerant.val = TRACKING_STAGE_GROUND_SPACE;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "codebook space";
-    enumerant.desc = "Projected into codebook aligned space";
-    enumerant.val = TRACKING_STAGE_CODEBOOK_SPACE;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "classified";
-    enumerant.desc = "After motion classification (if enabled)";
-    enumerant.val = TRACKING_STAGE_CLASSIFIED;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "naive floor detect";
-    enumerant.desc = "Points clustered for floor detection";
-    enumerant.val = TRACKING_STAGE_NAIVE_FLOOR;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "naive segmentation";
-    enumerant.desc = "Points clustered via naive segmentation";
-    enumerant.val = TRACKING_STAGE_NAIVE_FINAL;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "best person buffer";
-    enumerant.desc = "Best person inference buffer";
-    enumerant.val = TRACKING_STAGE_BEST_PERSON_BUF;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    enumerant = gm_ui_enumerant();
-    enumerant.name = "best person indices";
-    enumerant.desc = "Best person indices";
-    enumerant.val = TRACKING_STAGE_BEST_PERSON_CLOUD;
-    ctx->cloud_stage_enumerants.push_back(enumerant);
-
-    prop.enum_state.n_enumerants = ctx->cloud_stage_enumerants.size();
-    prop.enum_state.enumerants = ctx->cloud_stage_enumerants.data();
+    for (int i = 0; i < N_TRACKING_STAGES; i++) {
+        enumerant = gm_ui_enumerant();
+        enumerant.name = ctx->stages[i].name;
+        enumerant.desc = ctx->stages[i].desc;
+        enumerant.val = i;
+        ctx->cloud_stage_enumerants.push_back(enumerant);
+    }
+    prop.enum_state.n_enumerants = ctx->label_enumerants.size();
+    prop.enum_state.enumerants = ctx->label_enumerants.data();
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();
@@ -5497,6 +6305,92 @@ const gm_intrinsics *
 gm_context_get_training_intrinsics(struct gm_context *ctx)
 {
     return &ctx->training_camera_intrinsics;
+}
+
+int
+gm_context_get_n_stages(struct gm_context *ctx)
+{
+    return ctx->stages.size();
+}
+
+const char *
+gm_context_get_stage_name(struct gm_context *ctx,
+                          int stage)
+{
+    gm_assert(ctx->log, stage >=0 && stage < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    return ctx->stages[stage].name;
+}
+
+const char *
+gm_context_get_stage_description(struct gm_context *ctx,
+                                 int stage)
+{
+    gm_assert(ctx->log, stage >=0 && stage < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    return ctx->stages[stage].desc;
+}
+
+int
+gm_context_get_stage_n_images(struct gm_context *ctx,
+                              int stage_id)
+{
+    gm_assert(ctx->log, stage_id >=0 && stage_id < (int)ctx->stages.size(),
+              "Out of range stage index (%d)", stage_id);
+    struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+    return stage.images.size();
+}
+
+const char *
+gm_context_get_stage_nth_image_name(struct gm_context *ctx,
+                                    int stage_id,
+                                    int n)
+{
+    gm_assert(ctx->log, stage_id >= 0 && stage_id < (int)ctx->stages.size(),
+              "Out of range stage index (%d)", stage_id);
+    struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+    gm_assert(ctx->log, n >=0 && n < (int)stage.images.size(),
+              "Out of range stage %s image index (%d)", stage.name, n);
+
+    return stage.images[n].name;
+}
+
+const char *
+gm_context_get_stage_nth_image_description(struct gm_context *ctx,
+                                           int stage_id,
+                                           int n)
+{
+    gm_assert(ctx->log, stage_id >= 0 && stage_id < (int)ctx->stages.size(),
+              "Out of range stage index (%d)", stage_id);
+    struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+    gm_assert(ctx->log, n >=0 && n < (int)stage.images.size(),
+              "Out of range stage %s image index (%d)", stage.name, n);
+
+    return stage.images[n].desc;
+}
+
+struct gm_ui_properties *
+gm_context_get_stage_ui_properties(struct gm_context *ctx, int stage)
+{
+    gm_assert(ctx->log, stage >=0 && stage < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    return &ctx->stages[stage].properties_state;
+}
+
+uint64_t
+gm_context_get_average_stage_duration(struct gm_context *ctx,
+                                      int stage)
+{
+    gm_assert(ctx->log, stage >=0 && stage < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    return 0; // FIXME
 }
 
 const gm_intrinsics *
@@ -5544,7 +6438,7 @@ gm_tracking_get_skeleton(struct gm_tracking *_tracking)
     return tracking->success ? &tracking->skeleton : NULL;
 }
 
-void
+bool
 gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
                                  int *width, int *height, uint8_t **output)
 {
@@ -5597,9 +6491,11 @@ gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
         (*output)[off * 3 + 1] = g;
         (*output)[off * 3 + 2] = b;
     }
+
+    return true;
 }
 
-void
+bool
 gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
                              int *width, int *height, uint8_t **output)
 {
@@ -5633,9 +6529,11 @@ gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
         (*output)[off * 3 + 2] = shade;
 #endif
     }
+
+    return true;
 }
 
-void
+bool
 gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
                              int *width, int *height, uint8_t **output)
 {
@@ -5727,16 +6625,18 @@ gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
     case GM_FORMAT_Z_F16_M:
     case GM_FORMAT_POINTS_XYZC_F32_M:
         gm_assert(ctx->log, 0, "Unexpected format for video buffer");
-        return;
+        return false;
     }
 
     // Output is rotated, so make sure output width/height are correct
     if (rotation == GM_ROTATION_90 || rotation == GM_ROTATION_270) {
         std::swap(*width, *height);
     }
+
+    return true;
 }
 
-void
+bool
 gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
                                           int *width, int *height,
                                           uint8_t **output)
@@ -5745,7 +6645,7 @@ gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
     //struct gm_context *ctx = tracking->ctx;
 
     if (!tracking->cluster_labels) {
-        return;
+        return false;
     }
 
     *width = (int)tracking->cluster_labels->width;
@@ -5764,9 +6664,11 @@ gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
         (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
         (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
     }
+
+    return true;
 }
 
-void
+bool
 gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
                                             int *width, int *height,
                                             uint8_t **output)
@@ -5774,7 +6676,7 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
 
     if (!tracking->depth_class) {
-        return;
+        return false;
     }
 
     *width = (int)tracking->depth_class->width;
@@ -5788,6 +6690,8 @@ gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
         depth_classification_to_rgb((enum seg_class)tracking->depth_class->points[off].label,
                                     (*output) + off * 3);
     }
+
+    return true;
 }
 
 const struct gm_point_rgba *
@@ -5809,6 +6713,90 @@ gm_tracking_get_debug_lines(struct gm_tracking *_tracking,
               "Odd number of points in debug_lines array");
     *n_lines = tracking->debug_lines.size() / 2;
     return tracking->debug_lines.data();
+}
+
+uint64_t
+gm_tracking_get_duration(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->duration_ns;
+}
+
+uint64_t
+gm_tracking_get_stage_duration(struct gm_tracking *_tracking,
+                               int stage_index)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    return stage_data.duration_ns;
+}
+
+#if 0
+const struct gm_point_rgba *
+gm_tracking_get_stage_debug_point_cloud(struct gm_tracking *_tracking,
+                                        int stage_index,
+                                        int *n_points)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    return stage_data.debug_point_cloud.data();
+}
+
+const struct gm_point_rgba *
+gm_tracking_get_stage_debug_lines(struct gm_tracking *_tracking,
+                                  int stage_index,
+                                  int *n_lines)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    return stage_data.debug_lines.data();
+}
+#endif
+
+bool
+gm_tracking_create_stage_rgb_image(struct gm_tracking *_tracking,
+                                   int stage_index,
+                                   int image_index,
+                                   int *width,
+                                   int *height,
+                                   uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
+
+    gm_assert(ctx->log, image_index >=0 && image_index < (int)stage.images.size(),
+              "Out of range stage %s image index (%d)", stage.name, image_index);
+
+    if (stage.images[image_index].create_rgb_image)
+        return stage.images[image_index].create_rgb_image(_tracking,
+                                                          width, height,
+                                                          output);
+    else
+        return false;
 }
 
 const float *
