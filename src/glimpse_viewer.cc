@@ -348,6 +348,7 @@ static uint32_t joint_palette[] = {
 };
 
 char *glimpse_recordings_path;
+char *glimpse_targets_path;
 
 static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
@@ -418,11 +419,12 @@ intrinsics_to_project_matrix(const struct gm_intrinsics *intrinsics,
 }
 
 static bool
-index_files_recursive(Data *data,
-                      const char *match,
-                      const char *root, const char *subdir,
-                      std::vector<char *> &files,
-                      std::vector<char *> &names, char **err)
+index_files(Data *data,
+            const char *match,
+            const char *root, const char *subdir,
+            std::vector<char *> &files,
+            std::vector<char *> &names, char **err,
+            int recurse = 1)
 {
     struct dirent *entry;
     struct stat st;
@@ -450,8 +452,9 @@ index_files_recursive(Data *data,
 
         stat(cur_full_path, &st);
         if (S_ISDIR(st.st_mode)) {
-            if (!index_files_recursive(data, match, root,
-                                       cur_rel_path, files, names, err))
+            if (recurse > 0 &&
+                !index_files(data, match, root,
+                             cur_rel_path, files, names, err, recurse - 1))
             {
                 ret = false;
                 break;
@@ -476,13 +479,13 @@ index_recordings(Data *data)
     data->recording_names.clear();
 
     char *index_err = NULL;
-    index_files_recursive(data,
-                          "glimpse_recording.json",
-                          glimpse_recordings_path,
-                          "", // subdirectory
-                          data->recordings,
-                          data->recording_names,
-                          &index_err);
+    index_files(data,
+                "glimpse_recording.json",
+                glimpse_recordings_path,
+                "", // subdirectory
+                data->recordings,
+                data->recording_names,
+                &index_err);
     if (index_err) {
         gm_error(data->log, "Failed to index recordings: %s", index_err);
         free(index_err);
@@ -496,13 +499,13 @@ index_targets(Data *data)
     data->target_names.clear();
 
     char *index_err = NULL;
-    index_files_recursive(data,
-                          "glimpse_target.index",
-                          gm_get_assets_root(),
-                          "targets",
-                          data->targets,
-                          data->target_names,
-                          &index_err);
+    index_files(data,
+                "glimpse_target.index",
+                glimpse_targets_path,
+                "",
+                data->targets,
+                data->target_names,
+                &index_err);
     if (index_err) {
         gm_error(data->log, "Failed to index targets: %s", index_err);
         free(index_err);
@@ -865,17 +868,18 @@ draw_target_controls(Data *data)
             data->target = NULL;
         } else {
             char *err = NULL;
-            gm_debug(data->log, "XXX Attempting to load target '%s'",
+            char path_tmp[PATH_MAX];
+            snprintf(path_tmp, sizeof(path_tmp),
+                     "%s%s", glimpse_targets_path,
                      data->targets.at(data->selected_target));
             data->target =
-                gm_target_new_from_index(data->ctx, data->log, &err,
-                                         data->targets.at(data->selected_target));
+                gm_target_new_from_index(data->ctx, data->log, &err, path_tmp);
             if (!data->target) {
-                gm_warn(data->log, "XXX Failed to load target: %s", err);
+                gm_error(data->log, "Failed to load target: %s", err);
                 free(err);
             } else {
-                gm_debug(data->log, "XXX Target loaded with %u frames",
-                         gm_target_get_n_frames(data->target));
+                gm_info(data->log, "Target loaded with %u frames",
+                        gm_target_get_n_frames(data->target));
             }
         }
     }
@@ -3125,10 +3129,13 @@ main(int argc, char **argv)
         setenv("FAKENECT_PATH", fakenect_path, true);
     }
 
-    char recordings_path_tmp[PATH_MAX];
-    snprintf(recordings_path_tmp, sizeof(recordings_path_tmp),
+    char path_tmp[PATH_MAX];
+    snprintf(path_tmp, sizeof(path_tmp),
              "%s/ViewerRecording", assets_root);
-    glimpse_recordings_path = strdup(recordings_path_tmp);
+    glimpse_recordings_path = strdup(path_tmp);
+    snprintf(path_tmp, sizeof(path_tmp),
+             "%s/Targets", assets_root);
+    glimpse_targets_path = strdup(path_tmp);
 
     index_recordings(data);
     index_targets(data);

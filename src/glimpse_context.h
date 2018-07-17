@@ -498,7 +498,7 @@ gm_skeleton_new(struct gm_context *ctx,
 
 struct gm_skeleton *
 gm_skeleton_new_from_json(struct gm_context *ctx,
-                          const char *asset_name);
+                          const char *json_path);
 
 int
 gm_skeleton_get_n_joints(const struct gm_skeleton *skeleton);

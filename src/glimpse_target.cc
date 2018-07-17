@@ -22,13 +22,14 @@
  * SOFTWARE.
  */
 
+#include <libgen.h>
+#include <stdio.h>
 #include <string.h>
 #include <vector>
 
 #include <glm/gtc/quaternion.hpp>
 
 #include "glimpse_target.h"
-#include "glimpse_assets.h"
 
 struct gm_target {
     struct gm_context *ctx;
@@ -53,53 +54,34 @@ struct gm_target *
 gm_target_new_from_index(struct gm_context *ctx,
                          struct gm_logger *log,
                          char **err,
-                         const char *index_asset_name)
+                         const char *index_path)
 {
     // Load the JSON file index
-    struct gm_asset *index_asset =
-        gm_asset_open(log, index_asset_name, GM_ASSET_MODE_BUFFER, err);
-    if (!index_asset) {
-        return NULL;
-    }
-
-    const char *buf = (const char *)gm_asset_get_buffer(index_asset);
-    if (!buf) {
-        gm_throw(log, err, "Error retrieving buffer from asset '%s'",
-                 index_asset_name);
-        gm_asset_close(index_asset);
+    FILE *index_file = fopen(index_path, "rb");
+    if (!index_file) {
+        gm_throw(log, err, "Failed to open target index '%s'\n", index_path);
         return NULL;
     }
 
     struct gm_target *self = gm_target_new(ctx, log);
 
+    char *index_path_copy = strdup(index_path);
+    char *base = dirname(index_path_copy);
     char file[1024];
-    char *end_of_base = (char *)strrchr(index_asset_name, '/');
-    if (end_of_base) {
-        strncpy(file, index_asset_name, end_of_base - index_asset_name);
-        end_of_base = &file[end_of_base - index_asset_name] + 1;
-        *(end_of_base-1) = '/';
-    } else {
-        end_of_base = file;
-    }
+    char *skel_file = file + snprintf(file, sizeof(file), "%s/", base);
+    free(index_path_copy);
 
-    const char *end = buf;
-    while ((end = strchr(buf, '\n'))) {
-        if (end - buf > 1) {
-            strncpy(end_of_base, buf, end - buf);
-            end_of_base[end - buf] = '\0';
-            gm_debug(log, "XXX Trying to open skeleton '%s'", file);
-
-            struct gm_skeleton *skeleton = gm_skeleton_new_from_json(ctx, file);
-            if (skeleton) {
-                self->frames.push_back(skeleton);
-            } else {
-                gm_warn(log, "Error opening skeleton asset '%s'", file);
-            }
+    while (fgets(skel_file, sizeof(file) - (skel_file - file), index_file)) {
+        file[strlen(file) - 1] = '\0';
+        struct gm_skeleton *skeleton = gm_skeleton_new_from_json(ctx, file);
+        if (skeleton) {
+            self->frames.push_back(skeleton);
+        } else {
+            gm_error(log, "Error opening skeleton file '%s'", file);
         }
-        buf = end + 1;
     }
 
-    gm_asset_close(index_asset);
+    fclose(index_file);
 
     return self;
 }

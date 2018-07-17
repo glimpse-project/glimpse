@@ -5856,36 +5856,19 @@ gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints,
 
 struct gm_skeleton *
 gm_skeleton_new_from_json(struct gm_context *ctx,
-                          const char *asset_name)
+                          const char *json_path)
 {
-    char *catch_err = NULL;
-    struct gm_asset *json_asset = gm_asset_open(ctx->log,
-                                                asset_name,
-                                                GM_ASSET_MODE_BUFFER,
-                                                &catch_err);
-    if (!json_asset) {
-        gm_error(ctx->log,
-                 "Failed to open skeleton json asset '%s': %s",
-                 asset_name, catch_err);
-        free(catch_err);
-        return NULL;
-    }
-
-    const char *buffer = (const char *)gm_asset_get_buffer(json_asset);
-    JSON_Value *js;
-    if (!buffer || !(js = json_parse_string(buffer))) {
-        gm_error(ctx->log,
-                 "Failed to parse JSON asset '%s'", asset_name);
-        gm_asset_close(json_asset);
+    JSON_Value *js = json_parse_file(json_path);
+    if (!js) {
+        gm_error(ctx->log, "Failed to parse JSON file '%s'", json_path);
         return NULL;
     }
 
     JSON_Array *bones = json_object_get_array(json_object(js), "bones");
     if (!bones) {
         gm_error(ctx->log,
-                 "Failed to find bones in JSON asset '%s'", asset_name);
+                 "Failed to find bones in JSON file '%s'", json_path);
         json_value_free(js);
-        gm_asset_close(json_asset);
         return NULL;
     }
 
@@ -5921,8 +5904,8 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
             }
 
             if (!found) {
-                gm_warn(ctx->log, "Joint '%s' not found in JSON asset '%s'",
-                        bone_name, asset_name);
+                gm_warn(ctx->log, "Joint '%s' not found in JSON file '%s'",
+                        bone_name, json_path);
             }
         } else {
             gm_warn(ctx->log, "Can't derive bone name from joint name '%s'",
@@ -5932,7 +5915,6 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
     }
 
     json_value_free(js);
-    gm_asset_close(json_asset);
 
     return gm_skeleton_new(ctx, joints, 0, 0, 0);
 }
