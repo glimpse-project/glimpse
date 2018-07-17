@@ -2662,9 +2662,10 @@ print_frame_info_cb(struct gm_mem_pool *pool,
     struct gm_device_frame *frame = (struct gm_device_frame *)resource;
 
     gm_assert(dev->log, frame != NULL, "Spurious NULL frame resource");
+    int ref = frame->base.ref;
     gm_error(dev->log, "Unreleased frame %p, ref count = %d, paper trail len = %d",
              frame,
-             frame->base.ref,
+             ref,
              (int)frame->trail.size());
 
     if (frame->trail.size())
@@ -2682,10 +2683,11 @@ print_buf_info_cb(struct gm_mem_pool *pool,
 
     gm_assert(dev->log, buf != NULL, "Spurious NULL %s resource", pool_name);
 
+    int ref = buf->base.ref;
     gm_error(dev->log, "Unreleased %s buffer %p, ref count = %d, paper trail len = %d",
              pool_name,
              buf,
-             buf->base.ref,
+             ref,
              (int)buf->trail.size());
 
     if (buf->trail.size())

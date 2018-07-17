@@ -1461,9 +1461,10 @@ gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
+    int ref = tracking->ref;
     gm_debug(data->log, "Tracking Unref %p (ref = %d)",
              tracking,
-             tracking->ref);
+             ref);
     gm_tracking_unref(tracking);
 }
 
@@ -1518,9 +1519,10 @@ gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     struct gm_prediction *prediction = (struct gm_prediction *)prediction_handle;
 
+    int ref = prediction->ref;
     gm_debug(data->log, "Prediction Unref %p (ref = %d)",
              prediction,
-             prediction->ref);
+             ref);
     gm_prediction_unref(prediction);
 }
 

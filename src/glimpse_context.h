@@ -25,7 +25,13 @@
 #pragma once
 
 #include <assert.h>
+
+#ifdef __cplusplus
+#include <atomic>
+#define _Atomic(T) std::atomic<T>
+#else
 #include <stdatomic.h>
+#endif
 
 #include "glimpse_properties.h"
 #include "glimpse_log.h"
@@ -159,7 +165,7 @@ struct gm_buffer_vtable
 
 struct gm_buffer
 {
-    atomic_int ref;
+    _Atomic(int) ref;
 
     struct gm_buffer_vtable *api;
 
@@ -228,7 +234,7 @@ struct gm_frame_vtable
 
 struct gm_frame
 {
-    atomic_int ref;
+    _Atomic(int) ref;
 
     struct gm_frame_vtable *api;
 
@@ -282,7 +288,7 @@ struct gm_tracking_vtable
 
 struct gm_tracking
 {
-    atomic_int ref;
+    _Atomic(int) ref;
     struct gm_tracking_vtable *api;
 };
 
@@ -324,7 +330,7 @@ struct gm_prediction_vtable {
 };
 
 struct gm_prediction {
-    atomic_int ref;
+    _Atomic(int) ref;
     struct gm_prediction_vtable *api;
 };
 
