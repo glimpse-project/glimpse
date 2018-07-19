@@ -33,6 +33,7 @@
 #endif
 
 #include <cmath>
+#include <atomic>
 
 #include "xalloc.h"
 #include "rdt_tree.h"
@@ -48,7 +49,6 @@
 #define JIP_VERSION 0
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.001f
-#define PROGRESS_WIDTH 80
 
 using half_float::half;
 
@@ -66,10 +66,11 @@ typedef struct {
     int      n_images;      // Number of training images
     int      width;         // Width of training images
     int      height;        // Height of training images
-    uint8_t* label_images;  // Label images (row-major)
     half*    depth_images;  // Depth images (row-major)
-    float**  inferred;      // Inferred label probabilities
-    float*   weights;       // Pixel weighting for joint label groups
+
+    // Inferred joints for every combination of tested parameters (stored in
+    // combination-major order)
+    InferredJoints** inferred_joints;
 
     int      n_joints;      // Number of joints
     JSON_Value* joint_map;  // Map between joints and labels
@@ -83,6 +84,7 @@ typedef struct {
     float*   offsets;       // Z offsets to test
 
     int      n_threads;     // Number of threads to use for work
+    std::atomic<int> progress; // Number of combinations processed
 } TrainContext;
 
 typedef struct {
@@ -170,10 +172,22 @@ thread_body(void* userdata)
     TrainThreadData* data = (TrainThreadData*)userdata;
     TrainContext* ctx = data->ctx;
 
+    int last_output = -1;
+
     int n_labels = ctx->forest[0]->header.n_labels;
     float bg_depth = ctx->forest[0]->header.bg_depth;
 
-    // Generate probability tables and pixel weights
+    int n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
+    int combos_per_thread = std::max(1, n_combos / ctx->n_threads);
+    int c_start = combos_per_thread * data->thread;
+    int c_end = std::min(n_combos,
+                         (data->thread == ctx->n_threads - 1) ?
+                         n_combos : c_start + combos_per_thread);
+    int bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
+
+    // For a subset of all depth images, generate the weights and probability
+    // table and then test each combination of parameters and store the
+    // resulting joints.
     int images_per_thread =
         std::max(1, ctx->n_images / ctx->n_threads);
     int i_start = images_per_thread * data->thread;
@@ -183,42 +197,83 @@ thread_body(void* userdata)
     for (int i = i_start, idx = ctx->width * ctx->height * i_start;
          i < i_end; i++, idx += ctx->width * ctx->height)
     {
-        ctx->inferred[i] = infer_labels<half>(ctx->log,
-                                              ctx->forest, ctx->n_trees,
-                                              &ctx->depth_images[idx],
-                                              ctx->width, ctx->height);
+        if (data->thread == 0) {
+            int output = (int)(ctx->progress / (float)ctx->n_images * 100.f);
+            if (output != last_output) {
+                last_output = output;
+                printf("%03d%%\r", output);
+                fflush(stdout);
+            }
+        }
 
-        // Calculate pixel weight
-        int weight_idx = i * ctx->width * ctx->height * ctx->n_joints;
-        calc_pixel_weights<half>(&ctx->depth_images[idx], ctx->inferred[i],
-                                 ctx->width, ctx->height, n_labels,
-                                 ctx->joint_map,
-                                 &ctx->weights[weight_idx]);
+        half *depth_image = &ctx->depth_images[idx];
+
+        // Calculate label probabilities
+        float *pr_table = infer_labels<half>(ctx->log,
+                                             ctx->forest, ctx->n_trees,
+                                             depth_image,
+                                             ctx->width, ctx->height);
+
+        // Calculate pixel weights
+        float *weights = calc_pixel_weights<half>(&ctx->depth_images[idx],
+                                                  pr_table,
+                                                  ctx->width, ctx->height,
+                                                  n_labels, ctx->joint_map);
+
+        // For each combination this thread is processing, infer the joint
+        // positions for this depth image.
+        for (int c = 0; c < n_combos; c++) {
+            int bandwidth_idx = c / bandwidth_stride;
+            int threshold_idx = (c / ctx->n_offsets) % ctx->n_thresholds;
+            int offset_idx = c % ctx->n_offsets;
+
+            float bandwidth = ctx->bandwidths[bandwidth_idx];
+            float threshold = ctx->thresholds[threshold_idx];
+            float offset = ctx->offsets[offset_idx];
+
+            JIParam params[ctx->n_joints];
+            for (int j = 0; j < ctx->n_joints; ++j)
+            {
+                params[j].bandwidth = bandwidth;
+                params[j].threshold = threshold;
+                params[j].offset = offset;
+            }
+
+            ctx->inferred_joints[(i * n_combos) + c] =
+                infer_joints<half>(depth_image, pr_table, weights,
+                                   ctx->width, ctx->height,
+                                   bg_depth, n_labels, ctx->joint_map,
+                                   ctx->forest[0]->header.fov, params);
+        }
+
+        free(weights);
+        free(pr_table);
+
+        ctx->progress++;
     }
 
     // Wait for all threads to finish
     pthread_barrier_wait(data->barrier);
 
-    // Wait for main thread to output progress bar
+    // Wait for main thread to write a newline
     pthread_barrier_wait(data->barrier);
 
     // Loop over each bandwidth/threshold/offset combination and test to see
     // which combination gives the best results for inference on each joint.
-    int n_combos = ctx->n_bandwidths * ctx->n_thresholds * ctx->n_offsets;
-    int combos_per_thread = std::max(1, n_combos / ctx->n_threads);
-    int c_start = combos_per_thread * data->thread;
-    int c_end = std::min(n_combos,
-                         (data->thread == ctx->n_threads - 1) ?
-                         n_combos : c_start + combos_per_thread);
 
-    int bandwidth_stride = ctx->n_thresholds * ctx->n_offsets;
-
-    float output_acc = 0;
-    float output_freq = (c_end - c_start) /
-        (PROGRESS_WIDTH / (float)ctx->n_threads);
+    last_output = -1;
 
     for (int c = c_start; c < c_end; c++)
     {
+        if (data->thread == 0) {
+            int output = (int)(ctx->progress / (float)n_combos * 100.f);
+            if (output != last_output) {
+                last_output = output;
+                printf("%03d%%\r", output);
+                fflush(stdout);
+            }
+        }
+
         int bandwidth_idx = c / bandwidth_stride;
         int threshold_idx = (c / ctx->n_offsets) % ctx->n_thresholds;
         int offset_idx = c % ctx->n_offsets;
@@ -226,14 +281,6 @@ thread_body(void* userdata)
         float bandwidth = ctx->bandwidths[bandwidth_idx];
         float threshold = ctx->thresholds[threshold_idx];
         float offset = ctx->offsets[offset_idx];
-
-        JIParam params[ctx->n_joints];
-        for (int i = 0; i < ctx->n_joints; i++)
-        {
-            params[i].bandwidth = bandwidth;
-            params[i].threshold = threshold;
-            params[i].offset = offset;
-        }
 
         /* NB: clang doesn't allow using an = {0} initializer with dynamic
          * sized arrays...
@@ -243,22 +290,7 @@ thread_body(void* userdata)
 
         for (int i = 0; i < ctx->n_images; i++)
         {
-            int depth_idx = i * ctx->width * ctx->height;
-            int weight_idx = depth_idx * ctx->n_joints;
-
-            half* depth_image = &ctx->depth_images[depth_idx];
-            float* pr_table = ctx->inferred[i];
-            float* weights = &ctx->weights[weight_idx];
-
-            // Get joint positions
-            InferredJoints* result =
-                infer_joints<half>(depth_image, pr_table, weights,
-                                   ctx->width, ctx->height,
-                                   bg_depth,
-                                   n_labels,
-                                   ctx->joint_map,
-                                   ctx->forest[0]->header.fov,
-                                   params);
+            InferredJoints* result = ctx->inferred_joints[(i * n_combos) + c];
 
             // Calculate distance from expected joint position and accumulate
             for (int j = 0; j < ctx->n_joints; j++)
@@ -303,12 +335,7 @@ thread_body(void* userdata)
             }
         }
 
-        if (++output_acc >= output_freq)
-        {
-            fputc('x', stdout);
-            fflush(stdout);
-            output_acc -= output_freq;
-        }
+        ctx->progress++;
     }
 
     xfree(data);
@@ -584,9 +611,10 @@ main(int argc, char** argv)
         return 1;
     }
 
-    ctx.inferred = (float**)xmalloc(ctx.n_images * sizeof(float*));
-    ctx.weights = (float*)xmalloc(ctx.n_images * ctx.width * ctx.height *
-                                  ctx.n_joints * sizeof(float));
+    size_t n_combos = (size_t)ctx.n_bandwidths * ctx.n_thresholds *
+                      ctx.n_offsets;
+    ctx.inferred_joints = (InferredJoints**)xmalloc(n_combos * ctx.n_images *
+                                                    sizeof(InferredJoints*));
     float* best_dists = (float*)
         xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
     std::fill(best_dists, best_dists + (ctx.n_joints * ctx.n_threads), FLT_MAX);
@@ -598,6 +626,9 @@ main(int argc, char** argv)
         xmalloc(ctx.n_joints * ctx.n_threads * sizeof(float));
     pthread_t threads[ctx.n_threads];
 
+    printf("(%02d:%02d:%02d / %02d:%02d:%02d) Running joint inference...\n",
+           since_begin.hours, since_begin.minutes, since_begin.seconds,
+           since_last.hours, since_last.minutes, since_last.seconds);
     for (int i = 0; i < ctx.n_threads; i++)
     {
         TrainThreadData* thread_data = (TrainThreadData*)
@@ -619,19 +650,16 @@ main(int argc, char** argv)
     }
 
     pthread_barrier_wait(&barrier);
+    printf("100%%\n");
+    ctx.progress = 0;
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);
     since_last = get_time_for_display(&last, &now);
     last = now;
-    printf("(%02d:%02d:%02d / %02d:%02d:%02d) Waiting for mean shift...\n",
+    printf("(%02d:%02d:%02d / %02d:%02d:%02d) Testing combinations...\n",
            since_begin.hours, since_begin.minutes, since_begin.seconds,
            since_last.hours, since_last.minutes, since_last.seconds);
-
-    for (int i = 0; i < PROGRESS_WIDTH; i++) {
-        printf("-");
-    }
-    printf("\n");
 
     // Let threads continue
     pthread_barrier_wait(&barrier);
@@ -646,18 +674,12 @@ main(int argc, char** argv)
             fprintf(stderr, "Error joining thread, trying to continue...\n");
         }
     }
-    printf("\n");
+    printf("100%%\n");
 
     // Free memory we no longer need
-    xfree(ctx.depth_images);
-    xfree(ctx.weights);
-    for (int i = 0; i < ctx.n_images; i++) {
-        xfree(ctx.inferred[i]);
-    }
-    xfree(ctx.inferred);
+    xfree(ctx.inferred_joints);
 
     // Open output file
-
     const char *ext;
     if ((ext = strstr(out_filename, ".json")) && ext[5] == '\0')
     {
