@@ -1801,6 +1801,13 @@ gm_rdt_context_new(struct gm_logger *log)
     // without interleaving with messages between threads.
     pthread_mutex_init(&ctx->tidy_log_lock, NULL);
 
+    pthread_mutex_init(&ctx->scheduler_lock, NULL);
+
+    pthread_mutex_init(&ctx->train_queue_lock, NULL);
+
+    pthread_mutex_init(&ctx->work_queue_lock, NULL);
+    pthread_cond_init(&ctx->work_queue_changed, NULL);
+
     pthread_mutex_init(&ctx->tree_histograms_lock, NULL);
 
     ctx->data_dir = strdup(cwd);
