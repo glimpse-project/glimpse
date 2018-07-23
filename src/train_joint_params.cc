@@ -83,6 +83,7 @@ typedef struct {
     int      n_offsets;     // Number of Z offsets
     float*   offsets;       // Z offsets to test
 
+    bool     fast;          // Train for infer_joints_fast()
     int      n_threads;     // Number of threads to use for work
     std::atomic<int> progress; // Number of combinations processed
 } TrainContext;
@@ -124,20 +125,21 @@ static void
 print_usage(FILE* stream)
 {
     fprintf(stream,
-            "Usage: train_joint_params <data dir> \\\n"
-            "                          <index name> \\\n"
-            "                          <joint map> \\\n"
-            "                          <out_file> \\\n"
-            "                          [OPTIONS] \\\n"
-            "                          -- <tree file 1> [tree file 2] ...\n"
-            "Given a trained decision tree, train parameters for joint position proposal.\n"
-            "\n"
-            "  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
-            "  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
-            "  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
-            "  -j, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
-            "  -v, --verbose               Verbose output\n"
-            "  -h, --help                  Display this message\n");
+"Usage: train_joint_params <data dir> \\\n"
+"                          <index name> \\\n"
+"                          <joint map> \\\n"
+"                          <out_file> \\\n"
+"                          [OPTIONS] \\\n"
+"                          -- <tree file 1> [tree file 2] ...\n"
+"Given a trained decision tree, train parameters for joint position proposal.\n"
+"\n"
+"  -b, --bandwidths=MIN,MAX,N  Range of bandwidths to test\n"
+"  -t, --thresholds=MIN,MAX,N  Range of probability thresholds to test\n"
+"  -z, --offsets=MIN,MAX,N     Range of Z offsets to test\n"
+"  -f, --fast                  Train for infer_joints_fast (bandwidth is ignored)\n"
+"  -j, --threads=NUMBER        Number of threads to use (default: autodetect)\n"
+"  -v, --verbose               Verbose output\n"
+"  -h, --help                  Display this message\n");
 }
 
 /*static void
@@ -239,11 +241,19 @@ thread_body(void* userdata)
                 params[j].offset = offset;
             }
 
-            ctx->inferred_joints[(i * n_combos) + c] =
-                infer_joints<half>(depth_image, pr_table, weights,
-                                   ctx->width, ctx->height,
-                                   bg_depth, n_labels, ctx->joint_map,
-                                   ctx->forest[0]->header.fov, params);
+            if (ctx->fast) {
+                ctx->inferred_joints[(i * n_combos) + c] =
+                    infer_joints_fast<half>(depth_image, pr_table, weights,
+                                            ctx->width, ctx->height,
+                                            n_labels, ctx->joint_map,
+                                            ctx->forest[0]->header.fov, params);
+            } else {
+                ctx->inferred_joints[(i * n_combos) + c] =
+                    infer_joints<half>(depth_image, pr_table, weights,
+                                       ctx->width, ctx->height,
+                                       bg_depth, n_labels, ctx->joint_map,
+                                       ctx->forest[0]->header.fov, params);
+            }
         }
 
         free(weights);
@@ -315,7 +325,7 @@ thread_body(void* userdata)
                           powf(inferred_joint->z + actual_joint[2], 2.f));
 
                 // Accumulate
-                acc_distance[j] += distance;
+                acc_distance[j] += std::min(10.f, distance);
             }
 
             // Free joint positions
@@ -468,6 +478,10 @@ main(int argc, char** argv)
             {
                 param = 'z';
             }
+            else if (strcmp(arg, "fast") == 0)
+            {
+                param = 'f';
+            }
             else if (strstr(arg, "threads="))
             {
                 param = 'j';
@@ -498,6 +512,9 @@ main(int argc, char** argv)
         // Check for parameter-less options
         switch(param)
         {
+        case 'f':
+            ctx.fast = true;
+            continue;
         case 'v':
             verbose = true;
             continue;
@@ -584,14 +601,20 @@ main(int argc, char** argv)
               "More joints defined than labels");
 
     printf("Generating test parameters...\n");
-    printf("%u bandwidths from %.3f to %.3f\n",
-           ctx.n_bandwidths, min_bandwidth, max_bandwidth);
+    if (ctx.fast) {
+        ctx.n_bandwidths = 1;
+    } else {
+        printf("%u bandwidths from %.3f to %.3f\n",
+               ctx.n_bandwidths, min_bandwidth, max_bandwidth);
+    }
+    gen_range(&ctx.bandwidths, min_bandwidth, max_bandwidth, ctx.n_bandwidths);
+
     printf("%u thresholds from %.3f to %.3f\n",
            ctx.n_thresholds, min_threshold, max_threshold);
+    gen_range(&ctx.thresholds, min_threshold, max_threshold, ctx.n_thresholds);
+
     printf("%u offsets from %.3f to %.3f\n",
            ctx.n_offsets, min_offset, max_offset);
-    gen_range(&ctx.bandwidths, min_bandwidth, max_bandwidth, ctx.n_bandwidths);
-    gen_range(&ctx.thresholds, min_threshold, max_threshold, ctx.n_thresholds);
     gen_range(&ctx.offsets, min_offset, max_offset, ctx.n_offsets);
 
 
@@ -701,6 +724,8 @@ main(int argc, char** argv)
                     best_offsets[j] = best_offsets[idx];
                 }
             }
+
+            assert(best_dists[j] < FLT_MAX);
 
             JSON_Object *mapping = json_array_get_object(json_array(ctx.joint_map), j);
             const char *joint_name = json_object_get_string(mapping, "joint");
