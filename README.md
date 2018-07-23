@@ -88,15 +88,11 @@ cd glimpse-models
 ```
 *(to decompress the decision trees)*
 
-# Environment variable
+# Environment variables
 
 Further instructions assume the following environment variables are set
 
-`GLIMPSE_TRAINING_DATA` is set to the absolute path for the
-glimpse-training-data repository cloned above.
-
-`GLIMPSE_MODELS` is set to the absolute path for the glimpse-models repository
-above.
+`GLIMPSE_ASSETS_ROOT` is set to an absolute path containing all the data from the glimpse-models repository above. For the `glimpse_viewer` application, the [UI font file](src/Roboto-Medium.ttf) is also expected. This path can also contain recordings and motion capture targets, in `ViewerRecording` and `Targets` directories, respectively.
 
 # Building
 
@@ -215,10 +211,27 @@ keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -s
 
 # Building for OSX
 
-Assuming you use `brew` to install third-party tools then the Glimpse build will
+Assuming you use [brew](http://brew.sh/) to install third-party tools then the Glimpse build will
 first require:
 
-`brew install pkg-config libpng glfw3 libfreenect`
+`brew install pkg-config zlib libpng glfw3 python ninja git`
+
+If you want to use the software with a Kinect device, you will also need libfreenect installed:
+
+`brew install libfreenect`
+
+You will also likely want to add locally installed Python binaries to your PATH, which can be done by adding the following line to ~/.bash_profile:
+
+`export PATH=$HOME/Library/Python/3.6/bin:$PATH`
+
+You may also need to add zlib to LDFLAGS and CPPFLAGS - your mileage may vary here. This can be done by adding the following lines to ~/.bash_profile:
+
+```
+export LDFLAGS="-L/usr/local/opt/zlib/lib"
+export CPPFLAGS="-I/usr/local/opt/zlib/include"
+```
+
+From this point, building should work the same as on Linux (i.e. install meson, check out the project, create a build directory and issue the meson commands given above).
 
 # Building for iOS
 
