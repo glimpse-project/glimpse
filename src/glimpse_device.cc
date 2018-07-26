@@ -1703,7 +1703,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
     dev->frame_time = (uint64_t)(point_cloud->timestamp * 1e9);
     if (error == TANGO_SUCCESS) {
         dev->frame_pose = {
-            true,
+            GM_POSE_TO_START,
             { (float)-pose.orientation[0],
               (float)pose.orientation[1],
               (float)pose.orientation[2],
@@ -3048,7 +3048,7 @@ handle_jni_OnDisplayRotate(jint rotation)
     tango_display_rotation = (enum gm_rotation)rotation;
 
     if (tango_singleton_dev) {
-        dev->display_rotation = tango_display_rotation;
+        tango_singleton_dev->display_rotation = tango_display_rotation;
     } else {
         __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onDisplayRotate JNI");
     }
