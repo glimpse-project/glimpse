@@ -76,6 +76,8 @@ using half_float::half;
             threshold; /* statement expression evaluates to this */ \
         })
 
+#define spowf(x, y) (((x) >= 0) ? powf((x), (y)) : -powf((-x), (y)))
+
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
 struct bounds {
@@ -257,8 +259,10 @@ struct gm_rdt_context_impl {
     uint64_t  last_load_update;
     int      n_uvs;         // Number of combinations of u,v pairs
     float    uv_range;      // Range of u,v combinations to generate
+    float    uv_power;      // Power to raise generated u,v offset values to
     int      n_thresholds;  // The number of thresholds
     float    threshold_range;       // Range of thresholds to test (in meters)
+    float    threshold_power; // Power to raise threshold to
     int      max_depth;     // Maximum depth to train to
     int      max_nodes;     // Maximum number of nodes to train - used for debug
                             // and testing to trigger an early exit.
@@ -1885,6 +1889,17 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.float_state.max = 10;
     ctx->properties.push_back(prop);
 
+    ctx->threshold_power = 1.0f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "threshold_power";
+    prop.desc = "Power to raise threshold to";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->threshold_power;
+    prop.float_state.min = 1.f;
+    prop.float_state.max = 10.f;
+    ctx->properties.push_back(prop);
+
     ctx->n_uvs = 2000;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -1905,6 +1920,17 @@ gm_rdt_context_new(struct gm_logger *log)
     prop.float_state.ptr = &ctx->uv_range;
     prop.float_state.min = 0;
     prop.float_state.max = 10;
+    ctx->properties.push_back(prop);
+
+    ctx->uv_power = 1.0f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "uv_power";
+    prop.desc = "Power to raise UV offsets to";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->uv_power;
+    prop.float_state.min = 1.f;
+    prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
     ctx->max_depth = 20;
@@ -2977,15 +3003,18 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
 
     ctx->thresholds_mm = (int16_t*)xmalloc(ctx->n_thresholds * sizeof(int16_t));
 
-    float threshold_step_m = ctx->threshold_range / ((ctx->n_thresholds - 1) / 2);
+    float range = powf(ctx->threshold_range, 1.f/ctx->threshold_power);
+    float threshold_step_m = range / ((ctx->n_thresholds - 1) / 2);
     for (int n = 0; n < ctx->n_thresholds; n++) {
-        ctx->thresholds_mm[n] = roundf(nth_threshold_float(n, threshold_step_m) * 1000.f);
+        float nth_threshold = nth_threshold_float(n, threshold_step_m);
+        ctx->thresholds_mm[n] =
+            roundf(spowf(nth_threshold, ctx->threshold_power) * 1000.f);
         gm_info(ctx->log, "threshold: %f", ctx->thresholds_mm[n] / 1000.f);
     }
 
     float uv_range_pm = meter_range_to_pixelmeters(ctx->fov,
                                                    camera_height,
-                                                   ctx->uv_range);
+                                                   range);
     gm_info(ctx->log, "UV range = %.2fm = %f pixel-meters",
             ctx->uv_range, uv_range_pm);
 
@@ -2993,12 +3022,17 @@ gm_rdt_context_train(struct gm_rdt_context* _ctx, char** err)
     gm_info(ctx->log, "Preparing training metadata...\n");
     ctx->uvs_m.resize(ctx->n_uvs * 4);
     std::mt19937 rng(ctx->seed);
-    std::uniform_real_distribution<float> rand_uv(-uv_range_pm / 2.f,
-                                                   uv_range_pm / 2.f);
+    range = powf(ctx->uv_range, 1.f/ctx->uv_power);
+    std::uniform_real_distribution<float> rand_uv(-range / 2.f,
+                                                   range / 2.f);
     /* XXX: we are negating the values here just for consistency with older
      * code but it should be unnecessary... */
-    for (int i = 0; i < ctx->n_uvs * 4; i++)
-        ctx->uvs_m[i] = -rand_uv(rng);
+    for (int i = 0; i < ctx->n_uvs * 4; i++) {
+        float rand_val = -rand_uv(rng);
+        float meters = spowf(rand_val, ctx->uv_power);
+        ctx->uvs_m[i] =
+            meter_range_to_pixelmeters(ctx->fov, camera_height, meters);
+    }
 
     for (int i = 0; i < ctx->n_uvs; i++) {
         float *uvs = &ctx->uvs_m[i * 4];
