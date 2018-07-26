@@ -725,7 +725,8 @@ main(int argc, char** argv)
                 }
             }
 
-            assert(best_dists[j] < FLT_MAX);
+            gm_assert(ctx.log, best_dists[j] < FLT_MAX,
+                      "Uninitialised best distance found");
 
             JSON_Object *mapping = json_array_get_object(json_array(ctx.joint_map), j);
             const char *joint_name = json_object_get_string(mapping, "joint");
