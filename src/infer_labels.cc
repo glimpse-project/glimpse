@@ -46,6 +46,7 @@ typedef struct {
     int width;
     int height;
     float* output;
+    uint8_t* flip_map;
 } InferThreadData;
 
 typedef vector(int, 2) Int2D;
@@ -76,12 +77,11 @@ infer_label_probs_cb(void* userdata)
         int y = off / data->width;
         int x = off % data->width;
 
-        float* out_pr_table = &data->output[off * n_labels];
+        int out_pr_idx = off * n_labels;
         float depth = depth_image[off];
 
-        if (depth >= bg_depth)
-        {
-            out_pr_table[bg_label] += 1.0f;
+        if (depth >= bg_depth) {
+            (data->output + out_pr_idx)[bg_label] += 1.f;
             continue;
         }
 
@@ -89,50 +89,69 @@ infer_label_probs_cb(void* userdata)
         for (int i = 0; i < data->n_trees; ++i)
         {
             RDTree* tree = data->forest[i];
-            Node node = tree->nodes[0];
 
-            int id = 0;
-            while (node.label_pr_idx == 0) {
-                Int2D u = { (int)(pixel[0] + node.uv[0] / depth),
-                            (int)(pixel[1] + node.uv[1] / depth) };
-                Int2D v = { (int)(pixel[0] + node.uv[2] / depth),
-                            (int)(pixel[1] + node.uv[3] / depth) };
+            for (int j = 0; j < (data->flip_map ? 2 : 1); ++j) {
+                int id = 0;
+                Node node = tree->nodes[0];
+                bool flip = (j == 1);
 
-                float upixel = (u[0] >= 0 && u[0] < (int)width &&
-                                u[1] >= 0 && u[1] < (int)height) ?
-                    (float)depth_image[((u[1] * width) + u[0])] : bg_depth;
-                float vpixel = (v[0] >= 0 && v[0] < (int)width &&
-                                v[1] >= 0 && v[1] < (int)height) ?
-                    (float)depth_image[((v[1] * width) + v[0])] : bg_depth;
+                while (node.label_pr_idx == 0) {
+                    Int2D u, v;
+                    if (flip) {
+                        u = { (int)(pixel[0] - node.uv[0] / depth),
+                              (int)(pixel[1] + node.uv[1] / depth) };
+                        v = { (int)(pixel[0] - node.uv[2] / depth),
+                              (int)(pixel[1] + node.uv[3] / depth) };
+                    } else {
+                        u = { (int)(pixel[0] + node.uv[0] / depth),
+                              (int)(pixel[1] + node.uv[1] / depth) };
+                        v = { (int)(pixel[0] + node.uv[2] / depth),
+                              (int)(pixel[1] + node.uv[3] / depth) };
+                    }
 
-                float gradient = upixel - vpixel;
+                    float upixel = (u[0] >= 0 && u[0] < (int)width &&
+                                    u[1] >= 0 && u[1] < (int)height) ?
+                        (float)depth_image[((u[1] * width) + u[0])] : bg_depth;
+                    float vpixel = (v[0] >= 0 && v[0] < (int)width &&
+                                    v[1] >= 0 && v[1] < (int)height) ?
+                        (float)depth_image[((v[1] * width) + v[0])] : bg_depth;
 
-                /* NB: The nodes are arranged in breadth-first, left then
-                 * right child order with the root node at index zero.
-                 *
-                 * In this case if you have an index for any particular node
-                 * ('id' here) then 2 * id + 1 is the index for the left
-                 * child and 2 * id + 2 is the index for the right child...
+                    float gradient = upixel - vpixel;
+
+                    /* NB: The nodes are arranged in breadth-first, left then
+                     * right child order with the root node at index zero.
+                     *
+                     * In this case if you have an index for any particular node
+                     * ('id' here) then 2 * id + 1 is the index for the left
+                     * child and 2 * id + 2 is the index for the right child...
+                     */
+                    id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
+
+                    node = tree->nodes[id];
+                }
+
+                /* NB: node->label_pr_idx is a base-one index since index zero
+                 * is reserved to indicate that the node is not a leaf node
                  */
-                id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
-
-                node = tree->nodes[id];
-            }
-
-            /* NB: node->label_pr_idx is a base-one index since index zero
-             * is reserved to indicate that the node is not a leaf node
-             */
-            float* pr_table =
-                &tree->label_pr_tables[(node.label_pr_idx - 1) * n_labels];
-            for (int n = 0; n < n_labels; ++n)
-            {
-                out_pr_table[n] += pr_table[n];
+                float* pr_table =
+                    &tree->label_pr_tables[(node.label_pr_idx - 1) * n_labels];
+                float* out_pr_table = &data->output[out_pr_idx];
+                if (flip) {
+                    for (int n = 0; n < n_labels; ++n) {
+                        out_pr_table[data->flip_map[n]] += pr_table[n];
+                    }
+                } else {
+                    for (int n = 0; n < n_labels; ++n) {
+                        out_pr_table[n] += pr_table[n];
+                    }
+                }
             }
         }
 
-        for (int n = 0; n < n_labels; ++n)
-        {
-            out_pr_table[n] /= (float)data->n_trees;
+        float divider = (float)
+            (data->flip_map ? data->n_trees * 2 : data->n_trees);
+        for (int n = 0; n < n_labels; ++n) {
+            (data->output + out_pr_idx)[n] /= divider;
         }
     }
 
@@ -144,6 +163,15 @@ infer_label_probs_cb(void* userdata)
     return NULL;
 }
 
+size_t infer_labels_get_output_size(RDTree** forest,
+                                    int n_trees,
+                                    int width,
+                                    int height)
+{
+    int n_labels = (int)forest[0]->header.n_labels;
+    return width * height * n_labels * sizeof(float);
+}
+
 template<typename FloatT>
 float*
 infer_labels(struct gm_logger* log,
@@ -152,10 +180,11 @@ infer_labels(struct gm_logger* log,
              FloatT* depth_image,
              int width, int height,
              float* out_labels,
-             bool use_threads)
+             bool use_threads,
+             uint8_t* flip_map)
 {
-    int n_labels = (int)forest[0]->header.n_labels;
-    size_t output_size = width * height * n_labels * sizeof(float);
+    size_t output_size = infer_labels_get_output_size(forest, n_trees,
+                                                      width, height);
     float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
     memset(output_pr, 0, output_size);
 
@@ -167,7 +196,7 @@ infer_labels(struct gm_logger* log,
     {
         InferThreadData data = {
             1, 1, forest, n_trees,
-            (void*)depth_image, width, height, output_pr
+            (void*)depth_image, width, height, output_pr, flip_map
         };
         infer_labels_callback((void*)(&data));
     }
@@ -179,7 +208,7 @@ infer_labels(struct gm_logger* log,
         for (int i = 0; i < n_threads; ++i)
         {
             data[i] = { i, n_threads, forest, n_trees,
-                (void*)depth_image, width, height, output_pr };
+                (void*)depth_image, width, height, output_pr, flip_map };
             if (pthread_create(&threads[i], NULL, infer_labels_callback,
                                (void*)(&data[i])) != 0)
             {
@@ -203,8 +232,8 @@ infer_labels(struct gm_logger* log,
 template float*
 infer_labels<half>(struct gm_logger* log,
                    RDTree**, int, half*, int, int, float*,
-                   bool);
+                   bool, uint8_t*);
 template float*
 infer_labels<float>(struct gm_logger* log,
                     RDTree**, int, float*, int, int, float*,
-                    bool);
+                    bool, uint8_t*);

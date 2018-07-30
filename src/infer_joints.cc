@@ -64,7 +64,7 @@ typedef struct {
  * tight array of JointMapEntries.
  */
 static inline void
-unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
+unpack_joint_map(JSON_Value* joint_map, JointMapEntry *map, int n_joints)
 {
     for (int i = 0; i < n_joints; i++)
     {

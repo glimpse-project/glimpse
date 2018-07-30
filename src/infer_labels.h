@@ -31,6 +31,11 @@
 
 #define HUGE_DEPTH 1000.f
 
+size_t infer_labels_get_output_size(RDTree** forest,
+                                    int n_trees,
+                                    int width,
+                                    int height);
+
 template<typename FloatT>
 float* infer_labels(struct gm_logger* log,
                     RDTree** forest,
@@ -39,4 +44,5 @@ float* infer_labels(struct gm_logger* log,
                     int width,
                     int height,
                     float* out_labels = NULL,
-                    bool use_threads = false);
+                    bool use_threads = false,
+                    uint8_t* flipped_label_mapping = NULL);

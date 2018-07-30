@@ -3384,8 +3384,9 @@ gm_context_track_skeleton(struct gm_context *ctx,
                                tracking->training_camera_intrinsics.fy));
     float *weights = (float*)
         xmalloc(width * height * ctx->n_joints * sizeof(float));
-    float *label_probs = (float*)xmalloc(width * height * ctx->n_labels *
-                                         sizeof(float));
+    float *label_probs = (float*)xmalloc(
+        infer_labels_get_output_size(ctx->decision_trees,
+                                     ctx->n_decision_trees, width, height));
     unsigned best_person = 0;
     for (unsigned i = 0; i < depth_images.size(); ++i) {
         float *depth_img = depth_images[i];
