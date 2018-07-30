@@ -507,16 +507,17 @@ gm_data_load_label_map_from_json(struct gm_logger* log,
     memset(map, 255, 256);
 
     JSON_Array* label_map_array = json_array(label_map);
-    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
+    int n_labels = 0;
+    int n_entries = (int)json_array_get_count(label_map_array);
+    for (int i = 0; i < n_entries; ++i) {
         JSON_Object* mapping = json_array_get_object(label_map_array, i);
-        const char* label_name = json_object_get_string(mapping, "name");
-
         JSON_Array* inputs = json_object_get_array(mapping, "inputs");
+
         for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
             int input = json_array_get_number(inputs, j);
-            if (input < 0 || input > 255) {
+            if (input < 0 || input >= 128) {
                 gm_throw(log, err, "Out of range \"%s\" label mapping from %d in %s\n",
-                         label_name, input, filename);
+                         json_object_get_string(mapping, "name"), input, filename);
                 json_value_free(label_map);
                 return NULL;
             }
@@ -527,6 +528,68 @@ gm_data_load_label_map_from_json(struct gm_logger* log,
                 return NULL;
             }
             map[input] = i;
+            if (input > n_labels) {
+                n_labels = input;
+            }
+        }
+    }
+
+    ++n_labels;
+    for (int i = 0; i < n_entries; ++i) {
+        JSON_Object* mapping = json_array_get_object(label_map_array, i);
+        JSON_Array* inputs = json_object_get_array(mapping, "inputs");
+        int n_inputs = (int)json_array_get_count(inputs);
+
+        if (!json_object_has_value_of_type(mapping, "opposite", JSONString)) {
+            for (int j = 0; j < n_inputs; j++) {
+                int input = json_array_get_number(inputs, j);
+                map[input + n_labels] = input;
+            }
+            continue;
+        }
+
+        /* If this label has an opposite, find the opposite labels and write
+         * their information into the mapping at position + n_labels.
+         */
+        const char* opposite_label_name =
+            json_object_get_string(mapping, "opposite");
+        bool found = false;
+        for (int j = 0; j < n_entries; ++j) {
+            JSON_Object* o_mapping =
+                json_array_get_object(label_map_array, j);
+            if (strcmp(opposite_label_name,
+                       json_object_get_string(o_mapping, "name")) == 0)
+            {
+                found = true;
+                JSON_Array* o_inputs =
+                    json_object_get_array(o_mapping, "inputs");
+                int n_o_inputs = (int)json_array_get_count(o_inputs);
+                if (n_o_inputs != n_inputs) {
+                    gm_throw(log, err,
+                             "Label \"%s\" and its opposite, \"%s\" have "
+                             "mismatched input numbers",
+                             json_object_get_string(mapping, "name"),
+                             opposite_label_name);
+                    json_value_free(label_map);
+                    return NULL;
+                }
+
+                for (int n = 0; n < n_inputs; ++n) {
+                    int input = json_array_get_number(inputs, n);
+                    int o_input = json_array_get_number(o_inputs, n);
+                    map[input + n_labels] = o_input;
+                }
+                break;
+            }
+        }
+
+        if (!found) {
+            gm_throw(log, err,
+                     "Label \"%s\" has non-existent opposite \"%s\"",
+                     json_object_get_string(mapping, "name"),
+                     opposite_label_name);
+            json_value_free(label_map);
+            return NULL;
         }
     }
 

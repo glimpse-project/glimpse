@@ -444,6 +444,7 @@ usage(void)
 "  -r, --row-height=N      Number of rows per-label for confusion matrix bars\n"
 "                          (default 2)\n"
 "\n"
+"  -f, --flip              Enable horizontal mirroring for enhanced inference\n"
 "  -t, --threaded          Use multi-threaded inference.\n"
 "  -v, --verbose           Verbose output.\n"
 "  -h, --help              Display this message.\n"
@@ -454,6 +455,7 @@ usage(void)
 int
 main(int argc, char **argv)
 {
+    bool flip = false;
     uint64_t start, end;
 
     struct gm_logger *log = gm_logger_new(logger_cb, NULL);
@@ -462,11 +464,12 @@ main(int argc, char **argv)
 #define RDT_TO_TEST_MAP_OPT                 (CHAR_MAX + 1)
 #define TEST_TO_OUT_MAP_OPT                 (CHAR_MAX + 2)
 
-    const char *short_options="trvh";
+    const char *short_options="trfvh";
     const struct option long_options[] = {
         {"rdt-to-test-map",  required_argument,  0, RDT_TO_TEST_MAP_OPT},
         {"test-to-out-map",  required_argument,  0, TEST_TO_OUT_MAP_OPT},
         {"row-height",       required_argument,  0, 'r'},
+        {"flip",             no_argument,        0, 'f'},
         {"threaded",         no_argument,        0, 't'},
         {"verbose",          no_argument,        0, 'v'},
         {"help",             no_argument,        0, 'h'},
@@ -486,18 +489,25 @@ main(int argc, char **argv)
         switch (opt) {
         case RDT_TO_TEST_MAP_OPT:
             rdt_to_test_map_js =
-                gm_data_load_label_map_from_json(log, optarg, rdt_to_test_map, NULL);
-            n_test_labels = json_array_get_count(json_array(rdt_to_test_map_js));
+                gm_data_load_label_map_from_json(log, optarg, rdt_to_test_map,
+                                                 NULL);
+            n_test_labels =
+                json_array_get_count(json_array(rdt_to_test_map_js));
             break;
         case TEST_TO_OUT_MAP_OPT:
             test_to_out_map_js =
-                gm_data_load_label_map_from_json(log, optarg, test_to_out_map, NULL);
-            n_out_labels = json_array_get_count(json_array(test_to_out_map_js));
+                gm_data_load_label_map_from_json(log, optarg, test_to_out_map,
+                                                 NULL);
+            n_out_labels =
+                json_array_get_count(json_array(test_to_out_map_js));
             break;
         case 'r':
             rows_per_label_opt = atoi(optarg);
             gm_assert(log, rows_per_label_opt >= 1 && rows_per_label_opt <= 10,
                       "-r,--row-height value should be between 1 and 10 (inclusive)");
+            break;
+        case 'f':
+            flip = true;
             break;
         case 't':
             threaded_opt = true;
@@ -516,6 +526,9 @@ main(int argc, char **argv)
 
     if (argc - optind < 3)
         usage();
+
+    gm_assert(log, !flip || (flip && rdt_to_test_map_js),
+              "-f,--flip specified without --rdt-to-test-map");
 
     const char *data_dir = argv[optind];
     const char *index_name = argv[optind + 1];
@@ -673,9 +686,6 @@ main(int argc, char **argv)
     end = get_time();
     uint64_t load_data_duration = end - start;
 
-    //float *rdt_probs = (float*)xmalloc(width * height *
-    //                                   sizeof(float) * n_rdt_labels);
-
     std::vector<float> all_accuracies;
     all_accuracies.reserve(n_images);
 
@@ -721,6 +731,9 @@ main(int argc, char **argv)
                           full_set_nhistogram);
 
 
+    float *rdt_probs = (float*)xmalloc(width * height *
+                                       sizeof(float) * n_rdt_labels);
+
     for (int i = 0; i < n_images; i++) {
 
         int64_t image_off = (int64_t)i * width * height;
@@ -733,7 +746,6 @@ main(int argc, char **argv)
         int image_best_label_matches[n_out_labels];
         memset(image_best_label_matches, 0, sizeof(image_best_label_matches));
 
-#if 0
         infer_labels<half>(log,
                            forest,
                            n_trees,
@@ -741,8 +753,8 @@ main(int argc, char **argv)
                            width,
                            height,
                            rdt_probs,
-                           threaded_opt);
-#endif
+                           threaded_opt,
+                           flip ? rdt_to_test_map + n_rdt_labels : NULL);
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
@@ -756,7 +768,8 @@ main(int argc, char **argv)
 
                 uint8_t out_label = test_to_out_map[test_label];
 
-                float rdt_pr_table[n_rdt_labels];
+                float *rdt_pr_table = &rdt_probs[off * n_rdt_labels];
+#if 0
                 infer_pixel_label_probs(log,
                                         forest,
                                         n_trees,
@@ -765,8 +778,8 @@ main(int argc, char **argv)
                                         height,
                                         x, y,
                                         rdt_pr_table);
+#endif
 
-                //float *rdt_pr_table = &rdt_probs[off * n_rdt_labels];
                 float test_pr_table[n_test_labels];
                 memset(test_pr_table, 0, sizeof(test_pr_table));
                 float out_pr_table[n_out_labels];
