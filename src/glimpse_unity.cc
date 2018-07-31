@@ -599,7 +599,7 @@ gm_unity_process_events(void)
     process_events(plugin_data);
 }
 
-#ifdef USE_GLES
+#if defined(USE_GLES) || defined(USE_CORE_GL)
 
 static GLuint
 gen_ar_video_texture(struct glimpse_data *data)
@@ -764,14 +764,14 @@ draw_video(struct glimpse_data *data,
     GLuint ar_video_tex = get_oldest_ar_video_tex(data);
     GLenum target = GL_TEXTURE_2D;
 
-#ifdef USE_GLES
+#if defined(USE_CORE_GL) && defined(__linux__)
+    glBindTextureUnit(0, ar_video_tex);
+#else
 #ifdef USE_TANGO
     if (data->device_type == GM_DEVICE_TANGO)
         target = GL_TEXTURE_EXTERNAL_OES;
 #endif
     glBindTexture(target, ar_video_tex);
-#else
-    glBindTextureUnit(0, ar_video_tex);
 #endif
 
     /* Don't touch the depth buffer, otherwise everything rendered by later
@@ -1023,12 +1023,12 @@ on_khr_debug_message_cb(GLenum source,
         break;
     }
 }
-#endif // USE_GLES
+#endif // GLES or CORE_GL
 
 static void UNITY_INTERFACE_API
 on_render_event_cb(int event)
 {
-#ifdef USE_GLES
+#if defined(USE_GLES) || defined(USE_CORE_GL)
     /* Holding this lock while rendering implies it's not possible to start
      * terminating the plugin state during a render event callback...
      */
