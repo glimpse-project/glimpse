@@ -146,10 +146,9 @@ gm_asset_open(struct gm_logger *log,
     struct stat sb;
     uint8_t *buf = NULL;
     struct gm_asset *asset;
-    static const char *root = NULL;
+    char *root = NULL;
 
-    if (!root)
-        root = glimpse_assets_root;
+    root = glimpse_assets_root;
     if (!root)
         root = "./";
 
