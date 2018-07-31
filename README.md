@@ -224,13 +224,6 @@ You will also likely want to add locally installed Python binaries to your PATH,
 
 `export PATH=$HOME/Library/Python/3.6/bin:$PATH`
 
-You may also need to add zlib to LDFLAGS and CPPFLAGS - your mileage may vary here. This can be done by adding the following lines to ~/.bash_profile:
-
-```
-export LDFLAGS="-L/usr/local/opt/zlib/lib"
-export CPPFLAGS="-I/usr/local/opt/zlib/include"
-```
-
 From this point, building should work the same as on Linux (i.e. install meson, check out the project, create a build directory and issue the meson commands given above).
 
 # Building for iOS
