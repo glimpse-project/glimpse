@@ -4698,6 +4698,11 @@ gm_context_new(struct gm_logger *logger, char **err)
                                        GM_ASSET_MODE_BUFFER,
                                        &catch_err);
             if (!tree_asset) {
+                if (ctx->n_decision_trees == 0) {
+                    gm_warn(ctx->log,
+                            "Failed to open JSON decision tree '%s': %s",
+                            name, catch_err);
+                }
                 free(catch_err);
                 break;
             }
