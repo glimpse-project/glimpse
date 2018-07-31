@@ -1362,6 +1362,21 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     if (ImGui::Button("Save config")) {
         JSON_Value *props_object = json_value_init_object();
         gm_props_to_json(data->log, ctx_props, props_object);
+
+        JSON_Value *stages = json_value_init_object();
+        json_object_set_value(json_object(props_object), "_stages", stages);
+        for (int i = 0; i < n_stages; i++) {
+            const char *stage_name = gm_context_get_stage_name(data->ctx, i);
+            struct gm_ui_properties *stage_props =
+                gm_context_get_stage_ui_properties(data->ctx, i);
+            JSON_Value *stage_props_object = json_value_init_object();
+
+            gm_props_to_json(data->log, stage_props, stage_props_object);
+
+            json_object_set_value(json_object(stages), stage_name,
+                                  stage_props_object);
+        }
+
         char *json = json_serialize_to_string_pretty(props_object);
         json_value_free(props_object);
         props_object = NULL;
@@ -3222,6 +3237,22 @@ viewer_init(Data *data)
         gm_props_from_json(data->log,
                            gm_context_get_ui_properties(data->ctx),
                            json_props);
+
+        JSON_Object *stages =
+            json_object(json_object_get_value(json_object(json_props), "_stages"));
+        int n_stages = gm_context_get_n_stages(data->ctx);
+        for (int i = 0; i < n_stages; i++) {
+            const char *stage_name = gm_context_get_stage_name(data->ctx, i);
+            struct gm_ui_properties *stage_props =
+                gm_context_get_stage_ui_properties(data->ctx, i);
+
+            JSON_Value *json_stage_props =
+                json_object_get_value(stages, stage_name);
+
+            gm_props_from_json(data->log,
+                               stage_props,
+                               json_stage_props);
+        }
         json_value_free(json_props);
         gm_asset_close(config_asset);
     } else {
