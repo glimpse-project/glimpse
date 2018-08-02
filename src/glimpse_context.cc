@@ -6189,8 +6189,8 @@ gm_context_new(struct gm_logger *logger, char **err)
         enumerant.val = i;
         ctx->cloud_stage_enumerants.push_back(enumerant);
     }
-    prop.enum_state.n_enumerants = ctx->label_enumerants.size();
-    prop.enum_state.enumerants = ctx->label_enumerants.data();
+    prop.enum_state.n_enumerants = ctx->cloud_stage_enumerants.size();
+    prop.enum_state.enumerants = ctx->cloud_stage_enumerants.data();
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();
