@@ -98,15 +98,15 @@ infer_label_probs_cb(void* userdata)
                 while (node.label_pr_idx == 0) {
                     Int2D u, v;
                     if (flip) {
-                        u = { (int)(pixel[0] - node.uv[0] / depth),
-                              (int)(pixel[1] + node.uv[1] / depth) };
-                        v = { (int)(pixel[0] - node.uv[2] / depth),
-                              (int)(pixel[1] + node.uv[3] / depth) };
+                        u = (Int2D){ (int)(pixel[0] - node.uv[0] / depth),
+                                     (int)(pixel[1] + node.uv[1] / depth) };
+                        v = (Int2D){ (int)(pixel[0] - node.uv[2] / depth),
+                                     (int)(pixel[1] + node.uv[3] / depth) };
                     } else {
-                        u = { (int)(pixel[0] + node.uv[0] / depth),
-                              (int)(pixel[1] + node.uv[1] / depth) };
-                        v = { (int)(pixel[0] + node.uv[2] / depth),
-                              (int)(pixel[1] + node.uv[3] / depth) };
+                        u = (Int2D){ (int)(pixel[0] + node.uv[0] / depth),
+                                     (int)(pixel[1] + node.uv[1] / depth) };
+                        v = (Int2D){ (int)(pixel[0] + node.uv[2] / depth),
+                                     (int)(pixel[1] + node.uv[3] / depth) };
                     }
 
                     float upixel = (u[0] >= 0 && u[0] < (int)width &&
