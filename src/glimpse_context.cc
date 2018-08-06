@@ -617,6 +617,8 @@ struct gm_context
     float seg_psi;
     float seg_timeout;
 
+    bool flip_labels;
+
     bool joint_refinement;
     int max_joint_predictions;
     float max_prediction_delta;
@@ -3420,7 +3422,8 @@ stage_label_inference_cb(struct gm_tracking_impl *tracking,
                         state->depth_image,
                         width, height,
                         state->label_probs,
-                        true); // multi-threaded
+                        true, // multi-threaded
+                        ctx->flip_labels);
 }
 
 static void
@@ -6027,6 +6030,15 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    "Inferred labels",
                                    gm_tracking_create_rgb_label_map,
                                });
+
+        ctx->flip_labels = false;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "li_flip_labels";
+        prop.desc = "Use horizontal image-flipping to enhance inference";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->flip_labels;
+        stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();

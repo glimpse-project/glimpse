@@ -46,7 +46,7 @@ typedef struct {
     int width;
     int height;
     float* output;
-    uint8_t* flip_map;
+    bool flip;
 } InferThreadData;
 
 typedef vector(int, 2) Int2D;
@@ -89,8 +89,9 @@ infer_label_probs_cb(void* userdata)
         for (int i = 0; i < data->n_trees; ++i)
         {
             RDTree* tree = data->forest[i];
+            uint8_t* flip_map = tree->header.flip_map;
 
-            for (int j = 0; j < (data->flip_map ? 2 : 1); ++j) {
+            for (int j = 0; j < (data->flip ? 2 : 1); ++j) {
                 int id = 0;
                 Node node = tree->nodes[0];
                 bool flip = (j == 1);
@@ -138,7 +139,7 @@ infer_label_probs_cb(void* userdata)
                 float* out_pr_table = &data->output[out_pr_idx];
                 if (flip) {
                     for (int n = 0; n < n_labels; ++n) {
-                        out_pr_table[data->flip_map[n]] += pr_table[n];
+                        out_pr_table[flip_map[n]] += pr_table[n];
                     }
                 } else {
                     for (int n = 0; n < n_labels; ++n) {
@@ -149,7 +150,7 @@ infer_label_probs_cb(void* userdata)
         }
 
         float divider = (float)
-            (data->flip_map ? data->n_trees * 2 : data->n_trees);
+            (data->flip ? data->n_trees * 2 : data->n_trees);
         for (int n = 0; n < n_labels; ++n) {
             (data->output + out_pr_idx)[n] /= divider;
         }
@@ -172,7 +173,7 @@ infer_labels(struct gm_logger* log,
              int width, int height,
              float* out_labels,
              bool use_threads,
-             uint8_t* flip_map)
+             bool do_flip)
 {
     int n_labels = (int)forest[0]->header.n_labels;
     size_t output_size = width * height * n_labels * sizeof(float);
@@ -187,7 +188,7 @@ infer_labels(struct gm_logger* log,
     {
         InferThreadData data = {
             1, 1, forest, n_trees,
-            (void*)depth_image, width, height, output_pr, flip_map
+            (void*)depth_image, width, height, output_pr, do_flip
         };
         infer_labels_callback((void*)(&data));
     }
@@ -199,7 +200,7 @@ infer_labels(struct gm_logger* log,
         for (int i = 0; i < n_threads; ++i)
         {
             data[i] = { i, n_threads, forest, n_trees,
-                (void*)depth_image, width, height, output_pr, flip_map };
+                (void*)depth_image, width, height, output_pr, do_flip };
             if (pthread_create(&threads[i], NULL, infer_labels_callback,
                                (void*)(&data[i])) != 0)
             {
@@ -223,8 +224,8 @@ infer_labels(struct gm_logger* log,
 template float*
 infer_labels<half>(struct gm_logger* log,
                    RDTree**, int, half*, int, int, float*,
-                   bool, uint8_t*);
+                   bool, bool);
 template float*
 infer_labels<float>(struct gm_logger* log,
                     RDTree**, int, float*, int, int, float*,
-                    bool, uint8_t*);
+                    bool, bool);

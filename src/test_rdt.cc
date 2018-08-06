@@ -527,9 +527,6 @@ main(int argc, char **argv)
     if (argc - optind < 3)
         usage();
 
-    gm_assert(log, !flip || (flip && rdt_to_test_map_js),
-              "-f,--flip specified without --rdt-to-test-map");
-
     const char *data_dir = argv[optind];
     const char *index_name = argv[optind + 1];
 
@@ -754,7 +751,7 @@ main(int argc, char **argv)
                            height,
                            rdt_probs,
                            threaded_opt,
-                           flip ? rdt_to_test_map + n_rdt_labels : NULL);
+                           flip);
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {

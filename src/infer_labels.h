@@ -40,4 +40,4 @@ float* infer_labels(struct gm_logger* log,
                     int height,
                     float* out_labels = NULL,
                     bool use_threads = false,
-                    uint8_t* flipped_label_mapping = NULL);
+                    bool flip_label_mapping = false);

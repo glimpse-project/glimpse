@@ -32,15 +32,16 @@
 #include <cstddef>
 
 #include "rdt_tree.h"
+#include "glimpse_data.h"
 #include "parson.h"
 #include "xalloc.h"
 
 static void
 assert_rdt_abi()
 {
-    static_assert(sizeof(RDTHeader) == 16, "RDT ABI Breakage");
-    static_assert(sizeof(Node) == 32,      "RDT ABI Breakage");
-    static_assert(offsetof(Node, t) == 16, "RDT ABI Breakage");
+    static_assert(sizeof(RDTHeader) == 272, "RDT ABI Breakage");
+    static_assert(sizeof(Node) == 32,       "RDT ABI Breakage");
+    static_assert(offsetof(Node, t) == 16,  "RDT ABI Breakage");
 }
 
 static int
@@ -168,6 +169,52 @@ rdt_tree_destroy(RDTree* tree)
     xfree(tree);
 }
 
+static bool
+load_flip_map_from_label_map(struct gm_logger* log,
+                             JSON_Array* label_map_array,
+                             uint8_t* flip_map,
+                             char** err)
+{
+    memset(flip_map, 255, 256);
+
+    int n_entries = (int)json_array_get_count(label_map_array);
+
+    for (int i = 0; i < n_entries; ++i) {
+        JSON_Object* mapping = json_array_get_object(label_map_array, i);
+
+        if (!json_object_has_value_of_type(mapping, "opposite", JSONString)) {
+            flip_map[i] = i;
+            continue;
+        }
+
+        /* If this label has an opposite, find the opposite labels and write
+         * their information into the flip mapping.
+         */
+        const char* opposite_label_name =
+            json_object_get_string(mapping, "opposite");
+        for (int j = 0; j < n_entries; ++j) {
+            JSON_Object* o_mapping =
+                json_array_get_object(label_map_array, j);
+            if (strcmp(opposite_label_name,
+                       json_object_get_string(o_mapping, "name")) == 0)
+            {
+                flip_map[i] = j;
+                break;
+            }
+        }
+
+        if (flip_map[i] == 255) {
+            gm_throw(log, err,
+                     "Label \"%s\" has non-existent opposite \"%s\"",
+                     json_object_get_string(mapping, "name"),
+                     opposite_label_name);
+            return false;
+        }
+    }
+
+    return true;
+}
+
 RDTree*
 rdt_tree_load_from_json(struct gm_logger* log,
                         JSON_Value* json_tree_value,
@@ -200,6 +247,20 @@ rdt_tree_load_from_json(struct gm_logger* log,
     tree->header.n_labels = (uint8_t)json_object_get_number(json_tree, "n_labels");
     tree->header.bg_label = (uint8_t)json_object_get_number(json_tree, "bg_label");
     tree->header.fov = (float)json_object_get_number(json_tree, "vertical_fov");
+
+    JSON_Array* label_map = json_object_get_array(json_tree, "labels");
+    if (!label_map) {
+        gm_warn(log, "RDT tree with no label map, flipping will be disabled");
+        for (int i = 0; i < tree->header.n_labels; ++i) {
+            tree->header.flip_map[i] = i;
+        }
+    } else if (!load_flip_map_from_label_map(log, label_map,
+                                             tree->header.flip_map, err))
+    {
+        gm_throw(log, err, "RDT tree with invalid label map");
+        xfree(tree);
+        return NULL;
+    }
 
     if (json_object_has_value(json_tree, "bg_depth"))
         tree->header.bg_depth = json_object_get_number(json_tree, "bg_depth");
