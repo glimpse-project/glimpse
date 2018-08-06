@@ -514,7 +514,7 @@ gm_data_load_label_map_from_json(struct gm_logger* log,
 
         for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
             int input = json_array_get_number(inputs, j);
-            if (input < 0 || input >= 255) {
+            if (input < 0 || input > 255) {
                 gm_throw(log, err, "Out of range \"%s\" label mapping from %d in %s\n",
                          json_object_get_string(mapping, "name"), input, filename);
                 json_value_free(label_map);

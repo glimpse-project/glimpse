@@ -169,12 +169,14 @@ rdt_tree_destroy(RDTree* tree)
     xfree(tree);
 }
 
-static bool
-load_flip_map_from_label_map(struct gm_logger* log,
-                             JSON_Array* label_map_array,
-                             uint8_t* flip_map,
-                             char** err)
+bool
+rdt_util_load_flip_map_from_label_map(struct gm_logger* log,
+                                      JSON_Value* label_map,
+                                      uint8_t* flip_map,
+                                      char** err)
 {
+    JSON_Array *label_map_array = json_array(label_map);
+
     memset(flip_map, 255, 256);
 
     int n_entries = (int)json_array_get_count(label_map_array);
@@ -248,14 +250,15 @@ rdt_tree_load_from_json(struct gm_logger* log,
     tree->header.bg_label = (uint8_t)json_object_get_number(json_tree, "bg_label");
     tree->header.fov = (float)json_object_get_number(json_tree, "vertical_fov");
 
-    JSON_Array* label_map = json_object_get_array(json_tree, "labels");
+    JSON_Value* label_map = json_object_get_value(json_tree, "labels");
     if (!label_map) {
         gm_warn(log, "RDT tree with no label map, flipping will be disabled");
         for (int i = 0; i < tree->header.n_labels; ++i) {
             tree->header.flip_map[i] = i;
         }
-    } else if (!load_flip_map_from_label_map(log, label_map,
-                                             tree->header.flip_map, err))
+    } else if (!rdt_util_load_flip_map_from_label_map(log, label_map,
+                                                      tree->header.flip_map,
+                                                      err))
     {
         gm_throw(log, err, "RDT tree with invalid label map");
         xfree(tree);

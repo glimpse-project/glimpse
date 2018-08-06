@@ -106,6 +106,11 @@ rdt_forest_load_from_files(struct gm_logger* log,
 void
 rdt_forest_destroy(RDTree** forest, int n_trees);
 
+bool
+rdt_util_load_flip_map_from_label_map(struct gm_logger* log,
+                                      JSON_Value* js_label_map,
+                                      uint8_t* flip_map,
+                                      char** err);
 #ifdef __cplusplus
 };
 #endif

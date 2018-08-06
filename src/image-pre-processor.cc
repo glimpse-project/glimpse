@@ -48,11 +48,15 @@
 #include <random>
 #include <atomic>
 
-#include "image_utils.h"
-
 #include "half.hpp"
 
 #include "parson.h"
+
+#include "glimpse_log.h"
+#include "glimpse_data.h"
+#include "image_utils.h"
+#include "rdt_tree.h"
+
 
 #ifdef DEBUG
 #define PNG_DEBUG 3
@@ -186,15 +190,6 @@ static png_color palette[] = {
         if (snprintf(dest, sizeof(dest), fmt,  __VA_ARGS__) >= (int)sizeof(dest)) \
             exit(1); \
     } while(0)
-
-static void *
-xmalloc(size_t size)
-{
-    void *ret = malloc(size);
-    if (ret == NULL)
-        exit(1);
-    return ret;
-}
 
 static uint64_t
 get_time(void)
@@ -1139,19 +1134,6 @@ usage(void)
     exit(1);
 }
 
-static int
-find_label_index(JSON_Value* label_map, const char* name)
-{
-    JSON_Array* label_map_array = json_array(label_map);
-    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
-        JSON_Object* mapping = json_array_get_object(label_map_array, i);
-        if (strcmp(name, json_object_get_string(mapping, "name")) == 0) {
-            return i;
-        }
-    }
-    return -1;
-}
-
 int
 main(int argc, char **argv)
 {
@@ -1160,6 +1142,8 @@ main(int argc, char **argv)
 #define VAR_OPT                 (CHAR_MAX + 1)
 #define MIN_BODY_PX_OPT         (CHAR_MAX + 2)
 #define MIN_BODY_CHNG_PC_OPT    (CHAR_MAX + 3)
+
+    struct gm_logger *log = gm_logger_new(NULL, NULL);
 
     const char *short_options="hfgpv:b:j:m:";
     const struct option long_options[] = {
@@ -1243,51 +1227,12 @@ main(int argc, char **argv)
     top_out_dir = argv[optind + 1];
     char *label_map_file = argv[optind + 2];
 
-    JSON_Value *label_map = json_parse_file(label_map_file);
-    if (!label_map) {
-        fprintf(stderr, "Failed to parse label map %s\n", optarg);
-        exit(1);
-    }
-
-    static_assert(sizeof(grey_to_id_map) == 256,
-                  "grey_to_id_map should be a 256 byte table");
-
-    /* NB: by default the grey_to_id_map is zero initialized which means
-     * everything is mapped to the background label
-     */
-    JSON_Array *label_map_array = json_array(label_map);
-    for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
-        JSON_Object *mapping = json_array_get_object(label_map_array, i);
-        const char *label_name = json_object_get_string(mapping, "name");
-
-        JSON_Array *inputs = json_object_get_array(mapping, "inputs");
-        for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
-            int input = json_array_get_number(inputs, j);
-            if (input < 0 || input > 255) {
-                fprintf(stderr, "Out of range \"%s\" label mapping from %d\n",
-                        label_name, input);
-                exit(1);
-            }
-            if (grey_to_id_map[input]) {
-                fprintf(stderr, "Input %d sampled by multiple labels\n", input);
-                exit(1);
-            }
-            grey_to_id_map[input] = i;
-        }
-
-        const char *opposite_name = json_object_get_string(mapping, "opposite");
-        if (opposite_name) {
-            int opposite_i = find_label_index(label_map, opposite_name);
-            if (opposite_i <= 0) {
-                fprintf(stderr, "Invalid flip mapping from \"%s\" to \"%s\"\n",
-                        label_name, opposite_name);
-                exit(1);
-            }
-            left_to_right_map[i] = opposite_i;
-        } else {
-            left_to_right_map[i] = i;
-        }
-    }
+    JSON_Value *label_map = gm_data_load_label_map_from_json(log,
+                                                             label_map_file,
+                                                             grey_to_id_map,
+                                                             NULL); // abort on error
+    rdt_util_load_flip_map_from_label_map(log, label_map, left_to_right_map,
+                                          NULL); // abort on error
 
     char meta_filename[512];
     xsnprintf(meta_filename, "%s/meta.json", top_src_dir);
@@ -1322,6 +1267,7 @@ main(int argc, char **argv)
     /* We want to add the label names to the output meta.json but it doesn't
      * make sense to keep the input mappings...
      */
+    JSON_Array *label_map_array = json_array(label_map);
     for (int i = 0; i < (int)json_array_get_count(label_map_array); i++) {
         JSON_Object *mapping = json_array_get_object(label_map_array, i);
         json_object_remove(mapping, "inputs");
