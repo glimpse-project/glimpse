@@ -477,14 +477,6 @@ executable('pfm-to-exr',
              'src/tinyexr.cc' ],
            include_directories: inc)
 
-executable('rdt-to-json',
-           [ 'src/rdt-to-json.c',
-             'src/glimpse_log.c',
-             'src/rdt_tree.cc',
-             'src/parson.c',
-             'src/xalloc.c' ],
-           include_directories: inc)
-
 executable('json-to-rdt',
            [ 'src/json-to-rdt.c',
              'src/glimpse_log.c',
