@@ -74,16 +74,12 @@
 
 #include <vector>
 
-#include "half.hpp"
-
 #include "rdt_tree.h"
 #include "infer_labels.h"
 #include "image_utils.h"
 
 #include <glimpse_rdt.h>
 #include <glimpse_data.h>
-
-using half_float::half;
 
 #define xsnprintf(dest, size, fmt, ...) do { \
         if (snprintf(dest, size, fmt,  __VA_ARGS__) >= (int)size) \
@@ -97,8 +93,8 @@ struct data_loader
     int width;
     int height;
 
-    std::vector<half> depth_images;
-    half bg_depth;
+    std::vector<float> depth_images;
+    float bg_depth;
 
     std::vector<uint8_t> label_images;
 };
@@ -110,6 +106,7 @@ static int rows_per_label_opt = 2;
 
 /* Label maps... */
 static uint8_t rdt_to_test_map[256];
+static uint8_t rdt_left_to_right_map[256];
 static uint8_t test_to_out_map[256];
 
 static const char *hbars[] = {
@@ -280,8 +277,8 @@ load_test_data_cb(struct gm_data_index *data_index,
               top_dir, frame_path);
 
     int64_t depth_off = (int64_t)index * width * height;
-    half *depth_image = &loader->depth_images[depth_off];
-    IUImageSpec depth_spec = { width, height, IU_FORMAT_HALF };
+    float *depth_image = &loader->depth_images[depth_off];
+    IUImageSpec depth_spec = { width, height, IU_FORMAT_FLOAT };
     if (iu_read_exr_from_file(depth_filename, &depth_spec,
                               (void **)&depth_image) != SUCCESS)
     {
@@ -357,7 +354,7 @@ static void
 infer_pixel_label_probs(struct gm_logger *log,
                         RDTree **trees,
                         int n_trees,
-                        half *depth_image,
+                        float *depth_image,
                         int width,
                         int height,
                         int x,
@@ -661,9 +658,9 @@ main(int argc, char **argv)
     loader.width = width;
     loader.height = height;
     loader.bg_depth = forest[0]->header.bg_depth;
-    loader.depth_images = std::vector<half>((int64_t)width *
-                                            height *
-                                            n_images);
+    loader.depth_images = std::vector<float>((int64_t)width *
+                                             height *
+                                             n_images);
     loader.label_images = std::vector<uint8_t>((int64_t)width *
                                                height *
                                                n_images);
@@ -677,7 +674,7 @@ main(int argc, char **argv)
         return 1;
     }
 
-    half *depth_images = loader.depth_images.data();
+    float *depth_images = loader.depth_images.data();
     uint8_t *label_images = loader.label_images.data();
 
     end = get_time();
@@ -735,7 +732,7 @@ main(int argc, char **argv)
 
         int64_t image_off = (int64_t)i * width * height;
 
-        half *depth_image = &depth_images[image_off];
+        float *depth_image = &depth_images[image_off];
         uint8_t *labels = &label_images[image_off];
 
         int image_label_incidence[n_out_labels];
@@ -743,15 +740,15 @@ main(int argc, char **argv)
         int image_best_label_matches[n_out_labels];
         memset(image_best_label_matches, 0, sizeof(image_best_label_matches));
 
-        infer_labels<half>(log,
-                           forest,
-                           n_trees,
-                           depth_image,
-                           width,
-                           height,
-                           rdt_probs,
-                           threaded_opt,
-                           flip);
+        infer_labels<float>(log,
+                            forest,
+                            n_trees,
+                            depth_image,
+                            width,
+                            height,
+                            rdt_probs,
+                            threaded_opt,
+                            flip);
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {

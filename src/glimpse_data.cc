@@ -30,8 +30,6 @@
 
 #include <vector>
 
-#include "half.hpp"
-
 #include "image_utils.h"
 #include "xalloc.h"
 #include "parson.h"
@@ -55,7 +53,7 @@ typedef struct {
     int      width;
     int      height;
 
-    half*    depth_images;  // Depth image data
+    float*   depth_images;  // Depth image data
     uint8_t* label_images;  // Label image data
 
     bool     gather_depth;  // Whether to load depth images
@@ -385,7 +383,7 @@ load_frame_foreach_cb(struct gm_data_index* data_index,
 
     if (data->gather_depth)
     {
-        IUImageSpec depth_spec = { data->width, data->height, IU_FORMAT_HALF };
+        IUImageSpec depth_spec = { data->width, data->height, IU_FORMAT_FLOAT };
         int64_t off = (int64_t)index * data->width * data->height;
         void* output = &data->depth_images[off];
         if (iu_read_exr_from_file(depth_filename, &depth_spec, &output) != SUCCESS) {
@@ -406,7 +404,7 @@ gm_data_load_simple(struct gm_logger* log,
                     int* out_n_joints,
                     int* out_width,
                     int* out_height,
-                    half** out_depth_images,
+                    float** out_depth_images,
                     uint8_t** out_label_images,
                     float** out_joints,
                     char** err)
@@ -437,7 +435,7 @@ gm_data_load_simple(struct gm_logger* log,
         data.label_images = (uint8_t*)xmalloc(n_pixels * sizeof(uint8_t));
 
     if (data.gather_depth)
-        data.depth_images = (half*)xmalloc(n_pixels * sizeof(half));
+        data.depth_images = (float*)xmalloc(n_pixels * sizeof(float));
 
     *out_n_images = data.n_images;
     gm_info(log, "Processing %d training images...\n", *out_n_images);

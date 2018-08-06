@@ -30,15 +30,11 @@
 
 #include <vector>
 
-#include "half.hpp"
-
 #include "png.h"
 
 #include "rdt_tree.h"
 
 #include "glimpse_data.h"
-
-using half_float::half;
 
 static bool verbose_opt = false;
 
@@ -174,7 +170,7 @@ main(int argc, char **argv)
     int height;
     int n_images;
 
-    half *depth_images;
+    float *depth_images;
     uint8_t *label_images;
 
     JSON_Value *meta =
@@ -231,17 +227,15 @@ main(int argc, char **argv)
 
     uint64_t current_time = get_time();
 
-    float *float_image = (float *)xmalloc(width * height * 4);
     uint8_t *rgba_image = (uint8_t *)xmalloc(width * height * 4);
     for (int i = 0; i < n_images; i++) {
         int64_t img_off = (int64_t)i * width * height;
-        half *depth = &depth_images[img_off];
+        float *depth = &depth_images[img_off];
         uint8_t *labels = &label_images[img_off];
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {
                 int pos = y * width + x;
-                float_image[pos] = depth[pos];
                 uint8_t label = labels[pos];
 
                 rgba_image[pos*4+0] = palette[label].red;
@@ -260,7 +254,7 @@ main(int argc, char **argv)
                  out_dir, i);
         FILE *fp = fopen(bin_filename, "w");
         gm_assert(log, fp != NULL, "Failed to open %s", bin_filename);
-        if (fwrite(float_image, width * height * 4, 1, fp) != 1) {
+        if (fwrite(depth, width * height * 4, 1, fp) != 1) {
             gm_error(log, "Failed to write %s", bin_filename);
             exit(1);
         }
@@ -288,7 +282,6 @@ main(int argc, char **argv)
         json_array_append_value(json_array(frames), frame);
     }
 
-    xfree(float_image);
     xfree(rgba_image);
 
     json_serialize_to_file_pretty(recording, out_filename);

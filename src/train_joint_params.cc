@@ -41,16 +41,12 @@
 #include "infer_joints.h"
 #include "parson.h"
 
-#include "half.hpp"
-
 #include "glimpse_log.h"
 #include "glimpse_data.h"
 
 #define JIP_VERSION 0
 #define N_SHIFTS 5
 #define SHIFT_THRESHOLD 0.001f
-
-using half_float::half;
 
 
 static bool verbose = false;
@@ -66,7 +62,7 @@ typedef struct {
     int      n_images;      // Number of training images
     int      width;         // Width of training images
     int      height;        // Height of training images
-    half*    depth_images;  // Depth images (row-major)
+    float*   depth_images;  // Depth images
 
     // Inferred joints for every combination of tested parameters (stored in
     // combination-major order)
@@ -208,19 +204,19 @@ thread_body(void* userdata)
             }
         }
 
-        half *depth_image = &ctx->depth_images[idx];
+        float *depth_image = &ctx->depth_images[idx];
 
         // Calculate label probabilities
-        float *pr_table = infer_labels<half>(ctx->log,
-                                             ctx->forest, ctx->n_trees,
-                                             depth_image,
-                                             ctx->width, ctx->height);
+        float *pr_table = infer_labels<float>(ctx->log,
+                                              ctx->forest, ctx->n_trees,
+                                              depth_image,
+                                              ctx->width, ctx->height);
 
         // Calculate pixel weights
-        float *weights = calc_pixel_weights<half>(&ctx->depth_images[idx],
-                                                  pr_table,
-                                                  ctx->width, ctx->height,
-                                                  n_labels, ctx->joint_map);
+        float *weights = calc_pixel_weights<float>(&ctx->depth_images[idx],
+                                                   pr_table,
+                                                   ctx->width, ctx->height,
+                                                   n_labels, ctx->joint_map);
 
         // For each combination this thread is processing, infer the joint
         // positions for this depth image.
@@ -243,16 +239,16 @@ thread_body(void* userdata)
 
             if (ctx->fast) {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    infer_joints_fast<half>(depth_image, pr_table, weights,
-                                            ctx->width, ctx->height,
-                                            n_labels, ctx->joint_map,
-                                            ctx->forest[0]->header.fov, params);
+                    infer_joints_fast<float>(depth_image, pr_table, weights,
+                                             ctx->width, ctx->height,
+                                             n_labels, ctx->joint_map,
+                                             ctx->forest[0]->header.fov, params);
             } else {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    infer_joints<half>(depth_image, pr_table, weights,
-                                       ctx->width, ctx->height,
-                                       bg_depth, n_labels, ctx->joint_map,
-                                       ctx->forest[0]->header.fov, params);
+                    infer_joints<float>(depth_image, pr_table, weights,
+                                        ctx->width, ctx->height,
+                                        bg_depth, n_labels, ctx->joint_map,
+                                        ctx->forest[0]->header.fov, params);
             }
         }
 

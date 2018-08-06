@@ -30,11 +30,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <cmath>
 #include <getopt.h>
 
 #include <png.h>
-
-#include "half.hpp"
 
 #include <glimpse_log.h>
 
@@ -44,8 +43,6 @@
 #include "infer_labels.h"
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
-
-using half_float::half;
 
 static png_color default_palette[] = {
     { 0x21, 0x21, 0x21 },
@@ -143,8 +140,8 @@ main(int argc, char **argv)
         print_usage(stderr);
 
     // Read depth file
-    half* depth_image = NULL;
-    IUImageSpec exr_spec = { 0, 0, IU_FORMAT_HALF };
+    float* depth_image = NULL;
+    IUImageSpec exr_spec = { 0, 0, IU_FORMAT_FLOAT };
     if (iu_read_exr_from_file(argv[optind], &exr_spec,
                               (void**)(&depth_image)) != SUCCESS)
     {
@@ -201,9 +198,9 @@ main(int argc, char **argv)
         }
     }
 
-    float* output_pr = infer_labels<half>(log,
-                                          forest, n_trees, depth_image,
-                                          width, height);
+    float* output_pr = infer_labels<float>(log,
+                                           forest, n_trees, depth_image,
+                                           width, height);
 
     // Write out png of most likely labels
     png_bytep out_labels = (png_bytep)xcalloc(1, width * height);
