@@ -207,16 +207,16 @@ thread_body(void* userdata)
         float *depth_image = &ctx->depth_images[idx];
 
         // Calculate label probabilities
-        float *pr_table = infer_labels<float>(ctx->log,
-                                              ctx->forest, ctx->n_trees,
-                                              depth_image,
-                                              ctx->width, ctx->height);
+        float *pr_table = infer_labels(ctx->log,
+                                       ctx->forest, ctx->n_trees,
+                                       depth_image,
+                                       ctx->width, ctx->height);
 
         // Calculate pixel weights
-        float *weights = calc_pixel_weights<float>(&ctx->depth_images[idx],
-                                                   pr_table,
-                                                   ctx->width, ctx->height,
-                                                   n_labels, ctx->joint_map);
+        float *weights = calc_pixel_weights(&ctx->depth_images[idx],
+                                            pr_table,
+                                            ctx->width, ctx->height,
+                                            n_labels, ctx->joint_map);
 
         // For each combination this thread is processing, infer the joint
         // positions for this depth image.
@@ -239,16 +239,16 @@ thread_body(void* userdata)
 
             if (ctx->fast) {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    infer_joints_fast<float>(depth_image, pr_table, weights,
-                                             ctx->width, ctx->height,
-                                             n_labels, ctx->joint_map,
-                                             ctx->forest[0]->header.fov, params);
+                    infer_joints_fast(depth_image, pr_table, weights,
+                                      ctx->width, ctx->height,
+                                      n_labels, ctx->joint_map,
+                                      ctx->forest[0]->header.fov, params);
             } else {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    infer_joints<float>(depth_image, pr_table, weights,
-                                        ctx->width, ctx->height,
-                                        bg_depth, n_labels, ctx->joint_map,
-                                        ctx->forest[0]->header.fov, params);
+                    infer_joints(depth_image, pr_table, weights,
+                                 ctx->width, ctx->height,
+                                 bg_depth, n_labels, ctx->joint_map,
+                                 ctx->forest[0]->header.fov, params);
             }
         }
 

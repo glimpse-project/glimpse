@@ -28,14 +28,10 @@
 #include <thread>
 #include <pthread.h>
 
-#include "half.hpp"
-
 #include "infer_labels.h"
 #include "xalloc.h"
 #include "rdt_tree.h"
 
-
-using half_float::half;
 
 typedef struct {
     int thread;
@@ -51,16 +47,11 @@ typedef struct {
 
 typedef vector(int, 2) Int2D;
 
-/* Use this inference implementation with legacy decision trees that
- * were trained using floor() rounding when normalizing uv offsets
- * and measured gradients in floating point with meter units.
- */
-template<typename FloatT>
 static void*
 infer_label_probs_cb(void* userdata)
 {
     InferThreadData* data = (InferThreadData*)userdata;
-    FloatT* depth_image = (FloatT*)data->depth_image;
+    float* depth_image = (float*)data->depth_image;
     int n_labels = data->forest[0]->header.n_labels;
 
     float bg_depth = data->forest[0]->header.bg_depth;
@@ -164,12 +155,11 @@ infer_label_probs_cb(void* userdata)
     return NULL;
 }
 
-template<typename FloatT>
 float*
 infer_labels(struct gm_logger* log,
              RDTree** forest,
              int n_trees,
-             FloatT* depth_image,
+             float* depth_image,
              int width, int height,
              float* out_labels,
              bool use_threads,
@@ -181,7 +171,7 @@ infer_labels(struct gm_logger* log,
     memset(output_pr, 0, output_size);
 
     void* (*infer_labels_callback)(void* userdata);
-    infer_labels_callback = infer_label_probs_cb<FloatT>;
+    infer_labels_callback = infer_label_probs_cb;
 
     int n_threads = std::thread::hardware_concurrency();
     if (!use_threads || n_threads <= 1)
@@ -220,12 +210,3 @@ infer_labels(struct gm_logger* log,
 
     return output_pr;
 }
-
-template float*
-infer_labels<half>(struct gm_logger* log,
-                   RDTree**, int, half*, int, int, float*,
-                   bool, bool);
-template float*
-infer_labels<float>(struct gm_logger* log,
-                    RDTree**, int, float*, int, int, float*,
-                    bool, bool);

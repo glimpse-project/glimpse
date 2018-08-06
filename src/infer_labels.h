@@ -31,11 +31,10 @@
 
 #define HUGE_DEPTH 1000.f
 
-template<typename FloatT>
 float* infer_labels(struct gm_logger* log,
                     RDTree** forest,
                     int n_trees,
-                    FloatT* depth_image,
+                    float* depth_image,
                     int width,
                     int height,
                     float* out_labels = NULL,

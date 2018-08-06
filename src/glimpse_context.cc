@@ -3416,14 +3416,14 @@ stage_label_inference_cb(struct gm_tracking_impl *tracking,
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
 
-    infer_labels<float>(ctx->log,
-                        ctx->decision_trees,
-                        ctx->n_decision_trees,
-                        state->depth_image,
-                        width, height,
-                        state->label_probs,
-                        true, // multi-threaded
-                        ctx->flip_labels);
+    infer_labels(ctx->log,
+                 ctx->decision_trees,
+                 ctx->n_decision_trees,
+                 state->depth_image,
+                 width, height,
+                 state->label_probs,
+                 true, // multi-threaded
+                 ctx->flip_labels);
 }
 
 static void
@@ -3435,12 +3435,12 @@ stage_joint_weights_cb(struct gm_tracking_impl *tracking,
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
 
-    calc_pixel_weights<float>(state->depth_image,
-                              state->label_probs,
-                              width, height,
-                              ctx->n_labels,
-                              ctx->joint_map,
-                              state->weights);
+    calc_pixel_weights(state->depth_image,
+                       state->label_probs,
+                       width, height,
+                       ctx->n_labels,
+                       ctx->joint_map,
+                       state->weights);
 }
 
 static void
@@ -3456,14 +3456,14 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                                tracking->training_camera_intrinsics.fy));
 
     state->joints_candidate =
-            infer_joints_fast<float>(state->depth_image,
-                                     state->label_probs,
-                                     state->weights,
-                                     width, height,
-                                     ctx->n_labels,
-                                     ctx->joint_map,
-                                     vfov,
-                                     ctx->joint_params->joint_params);
+            infer_joints_fast(state->depth_image,
+                              state->label_probs,
+                              state->weights,
+                              width, height,
+                              ctx->n_labels,
+                              ctx->joint_map,
+                              vfov,
+                              ctx->joint_params->joint_params);
 }
 
 static void

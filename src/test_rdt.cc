@@ -740,15 +740,15 @@ main(int argc, char **argv)
         int image_best_label_matches[n_out_labels];
         memset(image_best_label_matches, 0, sizeof(image_best_label_matches));
 
-        infer_labels<float>(log,
-                            forest,
-                            n_trees,
-                            depth_image,
-                            width,
-                            height,
-                            rdt_probs,
-                            threaded_opt,
-                            flip);
+        infer_labels(log,
+                     forest,
+                     n_trees,
+                     depth_image,
+                     width,
+                     height,
+                     rdt_probs,
+                     threaded_opt,
+                     flip);
 
         for (int y = 0; y < height; y++) {
             for (int x = 0; x < width; x++) {

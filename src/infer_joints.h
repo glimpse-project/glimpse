@@ -43,8 +43,7 @@ typedef struct {
     LList** joints;
 } InferredJoints;
 
-template<typename FloatT>
-float* calc_pixel_weights(FloatT* depth_image,
+float* calc_pixel_weights(float* depth_image,
                           float* pr_table,
                           int width,
                           int height,
@@ -52,8 +51,7 @@ float* calc_pixel_weights(FloatT* depth_image,
                           JSON_Value* joint_map,
                           float* out_weights = NULL);
 
-template<typename FloatT>
-InferredJoints* infer_joints_fast(FloatT* depth_image,
+InferredJoints* infer_joints_fast(float* depth_image,
                                   float* pr_table,
                                   float* weights,
                                   int width,
@@ -63,8 +61,7 @@ InferredJoints* infer_joints_fast(FloatT* depth_image,
                                   float vfov,
                                   JIParam* params);
 
-template<typename FloatT>
-InferredJoints* infer_joints(FloatT* depth_image,
+InferredJoints* infer_joints(float* depth_image,
                              float* pr_table,
                              float* weights,
                              int width,

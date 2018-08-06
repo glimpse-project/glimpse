@@ -43,9 +43,6 @@
 #define ARRAY_LEN(ARRAY) (sizeof(ARRAY)/sizeof(ARRAY[0]))
 
 
-using half_float::half;
-
-
 typedef struct {
     int n_labels;
 
@@ -86,9 +83,8 @@ unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
     }
 }
 
-template<typename FloatT>
 float*
-calc_pixel_weights(FloatT* depth_image, float* pr_table,
+calc_pixel_weights(float* depth_image, float* pr_table,
                    int width, int height, int n_labels,
                    JSON_Value* joint_map, float* weights)
 {
@@ -125,13 +121,6 @@ calc_pixel_weights(FloatT* depth_image, float* pr_table,
     return weights;
 }
 
-template float*
-calc_pixel_weights<half>(half*, float*, int, int, int,
-                         JSON_Value*, float*);
-template float*
-calc_pixel_weights<float>(float*, float*, int, int, int,
-                          JSON_Value*, float*);
-
 static int
 compare_joints(LList* a, LList* b, void* userdata)
 {
@@ -140,9 +129,8 @@ compare_joints(LList* a, LList* b, void* userdata)
     return ja->confidence - jb->confidence;
 }
 
-template<typename FloatT>
 InferredJoints*
-infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
+infer_joints_fast(float* depth_image, float* pr_table, float* weights,
                   int width, int height, int n_labels,
                   JSON_Value* joint_map, float vfov, JIParam* params)
 {
@@ -339,17 +327,8 @@ infer_joints_fast(FloatT* depth_image, float* pr_table, float* weights,
     return result;
 }
 
-template InferredJoints*
-infer_joints_fast<half>(half*, float*, float*, int, int, int,
-                        JSON_Value*, float, JIParam*);
-
-template InferredJoints*
-infer_joints_fast<float>(float*, float*, float*, int, int, int,
-                         JSON_Value*, float, JIParam*);
-
-template<typename FloatT>
 InferredJoints*
-infer_joints(FloatT* depth_image, float* pr_table, float* weights,
+infer_joints(float* depth_image, float* pr_table, float* weights,
              int width, int height,
              float bg_depth,
              int n_labels,
@@ -533,14 +512,6 @@ infer_joints(FloatT* depth_image, float* pr_table, float* weights,
 
     return result;
 }
-
-template InferredJoints*
-infer_joints<half>(half*, float*, float*, int, int, float, int,
-                   JSON_Value*, float, JIParam*);
-
-template InferredJoints*
-infer_joints<float>(float*, float*, float*, int, int, float, int,
-                    JSON_Value*, float, JIParam*);
 
 void
 free_joints(InferredJoints* joints)
