@@ -27,6 +27,7 @@
 #include <math.h>
 #include <thread>
 #include <pthread.h>
+#include <string.h>
 
 #include "infer_labels.h"
 #include "xalloc.h"
