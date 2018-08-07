@@ -15,8 +15,8 @@ endian = 'little'
 [properties]
 root = '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer'
 
-c_args = ['-arch', 'arm64', '-fembed-bitcode' ]
-c_link_args = ['-arch', 'arm64' ]
-cpp_args = ['-arch', 'arm64', '-fembed-bitcode' ]
-cpp_link_args = ['-arch', 'arm64' ]
-objc_args = [ '-ObjC', '-arch', 'arm64', '-fobjc-arc', '-fembed-bitcode', '-fstrict-aliasing', '-fmessage-length=0', '-fdiagnostics-show-note-include-stack', '-fmacro-backtrace-limit=0', '-fpascal-strings', '-fmodules', '-gmodules', ]
+c_args = ['-arch', 'arm64', '-fembed-bitcode', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+cpp_args = ['-arch', 'arm64', '-fembed-bitcode', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+c_link_args = ['-arch', 'arm64', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+cpp_link_args = ['-arch', 'arm64', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+objc_args = [ '-ObjC', '-arch', 'arm64', '-fobjc-arc', '-fembed-bitcode', '-fstrict-aliasing', '-fmessage-length=0', '-fdiagnostics-show-note-include-stack', '-fmacro-backtrace-limit=0', '-fpascal-strings', '-fmodules', '-gmodules', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
