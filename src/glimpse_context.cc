@@ -304,6 +304,12 @@ struct gm_skeleton {
       joints(n_joints),
       confidence(0.f),
       distance(0.f) {}
+    gm_skeleton(const struct gm_skeleton *skeleton) :
+      joints(skeleton->joints),
+      bones(skeleton->bones),
+      confidence(skeleton->confidence),
+      distance(skeleton->distance),
+      timestamp(skeleton->timestamp) {}
 };
 
 struct image_generator {
@@ -6845,6 +6851,87 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
     json_value_free(js);
 
     return gm_skeleton_new(ctx, joints, 0, 0, 0);
+}
+
+void
+displace_joints(const struct gm_context *ctx,
+                struct gm_skeleton *skeleton,
+                struct gm_bone &bone,
+                float *displacement)
+{
+    skeleton->joints[bone.tail].x -= displacement[0];
+    skeleton->joints[bone.tail].y -= displacement[1];
+    skeleton->joints[bone.tail].z -= displacement[2];
+
+    for (size_t b = 0; b < skeleton->bones.size(); ++b) {
+        struct gm_bone &candidate_bone = skeleton->bones[b];
+        if (candidate_bone.head == bone.tail) {
+            displace_joints(ctx, skeleton, candidate_bone, displacement);
+        }
+    }
+}
+
+struct gm_skeleton *
+gm_skeleton_resize(struct gm_context *ctx,
+                   const struct gm_skeleton *skeleton,
+                   const struct gm_skeleton *ref_skeleton,
+                   int parent_joint)
+{
+    if (skeleton->bones.size() != ref_skeleton->bones.size()) {
+        gm_error(ctx->log,
+                 "Mismatching skeletons passed to gm_skeleton_resize()");
+        return NULL;
+    }
+
+    struct gm_skeleton *resized = new struct gm_skeleton(skeleton);
+
+    // Resize the bones then recalculate the joint positions based on the bones
+    std::queue<size_t> leftover_bones;
+
+    for (size_t b = 0; b < resized->bones.size(); ++b) {
+        resized->bones[b].length = ref_skeleton->bones[b].length;
+        if (resized->bones[b].head == parent_joint) {
+            leftover_bones.push(b);
+        }
+    }
+
+    while (!leftover_bones.empty()) {
+        size_t b = leftover_bones.front();
+        leftover_bones.pop();
+        struct gm_bone &bone = resized->bones[b];
+
+        // Recalculate tail position
+        float length_mult = ref_skeleton->bones[b].length /
+            skeleton->bones[b].length;
+        float displacement[3];
+        displacement[0] =
+            resized->joints[bone.tail].x -
+            (resized->joints[bone.head].x +
+             ((skeleton->joints[bone.tail].x - skeleton->joints[bone.head].x) *
+              length_mult));
+        displacement[1] =
+            resized->joints[bone.tail].y -
+            (resized->joints[bone.head].y +
+             ((skeleton->joints[bone.tail].y - skeleton->joints[bone.head].y) *
+              length_mult));
+        displacement[2] =
+            resized->joints[bone.tail].z -
+            (resized->joints[bone.head].z +
+             ((skeleton->joints[bone.tail].z - skeleton->joints[bone.head].z) *
+              length_mult));
+
+        // Shift all the connected bones' tail joints
+        displace_joints(ctx, resized, bone, displacement);
+
+        // Place the next bones onto the list
+        for (size_t b = 0; b < resized->bones.size(); ++b) {
+            if (resized->bones[b].head == bone.tail) {
+                leftover_bones.push(b);
+            }
+        }
+    }
+
+    return resized;
 }
 
 void

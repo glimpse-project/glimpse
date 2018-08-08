@@ -323,6 +323,7 @@ typedef struct _Data
     struct gm_target *target;
     float target_error;
     bool target_progress;
+    bool target_resize;
     GLSkeleton target_skel_gl;
 
     int selected_target;
@@ -779,7 +780,8 @@ get_oldest_ar_video_tex(Data *data)
 }
 
 static void
-update_target_skeleton_wireframe_gl_bos(Data *data)
+update_target_skeleton_wireframe_gl_bos(Data *data,
+                                        const struct gm_skeleton *ref_skeleton)
 {
     if (!data->target ||
         gm_target_get_n_frames(data->target) == 0) {
@@ -787,6 +789,12 @@ update_target_skeleton_wireframe_gl_bos(Data *data)
     }
 
     const struct gm_skeleton *skeleton = gm_target_get_skeleton(data->target);
+    struct gm_skeleton *resized_skeleton = NULL;
+    if (ref_skeleton && data->target_resize) {
+        resized_skeleton = gm_skeleton_resize(data->ctx,
+                                              skeleton, ref_skeleton, 0);
+        skeleton = (const struct gm_skeleton *)resized_skeleton;
+    }
 
     data->target_skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
 
@@ -817,6 +825,10 @@ update_target_skeleton_wireframe_gl_bos(Data *data)
                  colored_bones, GL_DYNAMIC_DRAW);
 
     glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    if (resized_skeleton) {
+        gm_skeleton_free(resized_skeleton);
+    }
 }
 
 static bool
@@ -894,7 +906,7 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
                 gm_target_set_frame(data->target, 0);
             }
         }
-        update_target_skeleton_wireframe_gl_bos(data);
+        update_target_skeleton_wireframe_gl_bos(data, skeleton);
     }
 
     gm_prediction_unref(prediction);
@@ -984,6 +996,8 @@ draw_target_controls(Data *data)
             gm_target_set_frame(data->target, 0);
         }
     }
+
+    ImGui::Checkbox("Resize target skeleton", &data->target_resize);
 }
 
 static void
