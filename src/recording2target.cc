@@ -117,8 +117,6 @@ on_event_cb(struct gm_context *ctx, struct gm_event *event, void *user_data)
             (data->last_time == 0 ||
              data->last_time + data->frame_time <= frame_time))
         {
-            data->last_time = frame_time;
-
             const struct gm_skeleton *skeleton =
                 gm_tracking_get_skeleton(tracking);
 
@@ -126,9 +124,16 @@ on_event_cb(struct gm_context *ctx, struct gm_event *event, void *user_data)
             JSON_Value *bones = json_value_init_array();
             json_object_set_value(json_object(root), "bones", bones);
 
-            for (int j = 0; j < gm_skeleton_get_n_joints(skeleton); ++j) {
+            int n_joints = gm_skeleton_get_n_joints(skeleton);
+            for (int j = 0; j < n_joints ; ++j) {
                 const struct gm_joint *joint =
                     gm_skeleton_get_joint(skeleton, j);
+
+                // If we didn't manage to infer any joint position then skip
+                // the frame...
+                if (!joint || joint->name == NULL)
+                    break;
+
                 char *bone_name = strdup(joint->name);
                 char *bone_part = strchr(bone_name, (int)'.');
                 if (bone_part) {
@@ -177,6 +182,8 @@ on_event_cb(struct gm_context *ctx, struct gm_event *event, void *user_data)
             // Add file to index
             snprintf(output_name, 1024, "%06d.json\n", frame);
             fputs(output_name, data->index);
+
+            data->last_time = frame_time;
         }
         if (tracking) {
             gm_tracking_unref(tracking);
