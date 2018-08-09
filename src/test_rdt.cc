@@ -438,6 +438,9 @@ usage(void)
 "                          (E.g. to group labels and see accuracy for the\n"
 "                          left/right side of the body or whole limbs)\n"
 "\n"
+"  --output=FILE           Output results in JSON format to this file\n"
+"\n"
+"  -p, --pretty            Write pretty JSON output\n"
 "  -r, --row-height=N      Number of rows per-label for confusion matrix bars\n"
 "                          (default 2)\n"
 "\n"
@@ -452,7 +455,6 @@ usage(void)
 int
 main(int argc, char **argv)
 {
-    bool flip = false;
     uint64_t start, end;
 
     struct gm_logger *log = gm_logger_new(logger_cb, NULL);
@@ -460,11 +462,14 @@ main(int argc, char **argv)
 
 #define RDT_TO_TEST_MAP_OPT                 (CHAR_MAX + 1)
 #define TEST_TO_OUT_MAP_OPT                 (CHAR_MAX + 2)
+#define OUTPUT_FILE_OPT                     (CHAR_MAX + 3)
 
-    const char *short_options="trfvh";
+    const char *short_options = "prftvh";
     const struct option long_options[] = {
         {"rdt-to-test-map",  required_argument,  0, RDT_TO_TEST_MAP_OPT},
         {"test-to-out-map",  required_argument,  0, TEST_TO_OUT_MAP_OPT},
+        {"output",           required_argument,  0, OUTPUT_FILE_OPT},
+        {"pretty",           no_argument,        0, 'p'},
         {"row-height",       required_argument,  0, 'r'},
         {"flip",             no_argument,        0, 'f'},
         {"threaded",         no_argument,        0, 't'},
@@ -478,6 +483,11 @@ main(int argc, char **argv)
     JSON_Value *test_to_out_map_js = NULL;
     int n_out_labels = 0;
     JSON_Value *out_label_names = NULL;
+
+    // Default options
+    bool flip = false;
+    bool pretty = false;
+    const char *output = NULL;
 
     int opt;
     while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
@@ -497,6 +507,12 @@ main(int argc, char **argv)
                                                  NULL);
             n_out_labels =
                 json_array_get_count(json_array(test_to_out_map_js));
+            break;
+        case OUTPUT_FILE_OPT:
+            output = optarg;
+            break;
+        case 'p':
+            pretty = true;
             break;
         case 'r':
             rows_per_label_opt = atoi(optarg);
@@ -1001,6 +1017,82 @@ main(int argc, char **argv)
         printf("%d ", x % 10);
     printf("\n");
 
+    // Write output to JSON file
+    if (output) {
+        JSON_Value *json_output_root = json_value_init_object();
+
+        // Output details about testing parameters
+        JSON_Value *json_params = json_value_init_object();
+        json_object_set_string(json_object(json_params), "data_dir", data_dir);
+        json_object_set_string(json_object(json_params), "index", index_name);
+        JSON_Value *tree_array = json_value_init_array();
+        for (int i = 0; i < n_trees; ++i) {
+            json_array_append_string(json_array(tree_array),
+                                     argv[optind + 2 + i]);
+        }
+        json_object_set_value(json_object(json_params), "trees", tree_array);
+        if (rdt_to_test_map_js) {
+            json_object_set_value(json_object(json_params), "rdt_to_test_map",
+                                  rdt_to_test_map_js);
+        }
+        if (test_to_out_map_js) {
+            json_object_set_value(json_object(json_params), "test_to_out_map",
+                                  test_to_out_map_js);
+        }
+        if (out_label_names) {
+            json_object_set_value(json_object(json_params), "out_label_names",
+                                  out_label_names);
+        }
+        json_object_set_boolean(json_object(json_params), "flip", flip);
+        json_object_set_value(json_object(json_output_root), "params",
+                              json_params);
+
+        // Output accuracy summary
+        JSON_Value *json_accuracy = json_value_init_object();
+        json_object_set_number(json_object(json_accuracy),
+                               "average", average_accuracy);
+        json_object_set_number(json_object(json_accuracy),
+                               "median",
+                               all_accuracies[all_accuracies.size() / 2]);
+        json_object_set_number(json_object(json_accuracy),
+                               "worst", worst_accuracy);
+        json_object_set_number(json_object(json_accuracy),
+                               "best", best_accuracy);
+
+        json_object_set_value(json_object(json_output_root), "accuracy",
+                              json_accuracy);
+
+        JSON_Value *results = json_value_init_object();
+        json_object_set_number(json_object(results), "n_labels", n_out_labels);
+
+        // Output confusion matrix and label incidence array
+        JSON_Value *json_confusion_matrix = json_value_init_array();
+        for (int i = 0; i < n_out_labels * n_out_labels; ++i) {
+            json_array_append_number(json_array(json_confusion_matrix),
+                                     overall_confusion_matrix[i]);
+        }
+        json_object_set_value(json_object(results), "confusion_matrix",
+                              json_confusion_matrix);
+
+        JSON_Value *json_label_incidence = json_value_init_array();
+        for (int i = 0; i < n_out_labels; ++i) {
+            json_array_append_number(json_array(json_label_incidence),
+                                     overall_label_incidence[i]);
+        }
+        json_object_set_value(json_object(results), "label_incidence",
+                              json_label_incidence);
+
+        json_object_set_value(json_object(json_output_root), "results", results);
+
+        if (pretty) {
+            json_serialize_to_file_pretty(json_output_root, output);
+        } else {
+            json_serialize_to_file(json_output_root, output);
+        }
+        json_value_free(json_output_root);
+    }
+
+    // Clean up and quit
     for (int i = 0; i < n_trees; i++) {
         rdt_tree_destroy(forest[i]);
     }
