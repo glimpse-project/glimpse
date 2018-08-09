@@ -92,7 +92,11 @@ cd glimpse-models
 
 Further instructions assume the following environment variables are set
 
-`GLIMPSE_ASSETS_ROOT` is set to an absolute path containing all the data from the glimpse-models repository above. For the `glimpse_viewer` application, the [UI font file](src/Roboto-Medium.ttf) is also expected. This path can also contain recordings and motion capture targets, in `ViewerRecording` and `Targets` directories, respectively.
+`GLIMPSE_ASSETS_ROOT` is set to an absolute path containing all the data from
+the glimpse-models repository above. For the `glimpse_viewer` application, the
+[UI font file](src/Roboto-Medium.ttf) is also expected. This path can also
+contain recordings and motion capture targets, in `ViewerRecording` and
+`Targets` directories, respectively.
 
 # Building
 
@@ -101,19 +105,25 @@ cross-compiling for Android and iOS. If someone wants to help port to Windows,
 that would be greatly appreciated and probably wouldn't be too tricky.
 
 We're using [Meson](https://mesonbuild.com) and [Ninja](https://ninja-build.org/)
-for building. If you don't already have Meson, it can typically be installed by
-running:
-```
-pip3 install --user --upgrade meson
-```
+for building. 
 
-For cross-compiling to Android or iOS you currently need to use [this branch of
-meson](https://github.com/glimpse-project/meson) which e.g. knows not to use
-shared library versioning on Android:
-
+Since upstream Meson doesn't have sufficient support for Android or iOS and to
+also ensure consistent build setups we're using a custom [branch of
+meson](https://github.com/glimpse-project/meson) to build Glimpse which can be
+installed via:
 ```
 pip3 install --user --upgrade git+https://github.com/glimpse-project/meson
 ```
+
+On OSX you may need to explicitly add locally installed Python binaries to your
+PATH, E.g. by adding the following line to your ~/.bash_profile:
+
+`export PATH=$HOME/Library/Python/3.6/bin:$PATH`
+
+_(The `3.6` version number may differ, depending on the specific version of
+ Python 3 being used)_
+
+
 The version should have `glimpse-devX` in the suffix like:
 ```
 $ meson --version
@@ -156,21 +166,6 @@ export PATH=~/local/android-arm-toolchain-24/bin:$PATH
 *Note: while building for 32bit arm we have to use api level >= 24 otherwise we hit build issues with -D_FILE_OFFSET_BITS=64 usage*
 
 
-Make sure you have cloned the `glimpse` branch of Meson from
-[here](https://github.com/glimpse-project/meson), since upstream Meson isn't
-yet aware that Android lacks support for shared library versioning.
-
-The version should have `glimpse` in the suffix like:
-```
-$ meson --version
-0.45.0.glimpse-dev1
-```
-
-If not, then it can be installed like:
-```
-pip3 install --user --upgrade git+https://github.com/glimpse-project/meson
-```
-
 
 Then to compile Glimpse:
 ```
@@ -211,32 +206,82 @@ keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -s
 
 # Building for OSX
 
-Assuming you use [brew](http://brew.sh/) to install third-party tools then the Glimpse build will
-first require:
+Assuming you use [brew](http://brew.sh/) to install third-party tools then the
+Glimpse build will first require:
 
 `brew install pkg-config zlib libpng glfw3 python ninja git`
 
-If you want to use the software with a Kinect device, you will also need libfreenect installed:
+If you want to use the software with a Kinect device, you will also need
+libfreenect installed:
 
 `brew install libfreenect`
 
-You will also likely want to add locally installed Python binaries to your PATH, which can be done by adding the following line to ~/.bash_profile:
+It's assumed that you have installed the `glimpse` branch of the `meson` build
+tool as documented earler.
 
-`export PATH=$HOME/Library/Python/3.6/bin:$PATH`
+Then to compile Glimpse:
+```
+mkdir build-debug
+cd build-debug
+meson --buildtype=debug ..
+ninja
+```
 
-From this point, building should work the same as on Linux (i.e. install meson, check out the project, create a build directory and issue the meson commands given above).
+or release:
+```
+mkdir build-release
+cd build-release
+CFLAGS="-march=native -mtune=native" CXXFLAGS="-march=native -mtune=native" meson --buildtype=release ..
+ninja
+```
 
 # Building for iOS
 
-This is mostly the same as building for Android, except XCode needs to be
-installed rather than the Android SDK/NDK, and the iOS cross file
-(`ios-xcode-arm64-cross-file.txt`) should be used.
+Firstly you need to make sure that your using the command line tools from the
+full Xcode installation not the more minimal Command Line Tools package via:
 
-When configuring, append the option `--default-library=static`, as dynamic
-libraries are not supported on iOS.
+```
+sudo xcode-select -switch /Applications/Xcode.app
+```
 
-Copy a built `glimpse_viewer` binary to
+If you run `xcode-select -p` you should see:
+```
+/Applications/Xcode.app/Contents/Developer
+```
+not:
+```
+/Library/Developer/CommandLineTools
+```
+
+If you run `xcrun --sdk iphoneos --show-sdk-path` you should see something like:
+```
+/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk
+```
+(If not then it's expected that the build of glimpse will fail because the build
+ script uses the same command to locate the correct headers for cross compiling)
+
+
+Then to compile Glimpse:
+```
+mkdir build-ios-debug
+cd build-ios-debug
+meson --cross-file ../ios-xcode-arm64-cross-file.txt --buildtype=debug --default-library=static ..
+ninja
+```
+
+or release:
+```
+mkdir build-ios-release
+cd build-ios-release
+meson --cross-file ../ios-xcode-arm64-cross-file.txt --buildtype=release --default-library=static ..
+ninja
+```
+
+_Note: When configuring, append the option `--default-library=static`, as
+dynamic libraries are not supported on iOS._
+
+Copy the built `glimpse_viewer` binary to
 `xcode/GlimpseViewer/GlimpseViewer/Glimpse Viewer` and open
-`xcode/GlimpseViewer` in XCode to package and run on an iPhone X.
+`xcode/GlimpseViewer` in XCode to build, package and run on an iPhone X.
 
 For the Unity plugin, use `ninja install_plugin` as with other platform builds.
