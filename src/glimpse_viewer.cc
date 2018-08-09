@@ -3386,6 +3386,7 @@ main(int argc, char **argv)
     index_recordings(data);
     index_targets(data);
 
+    pthread_mutex_init(&data->event_queue_lock, NULL);
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);

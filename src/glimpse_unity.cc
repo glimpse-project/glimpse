@@ -1322,6 +1322,7 @@ gm_unity_init(char *config_json)
             have_recording = true;
     }
 
+    pthread_mutex_init(&data->event_queue_lock, NULL);
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
