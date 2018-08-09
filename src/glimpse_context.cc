@@ -6219,6 +6219,30 @@ gm_context_new(struct gm_logger *logger, char **err)
 }
 
 void
+gm_context_set_config(struct gm_context *ctx, JSON_Value *json_config)
+{
+    gm_props_from_json(ctx->log,
+                       gm_context_get_ui_properties(ctx),
+                       json_config);
+
+    JSON_Object *stages =
+        json_object(json_object_get_value(json_object(json_config), "_stages"));
+    int n_stages = gm_context_get_n_stages(ctx);
+    for (int i = 0; i < n_stages; i++) {
+        const char *stage_name = gm_context_get_stage_name(ctx, i);
+        struct gm_ui_properties *stage_props =
+            gm_context_get_stage_ui_properties(ctx, i);
+
+        JSON_Value *json_stage_props =
+            json_object_get_value(stages, stage_name);
+
+        gm_props_from_json(ctx->log,
+                           stage_props,
+                           json_stage_props);
+    }
+}
+
+void
 gm_context_set_max_depth_pixels(struct gm_context *ctx, int max_pixels)
 {
     ctx->max_depth_pixels = max_pixels;

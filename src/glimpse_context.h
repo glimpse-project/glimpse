@@ -361,6 +361,9 @@ struct gm_ui_properties *
 gm_context_get_ui_properties(struct gm_context *ctx);
 
 void
+gm_context_set_config(struct gm_context *ctx, JSON_Value *json_config);
+
+void
 gm_context_set_max_depth_pixels(struct gm_context *ctx, int max_pixels);
 
 void
