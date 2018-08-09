@@ -1264,7 +1264,6 @@ gm_unity_init(char *config_json)
     const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
     char *assets_root = strdup(assets_root_env ? assets_root_env : ".");
     data->log_fp = fopen("glimpse.log", "w");
-#endif
 
     const char *assets_path_override =
         json_object_get_string(data->config, "assetsPath");
@@ -1272,6 +1271,8 @@ gm_unity_init(char *config_json)
         free(assets_root);
         assets_root = strdup(assets_path_override);
     }
+#endif
+
     gm_set_assets_root(data->log, assets_root);
 
     char recordings_path_tmp[PATH_MAX];
