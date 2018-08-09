@@ -1280,11 +1280,6 @@ gm_unity_init(char *config_json)
              "%s/ViewerRecording", assets_root);
     const char *recordings_path = recordings_path_tmp;
 
-    const char *recordings_path_override =
-        json_object_get_string(data->config, "recordingsPath");
-    if (recordings_path_override && strlen(recordings_path_override) != 0)
-        recordings_path = recordings_path_override;
-
     if (!getenv("FAKENECT_PATH")) {
         char fakenect_path[PATH_MAX];
         snprintf(fakenect_path, sizeof(fakenect_path),
