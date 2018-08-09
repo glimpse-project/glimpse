@@ -569,7 +569,7 @@ gm_skeleton_new(struct gm_context *ctx,
 
 struct gm_skeleton *
 gm_skeleton_new_from_json(struct gm_context *ctx,
-                          const char *json_path);
+                          const char *asset_name);
 
 struct gm_skeleton *
 gm_skeleton_resize(struct gm_context *ctx,

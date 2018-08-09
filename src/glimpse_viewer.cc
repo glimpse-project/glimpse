@@ -954,7 +954,7 @@ draw_target_controls(Data *data)
             char *err = NULL;
             char path_tmp[PATH_MAX];
             snprintf(path_tmp, sizeof(path_tmp),
-                     "%s%s", glimpse_targets_path,
+                     "Targets/%s",
                      data->targets.at(data->selected_target));
             data->target =
                 gm_target_new_from_index(data->ctx, data->log, &err, path_tmp);
