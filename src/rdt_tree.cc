@@ -337,7 +337,7 @@ rdt_tree_load_from_buf(struct gm_logger* log,
 
     if ((size_t)len < sizeof(RDTHeader))
     {
-        fprintf(stderr, "Buffer too small to contain tree\n");
+        gm_throw(log, err, "Buffer too small to contain tree\n");
         rdt_tree_destroy(tree);
         return NULL;
     }
@@ -347,15 +347,15 @@ rdt_tree_load_from_buf(struct gm_logger* log,
 
     if (strncmp(tree->header.tag, "RDT", 3) != 0)
     {
-        fprintf(stderr, "File is not an RDT file\n");
+        gm_throw(log, err, "File is not an RDT file\n");
         rdt_tree_destroy(tree);
         return NULL;
     }
 
     if (tree->header.version != RDT_VERSION)
     {
-        fprintf(stderr, "Incompatible RDT version, expected %u, found %u\n",
-                RDT_VERSION, (unsigned)tree->header.version);
+        gm_throw(log, err, "Incompatible RDT version, expected %u, found %u\n",
+                 RDT_VERSION, (unsigned)tree->header.version);
         rdt_tree_destroy(tree);
         return NULL;
     }
@@ -365,7 +365,7 @@ rdt_tree_load_from_buf(struct gm_logger* log,
     tree->nodes = (Node*)xmalloc(n_nodes * sizeof(Node));
     if ((size_t)len < (sizeof(Node) * n_nodes))
     {
-        fprintf(stderr, "Error parsing tree nodes\n");
+        gm_throw(log, err, "Error parsing tree nodes\n");
         rdt_tree_destroy(tree);
         return NULL;
     }
@@ -377,14 +377,14 @@ rdt_tree_load_from_buf(struct gm_logger* log,
     int label_bytes = len;
     if (label_bytes % sizeof(float) != 0)
     {
-        fprintf(stderr, "Unexpected size of label probability tables\n");
+        gm_throw(log, err, "Unexpected size of label probability tables\n");
         rdt_tree_destroy(tree);
         return NULL;
     }
     int n_prs = label_bytes / sizeof(float);
     if (n_prs % tree->header.n_labels != 0)
     {
-        fprintf(stderr, "Unexpected number of label probabilities\n");
+        gm_throw(log, err, "Unexpected number of label probabilities\n");
         rdt_tree_destroy(tree);
         return NULL;
     }
