@@ -3197,27 +3197,9 @@ viewer_init(Data *data)
                       "glimpse-config.json", GM_ASSET_MODE_BUFFER, &open_err);
     if (config_asset) {
         const char *buf = (const char *)gm_asset_get_buffer(config_asset);
-        JSON_Value *json_props = json_parse_string(buf);
-        gm_props_from_json(data->log,
-                           gm_context_get_ui_properties(data->ctx),
-                           json_props);
-
-        JSON_Object *stages =
-            json_object(json_object_get_value(json_object(json_props), "_stages"));
-        int n_stages = gm_context_get_n_stages(data->ctx);
-        for (int i = 0; i < n_stages; i++) {
-            const char *stage_name = gm_context_get_stage_name(data->ctx, i);
-            struct gm_ui_properties *stage_props =
-                gm_context_get_stage_ui_properties(data->ctx, i);
-
-            JSON_Value *json_stage_props =
-                json_object_get_value(stages, stage_name);
-
-            gm_props_from_json(data->log,
-                               stage_props,
-                               json_stage_props);
-        }
-        json_value_free(json_props);
+        JSON_Value *json_config = json_parse_string(buf);
+        gm_context_set_config(data->ctx, json_config);
+        json_value_free(json_config);
         gm_asset_close(config_asset);
     } else {
         gm_warn(data->log, "Failed to open glimpse-config.json: %s", open_err);
