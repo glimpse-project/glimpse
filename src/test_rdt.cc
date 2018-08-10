@@ -106,7 +106,6 @@ static int rows_per_label_opt = 2;
 
 /* Label maps... */
 static uint8_t rdt_to_test_map[256];
-static uint8_t rdt_left_to_right_map[256];
 static uint8_t test_to_out_map[256];
 
 static const char *hbars[] = {
