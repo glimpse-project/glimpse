@@ -1073,15 +1073,13 @@ recording_open(struct gm_device *dev,
     dev->video_format = (enum gm_format)
         round(json_object_get_number(meta, "video_format"));
 
-    dev->recording.frame = 0;
-    dev->recording.frame_skip = !config->recording.disable_frame_skip;
-
     JSON_Array *frames =
         json_object_get_array(json_object(dev->recording.json), "frames");
     int n_recorded_frames = json_array_get_count(frames);
 
     struct gm_ui_property prop;
 
+    dev->recording.frame = 0;
     prop = gm_ui_property();
     prop.object = dev;
     prop.name = "frame";
@@ -1100,6 +1098,15 @@ recording_open(struct gm_device *dev,
     prop.desc = "Loop Playback";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &dev->recording.loop;
+    dev->properties.push_back(prop);
+
+    dev->recording.frame_skip = true;
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "frame_skip";
+    prop.desc = "Skip frames to keep time";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &dev->recording.frame_skip;
     dev->properties.push_back(prop);
 
     dev->recording.max_frame = -1;

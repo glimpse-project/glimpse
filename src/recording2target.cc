@@ -217,6 +217,7 @@ on_device_event_cb(struct gm_device_event *event, void *user_data)
 
         props = gm_device_get_ui_properties(data->device);
         gm_props_set_bool(props, "loop", false);
+        gm_props_set_bool(props, "frame_skip", false);
         data->frame_property = gm_props_lookup(props, "frame");
 
         gm_device_start(data->device);
@@ -407,7 +408,6 @@ main(int argc, char **argv)
     struct gm_device_config config = {};
     config.type = GM_DEVICE_RECORDING;
     config.recording.path = record_dir;
-    config.recording.disable_frame_skip = true;
 
     pthread_mutex_init(&data.finished_cond_mutex, NULL);
     pthread_cond_init(&data.finished_cond, NULL);
