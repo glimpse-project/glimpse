@@ -1473,8 +1473,9 @@ recording_io_thread_cb(void *userdata)
 
         /* XXX: Skip frames if we're > 33ms behind */
         if (recording_progress < (real_progress - 33333333) &&
-            dev->recording.frame_skip) {
-            gm_warn(dev->log, "slow playback, skipping recorded frames");
+            dev->recording.frame_skip)
+        {
+            gm_warn(dev->log, "Slow read IO, skipping recorded frames");
 
             int last_depth = -1;
             int i;
