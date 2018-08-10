@@ -499,25 +499,17 @@ handle_device_ready(struct glimpse_data *data)
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(data->device));*/
 
-    const char *config_name = json_object_get_string(data->config, "deviceConfig");
-    if (config_name && strlen(config_name)) {
-        char *open_err = NULL;
-        struct gm_asset *config_asset =
-            gm_asset_open(data->log,
-                          config_name,
-                          GM_ASSET_MODE_BUFFER, &open_err);
-        if (config_asset) {
-            const char *buf = (const char *)gm_asset_get_buffer(config_asset);
-            JSON_Value *json_props = json_parse_string(buf);
-            gm_props_from_json(data->log,
-                               gm_device_get_ui_properties(data->device),
-                               json_props);
-            json_value_free(json_props);
-            gm_asset_close(config_asset);
-        } else {
-            gm_warn(data->log, "Failed to open %s: %s", config_name, open_err);
-            free(open_err);
-        }
+    char *catch_err = NULL;
+    const char *device_config = json_object_get_string(data->config, "deviceConfig");
+    if (device_config == NULL || strlen(device_config) == 0)
+        device_config = "glimpse-device.json";
+    if (!gm_device_load_config_asset(data->device,
+                                     device_config,
+                                     &catch_err))
+    {
+        gm_warn(data->log, "Didn't open device config: %s", catch_err);
+        free(catch_err);
+        catch_err = NULL;
     }
 
     data->device_ready = true;

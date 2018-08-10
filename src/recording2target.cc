@@ -202,6 +202,9 @@ on_device_event_cb(struct gm_device_event *event, void *user_data)
 {
     Data *data = (Data *)user_data;
 
+    char *catch_err = NULL;
+    const char *device_config = "glimpse-device.json";
+
     struct gm_frame *frame;
     struct gm_ui_properties *props;
     int max_depth_pixels, max_video_pixels;
@@ -219,6 +222,15 @@ on_device_event_cb(struct gm_device_event *event, void *user_data)
         gm_props_set_bool(props, "loop", false);
         gm_props_set_bool(props, "frame_skip", false);
         data->frame_property = gm_props_lookup(props, "frame");
+
+        if (!gm_device_load_config_asset(data->device,
+                                         device_config,
+                                         &catch_err))
+        {
+            gm_warn(data->log, "Didn't open device config: %s", catch_err);
+            free(catch_err);
+            catch_err = NULL;
+        }
 
         gm_device_start(data->device);
         gm_context_enable(data->ctx);
