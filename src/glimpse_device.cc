@@ -70,6 +70,7 @@
 #include "glimpse_log.h"
 #include "glimpse_mem_pool.h"
 #include "glimpse_device.h"
+#include "glimpse_assets.h"
 
 #undef GM_LOG_CONTEXT
 #ifdef __ANDROID__
@@ -2606,6 +2607,33 @@ enum gm_device_type
 gm_device_get_type(struct gm_device *dev)
 {
     return dev->type;
+}
+
+bool
+gm_device_load_config_asset(struct gm_device *dev,
+                            const char *config_name,
+                            char **err)
+{
+    gm_assert(dev->log, config_name != NULL, "Spurious NULL config_name");
+
+    struct gm_asset *config_asset =
+        gm_asset_open(dev->log,
+                      config_name,
+                      GM_ASSET_MODE_BUFFER, err);
+    if (config_asset) {
+        gm_info(dev->log, "Opened device config asset %s", config_name);
+        const char *buf = (const char *)gm_asset_get_buffer(config_asset);
+        JSON_Value *json_props = json_parse_string(buf);
+        gm_props_from_json(dev->log,
+                           gm_device_get_ui_properties(dev),
+                           json_props);
+        json_value_free(json_props);
+        gm_asset_close(config_asset);
+
+        return true;
+    }
+
+    return false;
 }
 
 bool

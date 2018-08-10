@@ -93,6 +93,11 @@ gm_device_set_event_callback(struct gm_device *dev,
                              void *user_data);
 
 bool
+gm_device_load_config_asset(struct gm_device *dev,
+                            const char *config_name,
+                            char **err);
+
+bool
 gm_device_commit_config(struct gm_device *dev, char **err);
 
 struct gm_ui_properties *
