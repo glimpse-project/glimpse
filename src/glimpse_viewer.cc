@@ -2362,6 +2362,17 @@ handle_device_ready(Data *data, struct gm_device *dev)
     /*gm_context_set_depth_to_video_camera_extrinsics(data->ctx,
       gm_device_get_depth_to_video_extrinsics(dev));*/
 
+    char *catch_err = NULL;
+    const char *device_config = "glimpse-device.json";
+    if (!gm_device_load_config_asset(dev,
+                                     device_config,
+                                     &catch_err))
+    {
+        gm_warn(data->log, "Didn't open device config: %s", catch_err);
+        free(catch_err);
+        catch_err = NULL;
+    }
+
     uint64_t old_reqs = data->pending_frame_buffers_mask;
     data->pending_frame_buffers_mask = 0;
     gm_device_start(dev);
