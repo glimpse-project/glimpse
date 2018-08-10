@@ -70,6 +70,22 @@ struct gm_device_config {
         } kinect;
         struct {
             const char *path;
+
+            /* If 'true' then frames are read at the same rate that
+             * _request_frame() is called. It essentially ensures that a
+             * request with multiple buffer flags can only be fulfilled by a
+             * single response.
+             *
+             * E.g. if _DEPTH|_VIDEO buffers are requested and a frame with
+             * _DEPTH is read + forwarded then a subsequently read
+             * _DEPTH|_VIDEO frame can't be used to satisfy the remaining
+             * _VIDEO request bit because that may result in the previously
+             * forwarded _DEPTH-only frame being missed.
+             *
+             * This is mainly useful for non-real-time tools like
+             * recording2target that want to process all frames in a recording.
+             */
+            bool lockstep_io;
         } recording;
     };
 };
@@ -86,11 +102,34 @@ gm_device_open(struct gm_logger *log,
 enum gm_device_type
 gm_device_get_type(struct gm_device *dev);
 
+/* XXX:
+ *
+ * The current design delivers events as a way to help the receiver remain
+ * decoupled from internal design / implementation details, and to try and E.g.
+ * keep the gm_device and gm_context layers decoupled from each other. The
+ * events are expected to be processed via a mainloop run on a known thread
+ * with known locking.
+ *
+ * It's undefined what thread an event notification is delivered on
+ * and undefined what locks may be held by the device/context subsystem
+ * (and so reentrancy may result in a dead-lock).
+ *
+ * Events should not be processed synchronously within notification callbacks
+ * and instead work should be queued to run on a known thread with a
+ * deterministic state for locks...
+ *
+ */
 void
 gm_device_set_event_callback(struct gm_device *dev,
                              void (*event_callback)(struct gm_device_event *event,
                                                     void *user_data),
                              void *user_data);
+
+/* Since events should not be synchronously handled within the above event
+ * callback (considering the undefined state) then this API should be used
+ * after an event has finally been handled.
+ */
+void gm_device_event_free(struct gm_device_event *event);
 
 bool
 gm_device_load_config_asset(struct gm_device *dev,
@@ -111,16 +150,6 @@ gm_device_get_max_video_pixels(struct gm_device *dev);
 
 struct gm_extrinsics *
 gm_device_get_depth_to_video_extrinsics(struct gm_device *dev);
-
-/* It's expected that events aren't synchronously handled within the above
- * event callback considering that it's undefined what thread the callback
- * is invoked on and it's undefined what locks might be held during the
- * invocation whereby the device api may not be reentrant at that point.
- *
- * An event will likely be queued for processing later but when processing
- * is finished then the event structure needs to be freed with this api:
- */
-void gm_device_event_free(struct gm_device_event *event);
 
 void gm_device_start(struct gm_device *dev);
 void gm_device_stop(struct gm_device *dev);

@@ -173,6 +173,22 @@ struct gm_device
 
             pthread_t io_thread;
 
+            /* If 'true' then frames are read at the same rate that
+             * _request_frame() is called. It essentially ensures that a
+             * request with multiple buffer flags can only be fulfilled by a
+             * single response.
+             *
+             * E.g. if _DEPTH|_VIDEO buffers are requested and a frame with
+             * _DEPTH is read + forwarded then a subsequently read
+             * _DEPTH|_VIDEO frame can't be used to satisfy the remaining
+             * _VIDEO request bit because that may result in the previously
+             * forwarded _DEPTH-only frame being missed.
+             *
+             * This is mainly useful for non-real-time tools like
+             * recording2target that want to process all frames in a recording.
+             */
+            bool lockstep_io;
+
             /* older recordings have intrinsics that apply to the entire recording
              * and more recent recordings attach intrinsics to each frame
              */
@@ -538,26 +554,44 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     return buf;
 }
 
+/* XXX: the request_buffers_mask_lock must be held while calling this.
+ *
+ * Note: this is intentionally keeping the lock around the
+ * ->event_callback as a guard against introducing synchronous handling of
+ * events that might attempt to re-enter the gm_device api to make more frame
+ * requests.
+ *
+ * The current design intention behind delivering events is to help the
+ * receiver remain decoupled from the internal design / implementation
+ * of the gm_device code, and to try and keep the gm_device and gm_context
+ * layers decoupled from each other. The events are expected to be processed
+ * via a mainloop run on a known thread with known locking, not on
+ * arbitrary/unknown device backend threads.
+ *
+ * A deadlock here probably implies events aren't being processed via a
+ * mainloop.
+ */
+static void
+notify_frame_locked(struct gm_device *dev)
+{
+    struct gm_device_event *event =
+        device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
+
+    gm_debug(dev->log, "notify_frame_locked (ready_buffers_mask = 0x%" PRIx64,
+             dev->frame_ready_buffers_mask);
+
+    event->frame_ready.buffers_mask = dev->frame_ready_buffers_mask;
+    dev->frame_request_buffers_mask &= ~dev->frame_ready_buffers_mask;
+
+    dev->event_callback(event, dev->callback_data);
+}
+
 static void
 maybe_notify_frame_locked(struct gm_device *dev)
 {
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     if (dev->frame_request_buffers_mask & dev->frame_ready_buffers_mask)
     {
-        struct gm_device_event *event =
-            device_event_alloc(dev, GM_DEV_EVENT_FRAME_READY);
-
-        gm_debug(dev->log, "notify_frame_locked (buffers_mask = 0x%" PRIx64,
-                 dev->frame_request_buffers_mask);
-
-        event->frame_ready.buffers_mask = dev->frame_ready_buffers_mask;
-        dev->frame_request_buffers_mask &= ~dev->frame_ready_buffers_mask;
-
-        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
-
-        dev->event_callback(event, dev->callback_data);
-    } else {
-        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+        notify_frame_locked(dev);
     }
 }
 
@@ -602,7 +636,9 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void
@@ -628,7 +664,9 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -1289,7 +1327,31 @@ swap_recorded_frame(struct gm_device *dev,
 
         pthread_mutex_unlock(&dev->swap_buffers_lock);
 
-        maybe_notify_frame_locked(dev);
+        pthread_mutex_lock(&dev->request_buffers_mask_lock);
+
+        if (dev->frame_request_buffers_mask & dev->frame_ready_buffers_mask) {
+            notify_frame_locked(dev);
+
+            if (dev->recording.lockstep_io) {
+                /*
+                 * This mode essentially ensures that a request with multiple
+                 * buffer flags can only be fulfilled by a single response.
+                 *
+                 * E.g. if _DEPTH|_VIDEO buffers are requested and a frame with
+                 * _DEPTH is read + forwarded then a subsequently read
+                 * _DEPTH|_VIDEO frame can't be used to satisfy the remaining
+                 * _VIDEO request bit because that may result in the previously
+                 * forwarded _DEPTH-only frame being missed.
+                 *
+                 * This is mainly useful for non-real-time tools like
+                 * recording2target that want to process all frames in a
+                 * recording.
+                 */
+                dev->frame_request_buffers_mask = 0;
+            }
+        }
+
+        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void *
@@ -1733,7 +1795,9 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 // This function does nothing. TangoService_connectOnTextureAvailable
@@ -1813,7 +1877,9 @@ tango_frame_available_cb(void *context,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -2369,7 +2435,9 @@ on_avf_video_cb(struct ios_av_session *session,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static void
@@ -2431,7 +2499,9 @@ on_avf_depth_cb(struct ios_av_session *session,
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
+    pthread_mutex_lock(&dev->request_buffers_mask_lock);
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 static bool
@@ -2935,9 +3005,8 @@ gm_device_request_frame(struct gm_device *dev, uint64_t buffers_mask)
     pthread_mutex_lock(&dev->request_buffers_mask_lock);
     dev->frame_request_buffers_mask |= buffers_mask;
     pthread_cond_signal(&dev->request_buffers_cond);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
-
     maybe_notify_frame_locked(dev);
+    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 }
 
 #if 0
