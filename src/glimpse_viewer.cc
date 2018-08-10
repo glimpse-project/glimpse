@@ -280,6 +280,7 @@ typedef struct _Data
      * notification
      */
     pthread_mutex_t event_queue_lock;
+    pthread_cond_t event_notify_cond;
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
 
@@ -2400,8 +2401,19 @@ handle_device_event(Data *data, struct gm_device_event *event)
         handle_device_ready(data, event->device);
         break;
     case GM_DEV_EVENT_FRAME_READY:
+        /* NB: It's always possible that we will see an event for a frame
+         * that was ready before we upgraded the buffers_mask for what
+         * we need, so we skip notifications for frames we can't use.
+         */
         if (event->frame_ready.buffers_mask & data->pending_frame_buffers_mask)
         {
+            /* To avoid redundant work; just in case there are multiple
+             * _FRAME_READY notifications backed up then we squash them
+             * together and handle after we've iterated all outstanding
+             * events...
+             *
+             * (See handle_device_frame_updates())
+             */
             data->device_frame_ready = true;
         }
         break;
@@ -2421,6 +2433,12 @@ handle_context_event(Data *data, struct gm_event *event)
                               GM_REQUEST_FRAME_VIDEO));
         break;
     case GM_EVENT_TRACKING_READY:
+        /* To avoid redundant work; just in case there are multiple
+         * _TRACKING_READY notifications backed up then we squash them together
+         * and handle after we've iterated all outstanding events...
+         *
+         * (See handle_context_tracking_updates())
+         */
         data->tracking_ready = true;
         break;
     }
@@ -2453,6 +2471,10 @@ event_loop_iteration(Data *data)
         data->events_front->clear();
     }
 
+    /* To avoid redundant work; just in case there are multiple _TRACKING_READY
+     * or _FRAME_READY notifications backed up then we squash them together and
+     * handle after we've iterated all outstanding events...
+     */
     handle_device_frame_updates(data);
     handle_context_tracking_updates(data);
 
@@ -2643,8 +2665,15 @@ on_khr_debug_message_cb(GLenum source,
     }
 }
 
-/* NB: it's undefined what thread this is called on so we queue events to
- * be processed as part of the mainloop processing.
+/* XXX:
+ *
+ * It's undefined what thread an event notification is delivered on
+ * and undefined what locks may be held by the device/context subsystem
+ * (and so reentrancy may result in a dead-lock).
+ *
+ * Events should not be processed synchronously within notification callbacks
+ * and instead work should be queued to run on a known thread with a
+ * deterministic state for locks...
  */
 static void
 on_event_cb(struct gm_context *ctx,
@@ -2658,6 +2687,7 @@ on_event_cb(struct gm_context *ctx,
 
     pthread_mutex_lock(&data->event_queue_lock);
     data->events_back->push_back(event);
+    pthread_cond_signal(&data->event_notify_cond);
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
@@ -2673,6 +2703,7 @@ on_device_event_cb(struct gm_device_event *device_event,
 
     pthread_mutex_lock(&data->event_queue_lock);
     data->events_back->push_back(event);
+    pthread_cond_signal(&data->event_notify_cond);
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
@@ -3381,6 +3412,7 @@ main(int argc, char **argv)
     index_targets(data);
 
     pthread_mutex_init(&data->event_queue_lock, NULL);
+    pthread_cond_init(&data->event_notify_cond, NULL);
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);

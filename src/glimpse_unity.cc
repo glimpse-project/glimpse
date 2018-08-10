@@ -157,6 +157,7 @@ struct glimpse_data
      * notification
      */
     pthread_mutex_t event_queue_lock;
+    pthread_cond_t event_notify_cond;
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
 
@@ -525,12 +526,19 @@ handle_device_event(struct glimpse_data *data, struct gm_device_event *event)
     case GM_DEV_EVENT_FRAME_READY:
         gm_debug(data->log, "GM_DEV_EVENT_FRAME_READY\n");
 
-        /* It's always possible that we will see an event for a frame
+        /* NB: It's always possible that we will see an event for a frame
          * that was ready before we upgraded the buffers_mask for what
          * we need, so we skip notifications for frames we can't use.
          */
         if (event->frame_ready.buffers_mask & data->pending_frame_buffers_mask)
         {
+            /* To avoid redundant work; just in case there are multiple
+             * _FRAME_READY notifications backed up then we squash them
+             * together and handle after we've iterated all outstanding
+             * events...
+             *
+             * (See handle_device_frame_updates())
+             */
             data->device_frame_ready = true;
         }
         break;
@@ -560,7 +568,7 @@ handle_context_event(struct glimpse_data *data, struct gm_event *event)
 }
 
 static void
-process_events(struct glimpse_data *data)
+event_loop_iteration(struct glimpse_data *data)
 {
     pthread_mutex_lock(&data->event_queue_lock);
     std::swap(data->events_front, data->events_back);
@@ -581,6 +589,10 @@ process_events(struct glimpse_data *data)
 
     data->events_front->clear();
 
+    /* To avoid redundant work; just in case there are multiple _TRACKING_READY
+     * or _FRAME_READY notifications backed up then we squash them together and
+     * handle after we've iterated all outstanding events...
+     */
     handle_device_frame_updates(data);
     handle_context_tracking_updates(data);
 }
@@ -588,7 +600,7 @@ process_events(struct glimpse_data *data)
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_process_events(void)
 {
-    process_events(plugin_data);
+    event_loop_iteration(plugin_data);
 }
 
 #if defined(USE_GLES) || defined(USE_CORE_GL)
@@ -1080,9 +1092,15 @@ gm_unity_get_render_event_callback(void)
     return on_render_event_cb;
 }
 
-/* NB: it's undefined what thread this is called on so we queue events to
- * be processed by gm_unity_process_events() during the GlimpseRuntime
- * script's Update().
+/* XXX:
+ *
+ * It's undefined what thread an event notification is delivered on
+ * and undefined what locks may be held by the device/context subsystem
+ * (and so reentrancy may result in a dead-lock).
+ *
+ * Events should not be processed synchronously within notification callbacks
+ * and instead work should be queued to run on a known thread with a
+ * deterministic state for locks...
  */
 static void
 on_event_cb(struct gm_context *ctx,
@@ -1098,6 +1116,7 @@ on_event_cb(struct gm_context *ctx,
 
     pthread_mutex_lock(&data->event_queue_lock);
     data->events_back->push_back(event);
+    pthread_cond_signal(&data->event_notify_cond);
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
@@ -1115,6 +1134,7 @@ on_device_event_cb(struct gm_device_event *device_event,
 
     pthread_mutex_lock(&data->event_queue_lock);
     data->events_back->push_back(event);
+    pthread_cond_signal(&data->event_notify_cond);
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
@@ -1315,6 +1335,7 @@ gm_unity_init(char *config_json)
     }
 
     pthread_mutex_init(&data->event_queue_lock, NULL);
+    pthread_cond_init(&data->event_notify_cond, NULL);
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 

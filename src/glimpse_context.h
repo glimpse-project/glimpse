@@ -394,6 +394,22 @@ bool
 gm_context_notify_frame(struct gm_context *ctx,
                         struct gm_frame *frame);
 
+/* XXX:
+ *
+ * The current design delivers events as a way to help the receiver remain
+ * decoupled from internal design / implementation details, and to try and E.g.
+ * keep the gm_device and gm_context layers decoupled from each other. The
+ * events are expected to be processed via a mainloop run on a known thread
+ * with known locking.
+ *
+ * It's undefined what thread an event notification is delivered on
+ * and undefined what locks may be held by the device/context subsystem
+ * (and so reentrancy may result in a dead-lock).
+ *
+ * Events should not be processed synchronously within notification callbacks
+ * and instead work should be queued to run on a known thread with a
+ * deterministic state for locks...
+ */
 void
 gm_context_set_event_callback(struct gm_context *ctx,
                               void (*event_callback)(struct gm_context *ctx,
@@ -401,6 +417,10 @@ gm_context_set_event_callback(struct gm_context *ctx,
                                                      void *user_data),
                               void *user_data);
 
+/* Since events should not be synchronously handled within the above event
+ * callback (considering the undefined state) then this API should be used
+ * after an event has finally been handled.
+ */
 void
 gm_context_event_free(struct gm_event *event);
 
