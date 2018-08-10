@@ -957,7 +957,7 @@ draw_target_controls(Data *data)
                      "Targets/%s",
                      data->targets.at(data->selected_target));
             data->target =
-                gm_target_new_from_index(data->ctx, data->log, &err, path_tmp);
+                gm_target_new_from_index(data->ctx, data->log, path_tmp, &err);
             if (!data->target) {
                 gm_error(data->log, "Failed to load target: %s", err);
                 free(err);
