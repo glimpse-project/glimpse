@@ -70,7 +70,6 @@ struct gm_device_config {
         } kinect;
         struct {
             const char *path;
-            bool disable_frame_skip;
         } recording;
     };
 };
