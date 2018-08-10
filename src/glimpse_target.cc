@@ -52,8 +52,8 @@ gm_target_new(struct gm_context *ctx,
 struct gm_target *
 gm_target_new_from_index(struct gm_context *ctx,
                          struct gm_logger *log,
-                         char **err,
-                         const char *index_asset_name)
+                         const char *index_asset_name,
+                         char **err)
 {
     // Load the JSON file index
     struct gm_asset *index_asset =

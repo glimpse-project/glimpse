@@ -40,8 +40,8 @@ gm_target_new(struct gm_context *ctx,
 struct gm_target *
 gm_target_new_from_index(struct gm_context *ctx,
                          struct gm_logger *logger,
-                         char **err,
-                         const char *index_asset_name);
+                         const char *index_asset_name,
+                         char **err);
 
 void
 gm_target_insert_frame(struct gm_target *target,
