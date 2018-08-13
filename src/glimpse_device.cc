@@ -165,6 +165,7 @@ struct gm_device
             bool loop;
             int max_frame;
             bool frame_skip;
+            bool frame_throttle;
 
             int next_frame;
 
@@ -1110,6 +1111,15 @@ recording_open(struct gm_device *dev,
     prop.bool_state.ptr = &dev->recording.frame_skip;
     dev->properties.push_back(prop);
 
+    dev->recording.frame_throttle = true;
+    prop = gm_ui_property();
+    prop.object = dev;
+    prop.name = "frame_throttle";
+    prop.desc = "Throttle frames to keep time";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &dev->recording.frame_throttle;
+    dev->properties.push_back(prop);
+
     dev->recording.max_frame = -1;
     prop = gm_ui_property();
     prop.object = dev;
@@ -1535,12 +1545,16 @@ recording_io_thread_cb(void *userdata)
         monotonic_clock += frame_delta;
         loop_prev_frame_timestamp = frame_timestamp;
 
-        /* Throttle playback according to the timestamps in the recorded frames */
-        while (recording_progress > real_progress) {
-            uint64_t delay_us = (recording_progress - real_progress) / 1000;
-            usleep(delay_us);
-            time = get_time();
-            real_progress = time - loop_start;
+        if (dev->recording.frame_throttle) {
+            /* Throttle playback according to the timestamps in the recorded
+             * frames
+             */
+            while (recording_progress > real_progress) {
+                uint64_t delay_us = (recording_progress - real_progress) / 1000;
+                usleep(delay_us);
+                time = get_time();
+                real_progress = time - loop_start;
+            }
         }
 
         struct gm_intrinsics depth_intrinsics;
