@@ -1953,7 +1953,8 @@ handle_device_frame_updates(Data *data)
     }
 
     if (data->context_needs_frame &&
-        data->last_depth_frame && data->last_video_frame) {
+        data->last_depth_frame && data->last_video_frame)
+    {
         ProfileScopedSection(FwdContextFrame);
 
         // Combine the two video/depth frames into a single frame for gm_context
