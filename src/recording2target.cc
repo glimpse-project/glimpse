@@ -260,76 +260,21 @@ append_tracking_target(Data *data,
 {
     const struct gm_skeleton *skeleton = gm_tracking_get_skeleton(tracking);
 
-    JSON_Value *root = json_value_init_object();
-    JSON_Value *bones = json_value_init_array();
-    json_object_set_value(json_object(root), "bones", bones);
-
-    int n_joints = gm_skeleton_get_n_joints(skeleton);
-    for (int j = 0; j < n_joints ; ++j) {
-        const struct gm_joint *joint =
-            gm_skeleton_get_joint(skeleton, j);
-
-        // If we didn't manage to infer any joint position then skip
-        // the frame...
-        if (!joint || joint->name == NULL) {
-            gm_message(data->log,
-                       "Skipping frame %d (failed to track joint %d)",
-                       recording_frame_no, j);
-            return false;
-        }
-
-        char *bone_name = strdup(joint->name);
-        char *bone_part = strchr(bone_name, (int)'.');
-        if (bone_part) {
-            bone_part[0] = '\0';
-            ++bone_part;
-
-            // Find bone, or create one if this is the first encounter
-            JSON_Value *bone = NULL;
-            for (int c = 0;
-                 c < json_array_get_count(json_array(bones)); ++c)
-            {
-                JSON_Value *bone_obj =
-                    json_array_get_value(json_array(bones), c);
-                if (strcmp(json_object_get_string(json_object(bone_obj),
-                                                  "name"),
-                           bone_name) == 0)
-                {
-                    bone = bone_obj;
-                    break;
-                }
-            }
-            if (!bone) {
-                bone = json_value_init_object();
-                json_object_set_string(json_object(bone), "name",
-                                       bone_name);
-                json_array_append_value(json_array(bones), bone);
-            }
-
-            JSON_Value *joint_array = json_value_init_array();
-            json_object_set_value(json_object(bone), bone_part,
-                                  joint_array);
-            json_array_append_number(json_array(joint_array), joint->x);
-            json_array_append_number(json_array(joint_array), joint->y);
-            json_array_append_number(json_array(joint_array), joint->z);
-        }
-        free(bone_name);
-    }
-
     char output_name[1024];
     snprintf(output_name, 1024, "%s/%06d.json", data->out_dir,
              recording_frame_no);
-    json_serialize_to_file_pretty(root, output_name);
 
-    json_value_free(root);
+    if (gm_skeleton_save(skeleton, output_name)) {
+        // Add file to index
+        snprintf(output_name, 1024, "%06d.json\n", recording_frame_no);
+        fputs(output_name, data->index);
 
-    // Add file to index
-    snprintf(output_name, 1024, "%06d.json\n", recording_frame_no);
-    fputs(output_name, data->index);
+        data->last_written_timestamp = data->last_tracking_timestamp;
 
-    data->last_written_timestamp = data->last_tracking_timestamp;
+        return true;
+    }
 
-    return true;
+    return false;
 }
 
 static void

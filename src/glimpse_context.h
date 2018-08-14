@@ -634,6 +634,10 @@ float
 gm_skeleton_angle_diff_cumulative(const struct gm_skeleton *a,
                                   const struct gm_skeleton *b);
 
+bool
+gm_skeleton_save(const struct gm_skeleton *skeleton,
+                 const char *filename);
+
 void
 gm_skeleton_free(struct gm_skeleton *skeleton);
 
