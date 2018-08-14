@@ -83,8 +83,8 @@ if args.output:
         y.append(rank_mean[0][-i])
         with open(rank_mean[1][-i], 'r') as file:
             result = json.load(file)
-            yerr[0].append(result['accuracy']['best'] - y[-1])
-            yerr[1].append(y[-1] - result['accuracy']['worst'])
+            yerr[1].append(result['accuracy']['best'] - y[-1])
+            yerr[0].append(y[-1] - result['accuracy']['worst'])
 
     fig, ax = plt.subplots(nrows=1, ncols=1)
     fig.subplots_adjust(bottom=0.20)
