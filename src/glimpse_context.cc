@@ -625,6 +625,8 @@ struct gm_context
 
     bool flip_labels;
 
+    bool fast_clustering;
+
     bool joint_refinement;
     int max_joint_predictions;
     float max_prediction_delta;
@@ -3461,15 +3463,28 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
     float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
                                tracking->training_camera_intrinsics.fy));
 
-    state->joints_candidate =
-            infer_joints_fast(state->depth_image,
-                              state->label_probs,
-                              state->weights,
-                              width, height,
-                              ctx->n_labels,
-                              ctx->joint_map,
-                              vfov,
-                              ctx->joint_params->joint_params);
+    if (ctx->fast_clustering) {
+        state->joints_candidate =
+                infer_joints_fast(state->depth_image,
+                                  state->label_probs,
+                                  state->weights,
+                                  width, height,
+                                  ctx->n_labels,
+                                  ctx->joint_map,
+                                  vfov,
+                                  ctx->joint_params->joint_params);
+    } else {
+        state->joints_candidate =
+                infer_joints(state->depth_image,
+                             state->label_probs,
+                             state->weights,
+                             width, height,
+                             ctx->decision_trees[0]->header.bg_depth,
+                             ctx->n_labels,
+                             ctx->joint_map,
+                             vfov,
+                             ctx->joint_params->joint_params);
+    }
 }
 
 static void
@@ -6071,6 +6086,15 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "joint_inference";
         stage.desc = "Infer position of skeleton joints";
+
+        ctx->fast_clustering = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "li_fast_clustering";
+        prop.desc = "Use 2D connected-points clustering during joint inference";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->fast_clustering;
+        stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
