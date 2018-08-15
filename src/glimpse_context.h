@@ -621,11 +621,6 @@ const struct gm_joint *
 gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint);
 
 float
-gm_skeleton_angle_diff(const struct gm_skeleton *a,
-                       const struct gm_skeleton *b,
-                       const struct gm_bone *bone);
-
-float
 gm_skeleton_angle_diff_cumulative(const struct gm_skeleton *a,
                                   const struct gm_skeleton *b);
 
