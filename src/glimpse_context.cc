@@ -427,9 +427,6 @@ struct gm_tracking_impl
     // Inferred joint positions
     struct gm_skeleton skeleton;
 
-    // Legacy interface
-    float *joints_processed;
-
     uint8_t *face_detect_buf;
     size_t face_detect_buf_width;
     size_t face_detect_buf_height;
@@ -4002,12 +3999,6 @@ gm_context_track_skeleton(struct gm_context *ctx,
                       NULL,
                       &state);
         }
-        for (int j = 0; j < ctx->n_joints; j++) {
-            int idx = j * 3;
-            tracking->joints_processed[idx] = tracking->skeleton.joints[j].x;
-            tracking->joints_processed[idx+1] = tracking->skeleton.joints[j].y;
-            tracking->joints_processed[idx+2] = tracking->skeleton.joints[j].z;
-        }
 
         end = get_time();
         duration = end - start;
@@ -4662,7 +4653,6 @@ tracking_state_free(struct gm_mem_pool *pool,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
 
     free(tracking->label_probs);
-    free(tracking->joints_processed);
 
     free(tracking->depth);
 
@@ -4739,8 +4729,6 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     tracking->skeleton.joints.resize(ctx->n_joints);
     tracking->skeleton.bones.clear();
-    tracking->joints_processed = (float *)
-      xcalloc(ctx->n_joints, 3 * sizeof(float));
 
     gm_assert(ctx->log, ctx->max_depth_pixels,
               "Undefined maximum number of depth pixels");
@@ -6401,16 +6389,6 @@ gm_tracking_get_training_camera_intrinsics(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     return &tracking->training_camera_intrinsics;
-}
-
-const float *
-gm_tracking_get_joint_positions(struct gm_tracking *_tracking,
-                                int *n_joints)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    if (n_joints) *n_joints = tracking->ctx->n_joints;
-    return tracking->joints_processed;
 }
 
 bool

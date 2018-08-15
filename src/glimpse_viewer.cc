@@ -2326,20 +2326,20 @@ handle_context_tracking_updates(Data *data)
     }
 
     if (data->joints_recording) {
-        int n_joints;
-        const float *joints =
-            gm_tracking_get_joint_positions(data->latest_tracking,
-                                            &n_joints);
+        const struct gm_skeleton *skeleton =
+            gm_tracking_get_skeleton(data->latest_tracking);
+        int n_joints = gm_skeleton_get_n_joints(skeleton);
+
         JSON_Value *joints_array_val = json_value_init_array();
         JSON_Array *joints_array = json_array(joints_array_val);
         for (int i = 0; i < n_joints; i++) {
-            const float *joint = joints + 3 * i;
+            const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
             JSON_Value *coord_val = json_value_init_array();
             JSON_Array *coord = json_array(coord_val);
 
-            json_array_append_number(coord, joint[0]);
-            json_array_append_number(coord, joint[1]);
-            json_array_append_number(coord, joint[2]);
+            json_array_append_number(coord, joint->x);
+            json_array_append_number(coord, joint->y);
+            json_array_append_number(coord, joint->z);
 
             json_array_append_value(joints_array, coord_val);
         }

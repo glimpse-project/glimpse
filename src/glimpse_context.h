@@ -523,11 +523,6 @@ gm_tracking_create_stage_rgb_image(struct gm_tracking *tracking,
                                    int *height,
                                    uint8_t **output);
 
-/* Deprecated */
-const float *
-gm_tracking_get_joint_positions(struct gm_tracking *tracking,
-                                int *n_joints);
-
 bool
 gm_tracking_has_skeleton(struct gm_tracking *tracking);
 

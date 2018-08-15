@@ -1431,20 +1431,6 @@ gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
     return (intptr_t)tracking;
 }
 
-extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_get_joint_positions(intptr_t plugin_handle,
-                                      intptr_t tracking_handle)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
-
-    gm_debug(data->log, "Tracking: Get Label Probabilities");
-
-    const float *joints = gm_tracking_get_joint_positions(tracking, NULL);
-
-    return joints;
-}
-
 extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
                                intptr_t tracking_handle)
@@ -1452,6 +1438,15 @@ gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
     return gm_tracking_has_skeleton(tracking);
+}
+
+extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_get_skeleton(intptr_t plugin_handle,
+                               intptr_t tracking_handle)
+{
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+
+    return (intptr_t)gm_tracking_get_skeleton(tracking);
 }
 
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1511,6 +1506,16 @@ gm_unity_prediction_get_joint(intptr_t plugin_handle,
     return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
 }
 
+extern "C" const intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prediction_get_skeleton(intptr_t plugin_handle,
+                                 intptr_t prediction_handle)
+{
+    struct gm_prediction *prediction =
+        (struct gm_prediction *)prediction_handle;
+
+    return (intptr_t)gm_prediction_get_skeleton(prediction);
+}
+
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_prediction_get_timestamp(intptr_t plugin_handle,
                                   intptr_t prediction_handle)
@@ -1532,6 +1537,34 @@ gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
              prediction,
              ref);
     gm_prediction_unref(prediction);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_get_n_joints(intptr_t plugin_handle,
+                               intptr_t skeleton_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL gm_unity_skeleton_get_n_joints() skeleton handle");
+        return NULL;
+    }
+
+    return gm_skeleton_get_n_joints(skeleton);
+}
+
+extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
+                                     intptr_t skeleton_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL gm_unity_skeleton_get_joint() skeleton handle");
+        return NULL;
+    }
+
+    return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
 }
 
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
