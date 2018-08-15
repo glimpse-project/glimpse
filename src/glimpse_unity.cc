@@ -49,6 +49,7 @@
 #include "glimpse_context.h"
 #include "glimpse_gl.h"
 #include "glimpse_assets.h"
+#include "glimpse_target.h"
 
 #ifdef __APPLE__
 #include <TargetConditionals.h>
@@ -84,6 +85,11 @@
 #include <tango_client_api.h>
 #include <tango_support_api.h>
 #endif
+
+#define xsnprintf(dest, n, fmt, ...) do { \
+        if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
+            exit(1); \
+    } while(0)
 
 using half_float::half;
 
@@ -1491,21 +1497,6 @@ gm_unity_context_get_prediction(intptr_t plugin_handle, int delay)
     return (intptr_t)prediction;
 }
 
-extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_prediction_get_joint(intptr_t plugin_handle,
-                              intptr_t prediction_handle,
-                              int joint)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    struct gm_prediction *prediction =
-        (struct gm_prediction *)prediction_handle;
-
-    gm_debug(data->log, "Prediction: Get Joint %d position", joint);
-
-    const gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
-    return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
-}
-
 extern "C" const intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_prediction_get_skeleton(intptr_t plugin_handle,
                                  intptr_t prediction_handle)
@@ -1544,10 +1535,10 @@ gm_unity_skeleton_get_n_joints(intptr_t plugin_handle,
                                intptr_t skeleton_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    const gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
-        gm_error(data->log, "NULL gm_unity_skeleton_get_n_joints() skeleton handle");
-        return NULL;
+        gm_error(data->log, "NULL skeleton handle");
+        return 0;
     }
 
     return gm_skeleton_get_n_joints(skeleton);
@@ -1555,19 +1546,282 @@ gm_unity_skeleton_get_n_joints(intptr_t plugin_handle,
 
 extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
-                                     intptr_t skeleton_handle)
+                                     intptr_t skeleton_handle,
+                                     int joint)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    const gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
-        gm_error(data->log, "NULL gm_unity_skeleton_get_joint() skeleton handle");
+        gm_error(data->log, "NULL skeleton handle");
         return NULL;
     }
 
     return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
 }
 
-extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_get_joint_confidence(intptr_t plugin_handle,
+                                       intptr_t skeleton_handle,
+                                       int joint_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return 0;
+    }
+
+    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
+    return joint->confidence;
+}
+
+extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_is_joint_predicted(intptr_t plugin_handle,
+                                     intptr_t skeleton_handle,
+                                     int joint_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return false;
+    }
+
+    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
+    return joint->predicted;
+}
+
+extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_get_joint_name(intptr_t plugin_handle,
+                                 intptr_t skeleton_handle,
+                                 int joint_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return "";
+    }
+
+    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
+    return joint->name;
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_get_n_bones(intptr_t plugin_handle, intptr_t skeleton_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return 0;
+    }
+
+    return gm_skeleton_get_n_bones(skeleton);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_get_bone(intptr_t plugin_handle,
+                           intptr_t skeleton_handle,
+                           int bone)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return 0;
+    }
+
+    return (intptr_t)gm_skeleton_get_bone(skeleton, bone);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_resize(intptr_t plugin_handle,
+                         intptr_t skeleton_handle,
+                         intptr_t ref_skeleton_handle,
+                         int parent_joint)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return 0;
+    }
+    const struct gm_skeleton *ref_skeleton = (struct gm_skeleton *)ref_skeleton_handle;
+    if (!ref_skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return 0;
+    }
+
+    return (intptr_t)gm_skeleton_resize(data->ctx, skeleton, ref_skeleton, parent_joint);
+}
+
+/* It's assumed that GlimpseRuntime knows when it has ownership of a skeleton
+ * and is responsible for freeing it. Notably skeletons got via tracking and
+ * prediction objects shouldn't be freed, but e.g. a skeleton derived by
+ * resizing a target pose to match proportions of the person being tracked
+ * may need to be freed
+ */
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_free(intptr_t plugin_handle, intptr_t skeleton_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return;
+    }
+
+    gm_skeleton_free(skeleton);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_bone_get_head(intptr_t plugin_handle, intptr_t bone_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_bone *bone = (struct gm_bone *)bone_handle;
+    if (!bone) {
+        gm_error(data->log, "NULL bone handle");
+        return NULL;
+    }
+
+    return (intptr_t)gm_bone_get_head(bone);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_bone_get_tail(intptr_t plugin_handle, intptr_t bone_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    const struct gm_bone *bone = (struct gm_bone *)bone_handle;
+    if (!bone) {
+        gm_error(data->log, "NULL bone handle");
+        return NULL;
+    }
+
+    return (intptr_t)gm_bone_get_tail(bone);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_open(intptr_t plugin_handle,
+                              const char *sequence_name)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+
+    if (sequence_name == NULL) {
+        gm_error(data->log, "NULL gm_unity_target_sequence_open() sequence_name");
+        return NULL;
+    }
+
+    char path_tmp[PATH_MAX];
+    xsnprintf(path_tmp, sizeof(path_tmp),
+              "Targets/%s/glimpse_target.index",
+              sequence_name);
+
+    gm_debug(data->log, "gm_unity_target_sequence_open(), opening %s",
+             sequence_name);
+
+    char *catch_err = NULL;
+    struct gm_target *target =
+        gm_target_new_from_index(data->ctx,
+                                 data->log,
+                                 path_tmp,
+                                 &catch_err);
+    if (!target) {
+        gm_error(data->log, "Failed to open target sequence %s: %s",
+                 path_tmp, catch_err);
+        free(catch_err);
+        catch_err = NULL;
+        return NULL;
+    }
+
+    return (intptr_t)target;
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_get_n_frames(intptr_t plugin_handle,
+                                      intptr_t target_sequence)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_target *sequence = (struct gm_target *)target_sequence;
+    if (!sequence) {
+        gm_error(data->log, "NULL sequence handle");
+        return 0;
+    }
+
+    return gm_target_get_n_frames(sequence);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_get_frame(intptr_t plugin_handle,
+                                   intptr_t target_sequence)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_target *sequence = (struct gm_target *)target_sequence;
+    if (!sequence) {
+        gm_error(data->log, "NULL sequence handle");
+        return 0;
+    }
+
+    return gm_target_get_frame(sequence);
+}
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_set_frame(intptr_t plugin_handle,
+                                   intptr_t target_sequence,
+                                   int frame_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    struct gm_target *sequence = (struct gm_target *)target_sequence;
+    if (!sequence) {
+        gm_error(data->log, "NULL sequence handle");
+        return;
+    }
+
+    gm_target_set_frame(sequence, frame_no);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_get_skeleton(intptr_t plugin_handle,
+                                      intptr_t target_sequence)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
+    struct gm_target *sequence = (struct gm_target *)target_sequence;
+    if (!sequence) {
+        gm_error(data->log, "NULL sequence handle");
+        return NULL;
+    }
+
+    return (intptr_t)gm_target_get_skeleton(sequence);
+}
+
+extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_get_bone_error(intptr_t plugin_handle,
+                                        intptr_t target_sequence,
+                                        intptr_t bone_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+    struct gm_target *sequence = (struct gm_target *)target_sequence;
+    if (!sequence) {
+        gm_error(data->log, "NULL sequence handle");
+        return 0;
+    }
+
+    const struct gm_bone *bone = (const struct gm_bone *)bone_handle;
+    if (!bone) {
+        gm_error(data->log, "NULL bone handle");
+        return 0;
+    }
+
+    return (intptr_t)gm_target_get_error(sequence, bone);
+}
+
+extern "C" uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_time(intptr_t plugin_handle)
 {
     return get_time();
