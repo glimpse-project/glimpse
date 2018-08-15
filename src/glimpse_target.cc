@@ -87,7 +87,6 @@ gm_target_new_from_index(struct gm_context *ctx,
         if (end - buf > 1) {
             strncpy(end_of_base, buf, end - buf);
             end_of_base[end - buf] = '\0';
-            gm_debug(log, "XXX Trying to open skeleton '%s'", file);
 
             struct gm_skeleton *skeleton = gm_skeleton_new_from_json(ctx, file);
             if (skeleton) {
