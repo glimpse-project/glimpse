@@ -28,8 +28,8 @@ parser.add_argument('--strip',
                     help='The tool for stripping shared library symbols',
                     default='strip')
 parser.add_argument('--plugin-jardir',
-                    help='Relative path under Unity project where GlimpsePlugin.jar will be copied (Android only, default = Assets/Plugins/Android)',
-                    default='Assets/Plugins/Android')
+                    help='Relative path under Unity project where GlimpsePlugin.jar will be copied (Android only, default = Assets/Plugins/Glimpse/Android)',
+                    default='Assets/Plugins/Glimpse/Android')
 
 parser.add_argument('unity_project',
                     help='Absolute path to a Unity project where we will install the Glimpse Unity plugin')

@@ -546,12 +546,12 @@ if unity_enabled
     install_deps = [ plugin_lib ]
 
     if compiler.get_define('__ANDROID__') != ''
-        plugin_lib_dir = join_paths('Assets', 'Plugins', 'Android', 'libs',
+        plugin_lib_dir = join_paths('Assets', 'Plugins', 'Glimpse', 'Android', 'libs',
                                     meson.get_cross_property('_ndk_arch'))
         install_args += [
             '--android-ndk', android_ndk_home,
             '--android-ndk-arch', meson.get_cross_property('_ndk_arch'),
-            '--plugin-jardir', join_paths('Assets', 'Plugins', 'Android'),
+            '--plugin-jardir', join_paths('Assets', 'Plugins', 'Glimpse', 'Android'),
             '--strip', meson.get_cross_property('_strip_binary'),
         ]
         if tango_enabled
@@ -560,9 +560,9 @@ if unity_enabled
         endif
         install_deps += [ unity_java_jar ]
     elif platform_ios
-        plugin_lib_dir = join_paths('Assets', 'Plugins', 'iOS')
+        plugin_lib_dir = join_paths('Assets', 'Plugins', 'Glimpse', 'iOS')
     else
-        plugin_lib_dir = join_paths('Assets', 'Plugins', host_machine.cpu_family())
+        plugin_lib_dir = join_paths('Assets', 'Plugins', 'Glimpse', host_machine.cpu_family())
     endif
 
     install_args += [
