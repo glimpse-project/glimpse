@@ -264,6 +264,7 @@ typedef struct _Data
      * frames as we add them.
      */
     bool overwrite_recording;
+    bool track_while_recording;
     struct gm_recording *recording;
     struct gm_device *recording_device;
     std::vector<char *> recordings;
@@ -1084,6 +1085,8 @@ draw_playback_controls(Data *data)
                      data->recording_names.data(),
                      data->recording_names.size());
     }
+
+    ImGui::Checkbox("Track while recording", &data->track_while_recording);
 }
 
 static bool
@@ -1967,7 +1970,8 @@ handle_device_frame_updates(Data *data)
     }
 
     if (data->context_needs_frame &&
-        data->last_depth_frame && data->last_video_frame)
+        data->last_depth_frame && data->last_video_frame &&
+        (data->track_while_recording || !data->recording))
     {
         ProfileScopedSection(FwdContextFrame);
 
