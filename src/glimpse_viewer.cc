@@ -3243,6 +3243,39 @@ viewer_init(Data *data)
 
     data->ctx = gm_context_new(data->log, NULL);
 
+    {
+        JSON_Value *rec = json_parse_file("glimpse-joints-recording.json");
+        uint64_t ts = 0;
+
+        for (int n = 0; n < json_array_get_count(json_array(rec)); n++) {
+            JSON_Array *frame = json_array_get_array(json_array(rec), n);
+            int n_joints = json_array_get_count(frame);
+            for (int i = 0; i < n_joints; i++) {
+                char buf[512];
+                float joints[3*n_joints];
+
+                memset(joints, 0, sizeof(float) * 3 * n_joints);
+                for (int j = 0; j < n_joints; j++) {
+                    JSON_Array *joint_js = json_array_get_array(frame, j);
+                    joints[j*3+0] = json_array_get_number(joint_js, 0);
+                    joints[j*3+1] = json_array_get_number(joint_js, 1);
+                    joints[j*3+2] = json_array_get_number(joint_js, 2);
+                }
+
+                struct gm_skeleton *skel =
+                    gm_skeleton_new_from_joint_coords(data->ctx,
+                                                      joints,
+                                                      ts);
+
+                xsnprintf(buf, sizeof(buf), "converted_target/%06d.json", n);
+                gm_skeleton_save(skel, buf);
+                gm_skeleton_free(skel);
+            }
+            ts += 33333333;
+        }
+        exit(0);
+    }
+
     gm_context_set_event_callback(data->ctx, on_event_cb, data);
 
     /* TODO: load config for viewer properties */

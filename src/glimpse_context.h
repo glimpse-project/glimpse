@@ -583,6 +583,11 @@ gm_skeleton_new(struct gm_context *ctx,
                 uint64_t timestamp);
 
 struct gm_skeleton *
+gm_skeleton_new_from_joint_coords(struct gm_context *ctx,
+                                  float *joints,
+                                  uint64_t timestamp);
+
+struct gm_skeleton *
 gm_skeleton_new_from_json(struct gm_context *ctx,
                           const char *asset_name);
 

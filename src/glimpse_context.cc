@@ -6815,6 +6815,33 @@ gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints,
 }
 
 struct gm_skeleton *
+gm_skeleton_new_from_joint_coords(struct gm_context *ctx,
+                                  float *joints,
+                                  uint64_t timestamp)
+{
+    struct gm_skeleton *skeleton = new struct gm_skeleton(ctx->n_joints);
+
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        struct gm_joint joint;
+        joint.name = joint_name(j);
+        joint.x = joints[3*j + 0];
+        joint.y = joints[3*j + 1];
+        joint.z = joints[3*j + 2];
+        joint.confidence = 1;
+        joint.predicted = false;
+        skeleton->joints[j] = joint;
+    }
+
+    skeleton->confidence = 1;
+    skeleton->distance = 1;
+    skeleton->timestamp = timestamp;
+
+    build_bones(ctx, *skeleton);
+
+    return skeleton;
+}
+
+struct gm_skeleton *
 gm_skeleton_new_from_json(struct gm_context *ctx,
                           const char *asset_name)
 {
