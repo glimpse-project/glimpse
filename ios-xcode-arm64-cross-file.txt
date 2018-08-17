@@ -15,8 +15,14 @@ endian = 'little'
 [properties]
 root = '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer'
 
-c_args = ['-arch', 'arm64', '-fembed-bitcode', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
-cpp_args = ['-arch', 'arm64', '-fembed-bitcode', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
-c_link_args = ['-arch', 'arm64', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
-cpp_link_args = ['-arch', 'arm64', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
-objc_args = [ '-ObjC', '-arch', 'arm64', '-fobjc-arc', '-fembed-bitcode', '-fstrict-aliasing', '-fmessage-length=0', '-fdiagnostics-show-note-include-stack', '-fmacro-backtrace-limit=0', '-fpascal-strings', '-fmodules', '-gmodules', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS.sdk']
+# XXX: Do not change the -isysroot path to point at a non-versioned
+# SDK like SDKs/iPhoneOS.sdk since clang will infer a min OS version from
+# the SDK name and -miphoneos-min-version does't seem to override and
+# duplicate -isysroot arguments (e.g. added later by evaulating xcrun)
+# also don't seem to override either.
+# ...
+c_args = ['-arch', 'arm64', '-fembed-bitcode', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk']
+cpp_args = ['-arch', 'arm64', '-fembed-bitcode', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk']
+c_link_args = ['-arch', 'arm64', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk']
+cpp_link_args = ['-arch', 'arm64', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk']
+objc_args = [ '-ObjC', '-arch', 'arm64', '-fobjc-arc', '-fembed-bitcode', '-fstrict-aliasing', '-fmessage-length=0', '-fdiagnostics-show-note-include-stack', '-fmacro-backtrace-limit=0', '-fpascal-strings', '-fmodules', '-gmodules', '-isysroot', '/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk']
