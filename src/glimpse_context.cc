@@ -620,6 +620,7 @@ struct gm_context
     float seg_psi;
     float seg_timeout;
 
+    bool use_threads;
     bool flip_labels;
 
     bool fast_clustering;
@@ -3427,7 +3428,7 @@ stage_label_inference_cb(struct gm_tracking_impl *tracking,
                  state->depth_image,
                  width, height,
                  state->label_probs,
-                 true, // multi-threaded
+                 ctx->use_threads,
                  ctx->flip_labels);
 }
 
@@ -6039,6 +6040,15 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    "Inferred labels",
                                    gm_tracking_create_rgb_label_map,
                                });
+
+        ctx->use_threads = false;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "li_use_threads";
+        prop.desc = "Use extra threads during label inference";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->use_threads;
+        stage.properties.push_back(prop);
 
         ctx->flip_labels = false;
         prop = gm_ui_property();
