@@ -69,6 +69,8 @@ parser.add_argument('-p', '--pretty', action='store_true', default=False,
                     help='Output pretty JSON')
 parser.add_argument('-o', '--output-prefix', type=str, default='out',
                     help='Prefix for out_file property')
+parser.add_argument('-e', '--reload', action='store_true', default=False,
+                    help='Add a reload field mirroring the output')
 parser.add_argument('-s', '--param-set', action='append', type=parse_param,
                     help='Set a named parameter')
 parser.add_argument('-l', '--param-list', action='append', type=parse_list,
@@ -90,6 +92,8 @@ def add_jobs_recursive(jobs=[], job=None, n_prop=0):
     if job is None:
         job = {}
         job['out_file'] = '%s-%05d.json' % (args.output_prefix, output_id)
+        if args.reload:
+            job['reload'] = job['out_file']
         output_id += 1;
         jobs.append(job)
 
@@ -100,6 +104,8 @@ def add_jobs_recursive(jobs=[], job=None, n_prop=0):
     for i in range(1, len(prop[1])):
         job_copy = copy.deepcopy(job)
         job_copy['out_file'] = '%s-%05d.json' % (args.output_prefix, output_id)
+        if args.reload:
+            job_copy['reload'] = job_copy['out_file']
         output_id += 1;
         jobs.append(job_copy)
         job_copy[prop[0]] = prop[1][i]
