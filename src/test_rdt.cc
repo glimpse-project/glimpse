@@ -97,6 +97,8 @@ struct data_loader
     float bg_depth;
 
     std::vector<uint8_t> label_images;
+
+    std::vector<char *> frame_paths;
 };
 
 static bool threaded_opt = false;
@@ -107,6 +109,9 @@ static int rows_per_label_opt = 2;
 /* Label maps... */
 static uint8_t rdt_to_test_map[256];
 static uint8_t test_to_out_map[256];
+
+static const char *index_output_opt = NULL;
+static float index_low_acc_opt = 0.f;
 
 static const char *hbars[] = {
     " ",
@@ -316,6 +321,10 @@ load_test_data_cb(struct gm_data_index *data_index,
         return false;
     }
 
+    if (index_output_opt) {
+        loader->frame_paths[index] = strdup(frame_path);
+    }
+
     return true;
 }
 
@@ -437,7 +446,11 @@ usage(void)
 "                          (E.g. to group labels and see accuracy for the\n"
 "                          left/right side of the body or whole limbs)\n"
 "\n"
-"  --output=FILE           Output results in JSON format to this file\n"
+"  -o, --output=FILE       Output results in JSON format to this file\n"
+"\n"
+"  --index-output=FILE     Output filtered index of test images\n"
+"  --index-low-accuracy=A  Index test images with an inference accuracy < A.\n"
+"                          Range = (0,1]\n"
 "\n"
 "  -p, --pretty            Write pretty JSON output\n"
 "  -r, --row-height=N      Number of rows per-label for confusion matrix bars\n"
@@ -445,6 +458,7 @@ usage(void)
 "\n"
 "  -f, --flip              Enable horizontal mirroring for enhanced inference\n"
 "  -t, --threaded          Use multi-threaded inference.\n"
+"\n"
 "  -v, --verbose           Verbose output.\n"
 "  -h, --help              Display this message.\n"
     );
@@ -461,13 +475,16 @@ main(int argc, char **argv)
 
 #define RDT_TO_TEST_MAP_OPT                 (CHAR_MAX + 1)
 #define TEST_TO_OUT_MAP_OPT                 (CHAR_MAX + 2)
-#define OUTPUT_FILE_OPT                     (CHAR_MAX + 3)
+#define INDEX_OUTPUT_OPT                    (CHAR_MAX + 3)
+#define INDEX_LOW_ACC_OPT                   (CHAR_MAX + 4)
 
-    const char *short_options = "prftvh";
+    const char *short_options = "oprftvh";
     const struct option long_options[] = {
         {"rdt-to-test-map",  required_argument,  0, RDT_TO_TEST_MAP_OPT},
         {"test-to-out-map",  required_argument,  0, TEST_TO_OUT_MAP_OPT},
-        {"output",           required_argument,  0, OUTPUT_FILE_OPT},
+        {"output",           required_argument,  0, 'o'},
+        {"index-output",      required_argument,  0, INDEX_OUTPUT_OPT},
+        {"index-low-accuracy",required_argument,  0, INDEX_LOW_ACC_OPT},
         {"pretty",           no_argument,        0, 'p'},
         {"row-height",       required_argument,  0, 'r'},
         {"flip",             no_argument,        0, 'f'},
@@ -507,8 +524,21 @@ main(int argc, char **argv)
             n_out_labels =
                 json_array_get_count(json_array(test_to_out_map_js));
             break;
-        case OUTPUT_FILE_OPT:
+        case 'o':
             output = optarg;
+            break;
+        case INDEX_OUTPUT_OPT:
+            index_output_opt = optarg;
+            break;
+        case INDEX_LOW_ACC_OPT:
+            {
+                char *end = NULL;
+                index_low_acc_opt = strtod(optarg, &end);
+                gm_assert(log, end && *end == '\0',
+                          "Failed to parse low accuracy threshold");
+                gm_assert(log, index_low_acc_opt > 0 && index_low_acc_opt <= 1.0,
+                          "Low accuracy threshold should be between 0 and 1");
+            }
             break;
         case 'p':
             pretty = true;
@@ -679,6 +709,9 @@ main(int argc, char **argv)
     loader.label_images = std::vector<uint8_t>((int64_t)width *
                                                height *
                                                n_images);
+    if (index_output_opt) {
+        loader.frame_paths = std::vector<char *>(n_images);
+    }
 
     printf("Loading test data...\n");
     if (!gm_data_index_foreach(data_index,
@@ -689,8 +722,16 @@ main(int argc, char **argv)
         return 1;
     }
 
+    FILE *index_output_fd = NULL;
+    if (index_output_opt) {
+        index_output_fd = fopen(index_output_opt, "w");
+        gm_assert(log, index_output_fd != NULL,
+                  "Failed to open %s", index_output_opt);
+    }
+
     float *depth_images = loader.depth_images.data();
     uint8_t *label_images = loader.label_images.data();
+    char **file_paths = loader.frame_paths.data();
 
     end = get_time();
     uint64_t load_data_duration = end - start;
@@ -849,6 +890,14 @@ main(int argc, char **argv)
         accuracy /= (float)present_labels;
 
         all_accuracies.push_back(accuracy);
+
+        if (index_output_fd) {
+            if (accuracy < index_low_acc_opt) {
+                char *file_path = file_paths[i];
+                fwrite(file_path, strlen(file_path), 1, index_output_fd);
+                fputc('\n', index_output_fd);
+            }
+        }
     }
 
 
@@ -1089,6 +1138,10 @@ main(int argc, char **argv)
             json_serialize_to_file(json_output_root, output);
         }
         json_value_free(json_output_root);
+    }
+
+    if (index_output_fd) {
+        fclose(index_output_fd);
     }
 
     // Clean up and quit
