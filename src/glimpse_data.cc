@@ -174,7 +174,7 @@ gm_data_index_get_n_labels(struct gm_data_index* data_index)
 const char *
 gm_data_index_get_frame_path(struct gm_data_index* data_index, int n)
 {
-    if (n < data_index->paths.size())
+    if (n < (int)data_index->paths.size())
         return data_index->paths[n];
     else
         return NULL;
