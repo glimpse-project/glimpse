@@ -1020,7 +1020,6 @@ worker_thread_cb(void *data)
                 for (int b = 0; b < n_bones; b++) {
                     JSON_Object *bone = json_array_get_object(bones, b);
                     //const char *name = json_object_get_string(bone, "name");
-                    json_object_set_string(bone, "debug", "foo");
                     float x;
 
                     JSON_Array *head = json_object_get_array(bone, "head");
