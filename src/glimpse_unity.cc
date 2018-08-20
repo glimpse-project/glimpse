@@ -345,16 +345,6 @@ request_device_frame(struct glimpse_data *data, uint64_t buffers_mask)
     }
 }
 
-/* FIXME: query time via the _context api */
-static uint64_t
-get_time(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
-
 static void
 handle_device_frame_updates(struct glimpse_data *data)
 {
@@ -370,16 +360,6 @@ handle_device_frame_updates(struct glimpse_data *data)
         struct gm_frame *device_frame = gm_device_get_latest_frame(data->device);
 
         assert(device_frame);
-
-        /* XXX: This is a hack so that we can be sure we always know that the
-         * frame timestamps are in the CLOCK_MONOTONIC time base so we can
-         * support a gm_unity_get_time() api. We want this because we know that
-         * Tango can only support capturing depth at 5fps and we want to be
-         * able to query interpolated joint positions, which in turn means
-         * we need to choose a standard clock domain for requesting our
-         * predicted tracking state.
-         */
-        device_frame->timestamp = get_time();
 
         /* XXX: we have to consider that the rendering is in another thread
          * and we don't want to unref (and potentially free) the last frame
@@ -1478,23 +1458,24 @@ gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_context_get_prediction(intptr_t plugin_handle, int delay)
+gm_unity_context_get_prediction(intptr_t plugin_handle,
+                                uint64_t delay)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    uint64_t timestamp;
 
-    if (data->last_video_frame)
-        timestamp = data->last_video_frame->timestamp - delay;
-    else
-        timestamp = get_time();
+    if (data->last_video_frame) {
+        uint64_t timestamp = data->last_video_frame->timestamp - delay;
 
-    struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
-                                                                 timestamp);
+        struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
+                                                                     timestamp);
 
-    gm_debug(data->log, "Get Prediction: delay=%dns, ts=%" PRIu64 "ns: %p",
-             delay, timestamp, prediction);
+        gm_debug(data->log, "Get Prediction: delay=%dns, ts=%" PRIu64 "ns: %p",
+                 delay, timestamp, prediction);
 
-    return (intptr_t)prediction;
+        return (intptr_t)prediction;
+    } else {
+        return (intptr_t)NULL;
+    }
 }
 
 extern "C" const intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1819,12 +1800,6 @@ gm_unity_target_sequence_get_bone_error(intptr_t plugin_handle,
     }
 
     return (intptr_t)gm_target_get_error(sequence, bone);
-}
-
-extern "C" uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_get_time(intptr_t plugin_handle)
-{
-    return get_time();
 }
 
 static glm::mat4
