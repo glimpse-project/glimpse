@@ -379,7 +379,12 @@ static bool permissions_check_failed;
 static bool permissions_check_passed;
 #endif
 
+#ifdef USE_FREENECT
 static enum gm_device_type device_type_opt = GM_DEVICE_KINECT;
+#else
+static enum gm_device_type device_type_opt = GM_DEVICE_NULL;
+#endif
+
 static char *device_recording_opt;
 
 static void viewer_init(Data *data);
@@ -3213,6 +3218,15 @@ viewer_destroy(Data *data)
 }
 
 static void
+configure_recording_device(Data *data)
+{
+    gm_device_set_event_callback(data->recording_device, on_device_event_cb, data);
+#ifdef __ANDROID__
+    gm_device_attach_jvm(data->recording_device, android_jvm_singleton);
+#endif
+}
+
+static void
 viewer_init(Data *data)
 {
     ImGuiIO& io = ImGui::GetIO();
@@ -3280,13 +3294,39 @@ viewer_init(Data *data)
         config.recording.path = rec_path;
     }
 #endif
-    data->recording_device = gm_device_open(data->log, &config, NULL);
+    char *catch_err = NULL;
+    data->recording_device = gm_device_open(data->log, &config, &catch_err);
     data->active_device = data->recording_device;
-    gm_device_set_event_callback(data->recording_device, on_device_event_cb, data);
-#ifdef __ANDROID__
-    gm_device_attach_jvm(data->recording_device, android_jvm_singleton);
-#endif
-    gm_device_commit_config(data->recording_device, NULL);
+    if (data->recording_device) {
+        configure_recording_device(data);
+
+        char *catch_err = NULL;
+        if (!gm_device_commit_config(data->recording_device, &catch_err)) {
+            gm_error(data->log, "Failed to common device config: %s (falling back to opening NULL device)",
+                     catch_err);
+            free(catch_err);
+            catch_err = NULL;
+
+            gm_device_close(data->recording_device);
+            data->recording_device = nullptr;
+        }
+    } else {
+        gm_error(data->log, "Failed to open device: %s (falling back to opening NULL device)",
+                 catch_err);
+        free(catch_err);
+        catch_err = NULL;
+    }
+
+    if (!data->recording_device) {
+        config.type = GM_DEVICE_NULL;
+        data->recording_device =
+            gm_device_open(data->log, &config, NULL); // abort on error
+        data->active_device = data->recording_device;
+
+        configure_recording_device(data);
+
+        gm_device_commit_config(data->recording_device, NULL); // abort on error
+    }
 
     if (config.type == GM_DEVICE_TANGO ||
         config.type == GM_DEVICE_AVF)
@@ -3319,6 +3359,8 @@ usage(void)
 "                                            recording (default)\n"
 "                               - recording: A glimpse_viewer recording (must\n"
 "                                            pass -r/--recording option too)\n"
+"                               - null:      A stub device that doesn't support\n"
+"                                            any frame capture\n"
 "    -r,--recording=NAME        Name or recording to play\n"
 "\n"
 "    -h,--help                  Display this help\n\n"
@@ -3359,6 +3401,8 @@ parse_args(Data *data, int argc, char **argv)
                     device_type_opt = GM_DEVICE_KINECT;
                 else if (strcmp(optarg, "recording") == 0)
                     device_type_opt = GM_DEVICE_RECORDING;
+                else if (strcmp(optarg, "null") == 0)
+                    device_type_opt = GM_DEVICE_NULL;
                 else
                     usage();
                 break;

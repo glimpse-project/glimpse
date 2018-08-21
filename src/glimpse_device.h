@@ -56,6 +56,7 @@ struct gm_device_event
 
 
 enum gm_device_type {
+    GM_DEVICE_NULL,
     GM_DEVICE_KINECT,
     GM_DEVICE_RECORDING,
     GM_DEVICE_TANGO,

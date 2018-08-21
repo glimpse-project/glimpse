@@ -1469,7 +1469,7 @@ gm_unity_context_get_prediction(intptr_t plugin_handle,
         struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
                                                                      timestamp);
 
-        gm_debug(data->log, "Get Prediction: delay=%dns, ts=%" PRIu64 "ns: %p",
+        gm_debug(data->log, "Get Prediction: delay=%" PRIu64 "ns, ts=%" PRIu64 "ns: %p",
                  delay, timestamp, prediction);
 
         return (intptr_t)prediction;

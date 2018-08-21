@@ -486,6 +486,10 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     buf->base.api = &buf->vtable;
 
     switch (dev->type) {
+    case GM_DEVICE_NULL:
+        gm_assert(dev->log, 0, "Tried to alloc video buffer for NULL device");
+        buf->base.len = 0;
+        break;
     case GM_DEVICE_TANGO:
     case GM_DEVICE_KINECT:
         /* Allocated large enough for RGB data */
@@ -530,6 +534,10 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
     buf->base.api = &buf->vtable;
 
     switch (dev->type) {
+    case GM_DEVICE_NULL:
+        gm_assert(dev->log, 0, "Tried to alloc depth buffer for NULL device");
+        buf->base.len = 0;
+        break;
     case GM_DEVICE_TANGO:
         /* Allocated large enough for _XYZC_F32_M data */
         buf->base.len = dev->max_depth_pixels * 16;
@@ -688,14 +696,14 @@ kinect_open(struct gm_device *dev, const struct gm_device_config *config,
                                                        FREENECT_DEVICE_CAMERA));
 
     if (!freenect_num_devices(dev->kinect.fctx)) {
-        gm_throw(dev->log, err, "Failed to find a Kinect device\n");
+        gm_throw(dev->log, err, "Failed to find a Kinect device");
         freenect_shutdown(dev->kinect.fctx);
         dev->kinect.fctx = NULL;
         return false;
     }
 
     if (freenect_open_device(dev->kinect.fctx, &dev->kinect.fdev, 0) < 0) {
-        gm_throw(dev->log, err, "Could not open Kinect device\n");
+        gm_throw(dev->log, err, "Could not open Kinect device");
         freenect_shutdown(dev->kinect.fctx);
         dev->kinect.fctx = NULL;
         return false;
@@ -1229,7 +1237,7 @@ read_frame_buffer(struct gm_device *dev,
 
     FILE *fp = fopen(abs_filename, "r");
     if (!fp) {
-        gm_error(dev->log, "Failed to open recording frame '%s'\n",
+        gm_error(dev->log, "Failed to open recording frame '%s'",
                  abs_filename);
         return NULL;
     }
@@ -1238,7 +1246,7 @@ read_frame_buffer(struct gm_device *dev,
         mem_pool_acquire_buffer(buf_pool, "recording buffer");
 
     if (fread(buf->data, 1, len, fp) != len) {
-        gm_error(dev->log, "Failed to open recording frame '%s'\n",
+        gm_error(dev->log, "Failed to open recording frame '%s'",
                  abs_filename);
         mem_pool_recycle_resource(buf_pool, buf);
         fclose(fp);
@@ -2607,6 +2615,10 @@ gm_device_open(struct gm_logger *log,
                      dev); // user data
 
     switch (config->type) {
+    case GM_DEVICE_NULL:
+        gm_debug(log, "Opening NULL device");
+        status = true;
+        break;
     case GM_DEVICE_KINECT:
         gm_debug(log, "Opening Kinect device");
 #ifdef USE_FREENECT
@@ -2808,25 +2820,28 @@ gm_device_close(struct gm_device *dev)
         gm_device_stop(dev);
 
     switch (dev->type) {
+    case GM_DEVICE_NULL:
+        gm_debug(dev->log, "Closing NULL device");
+        break;
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
-        gm_debug(dev->log, "kinect_close");
+        gm_debug(dev->log, "Closing Kinect device");
         kinect_close(dev);
 #endif
         break;
     case GM_DEVICE_RECORDING:
-        gm_debug(dev->log, "recording_close");
+        gm_debug(dev->log, "Closing recording device");
         recording_close(dev);
         break;
     case GM_DEVICE_TANGO:
 #ifdef USE_TANGO
-        gm_debug(dev->log, "tango_close");
+        gm_debug(dev->log, "Closing Tango device");
         tango_close(dev);
 #endif
         break;
     case GM_DEVICE_AVF:
 #ifdef USE_AVF
-        gm_debug(dev->log, "avf_close");
+        gm_debug(dev->log, "Closing AVF device");
         avf_close(dev);
 #endif
         break;
@@ -2909,6 +2924,9 @@ gm_device_start(struct gm_device *dev)
 #endif
 
     switch (dev->type) {
+    case GM_DEVICE_NULL:
+        dev->running = true;
+        break;
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
         kinect_start(dev);
@@ -2946,6 +2964,9 @@ gm_device_stop(struct gm_device *dev)
     }
 
     switch (dev->type) {
+    case GM_DEVICE_NULL:
+        dev->running = false;
+        break;
     case GM_DEVICE_KINECT:
 #ifdef USE_FREENECT
         gm_debug(dev->log, "kinect_stop");
