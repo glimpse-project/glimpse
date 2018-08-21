@@ -116,6 +116,8 @@ struct glimpse_data
     FILE *log_fp;
     struct gm_logger *log;
 
+    int render_event_id;
+
     struct gm_context *ctx;
     struct gm_device *device;
     enum gm_device_type device_type;
@@ -195,7 +197,6 @@ static void (*unity_log_function)(int level,
                                   const char *context,
                                   const char *msg);
 
-static float unity_current_time;
 static IUnityInterfaces *unity_interfaces;
 static IUnityGraphics *unity_graphics;
 
@@ -206,9 +207,16 @@ static UnityGfxRenderer unity_renderer_type = kUnityGfxRendererNull;
  * our plugin state because it's possible we might still see render
  * event callbacks which shouldn't try and access the plugin state
  */
-static pthread_mutex_t life_cycle_lock;
+static pthread_mutex_t life_cycle_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool terminating; // checked in on_render_event_cb()
-static struct glimpse_data *plugin_data;
+
+// The render events can only be passed an event ID not a plugin_handle
+// so we have to iterate all the current plugin handles to match
+// with an event ID that's used instead of a pointer...
+static pthread_mutex_t plugin_data_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::vector<struct glimpse_data *> all_plugin_data;
+
+static int next_unique_event_id = 1;
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_notify_log_function(void (*log_func)(int level,
@@ -304,16 +312,14 @@ logger_abort_cb(struct gm_logger *logger,
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_log(int level, const char *msg)
+gm_unity_log(intptr_t plugin_handle, int level, const char *msg)
 {
-    if (plugin_data)
-        gm_log(plugin_data->log, (enum gm_log_level)level, "GlimpseUnity", "%s", msg);
-}
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
 
-extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_set_time(float time)
-{
-    unity_current_time = time;
+    gm_log(data->log, (enum gm_log_level)level, "GlimpseUnity", "%s", msg);
 }
 
 static void UNITY_INTERFACE_API
@@ -584,9 +590,14 @@ event_loop_iteration(struct glimpse_data *data)
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_process_events(void)
+gm_unity_process_events(intptr_t plugin_handle)
 {
-    event_loop_iteration(plugin_data);
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
+
+    event_loop_iteration(data);
 }
 
 #if defined(USE_GLES) || defined(USE_CORE_GL)
@@ -1018,6 +1029,20 @@ on_khr_debug_message_cb(GLenum source,
 static void UNITY_INTERFACE_API
 on_render_event_cb(int event)
 {
+    struct glimpse_data *data = NULL;
+
+    pthread_mutex_lock(&plugin_data_lock);
+    for (int i = 0; i < all_plugin_data.size(); i++) {
+        if (all_plugin_data[i]->render_event_id == event) {
+            data = all_plugin_data[i];
+            break;
+        }
+    }
+    gm_assert(data->log, data != NULL,
+              "Failed to find plugin data by event ID = %d",
+              event);
+    pthread_mutex_unlock(&plugin_data_lock);
+
 #if defined(USE_GLES) || defined(USE_CORE_GL)
     /* Holding this lock while rendering implies it's not possible to start
      * terminating the plugin state during a render event callback...
@@ -1032,13 +1057,13 @@ on_render_event_cb(int event)
         return;
     }
 
-    gm_debug(plugin_data->log, "Render Event %d DEBUG\n", event);
+    gm_debug(data->log, "Render Event %d DEBUG\n", event);
 
 #if TARGET_OS_MAC == 0// (OSX AND IOS)
     /* We just assume Unity isn't registering a GL debug callback and
      * cross our fingers...
      */
-    if (!plugin_data->registered_gl_debug_callback) {
+    if (!data->registered_gl_debug_callback) {
         glDebugMessageControl(GL_DONT_CARE, /* source */
                               GL_DONT_CARE, /* type */
                               GL_DONT_CARE, /* severity */
@@ -1054,19 +1079,12 @@ on_render_event_cb(int event)
                               true);
 
         glEnable(GL_DEBUG_OUTPUT);
-        glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, plugin_data);
-        plugin_data->registered_gl_debug_callback = true;
+        glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
+        data->registered_gl_debug_callback = true;
     }
 #endif
 
-    switch (event) {
-    case 0:
-        gm_context_render_thread_hook(plugin_data->ctx);
-        break;
-    case 1:
-        render_ar_video_background(plugin_data);
-        break;
-    }
+    render_ar_video_background(data);
 
     pthread_mutex_unlock(&life_cycle_lock);
 #endif // USE_GLES
@@ -1125,15 +1143,12 @@ on_device_event_cb(struct gm_device_event *device_event,
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_terminate(void)
+gm_unity_terminate(intptr_t plugin_handle)
 {
-    /* Just in case we have multiple OnApplicationQuit attempts to terminate
-     * the plugin state... */
-    if (plugin_data == NULL) {
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
         return;
     }
-
-    struct glimpse_data *data = plugin_data;
 
     gm_debug(data->log, "GLIMPSE: Terminate\n");
 
@@ -1205,10 +1220,21 @@ gm_unity_terminate(void)
     fclose(data->log_fp);
     unity_log_function = NULL;
 
-    json_value_free(plugin_data->config_val);
+    json_value_free(data->config_val);
 
-    delete plugin_data;
-    plugin_data = NULL;
+    pthread_mutex_lock(&plugin_data_lock);
+    bool found = false;
+    for (int i = 0; i < all_plugin_data.size(); i++) {
+        if (all_plugin_data[i] == data) {
+            std::swap(all_plugin_data[i], all_plugin_data.back());
+            all_plugin_data.pop_back();
+            found = true;
+        }
+    }
+    gm_assert(data->log, found == true, "Failed to unregister terminated plugin data");
+    pthread_mutex_unlock(&plugin_data_lock);
+
+    delete data;
 }
 
 /* XXX: multiple calls to _init will return the same singleton plugin
@@ -1217,23 +1243,23 @@ gm_unity_terminate(void)
  * (i.e. it's not ref-counted.
  */
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_init(char *config_json)
+gm_unity_init(char *config_json, bool force_null_device)
 {
 #if TARGET_OS_IOS == 1
     ios_log("gm_unity_init\n");
 #endif
-
-    if (plugin_data) {
-        gm_info(plugin_data->log, "gm_unity_init lite init, returning existing plugin_data");
-        return (intptr_t )plugin_data;
-    }
 
     struct glimpse_data *data = new glimpse_data();
 
     data->config_val = json_parse_string(config_json);
     data->config = json_object(data->config_val);
 
-    plugin_data = data;
+    data->render_event_id = next_unique_event_id++;
+
+    pthread_mutex_lock(&plugin_data_lock);
+    all_plugin_data.push_back(data);
+    pthread_mutex_unlock(&plugin_data_lock);
+
     terminating = false;
 
     data->log = gm_logger_new(logger_cb, data);
@@ -1331,10 +1357,10 @@ gm_unity_init(char *config_json)
     data->ctx = gm_context_new(data->log, &ctx_err);
     if (!data->ctx) {
         gm_error(data->log, "Failed to create Glimpse tracking context: %s", ctx_err);
-        gm_unity_terminate();
-        return 0;
+        gm_unity_terminate((intptr_t)data);
+        return NULL;
     }
-    gm_context_set_event_callback(data->ctx, on_event_cb, plugin_data);
+    gm_context_set_event_callback(data->ctx, on_event_cb, data);
 
     const char *config_name = json_object_get_string(data->config, "contextConfig");
     if (config_name && strlen(config_name)) {
@@ -1369,7 +1395,11 @@ gm_unity_init(char *config_json)
             config.type = GM_DEVICE_RECORDING;
             config.recording.path = full_recording_path;
         } else {
+#ifdef USE_FREENECT
             config.type = GM_DEVICE_KINECT;
+#else
+            config.type = GM_DEVICE_NULL;
+#endif
         }
 #endif
         break;
@@ -1380,17 +1410,23 @@ gm_unity_init(char *config_json)
         config.type = GM_DEVICE_RECORDING;
         config.recording.path = full_recording_path;
         break;
+    case 3:
+        config.type = GM_DEVICE_NULL;
+        break;
     }
+
+    if (force_null_device)
+        config.type = GM_DEVICE_NULL;
 
     char *dev_err = NULL;
     data->device = gm_device_open(data->log, &config, &dev_err);
     if (!data->device) {
         gm_error(data->log, "Failed to open device: %s", dev_err);
-        gm_unity_terminate();
-        return 0;
+        gm_unity_terminate((intptr_t)data);
+        return NULL;
     }
     data->device_type = gm_device_get_type(data->device);
-    gm_device_set_event_callback(data->device, on_device_event_cb, plugin_data);
+    gm_device_set_event_callback(data->device, on_device_event_cb, data);
 #ifdef __ANDROID__
     gm_device_attach_jvm(data->device, android_jvm_singleton);
 #endif
@@ -1399,17 +1435,32 @@ gm_unity_init(char *config_json)
         gm_error(data->log, "Failed to commit device configuration: %s", dev_err);
         gm_device_close(data->device);
         data->device = NULL;
-        gm_unity_terminate();
-        return 0;
+        gm_unity_terminate((intptr_t)data);
+        return NULL;
     }
 
     return (intptr_t )data;
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_render_event_id(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return data->render_event_id;
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
+
     struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
 
     gm_debug(data->log, "Get Latest Tracking %p", tracking);
@@ -1421,15 +1472,25 @@ extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
                                intptr_t tracking_handle)
 {
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
+
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
     return gm_tracking_has_skeleton(tracking);
 }
 
-extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" const intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_get_skeleton(intptr_t plugin_handle,
                                intptr_t tracking_handle)
 {
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
+
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
     return (intptr_t)gm_tracking_get_skeleton(tracking);
@@ -1439,6 +1500,11 @@ extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_get_timestamp(intptr_t plugin_handle,
                                 intptr_t tracking_handle)
 {
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
     return gm_tracking_get_timestamp(tracking);
@@ -1448,6 +1514,10 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
+
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
     int ref = tracking->ref;
@@ -1462,6 +1532,9 @@ gm_unity_context_get_prediction(intptr_t plugin_handle,
                                 uint64_t delay)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
 
     if (data->last_video_frame) {
         uint64_t timestamp = data->last_video_frame->timestamp - delay;
@@ -1482,6 +1555,10 @@ extern "C" const intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_prediction_get_skeleton(intptr_t plugin_handle,
                                  intptr_t prediction_handle)
 {
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
     struct gm_prediction *prediction =
         (struct gm_prediction *)prediction_handle;
 
@@ -1492,6 +1569,10 @@ extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_prediction_get_timestamp(intptr_t plugin_handle,
                                   intptr_t prediction_handle)
 {
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
     struct gm_prediction *prediction =
         (struct gm_prediction *)prediction_handle;
 
@@ -1502,6 +1583,9 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
     struct gm_prediction *prediction = (struct gm_prediction *)prediction_handle;
 
     int ref = prediction->ref;
@@ -1516,6 +1600,9 @@ gm_unity_skeleton_get_n_joints(intptr_t plugin_handle,
                                intptr_t skeleton_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1531,6 +1618,9 @@ gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
                                      int joint)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1546,6 +1636,9 @@ gm_unity_skeleton_get_joint_confidence(intptr_t plugin_handle,
                                        int joint_no)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1562,6 +1655,9 @@ gm_unity_skeleton_is_joint_predicted(intptr_t plugin_handle,
                                      int joint_no)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1578,6 +1674,9 @@ gm_unity_skeleton_get_joint_name(intptr_t plugin_handle,
                                  int joint_no)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return "";
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1592,6 +1691,9 @@ extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_get_n_bones(intptr_t plugin_handle, intptr_t skeleton_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1607,10 +1709,13 @@ gm_unity_skeleton_get_bone(intptr_t plugin_handle,
                            int bone)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
-        return 0;
+        return NULL;
     }
 
     return (intptr_t)gm_skeleton_get_bone(skeleton, bone);
@@ -1623,15 +1728,18 @@ gm_unity_skeleton_resize(intptr_t plugin_handle,
                          int parent_joint)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
     const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
-        return 0;
+        return NULL;
     }
     const struct gm_skeleton *ref_skeleton = (struct gm_skeleton *)ref_skeleton_handle;
     if (!ref_skeleton) {
         gm_error(data->log, "NULL skeleton handle");
-        return 0;
+        return NULL;
     }
 
     return (intptr_t)gm_skeleton_resize(data->ctx, skeleton, ref_skeleton, parent_joint);
@@ -1647,6 +1755,9 @@ extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_free(intptr_t plugin_handle, intptr_t skeleton_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
     struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
@@ -1660,6 +1771,10 @@ extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_head(intptr_t plugin_handle, intptr_t bone_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
+
     const struct gm_bone *bone = (struct gm_bone *)bone_handle;
     if (!bone) {
         gm_error(data->log, "NULL bone handle");
@@ -1673,6 +1788,10 @@ extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_tail(intptr_t plugin_handle, intptr_t bone_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
+
     const struct gm_bone *bone = (struct gm_bone *)bone_handle;
     if (!bone) {
         gm_error(data->log, "NULL bone handle");
@@ -1687,6 +1806,9 @@ gm_unity_target_sequence_open(intptr_t plugin_handle,
                               const char *sequence_name)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return NULL;
+    }
 
     if (sequence_name == NULL) {
         gm_error(data->log, "NULL gm_unity_target_sequence_open() sequence_name");
@@ -1723,6 +1845,9 @@ gm_unity_target_sequence_get_n_frames(intptr_t plugin_handle,
                                       intptr_t target_sequence)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
     struct gm_target *sequence = (struct gm_target *)target_sequence;
     if (!sequence) {
         gm_error(data->log, "NULL sequence handle");
@@ -1737,6 +1862,9 @@ gm_unity_target_sequence_get_frame(intptr_t plugin_handle,
                                    intptr_t target_sequence)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
     struct gm_target *sequence = (struct gm_target *)target_sequence;
     if (!sequence) {
         gm_error(data->log, "NULL sequence handle");
@@ -1752,6 +1880,9 @@ gm_unity_target_sequence_set_frame(intptr_t plugin_handle,
                                    int frame_no)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
     struct gm_target *sequence = (struct gm_target *)target_sequence;
     if (!sequence) {
         gm_error(data->log, "NULL sequence handle");
@@ -1825,6 +1956,9 @@ extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
 
     if (data->last_video_frame) {
         struct gm_intrinsics *intrinsics = &data->last_video_frame->video_intrinsics;
@@ -1846,9 +1980,12 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
 }
 
 extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_run(void)
+gm_unity_run(intptr_t plugin_handle)
 {
-    struct glimpse_data *data = plugin_data;
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
 
     if (!data->device_ready)
         return false;
@@ -1861,9 +1998,12 @@ gm_unity_run(void)
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_stop(void)
+gm_unity_stop(intptr_t plugin_handle)
 {
-    struct glimpse_data *data = plugin_data;
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
 
     gm_debug(data->log, "GLIMPSE: Stop\n");
     gm_context_disable(data->ctx);
