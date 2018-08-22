@@ -9,9 +9,11 @@ parser = argparse.ArgumentParser(description=
 
 def linspace(min, max, n_values):
     step = (max - min) / (int(n_values) - 1)
-    while min < max:
+    i = 0
+    while i < n_values - 1:
         yield min
         min += step
+        i += 1
     yield max
 
 def parse_value(string):
