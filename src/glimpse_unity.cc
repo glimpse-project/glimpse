@@ -1630,44 +1630,6 @@ gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
     return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
 }
 
-extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_skeleton_get_joint_confidence(intptr_t plugin_handle,
-                                       intptr_t skeleton_handle,
-                                       int joint_no)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data) {
-        return 0;
-    }
-    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
-    if (!skeleton) {
-        gm_error(data->log, "NULL skeleton handle");
-        return 0;
-    }
-
-    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
-    return joint->confidence;
-}
-
-extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_skeleton_is_joint_predicted(intptr_t plugin_handle,
-                                     intptr_t skeleton_handle,
-                                     int joint_no)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data) {
-        return false;
-    }
-    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
-    if (!skeleton) {
-        gm_error(data->log, "NULL skeleton handle");
-        return false;
-    }
-
-    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
-    return joint->predicted;
-}
-
 extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_get_joint_name(intptr_t plugin_handle,
                                  intptr_t skeleton_handle,

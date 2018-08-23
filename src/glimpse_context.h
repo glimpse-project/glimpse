@@ -313,8 +313,6 @@ struct gm_joint {
     float x;
     float y;
     float z;
-    float confidence;
-    bool predicted;
 };
 
 struct gm_bone;
@@ -466,6 +464,13 @@ struct gm_prediction *
 gm_context_get_prediction(struct gm_context *ctx,
                           uint64_t timestamp);
 
+/* Gets the sum of the square of the difference between min/max bone lengths
+ * and actual bone lengths from the inferred skeleton.
+ */
+float
+gm_context_get_skeleton_distance(struct gm_context *ctx,
+                                 const struct gm_skeleton *skeleton);
+
 uint64_t
 gm_prediction_get_timestamp(struct gm_prediction *prediction);
 
@@ -571,10 +576,7 @@ gm_tracking_get_pipeline_stage_data(struct gm_tracking *tracking,
 
 struct gm_skeleton *
 gm_skeleton_new(struct gm_context *ctx,
-                struct gm_joint *joints,
-                float confidence,
-                float distance,
-                uint64_t timestamp);
+                struct gm_joint *joints);
 
 struct gm_skeleton *
 gm_skeleton_new_from_json(struct gm_context *ctx,
@@ -601,18 +603,13 @@ gm_skeleton_find_bone(const struct gm_skeleton *skeleton,
                       int head,
                       int tail);
 
-/* Gets the cumulative confidence of the joint values in the skeleton */
-float
-gm_skeleton_get_confidence(const struct gm_skeleton *skeleton);
-
-/* Gets the sum of the square of the difference between min/max bone lengths
- * and actual bone lengths from the inferred skeleton.
- */
-float
-gm_skeleton_get_distance(const struct gm_skeleton *skeleton);
-
 const struct gm_joint *
 gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint);
+
+float
+gm_skeleton_compare_angle(const struct gm_skeleton *a,
+                          const struct gm_skeleton *b,
+                          const struct gm_bone *bone);
 
 float
 gm_skeleton_angle_diff_cumulative(const struct gm_skeleton *a,
