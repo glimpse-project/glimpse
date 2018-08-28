@@ -314,6 +314,62 @@ get_time(void)
     return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
+static void
+log_intrinsics_summary(struct gm_device *dev,
+                       const char *name,
+                       struct gm_intrinsics *intrinsics)
+{
+#define DEGREES(RAD) (RAD * (360.0 / (M_PI * 2.0)))
+    float hfov = 2.0 * atan(0.5 * intrinsics->width /
+                                  intrinsics->fx);
+    float vfov = 2.0 * atan(0.5 * intrinsics->height /
+                                  intrinsics->fy);
+    gm_debug(dev->log,
+             "%s: %dx%d fx=%f,fy=%f (hfov=%f,vfov=%f), cx=%f,cy=%f",
+             name,
+             (int)intrinsics->width,
+             (int)intrinsics->height,
+             intrinsics->fx,
+             intrinsics->fy,
+             DEGREES(hfov), DEGREES(vfov),
+             intrinsics->cx,
+             intrinsics->cy);
+
+    switch (intrinsics->distortion_model) {
+    case GM_DISTORTION_NONE:
+        gm_debug(dev->log, "%s: distortion 'none'", name);
+        break;
+    case GM_DISTORTION_FOV_MODEL:
+        gm_debug(dev->log, "%s: distortion 'fov-model', w=%f",
+                 name, intrinsics->distortion[0]);
+        break;
+    case GM_DISTORTION_BROWN_K1_K2:
+        gm_debug(dev->log, "%s: distortion 'brown2', k1=%f, k2=%f",
+                 name,
+                 intrinsics->distortion[0],
+                 intrinsics->distortion[1]);
+        break;
+    case GM_DISTORTION_BROWN_K1_K2_K3:
+        gm_debug(dev->log, "%s: distortion 'brown3', k1=%f, k2=%f, k3=%f",
+                 name,
+                 intrinsics->distortion[0],
+                 intrinsics->distortion[1],
+                 intrinsics->distortion[2]);
+
+        break;
+    case GM_DISTORTION_BROWN_K1_K2_P1_P2_K3:
+        gm_debug(dev->log, "%s: distortion 'brown5', k1=%f, k2=%f, p1=%f, p2=%f, k3=%f",
+                 name,
+                 intrinsics->distortion[0],
+                 intrinsics->distortion[1],
+                 intrinsics->distortion[2],
+                 intrinsics->distortion[3],
+                 intrinsics->distortion[4]);
+        break;
+    }
+#undef DEGREES
+}
+
 static struct gm_device_event *
 device_event_alloc(struct gm_device *device, enum gm_device_event_type type)
 {
@@ -1366,6 +1422,8 @@ static void *
 recording_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
+    bool logged_depth_camera_intrinsics = false;
+    bool logged_video_camera_intrinsics = false;
 
     gm_debug(dev->log, "Started recording IO thread (on frame %d)",
              dev->recording.frame);
@@ -1460,6 +1518,11 @@ recording_io_thread_cb(void *userdata)
                                                            "depth_intrinsics",
                                                            &depth_intrinsics,
                                                            dev->depth_buf_pool);
+        if (!logged_depth_camera_intrinsics && depth_buffer) {
+            log_intrinsics_summary(dev, "Recording Depth Camera",
+                                   &depth_intrinsics);
+            logged_depth_camera_intrinsics = true;
+        }
         struct gm_intrinsics video_intrinsics;
         struct gm_buffer *video_buffer = read_frame_buffer(dev,
                                                            frame,
@@ -1468,6 +1531,11 @@ recording_io_thread_cb(void *userdata)
                                                            "video_intrinsics",
                                                            &video_intrinsics,
                                                            dev->video_buf_pool);
+        if (!logged_video_camera_intrinsics && video_buffer) {
+            log_intrinsics_summary(dev, "Recording Video Camera",
+                                   &video_intrinsics);
+            logged_video_camera_intrinsics = true;
+        }
         enum gm_rotation rotation = (enum gm_rotation)
             json_object_get_number(frame, "camera_rotation");
 
