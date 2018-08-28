@@ -53,7 +53,7 @@ float noise2d(float x, float y)
     return smooth_inter(low, high, y_frac);
 }
 
-float perlin2d(float x, float y, float freq, int depth)
+float perlin2d(float x, float y, float freq, int octaves)
 {
     float xa = x*freq;
     float ya = y*freq;
@@ -62,7 +62,7 @@ float perlin2d(float x, float y, float freq, int depth)
     float div = 0.0;
 
     int i;
-    for(i=0; i<depth; i++)
+    for(i=0; i<octaves; i++)
     {
         div += 256 * amp;
         fin += noise2d(xa, ya) * amp;
