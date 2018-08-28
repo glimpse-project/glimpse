@@ -22,23 +22,27 @@ static int hash[] = {
     114,20,218,113,154,27,127,246,250,1,8,198,250,209,92,222,173,21,88,102,219
 };
 
-int noise2(int x, int y)
+static int
+noise2(int x, int y)
 {
     int tmp = hash[(y + SEED) % 256];
     return hash[(tmp + x) % 256];
 }
 
-float lin_inter(float x, float y, float s)
+static float
+lin_inter(float x, float y, float s)
 {
     return x + s * (y-x);
 }
 
-float smooth_inter(float x, float y, float s)
+static float
+smooth_inter(float x, float y, float s)
 {
     return lin_inter(x, y, s * s * (3-2*s));
 }
 
-float noise2d(float x, float y)
+static float
+noise2d(float x, float y)
 {
     int x_int = x;
     int y_int = y;
@@ -72,15 +76,4 @@ float perlin2d(float x, float y, float freq, int octaves)
     }
 
     return fin/div;
-}
-
-int
-main(int argc, char *argv[])
-{
-    int x, y;
-    for(y=0; y<4000; y++)
-        for(x=0; x<4000; x++)
-            perlin2d(x, y, 0.1, 4);
-
-    return 0;
 }
