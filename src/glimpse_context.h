@@ -373,9 +373,6 @@ void
 gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
                                                 struct gm_extrinsics *extrinsics);
 
-const struct gm_intrinsics *
-gm_context_get_training_intrinsics(struct gm_context *ctx);
-
 void
 gm_context_rotate_intrinsics(struct gm_context *ctx,
                              const struct gm_intrinsics *intrinsics_in,
@@ -480,9 +477,6 @@ gm_tracking_get_video_camera_intrinsics(struct gm_tracking *tracking);
 
 const struct gm_intrinsics *
 gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *tracking);
-
-const struct gm_intrinsics *
-gm_tracking_get_training_camera_intrinsics(struct gm_tracking *tracking);
 
 const float *
 gm_tracking_get_label_probabilities(struct gm_tracking *tracking,

@@ -380,7 +380,9 @@ struct gm_tracking_impl
     struct gm_intrinsics depth_camera_intrinsics;
     struct gm_intrinsics video_camera_intrinsics;
 
-    /* This is currently just a copy of ctx->training_camera_intrinsics */
+    /* This is derived from the depth camera intrinsics and the loaded
+     * decision trees.
+     */
     struct gm_intrinsics training_camera_intrinsics;
 
     /* XXX: these are currently a copy of ctx->basis_depth_to_video_extrinsics
@@ -394,11 +396,9 @@ struct gm_tracking_impl
     // Depth data, in meters
     float *depth;
 
-    // Label inference data
-    uint8_t *label_map;
-
     // Label probability tables
     float *label_probs;
+    int label_probs_size;
 
     // The unprojected full-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_cloud;
@@ -459,8 +459,6 @@ struct gm_context
 
     int max_depth_pixels;
     int max_video_pixels;
-
-    struct gm_intrinsics training_camera_intrinsics;
 
     /* '_basis' here implies that the transform does not take into account how
      * video/depth data may be rotated to match the device orientation
@@ -620,6 +618,7 @@ struct gm_context
     float seg_psi;
     float seg_timeout;
 
+    int inf_res;
     bool use_threads;
     bool flip_labels;
 
@@ -2655,6 +2654,7 @@ struct pipeline_scratch_state
     float *depth_image;
     float *weights;
     float *label_probs;
+    int label_probs_size;
     InferredJoints *joints_candidate;
     struct gm_skeleton candidate_skeleton;
 
@@ -3458,9 +3458,6 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
 
-    float vfov =  pcl::rad2deg(2.0f * atanf(0.5 * height /
-                               tracking->training_camera_intrinsics.fy));
-
     if (ctx->fast_clustering) {
         state->joints_candidate =
                 infer_joints_fast(state->depth_image,
@@ -3469,7 +3466,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                                   width, height,
                                   ctx->n_labels,
                                   ctx->joint_map,
-                                  vfov,
+                                  pcl::rad2deg(ctx->decision_trees[0]->header.fov),
                                   ctx->joint_params->joint_params);
     } else {
         state->joints_candidate =
@@ -3480,7 +3477,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                              ctx->decision_trees[0]->header.bg_depth,
                              ctx->n_labels,
                              ctx->joint_map,
-                             vfov,
+                             pcl::rad2deg(ctx->decision_trees[0]->header.fov),
                              ctx->joint_params->joint_params);
     }
 }
@@ -3840,13 +3837,21 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
+    int size = width * height;
     std::vector<float*> &depth_images = state.depth_images;
     state.weights = (float*)
         xmalloc(width * height * ctx->n_joints * sizeof(float));
-    state.label_probs = (float*)xmalloc(width * height * ctx->n_labels *
-                                         sizeof(float));
+    state.label_probs = NULL;
+    state.label_probs_size = 0;
     state.best_person = 0;
     for (int i = 0; i < (int)depth_images.size(); i++) {
+        if (state.label_probs_size != size) {
+            if (state.label_probs) {
+                xfree(state.label_probs);
+            }
+            state.label_probs = (float*)xmalloc(width * height *
+                                                ctx->n_labels * sizeof(float));
+        }
         state.depth_image = depth_images[i];
 
         run_stage(tracking,
@@ -3880,14 +3885,20 @@ gm_context_track_skeleton(struct gm_context *ctx,
         {
             std::swap(tracking->skeleton, state.candidate_skeleton);
             std::swap(tracking->label_probs, state.label_probs);
+            std::swap(tracking->label_probs_size, state.label_probs_size);
             state.best_person = i;
         }
 
         free_joints(state.joints_candidate);
         state.joints_candidate = NULL;
     }
-    xfree(state.label_probs);
-    state.label_probs = NULL;
+
+    if (state.label_probs_size) {
+        xfree(state.label_probs);
+        state.label_probs = NULL;
+        state.label_probs_size = 0;
+    }
+
     xfree(state.weights);
     state.weights = NULL;
 
@@ -4528,7 +4539,20 @@ detector_thread_cb(void *data)
                                      &tracking->depth_camera_intrinsics,
                                      tracking->frame->camera_rotation);
 
-        tracking->training_camera_intrinsics = ctx->training_camera_intrinsics;
+        // Fill training camera intrinsics
+        int inf_res = ctx->inf_res;
+        tracking->training_camera_intrinsics.width =
+            frame->depth_intrinsics.width / inf_res;
+        tracking->training_camera_intrinsics.height =
+            frame->depth_intrinsics.height / inf_res;
+        tracking->training_camera_intrinsics.cx =
+            tracking->training_camera_intrinsics.width / 2;
+        tracking->training_camera_intrinsics.cy =
+            tracking->training_camera_intrinsics.height / 2;
+        tracking->training_camera_intrinsics.fx =
+            tracking->training_camera_intrinsics.fy =
+                tracking->training_camera_intrinsics.height /
+                (2 * tanf(ctx->decision_trees[0]->header.fov / 2));
 
         copy_and_rotate_depth_buffer(ctx,
                                      tracking,
@@ -4717,16 +4741,6 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     tracking->pool = pool;
     tracking->ctx = ctx;
-
-    int labels_width = ctx->training_camera_intrinsics.width;
-    int labels_height = ctx->training_camera_intrinsics.height;
-
-    assert(labels_width);
-    assert(labels_height);
-
-    tracking->label_probs = (float *)xcalloc(labels_width *
-                                             labels_height *
-                                             ctx->n_labels, sizeof(float));
 
     tracking->skeleton.joints.resize(ctx->n_joints);
     tracking->skeleton.bones.clear();
@@ -5202,15 +5216,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                  "Failed to start face detector thread: %s", strerror(ret));
         gm_context_destroy(ctx);
     }
-
-    int labels_width = 172;
-    int labels_height = 224;
-    ctx->training_camera_intrinsics.width = labels_width;
-    ctx->training_camera_intrinsics.height = labels_height;
-    ctx->training_camera_intrinsics.cx = 86;
-    ctx->training_camera_intrinsics.cy = 112;
-    ctx->training_camera_intrinsics.fx = 217.461437772;
-    ctx->training_camera_intrinsics.fy = 217.461437772;
 
     ctx->joint_map = NULL;
     char *open_err = NULL;
@@ -6041,6 +6046,17 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    gm_tracking_create_rgb_label_map,
                                });
 
+        ctx->inf_res = 2;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "inf_res";
+        prop.desc = "Resolution divider for running inference";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->inf_res;
+        prop.int_state.min = 1;
+        prop.int_state.max = 4;
+        stage.properties.push_back(prop);
+
         ctx->use_threads = false;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -6288,12 +6304,6 @@ gm_context_set_depth_to_video_camera_extrinsics(struct gm_context *ctx,
     }
 }
 
-const gm_intrinsics *
-gm_context_get_training_intrinsics(struct gm_context *ctx)
-{
-    return &ctx->training_camera_intrinsics;
-}
-
 int
 gm_context_get_n_stages(struct gm_context *ctx)
 {
@@ -6392,13 +6402,6 @@ gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     return &tracking->depth_camera_intrinsics;
-}
-
-const gm_intrinsics *
-gm_tracking_get_training_camera_intrinsics(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return &tracking->training_camera_intrinsics;
 }
 
 bool
