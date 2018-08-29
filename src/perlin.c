@@ -3,7 +3,7 @@
 // https://gist.github.com/nowl/828013
 //
 
-#include <stdio.h>
+#include "perlin.h"
 
 static int hash[] = {
     208,34,231,213,32,248,233,56,161,78,24,140,71,48,140,254,245,255,247,247,40,
@@ -55,7 +55,8 @@ noise2d(float x, float y, int seed)
     return smooth_inter(low, high, y_frac);
 }
 
-float perlin2d(float x, float y, float freq, int octaves, int seed)
+float
+perlin2d(float x, float y, float freq, int octaves, int seed)
 {
     float xa = x*freq;
     float ya = y*freq;
