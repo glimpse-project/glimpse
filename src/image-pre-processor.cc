@@ -751,8 +751,14 @@ ensure_directory(const char *path)
     struct stat st;
     int ret;
 
-    char *dirname_copy = strdup(path);
-    char *parent = dirname(dirname_copy);
+    // XXX: some implementation of dirname() will modify the given string
+    char *path_copy = strdup(path);
+
+    // XXX: some implementations of dirname() will return a pointer to
+    // internal storage
+    char *parent = dirname(path_copy);
+    if (parent)
+        parent = strdup(parent);
 
     if (strcmp(parent, ".") != 0 &&
         strcmp(parent, "..") != 0 &&
