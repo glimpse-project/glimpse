@@ -62,7 +62,7 @@
 #define PNG_DEBUG 3
 #define debug(ARGS...) printf(ARGS)
 #else
-#define debug(ARGS...) do {} while(0)
+#define debug(ARGS...) ({ while(0) { printf(ARGS); } })
 #endif
 
 #include <png.h>
