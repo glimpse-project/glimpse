@@ -397,8 +397,7 @@ struct gm_tracking_impl
     float *depth;
 
     // Label probability tables
-    float *label_probs;
-    int label_probs_size;
+    std::vector<float> label_probs;
 
     // The unprojected full-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_cloud;
@@ -662,6 +661,11 @@ struct gm_context
                            void *user_data);
 
     void *callback_data;
+
+    /* A re-usable allocation for label probabilities that might
+     * get swapped into the latest tracking object
+     */
+    std::vector<float> label_probs_backbuffer;
 };
 
 static const char *label_names[] = {
@@ -2653,8 +2657,6 @@ struct pipeline_scratch_state
     // per-cluster inference
     float *depth_image;
     float *weights;
-    float *label_probs;
-    int label_probs_size;
     InferredJoints *joints_candidate;
     struct gm_skeleton candidate_skeleton;
 
@@ -3427,7 +3429,7 @@ stage_label_inference_cb(struct gm_tracking_impl *tracking,
                  ctx->n_decision_trees,
                  state->depth_image,
                  width, height,
-                 state->label_probs,
+                 ctx->label_probs_backbuffer.data(),
                  ctx->use_threads,
                  ctx->flip_labels);
 }
@@ -3442,7 +3444,7 @@ stage_joint_weights_cb(struct gm_tracking_impl *tracking,
     int height = tracking->training_camera_intrinsics.height;
 
     calc_pixel_weights(state->depth_image,
-                       state->label_probs,
+                       ctx->label_probs_backbuffer.data(),
                        width, height,
                        ctx->n_labels,
                        ctx->joint_map,
@@ -3461,7 +3463,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
     if (ctx->fast_clustering) {
         state->joints_candidate =
                 infer_joints_fast(state->depth_image,
-                                  state->label_probs,
+                                  ctx->label_probs_backbuffer.data(),
                                   state->weights,
                                   width, height,
                                   ctx->n_labels,
@@ -3471,7 +3473,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
     } else {
         state->joints_candidate =
                 infer_joints(state->depth_image,
-                             state->label_probs,
+                             ctx->label_probs_backbuffer.data(),
                              state->weights,
                              width, height,
                              ctx->decision_trees[0]->header.bg_depth,
@@ -3837,21 +3839,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
 
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
-    int size = width * height;
     std::vector<float*> &depth_images = state.depth_images;
     state.weights = (float*)
         xmalloc(width * height * ctx->n_joints * sizeof(float));
-    state.label_probs = NULL;
-    state.label_probs_size = 0;
     state.best_person = 0;
+    ctx->label_probs_backbuffer.resize(width * height * ctx->n_labels);
     for (int i = 0; i < (int)depth_images.size(); i++) {
-        if (state.label_probs_size != size) {
-            if (state.label_probs) {
-                xfree(state.label_probs);
-            }
-            state.label_probs = (float*)xmalloc(width * height *
-                                                ctx->n_labels * sizeof(float));
-        }
         state.depth_image = depth_images[i];
 
         run_stage(tracking,
@@ -3884,19 +3877,12 @@ gm_context_track_skeleton(struct gm_context *ctx,
             compare_skeletons(state.candidate_skeleton, tracking->skeleton))
         {
             std::swap(tracking->skeleton, state.candidate_skeleton);
-            std::swap(tracking->label_probs, state.label_probs);
-            std::swap(tracking->label_probs_size, state.label_probs_size);
+            std::swap(tracking->label_probs, ctx->label_probs_backbuffer);
             state.best_person = i;
         }
 
         free_joints(state.joints_candidate);
         state.joints_candidate = NULL;
-    }
-
-    if (state.label_probs_size) {
-        xfree(state.label_probs);
-        state.label_probs = NULL;
-        state.label_probs_size = 0;
     }
 
     xfree(state.weights);
@@ -4677,8 +4663,6 @@ tracking_state_free(struct gm_mem_pool *pool,
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
 
-    free(tracking->label_probs);
-
     free(tracking->depth);
 
     free(tracking->face_detect_buf);
@@ -4750,6 +4734,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     tracking->depth = (float *)
       xcalloc(ctx->max_depth_pixels, sizeof(float));
+
+    tracking->label_probs.resize(ctx->max_depth_pixels);
 
     gm_assert(ctx->log, ctx->max_video_pixels,
               "Undefined maximum number of video pixels");
@@ -6420,25 +6406,31 @@ gm_tracking_get_skeleton(struct gm_tracking *_tracking)
 
 bool
 gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
-                                 int *width, int *height, uint8_t **output)
+                                 int *width_out, int *height_out, uint8_t **output)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
     struct gm_context *ctx = tracking->ctx;
 
     uint8_t n_labels = ctx->n_labels;
 
-    *width = (int)tracking->training_camera_intrinsics.width;
-    *height = (int)tracking->training_camera_intrinsics.height;
+    int width = (int)tracking->training_camera_intrinsics.width;
+    int height = (int)tracking->training_camera_intrinsics.height;
+
+    if (tracking->label_probs.size() != width * height * n_labels)
+        return false;
+
+    *width_out = width;
+    *height_out = height;
 
     if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+        *output = (uint8_t *)malloc(width * height * 3);
     }
 
     gm_assert(ctx->log, ctx->debug_label < n_labels,
               "Can't create RGB map of invalid label %u",
               ctx->debug_label);
 
-    foreach_xy_off(*width, *height) {
+    foreach_xy_off(width, height) {
         uint8_t label = 0;
         float pr = -1.0;
         float *pr_table = &tracking->label_probs[off * n_labels];
@@ -6789,7 +6781,7 @@ gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
     *width = tracking->training_camera_intrinsics.width;
     *height = tracking->training_camera_intrinsics.height;
 
-    return tracking->label_probs;
+    return tracking->label_probs.data();
 }
 
 uint64_t
