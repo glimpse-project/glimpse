@@ -76,7 +76,11 @@ parser.add_argument("-v", "--verbose", action="store_true", help="Display verbos
 parser.add_argument("-s", "--seed", help="Seed for random sampling")
 parser.add_argument("-f", "--full", nargs=1, default=['full'], help="An alternative index.<FULL> extension for the full index (default 'full')")
 parser.add_argument("-e", "--exclude", action="append", nargs=1, metavar=('NAME'), help="Load index.<NAME> frames to be excluded from sampling")
+
+# Sampling methods...
 parser.add_argument("-w", "--without-replacement", action="store_true", help="Sample each index without replacement (use -e if you need to avoid replacement between index files)")
+parser.add_argument("-a", "--all", action="store_true", help="Simply keep everything (in-order) after applying filters and exclusions")
+
 parser.add_argument("-i", "--index", action="append", nargs=2, metavar=('NAME','N'), help="Create an index.<NAME> file with N frames")
 
 args = parser.parse_args()
@@ -140,16 +144,8 @@ if args.index:
             raise ValueError("each index needs a unique name")
         names[name] = 1
         n_samples = int(length_str)
-        if args.without_replacement and n_samples > n_frames:
+        if (args.without_replacement or args.all) and n_samples > n_frames:
             raise ValueError("Not enough frames to create requested index file %s" % name)
-
-
-    start = 0
-    if args.verbose:
-        for (name, length_str) in args.index:
-            N = int(length_str)
-            subset = samples[start:start+N]
-            print("index %s sample indices: %s" % (name, str(subset)))
 
     print("")
     start = 0
@@ -162,7 +158,9 @@ if args.index:
             random.seed(name)
 
         frame_range = range(n_frames)
-        if args.without_replacement:
+        if args.all:
+            samples = frame_range[:N]
+        elif args.without_replacement:
             samples = random.sample(frame_range, N)
         else:
             samples = [ random.choice(frame_range) for i in range(N) ]
@@ -171,7 +169,9 @@ if args.index:
             for i in samples:
                 fp.write(full_index[i])
 
-            if args.without_replacement:
+            if args.all:
+                print("index %s: %d frames" % (name, N))
+            elif args.without_replacement:
                 print("index %s: %d samples (without replacement)" % (name, N))
             else:
                 print("index %s: %d samples (with replacement)" % (name, N))
