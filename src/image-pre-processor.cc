@@ -47,6 +47,7 @@
 #include <queue>
 #include <random>
 #include <atomic>
+#include <thread>
 
 #include "half.hpp"
 
@@ -1075,38 +1076,6 @@ worker_thread_cb(void *data)
 }
 
 static void
-cpu_count_once_cb(void)
-{
-    uint8_t *buf;
-    int len;
-    unsigned ignore = 0, max_cpu = 0;
-
-    buf = read_file("/sys/devices/system/cpu/present", &len);
-    if (!buf) {
-        fprintf(stderr, "Failed to read number of CPUs\n");
-        return;
-    }
-
-    if (sscanf((char *)buf, "%u-%u", &ignore, &max_cpu) != 2) {
-        fprintf(stderr, "Failed to parse /sys/devices/system/cpu/present\n");
-        free(buf);
-        return;
-    }
-
-    free(buf);
-
-    n_cpus = max_cpu + 1;
-}
-
-static int
-cpu_count(void)
-{
-    pthread_once(&cpu_count_once, cpu_count_once_cb);
-
-    return n_cpus;
-}
-
-static void
 usage(void)
 {
     printf(
@@ -1293,14 +1262,9 @@ main(int argc, char **argv)
     xsnprintf(index_filename, "%s/index", top_out_dir);
     index_fp = fopen(index_filename, "w");
 
-    int n_threads;
-
-    if (!n_threads_override) {
-        int n_cpus = cpu_count();
-        n_threads = n_cpus * 2;
-    } else {
+    int n_threads = std::thread::hardware_concurrency();
+    if (n_threads_override)
         n_threads = n_threads_override;
-    }
 
     //n_threads = 1;
 
