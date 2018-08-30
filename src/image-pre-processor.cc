@@ -768,13 +768,19 @@ ensure_directory(const char *path)
         ensure_directory(parent);
     }
 
-    free(dirname_copy);
+    free(parent);
+    parent = NULL;
 
+    free(path_copy);
+    path_copy = NULL;
+
+    //printf("Ensuring %s\n", path);
     ret = stat(path, &st);
     if (ret == -1) {
         int ret = mkdir(path, 0777);
         if (ret < 0 && errno != EEXIST) {
-            fprintf(stderr, "Failed to create destination directory %s: %m\n", path);
+            fprintf(stderr, "Failed to create destination directory %s: %s\n",
+                    path, strerror(errno));
             exit(1);
         }
     }
