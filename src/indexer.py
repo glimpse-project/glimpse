@@ -75,6 +75,10 @@ parser.add_argument("data", nargs=1, help="Data Directory")
 parser.add_argument("-v", "--verbose", action="store_true", help="Display verbose debug information")
 parser.add_argument("-s", "--seed", help="Seed for random sampling")
 parser.add_argument("-f", "--full", nargs=1, default=['full'], help="An alternative index.<FULL> extension for the full index (default 'full')")
+
+# Filters...
+parser.add_argument("--body", action="append", nargs=1, metavar=('BODY_NAME'), help="Only consider frames including specific body models")
+parser.add_argument("--bvh", action="append", nargs=1, metavar=('BVH_NAME'), help="Only consider frames part of specific mocap sequences")
 parser.add_argument("-e", "--exclude", action="append", nargs=1, metavar=('NAME'), help="Load index.<NAME> frames to be excluded from sampling")
 
 # Sampling methods...
@@ -115,7 +119,23 @@ n_frames = len(full_index)
 print("index.%s: %u frames\n" % (args.full[0], n_frames))
 
 
-# 2. Apply exclusions
+# 2. Apply filters
+if args.body or args.bvh:
+    filtered_index = []
+    for frame in full_index:
+        keep = True
+        with open(frame + ".json", 'r') as fp:
+            meta = json.load(fp)
+            if args.bvh and meta['bvh'] not in args.bvh:
+                keep = False
+            if args.body and meta['body'] not in args.body:
+                keep = False
+        if keep:
+            filtered_index.append(frame)
+    full_index = filtered_index
+
+
+# 3. Apply exclusions
 if args.exclude:
     exclusions = []
     for (name,) in args.exclude:
@@ -135,7 +155,7 @@ if args.exclude:
     full_index.sort()
 
 
-# 3. Create randomly sampled index files
+# 4. Sample index files
 if args.index:
     names = {}
 
