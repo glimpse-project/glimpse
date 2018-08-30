@@ -1285,12 +1285,11 @@ main(int argc, char **argv)
     while (true) {
         uint64_t target_frame_count;
 
-        bool finished = false;
+        int n_jobs = 0;
         pthread_mutex_lock(&work_queue_lock);
-        if (work_queue.empty())
-            finished = true;
+        n_jobs = work_queue.size();
         pthread_mutex_unlock(&work_queue_lock);
-        if (finished)
+        if (n_jobs == 0 || finished)
             break;
 
         if (max_frame_count != UINT64_MAX)
@@ -1299,8 +1298,8 @@ main(int argc, char **argv)
             target_frame_count = input_frame_count * 2;
 
         int progress = 100.0 * ((double)frame_count / (double)target_frame_count);
-        printf("\nProgress = %3d%%: %10" PRIu64 " / %-10" PRIu64 "\n\n",
-               progress, (uint64_t)frame_count, (uint64_t)target_frame_count);
+        printf("\nProgress = %3d%%: %10" PRIu64 " / %-10" PRIu64 " (%d jobs remaining)\n\n",
+               progress, (uint64_t)frame_count, (uint64_t)target_frame_count, n_jobs);
 
         sleep(1);
     }
