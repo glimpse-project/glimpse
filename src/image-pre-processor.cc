@@ -547,14 +547,14 @@ frame_add_noise(const struct image *__restrict__ labels,
     struct rel_pos {
         int x, y;
     } neighbour_position[] = {
-        - 1, - 1,
-          0, - 1,
-          1, - 1,
-        - 1,   0,
-          1,   0,
-        - 1,   1,
-          0,   1,
-          1,   1,
+        { - 1, - 1, },
+        {   0, - 1, },
+        {   1, - 1, },
+        { - 1,   0, },
+        {   1,   0, },
+        { - 1,   1, },
+        {   0,   1, },
+        {   1,   1, },
     };
 
 #define in_depth_at(x, y) *(in_depth_px + width * y + x)
