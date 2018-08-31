@@ -766,23 +766,23 @@ sanity_check_frame(const struct image *labels,
 
             if (std::isinf(depth_m) ||
                 std::isnan(depth_m)) {
-                fprintf(stderr, "Invalid INF value in depth image");
+                fprintf(stderr, "Invalid INF value in depth image\n");
                 exit(1);
             }
             if (depth_m > background_depth_m) {
-                fprintf(stderr, "Invalid out-of-range depth value");
+                fprintf(stderr, "Invalid out-of-range depth value\n");
                 exit(1);
             }
             if (labels_px[pos] == BACKGROUND_ID &&
                 depth_m != background_depth_m)
             {
-                fprintf(stderr, "Background pixel has incorrect depth");
+                fprintf(stderr, "Background pixel has incorrect depth\n");
                 exit(1);
             }
             if (labels_px[pos] != BACKGROUND_ID &&
                 depth_m == background_depth_m)
             {
-                fprintf(stderr, "Spurious non-background pixel has background depth");
+                fprintf(stderr, "Spurious non-background pixel has background depth\n");
                 exit(1);
             }
         }
@@ -1158,8 +1158,9 @@ worker_thread_cb(void *data)
             int len = 0;
             uint8_t *json_data = read_file(filename, &len);
             if (!json_data) {
-                fprintf(stderr, "WARNING: Failed to read frame's meta data %s: %m\n",
-                        filename);
+                fprintf(stderr, "WARNING: Failed to read frame's meta data %s: %s\n",
+                        filename,
+                        strerror(errno));
             }
 
             if (json_data) {
@@ -1169,8 +1170,9 @@ worker_thread_cb(void *data)
                           (int)strlen(frame.path) - 4,
                           frame.path);
                 if (!write_file(filename, json_data, len)) {
-                    fprintf(stderr, "WARNING: Failed to copy frame's meta data to %s: %m\n",
-                            filename);
+                    fprintf(stderr, "WARNING: Failed to copy frame's meta data to %s: %s\n",
+                            filename,
+                            strerror(errno));
                 }
 
                 /* For the -flipped frame we have to flip the x position of
@@ -1202,8 +1204,9 @@ worker_thread_cb(void *data)
                           (int)strlen(frame.path) - 4,
                           frame.path);
                 if (json_serialize_to_file_pretty(root_value, filename) != JSONSuccess) {
-                    fprintf(stderr, "WARNING: Failed to serialize flipped frame's json meta data to %s: %m\n",
-                            filename);
+                    fprintf(stderr, "WARNING: Failed to serialize flipped frame's json meta data to %s: %s\n",
+                            filename,
+                            strerror(errno));
                 }
 
                 json_value_free(root_value);
