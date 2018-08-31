@@ -63,7 +63,7 @@ image-pre-processor \
     glimpse-training-data/label-maps/2018-06-render-to-2018-06-rdt-map.json \
     -c glimpse-training-data/pre-processor-configs/iphone-x-config.json
 
-indexer.py rendered-training-data/pre-processed/test-render
+glimpse-training-data/glimpse-data-indexer.py rendered-training-data/pre-processed/test-render
 
 JOBS=$(cat<<'EOF'
 [
