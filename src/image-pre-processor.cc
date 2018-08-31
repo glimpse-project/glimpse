@@ -711,10 +711,9 @@ frame_add_noise(const struct image *__restrict__ labels,
                     out_depth_at(x, y) = in_depth_at(x, y);
                 }
             } else {
-                out_label_at(x, y) = in_label_at(x, y);
-                out_depth_at(x, y) = in_depth_at(x, y);
+                out_label_at(x, y) = BACKGROUND_ID;
+                out_depth_at(x, y) = background_depth_m;
             }
-
         }
 
         out_label_at(width - 1, y) = in_label_at(width - 1, y);
@@ -745,6 +744,20 @@ frame_add_noise(const struct image *__restrict__ labels,
                 break;
             }
         }
+    } else {
+        /* The above noise filters also have the effect of ensuring that
+         * all background pixels will have a depth value of background_depth_m
+         * so if no noise is being applied we at least need to ensure
+         * background depth values are all valid...
+         */
+        for (int y = 0; y < height; y++) {
+            for (int x = 0; x < width; x++) {
+                int pos = width * y + x;
+
+                if (out_labels_px[pos] == BACKGROUND_ID)
+                    out_depth_px[pos] = background_depth_m;
+            }
+        }
     }
 }
 
@@ -770,7 +783,8 @@ sanity_check_frame(const struct image *labels,
                 exit(1);
             }
             if (depth_m > background_depth_m) {
-                fprintf(stderr, "Invalid out-of-range depth value\n");
+                fprintf(stderr, "Invalid out-of-range depth value (%f > background depth of %f)\n",
+                        depth_m, background_depth_m);
                 exit(1);
             }
             if (labels_px[pos] == BACKGROUND_ID &&
