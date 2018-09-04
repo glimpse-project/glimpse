@@ -80,6 +80,8 @@ cd blender
 and to configure Blender with all the required addons for rendering via
 blender/glimpse-cli.py)*
 
+*Note: You have to set enviromental variable before running install-addons.sh (export PATH=/Applications/Blender/blender.app/Contents/MacOS/:$PATH)*
+
 and in the glimpse-models repo run:
 
 ```
@@ -105,7 +107,7 @@ cross-compiling for Android and iOS. If someone wants to help port to Windows,
 that would be greatly appreciated and probably wouldn't be too tricky.
 
 We're using [Meson](https://mesonbuild.com) and [Ninja](https://ninja-build.org/)
-for building. 
+for building.
 
 Since upstream Meson doesn't have sufficient support for Android or iOS and to
 also ensure consistent build setups we're using a custom [branch of
