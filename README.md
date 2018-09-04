@@ -80,7 +80,9 @@ cd blender
 and to configure Blender with all the required addons for rendering via
 blender/glimpse-cli.py)*
 
-*Note: You have to set enviromental variable before running install-addons.sh (export PATH=/Applications/Blender/blender.app/Contents/MacOS/:$PATH)*
+*Note: You have to set enviromental variable before running install-addons.sh*
+
+`export PATH=/Applications/Blender/blender.app/Contents/MacOS/:$PATH`
 
 and in the glimpse-models repo run:
 
