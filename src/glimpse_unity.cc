@@ -1453,6 +1453,53 @@ gm_unity_get_render_event_id(intptr_t plugin_handle)
     return data->render_event_id;
 }
 
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_n_joints(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return gm_context_get_n_joints(data->ctx);
+}
+
+extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_joint_name(intptr_t plugin_handle, int joint_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return "Unknown";
+    }
+
+    int n_joints = gm_context_get_n_joints(data->ctx);
+    if (joint_no < 0 || joint_no >= n_joints) {
+        gm_error(data->log, "Out of bounds joint index %d (n_joints = %d)",
+                 joint_no, n_joints);
+        return "Unknown";
+    }
+
+    return gm_context_get_joint_name(data->ctx, joint_no);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_joint_semantic(intptr_t plugin_handle, int joint_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return GM_JOINT_UNKNOWN;
+    }
+
+    int n_joints = gm_context_get_n_joints(data->ctx);
+    if (joint_no < 0 || joint_no >= n_joints) {
+        gm_error(data->log, "Out of bounds joint index %d (n_joints = %d)",
+                 joint_no, n_joints);
+        return GM_JOINT_UNKNOWN;
+    }
+
+    return (int)gm_context_get_joint_semantic(data->ctx, joint_no);
+}
+
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
 {
@@ -1595,6 +1642,7 @@ gm_unity_prediction_unref(intptr_t plugin_handle, intptr_t prediction_handle)
     gm_prediction_unref(prediction);
 }
 
+/* XXX: deprecated, use gm_unity_context_get_n_joints() */
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_get_n_joints(intptr_t plugin_handle,
                                intptr_t skeleton_handle)
@@ -1630,6 +1678,7 @@ gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
     return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
 }
 
+/* XXX: deprecated, use gm_unity_context_get_joint_name() */
 extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_get_joint_name(intptr_t plugin_handle,
                                  intptr_t skeleton_handle,
@@ -1639,14 +1688,8 @@ gm_unity_skeleton_get_joint_name(intptr_t plugin_handle,
     if (!data) {
         return "";
     }
-    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
-    if (!skeleton) {
-        gm_error(data->log, "NULL skeleton handle");
-        return "";
-    }
 
-    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
-    return joint->name;
+    return gm_context_get_joint_name(data->ctx, joint_no);
 }
 
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API

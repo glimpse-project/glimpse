@@ -308,8 +308,27 @@ gm_tracking_unref(struct gm_tracking *tracking)
 
 struct gm_context;
 
+enum gm_joint_semantic
+{
+    GM_JOINT_UNKNOWN,
+    GM_JOINT_HEAD,
+    GM_JOINT_NECK,
+    GM_JOINT_LEFT_SHOULDER,
+    GM_JOINT_RIGHT_SHOULDER,
+    GM_JOINT_LEFT_ELBOW,
+    GM_JOINT_LEFT_WRIST,
+    GM_JOINT_RIGHT_ELBOW,
+    GM_JOINT_RIGHT_WRIST,
+    GM_JOINT_LEFT_HIP,
+    GM_JOINT_LEFT_KNEE,
+    GM_JOINT_RIGHT_HIP,
+    GM_JOINT_RIGHT_KNEE,
+    GM_JOINT_LEFT_ANKLE,
+    GM_JOINT_RIGHT_ANKLE,
+};
+
 struct gm_joint {
-    const char *name;
+    bool valid;
     float x;
     float y;
     float z;
@@ -351,15 +370,37 @@ extern "C" {
 #endif
 
 struct gm_context *gm_context_new(struct gm_logger *logger, char **err);
-void gm_context_flush(struct gm_context *ctx, char **err);
-void gm_context_destroy(struct gm_context *ctx);
 
+/* Before starting to feed a context frames from a new device then all buffered
+ * state pertaining to the current/previous device can be flushed/cleared out
+ * with this api.
+ *
+ * XXX: It's the user's/caller's responsibility to ensure they have dropped all
+ * references to context resources (e.g. tracking and prediction objects)
+ * before calling this function.
+ */
+void gm_context_flush(struct gm_context *ctx, char **err);
+
+/* XXX: It's the user's/caller's responsibility to ensure they have dropped all
+ * references to context resources (e.g. tracking and prediction objects)
+ * before calling this function.
+ */
+void gm_context_destroy(struct gm_context *ctx);
 
 struct gm_ui_properties *
 gm_context_get_ui_properties(struct gm_context *ctx);
 
 void
 gm_context_set_config(struct gm_context *ctx, JSON_Value *json_config);
+
+int
+gm_context_get_n_joints(struct gm_context *ctx);
+
+const char *
+gm_context_get_joint_name(struct gm_context *ctx, int joint_id);
+
+const enum gm_joint_semantic
+gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id);
 
 void
 gm_context_set_max_depth_pixels(struct gm_context *ctx, int max_pixels);

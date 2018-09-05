@@ -808,10 +808,18 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
     XYZRGBA colored_joints[data->target_skel_gl.n_joints];
     for (int i = 0; i < data->target_skel_gl.n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        colored_joints[i].x = joint->x;
-        colored_joints[i].y = joint->y;
-        colored_joints[i].z = joint->z;
-        colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        if (joint) {
+            colored_joints[i].x = joint->x;
+            colored_joints[i].y = joint->y;
+            colored_joints[i].z = joint->z;
+            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        } else {
+            /* TODO: do something smarter... */
+            colored_joints[i].x = 0;
+            colored_joints[i].y = 0;
+            colored_joints[i].z = 0;
+            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        }
     }
     glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.joints_bo);
     glBufferData(GL_ARRAY_BUFFER,
@@ -863,10 +871,18 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
     XYZRGBA colored_joints[data->skel_gl.n_joints];
     for (int i = 0; i < data->skel_gl.n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        colored_joints[i].x = joint->x;
-        colored_joints[i].y = joint->y;
-        colored_joints[i].z = joint->z;
-        colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        if (joint) {
+            colored_joints[i].x = joint->x;
+            colored_joints[i].y = joint->y;
+            colored_joints[i].z = joint->z;
+            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        } else {
+            /* TODO: do something smarter... */
+            colored_joints[i].x = 0;
+            colored_joints[i].y = 0;
+            colored_joints[i].z = 0;
+            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+        }
     }
     glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.joints_bo);
     glBufferData(GL_ARRAY_BUFFER,
@@ -2345,10 +2361,16 @@ handle_context_tracking_updates(Data *data)
             const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
             JSON_Value *coord_val = json_value_init_array();
             JSON_Array *coord = json_array(coord_val);
-
-            json_array_append_number(coord, joint->x);
-            json_array_append_number(coord, joint->y);
-            json_array_append_number(coord, joint->z);
+            if (joint) {
+                json_array_append_number(coord, joint->x);
+                json_array_append_number(coord, joint->y);
+                json_array_append_number(coord, joint->z);
+            } else {
+                /* TODO: do something smarter... */
+                json_array_append_number(coord, 0);
+                json_array_append_number(coord, 0);
+                json_array_append_number(coord, 0);
+            }
 
             json_array_append_value(joints_array, coord_val);
         }

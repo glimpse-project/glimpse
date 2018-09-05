@@ -104,10 +104,6 @@
             exit(1); \
     } while(0)
 
-#define joint_name(x) \
-    json_object_get_string( \
-        json_array_get_object(json_array(ctx->joint_map), x), "joint")
-
 /* With this foreach macro the following block of code will have access to
  * x, y, z and off variables. (off = y * width + x)
  */
@@ -287,15 +283,9 @@ struct gm_bone
 };
 
 struct gm_skeleton {
+    struct gm_context *ctx;
     std::vector<struct gm_joint> joints;
     std::vector<struct gm_bone> bones;
-
-    gm_skeleton() {}
-    gm_skeleton(int n_joints) :
-      joints(n_joints) {}
-    gm_skeleton(const struct gm_skeleton *skeleton) :
-      joints(skeleton->joints),
-      bones(skeleton->bones) {}
 };
 
 struct image_generator {
@@ -574,6 +564,10 @@ struct gm_context
     int n_labels;
 
     JSON_Value *joint_map;
+    std::vector<const char *> joint_blender_names; // (pointers into joint_map data)
+    std::vector<const char *> joint_names;
+    std::vector<enum gm_joint_semantic> joint_semantics;
+
     JIParams *joint_params;
     struct joint_info *joint_stats;
     int n_joints;
@@ -1438,9 +1432,9 @@ build_bones(struct gm_context *ctx,
     }
 
     if (joint_no != last_joint_no) {
-        if (skeleton.joints[joint_no].name &&
+        if (skeleton.joints[joint_no].valid &&
             last_joint_no != -1 &&
-            skeleton.joints[last_joint_no].name)
+            skeleton.joints[last_joint_no].valid)
         {
             struct gm_bone bone;
             bone.length = 0;
@@ -1498,12 +1492,15 @@ build_skeleton(struct gm_context *ctx,
         if (result->joints[joint_no]) {
             Joint *tail = (Joint *)result->joints[joint_no]->data;
 
-            skeleton.joints[joint_no].name = joint_name(joint_no);
+            skeleton.joints[joint_no].valid = true;
             skeleton.joints[joint_no].x = tail->x;
             skeleton.joints[joint_no].y = tail->y;
             skeleton.joints[joint_no].z = tail->z;
         } else {
-            skeleton.joints[joint_no].name = NULL;
+            skeleton.joints[joint_no].valid = false;
+            skeleton.joints[joint_no].x = 0;
+            skeleton.joints[joint_no].y = 0;
+            skeleton.joints[joint_no].z = 0;
         }
     }
 
@@ -1543,10 +1540,12 @@ refine_skeleton(struct gm_tracking_impl *tracking)
         }
 
         for (LList *l = tracking->joints->joints[j]->next; l; l = l->next) {
-            struct gm_skeleton candidate_skeleton(tracking->joints->n_joints);
+            struct gm_skeleton candidate_skeleton = {};
+
+            candidate_skeleton.ctx = ctx;
+            candidate_skeleton.joints.resize(ctx->n_joints);
 
             Joint *joint = (Joint *)l->data;
-            candidate_skeleton.joints[j].name = joint_name(j);
             candidate_skeleton.joints[j].x = joint->x;
             candidate_skeleton.joints[j].y = joint->y;
             candidate_skeleton.joints[j].z = joint->z;
@@ -1640,7 +1639,7 @@ sanitise_skeleton(struct gm_context *ctx,
         for (int j = 0; j < ctx->n_tracking - 1; ++j) {
             struct gm_joint &joint1 = prev[j]->skeleton.joints[joint];
             struct gm_joint &joint2 = prev[j+1]->skeleton.joints[joint];
-            if (!joint1.name || !joint2.name) {
+            if (!joint1.valid || !joint2.valid) {
                 displacements[j] = FLT_MAX;
                 continue;
             }
@@ -1662,7 +1661,7 @@ sanitise_skeleton(struct gm_context *ctx,
                 if (displacements[j] <= outlier_threshold) {
                     gm_debug(ctx->log, "Bone joint (%s) average displacement: "
                              "%.2f, correction: %.2f -> %.2f",
-                             joint_name(joint),
+                             ctx->joint_names[joint],
                              avg_displacement, distance, displacements[j]);
                     parent_joint = prev[j]->skeleton.joints[joint];
                     break;
@@ -1724,7 +1723,8 @@ sanitise_skeleton(struct gm_context *ctx,
                 gm_debug(ctx->log,
                          "Bone (%s->%s) average length: %.2f, "
                          "correction: %.2f -> %.2f",
-                         joint_name(bone.head), joint_name(bone.tail),
+                         ctx->joint_names[bone.head],
+                         ctx->joint_names[bone.tail],
                          avg_bone_length, bone.length, new_length);
 
                 glm::vec3 new_tail =
@@ -1768,10 +1768,10 @@ sanitise_skeleton(struct gm_context *ctx,
         float avg_bone_rot = bone_rot;
         int n_rots = 1;
         for (int i = 0; i < ctx->n_tracking - 1; ++i) {
-            if (!prev[i]->skeleton.joints[bone.head].name ||
-                !prev[i]->skeleton.joints[bone.tail].name ||
-                !prev[i+1]->skeleton.joints[bone.head].name ||
-                !prev[i+1]->skeleton.joints[bone.tail].name) {
+            if (!prev[i]->skeleton.joints[bone.head].valid ||
+                !prev[i]->skeleton.joints[bone.tail].valid ||
+                !prev[i+1]->skeleton.joints[bone.head].valid ||
+                !prev[i+1]->skeleton.joints[bone.tail].valid) {
               bone_rots[i] = 180.f;
               continue;
             }
@@ -1782,7 +1782,8 @@ sanitise_skeleton(struct gm_context *ctx,
                       "Bone (%s->%s) angle diff is NaN "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f) v "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f)",
-                      joint_name(bone.head), joint_name(bone.tail),
+                      ctx->joint_names[bone.head],
+                      ctx->joint_names[bone.tail],
                       prev[i]->skeleton.joints[bone.head].x,
                       prev[i]->skeleton.joints[bone.head].y,
                       prev[i]->skeleton.joints[bone.head].z,
@@ -1801,7 +1802,9 @@ sanitise_skeleton(struct gm_context *ctx,
         avg_bone_rot /= n_rots;
 
         gm_debug(ctx->log, "Bone (%s->%s) average rot-mag: %.2f",
-                 joint_name(bone.head), joint_name(bone.tail), avg_bone_rot);
+                 ctx->joint_names[bone.head],
+                 ctx->joint_names[bone.tail],
+                 avg_bone_rot);
 
         float bone_rot_factor = avg_bone_rot *
             ctx->bone_rotation_outlier_factor;
@@ -1813,7 +1816,8 @@ sanitise_skeleton(struct gm_context *ctx,
 
                 gm_debug(ctx->log, "Bone (%s->%s) average rot-mag: %.2f, "
                          "correction: %.2f -> %.2f",
-                         joint_name(bone.head), joint_name(bone.tail),
+                         ctx->joint_names[bone.head],
+                         ctx->joint_names[bone.tail],
                          avg_bone_rot, bone_rot, bone_rots[i]);
 
                 const struct gm_bone *abs_prev_bone =
@@ -3805,12 +3809,13 @@ gm_context_track_skeleton(struct gm_context *ctx,
     std::vector<float*> &depth_images = state.depth_images;
     state.weights = (float*)
         xmalloc(width * height * ctx->n_joints * sizeof(float));
-    ctx->label_probs_backbuffer.resize(width * height * ctx->n_labels);
     state.best_person = 0;
     state.confidence = 0.f;
+
     for (int i = 0; i < (int)depth_images.size(); i++) {
         state.depth_image = depth_images[i];
 
+        ctx->label_probs_backbuffer.resize(width * height * ctx->n_labels);
         run_stage(tracking,
                   TRACKING_STAGE_LABEL_INFERENCE,
                   stage_label_inference_cb,
@@ -4714,6 +4719,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     tracking->pool = pool;
     tracking->ctx = ctx;
 
+    tracking->joints = NULL;
+
     tracking->skeleton.joints.resize(ctx->n_joints);
     tracking->skeleton.bones.clear();
 
@@ -5038,8 +5045,13 @@ gm_context_destroy(struct gm_context *ctx)
     if (ctx->joint_params)
         jip_free(ctx->joint_params);
 
-    if (ctx->joint_map)
+    if (ctx->joint_map) {
         json_value_free(ctx->joint_map);
+        ctx->joint_map = NULL;
+        ctx->joint_blender_names.resize(0);
+        ctx->joint_names.resize(0);
+        ctx->joint_semantics.resize(0);
+    }
 
     if (ctx->joint_stats) {
         for (int i = 0; i < ctx->n_joints; i++) {
@@ -5220,13 +5232,69 @@ gm_context_new(struct gm_logger *logger, char **err)
             return NULL;
         }
 
-        ctx->n_joints = json_array_get_count(json_array(ctx->joint_map));
-
     } else {
         gm_throw(logger, err, "Failed to open joint-map.json: %s", open_err);
         free(open_err);
         gm_context_destroy(ctx);
         return NULL;
+    }
+
+    int n_joints = json_array_get_count(json_array(ctx->joint_map));
+    if (n_joints == 0) {
+        gm_throw(logger, err, "Joint map contains no joints");
+        gm_context_destroy(ctx);
+        return NULL;
+    }
+
+    ctx->n_joints = n_joints;
+    ctx->joint_blender_names.resize(n_joints);
+    ctx->joint_names.resize(n_joints);
+    ctx->joint_semantics.resize(n_joints);
+    for (int i = 0; i < n_joints; i++) {
+        const char *blender_name = json_object_get_string(
+            json_array_get_object(json_array(ctx->joint_map), i), "joint");
+        ctx->joint_blender_names[i] = blender_name;
+        ctx->joint_names[i] = "Unknown";
+        ctx->joint_semantics[i] = GM_JOINT_UNKNOWN;
+
+        /* FIXME: these mappings should probably come from the joint map
+         * directly
+         */
+        struct {
+            const char *blender_name;
+            const char *name;
+            enum gm_joint_semantic semantic;
+        } blender_name_to_info_map[] = {
+            { "head.tail", "Head", GM_JOINT_HEAD },
+            { "neck_01.head", "Neck", GM_JOINT_NECK },
+            { "upperarm_l.head", "Left Shoulder", GM_JOINT_LEFT_SHOULDER },
+            { "upperarm_r.head", "Right Shoulder", GM_JOINT_RIGHT_SHOULDER },
+            { "lowerarm_l.head", "Left Elbow", GM_JOINT_LEFT_ELBOW },
+            { "lowerarm_l.tail", "Left Wrist", GM_JOINT_LEFT_WRIST },
+            { "lowerarm_r.head", "Right Elbow", GM_JOINT_RIGHT_ELBOW },
+            { "lowerarm_r.tail", "Right Wrist", GM_JOINT_RIGHT_WRIST },
+            { "thigh_l.head", "Left Hip", GM_JOINT_LEFT_HIP },
+            { "thigh_l.tail", "Left Knee", GM_JOINT_LEFT_KNEE },
+            { "thigh_r.head", "Right Hip", GM_JOINT_RIGHT_HIP },
+            { "thigh_r.tail", "Right Knee", GM_JOINT_RIGHT_KNEE },
+            { "foot_l.head", "Left Ankle", GM_JOINT_LEFT_ANKLE },
+            { "foot_r.head", "Right Ankle", GM_JOINT_RIGHT_ANKLE },
+            { NULL, "Unknown", GM_JOINT_UNKNOWN }, // NULL sentinel
+        };
+
+        for (int j = 0; blender_name_to_info_map[j].name; j++) {
+            if (strcmp(blender_name, blender_name_to_info_map[j].blender_name) == 0) {
+                ctx->joint_names[i] = blender_name_to_info_map[j].name;
+                ctx->joint_semantics[i] = blender_name_to_info_map[j].semantic;
+                break;
+            }
+        }
+
+        /* Maybe allow this later for some kind of backwards compatibility
+         * but for now it most likely implies a mistake has been made...
+         */
+        gm_assert(ctx->log, ctx->joint_semantics[i] != GM_JOINT_UNKNOWN,
+                  "Unknown joint semantic");
     }
 
     ctx->joint_params = NULL;
@@ -6365,6 +6433,32 @@ gm_context_get_average_stage_duration(struct gm_context *ctx,
     return 0; // FIXME
 }
 
+int
+gm_context_get_n_joints(struct gm_context *ctx)
+{
+    gm_assert(ctx->log, ctx->joint_names.size() != 0, "No joint map");
+
+    return ctx->joint_names.size();
+}
+
+const char *
+gm_context_get_joint_name(struct gm_context *ctx, int joint_id)
+{
+    gm_assert(ctx->log, joint_id >= 0 && joint_id < ctx->joint_names.size(),
+              "Invalid joint index");
+
+    return ctx->joint_names[joint_id];
+}
+
+const enum gm_joint_semantic
+gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id)
+{
+    gm_assert(ctx->log, joint_id >= 0 && joint_id < ctx->joint_names.size(),
+              "Invalid joint index");
+
+    return ctx->joint_semantics[joint_id];
+}
+
 const gm_intrinsics *
 gm_tracking_get_video_camera_intrinsics(struct gm_tracking *_tracking)
 {
@@ -6792,8 +6886,11 @@ gm_tracking_was_successful(struct gm_tracking *_tracking)
 struct gm_skeleton *
 gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints)
 {
-    struct gm_skeleton *skeleton = new struct gm_skeleton(ctx->n_joints);
+    struct gm_skeleton *skeleton = new gm_skeleton();
 
+    skeleton->ctx = ctx;
+
+    skeleton->joints.resize(ctx->n_joints);
     for (int j = 0; j < ctx->n_joints; ++j) {
         skeleton->joints[j] = joints[j];
     }
@@ -6841,8 +6938,7 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
     struct gm_joint joints[ctx->n_joints];
     memset(joints, 0, ctx->n_joints * sizeof(struct gm_joint));
     for (int j = 0; j < ctx->n_joints; ++j) {
-        joints[j].name = joint_name(j);
-        char *bone_name = strdup(joint_name(j));
+        char *bone_name = strdup(ctx->joint_names[j]);
         char *bone_part = strchr(bone_name, (int)'.');
         if (bone_part) {
             bone_part[0] = '\0';
@@ -6862,6 +6958,7 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
                             json_array_get_number(joint_array, 1);
                         joints[j].z = (float)
                             json_array_get_number(joint_array, 2);
+                        joints[j].valid = true;
                         found = true;
                         break;
                     }
@@ -6915,7 +7012,11 @@ gm_skeleton_resize(struct gm_context *ctx,
         return NULL;
     }
 
-    struct gm_skeleton *resized = new struct gm_skeleton(skeleton);
+    struct gm_skeleton *resized = new gm_skeleton();
+
+    resized->ctx = ctx;
+    resized->joints = ref_skeleton->joints;
+    resized->bones = ref_skeleton->bones;
 
     // Resize the bones then recalculate the joint positions based on the bones
     std::queue<size_t> leftover_bones;
@@ -6970,21 +7071,22 @@ bool
 gm_skeleton_save(const struct gm_skeleton *skeleton,
                  const char *filename)
 {
+    struct gm_context *ctx = skeleton->ctx;
     JSON_Value *root = json_value_init_object();
     JSON_Value *bones = json_value_init_array();
     json_object_set_value(json_object(root), "bones", bones);
 
     int n_joints = gm_skeleton_get_n_joints(skeleton);
-    for (int i = 0; i < n_joints ; ++i) {
+    for (int i = 0; i < n_joints ; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
 
         // Don't save a skeleton if a joint wasn't able to be inferred
-        if (!joint || joint->name == NULL) {
+        if (!joint) {
             json_value_free(root);
             return false;
         }
 
-        char *bone_name = strdup(joint->name);
+        char *bone_name = strdup(ctx->joint_blender_names[i]);
         char *bone_part = strchr(bone_name, (int)'.');
         if (bone_part) {
             bone_part[0] = '\0';
@@ -7053,7 +7155,13 @@ gm_skeleton_get_bone(const struct gm_skeleton *skeleton, int bone)
 const struct gm_joint *
 gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint)
 {
-    return &skeleton->joints[joint];
+    /* For now a NULL name is what indicates that we failed to track
+     * this joint...
+     */
+    if (skeleton->joints[joint].valid)
+        return &skeleton->joints[joint];
+    else
+        return NULL;
 }
 
 float
