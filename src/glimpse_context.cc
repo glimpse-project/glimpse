@@ -6487,6 +6487,13 @@ gm_tracking_get_skeleton(struct gm_tracking *_tracking)
     return tracking->success ? &tracking->skeleton_corrected : NULL;
 }
 
+const struct gm_skeleton *
+gm_tracking_get_raw_skeleton(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->success ? &tracking->skeleton : NULL;
+}
+
 bool
 gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
                                  int *width_out, int *height_out, uint8_t **output)

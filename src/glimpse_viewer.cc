@@ -201,6 +201,7 @@ typedef struct _Data
     bool realtime_ar_mode;
 
     bool show_profiler;
+    bool show_joint_summary;
 
     /* In realtime mode, we use predicted joint positions so that the
      * presented skeleton keeps up with the video. This allows us to add a
@@ -1250,6 +1251,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     }
 
     ImGui::Checkbox("Show profiler", &data->show_profiler);
+    ImGui::Checkbox("Show joint summary", &data->show_joint_summary);
 
     int queue_len = data->ar_video_queue_len;
     ImGui::SliderInt("AR video queue len", &queue_len, 1, 30);
@@ -1466,6 +1468,95 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::End();
 
     return focused;
+}
+
+static void
+draw_joint_summary(Data *data)
+{
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0);
+
+    ImGui::Begin("Joint details");
+
+    float label_width = ImGui::GetContentRegionAvailWidth() * 0.275;
+    float col_width = (ImGui::GetContentRegionAvailWidth() -
+                       label_width) / 2.f;
+
+    ImGui::Columns(3);
+    ImGui::SetColumnWidth(0, label_width);
+    ImGui::SetColumnWidth(1, col_width);
+    ImGui::NextColumn();
+    ImGui::TextDisabled("Raw");
+    ImGui::NextColumn();
+    ImGui::TextDisabled("Corrected");
+    ImGui::NextColumn();
+
+    if (data->latest_tracking &&
+        gm_tracking_has_skeleton(data->latest_tracking))
+    {
+        const struct gm_skeleton *skel =
+            gm_tracking_get_raw_skeleton(data->latest_tracking);
+        const struct gm_skeleton *skel_ec =
+            gm_tracking_get_skeleton(data->latest_tracking);
+
+        for (int i = 0; i < gm_skeleton_get_n_joints(skel_ec); ++i) {
+            const struct gm_joint *joint =
+                gm_skeleton_get_joint(skel, i);
+            const struct gm_joint *joint_ec =
+                gm_skeleton_get_joint(skel_ec, i);
+
+            ImGui::Columns(3);
+            ImGui::SetColumnWidth(0, label_width);
+            ImGui::SetColumnWidth(1, col_width);
+
+            ImGui::TextDisabled("%s", gm_context_get_joint_name(data->ctx, i));
+            ImGui::NextColumn();
+
+            if (!joint || !joint_ec) {
+                ImGui::NextColumn();
+                ImGui::NextColumn();
+                continue;
+            }
+
+            bool corrected = (joint->x != joint_ec->x ||
+                              joint->y != joint_ec->y ||
+                              joint->z != joint_ec->z);
+
+            if (!corrected) {
+                ImGui::PushStyleColor(ImGuiCol_Text,
+                    ImGui::GetStyle().Colors[ImGuiCol_TextDisabled]);
+            }
+
+            float joint_coords[3];
+            joint_coords[0] = joint->x;
+            joint_coords[1] = joint->y;
+            joint_coords[2] = joint->z;
+            ImGui::PushItemWidth(-1);
+            ImGui::InputFloat3("", joint_coords, "%.2f",
+                               ImGuiInputTextFlags_ReadOnly);
+            ImGui::PopItemWidth();
+
+            ImGui::NextColumn();
+
+            if (corrected) {
+                joint_coords[0] = joint_ec->x;
+                joint_coords[1] = joint_ec->y;
+                joint_coords[2] = joint_ec->z;
+                ImGui::PushItemWidth(-1);
+                ImGui::InputFloat3("", joint_coords, "%.2f",
+                                   ImGuiInputTextFlags_ReadOnly);
+                ImGui::PopItemWidth();
+            } else {
+                ImGui::PopStyleColor();
+            }
+
+            ImGui::NextColumn();
+        }
+    }
+    ImGui::End();
+
+    ImGui::PopStyleVar(); // ImGuiStyleVar_FrameRounding
+    ImGui::PopStyleVar(); // ImGuiStyleVar_WindowPadding
 }
 
 static void
@@ -1771,13 +1862,18 @@ draw_ui(Data *data)
                       false); // enabled
     }
 
-    ImGui::PopStyleVar();
+    ImGui::PopStyleVar(); // ImGuiStyleVar_WindowRounding
 
     if (data->show_profiler) {
         // Draw profiler window always-on-top
         ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
         ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
         ProfileDrawUI();
+    }
+
+    if (data->show_joint_summary) {
+        ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
+        draw_joint_summary(data);
     }
 
     ImGui::Render();

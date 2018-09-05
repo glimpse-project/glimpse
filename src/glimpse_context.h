@@ -569,6 +569,9 @@ gm_tracking_has_skeleton(struct gm_tracking *tracking);
 const struct gm_skeleton *
 gm_tracking_get_skeleton(struct gm_tracking *tracking);
 
+const struct gm_skeleton *
+gm_tracking_get_raw_skeleton(struct gm_tracking *tracking);
+
 uint64_t
 gm_tracking_get_timestamp(struct gm_tracking *tracking);
 
