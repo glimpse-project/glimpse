@@ -2626,8 +2626,6 @@ struct pipeline_scratch_state
 
     int best_person;
     float confidence;
-
-    pipeline_scratch_state() {}
 };
 
 static void
@@ -3613,7 +3611,7 @@ gm_context_track_skeleton(struct gm_context *ctx,
     uint64_t start, end, duration;
     enum tracking_stage debug_stage_id =
         (enum tracking_stage)ctx->debug_pipeline_stage;
-    struct pipeline_scratch_state state;
+    struct pipeline_scratch_state state = {};
 
     for (int i = 0; i < tracking->stage_data.size(); i++) {
         tracking->stage_data[i].duration_ns = 0;
@@ -3825,6 +3823,8 @@ gm_context_track_skeleton(struct gm_context *ctx,
                   NULL,
                   &state);
 
+        gm_assert(ctx->log, state.joints_candidate == NULL,
+                  "Spurious non-NULL candidate joints before joint inference");
         run_stage(tracking,
                   TRACKING_STAGE_JOINT_INFERENCE,
                   stage_joint_inference_cb,
