@@ -4722,6 +4722,7 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     tracking->joints = NULL;
 
+    tracking->skeleton.ctx = ctx;
     tracking->skeleton.joints.resize(ctx->n_joints);
     tracking->skeleton.bones.clear();
 
