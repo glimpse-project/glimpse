@@ -1663,7 +1663,7 @@ gm_unity_skeleton_get_n_joints(intptr_t plugin_handle,
 extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
                                      intptr_t skeleton_handle,
-                                     int joint)
+                                     int joint_no)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -1674,8 +1674,42 @@ gm_unity_skeleton_get_joint_position(intptr_t plugin_handle,
         gm_error(data->log, "NULL skeleton handle");
         return NULL;
     }
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
+    if (joint_no < 0 || joint_no >= n_joints) {
+        gm_error(data->log, "Out of bounds joint index %d (n_joints = %d)",
+                 joint_no, n_joints);
+        return NULL;
+    }
 
-    return (const float *)&((gm_skeleton_get_joint(skeleton, joint)->x));
+    const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, joint_no);
+    if (joint)
+        return (const float *)&(joint->x);
+    else
+        return NULL;
+}
+
+extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_skeleton_is_joint_valid(intptr_t plugin_handle,
+                                 intptr_t skeleton_handle,
+                                 int joint_no)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
+    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    if (!skeleton) {
+        gm_error(data->log, "NULL skeleton handle");
+        return false;
+    }
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
+    if (joint_no < 0 || joint_no >= n_joints) {
+        gm_error(data->log, "Out of bounds joint index %d (n_joints = %d)",
+                 joint_no, n_joints);
+        return false;
+    }
+
+    return !!gm_skeleton_get_joint(skeleton, joint_no);
 }
 
 /* XXX: deprecated, use gm_unity_context_get_joint_name() */
