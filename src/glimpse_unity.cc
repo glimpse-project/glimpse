@@ -1384,33 +1384,49 @@ gm_unity_init(char *config_json, bool force_null_device)
     struct gm_device_config config = {};
 
     int device_choice = json_object_get_number(data->config, "device");
+
+#if TARGET_OS_IOS == 1
+    gm_info(data->log, "Checking 'iosDevice' config");
+    if (json_object_has_value(data->config, "iosDevice")) {
+        device_choice = json_object_get_number(data->config, "iosDevice");
+    }
+#endif
+
     switch (device_choice) {
     case 0: // Auto
 #ifdef USE_TANGO
+        gm_info(data->log, "Requested device type = Auto (Tango)");
         config.type = GM_DEVICE_TANGO;
 #elif TARGET_OS_IOS == 1
+        gm_info(data->log, "Requested device type = Auto (Avf)");
         config.type = GM_DEVICE_AVF;
 #else
         if (have_recording) {
+            gm_info(data->log, "Requested device type = Auto (Recording)");
             config.type = GM_DEVICE_RECORDING;
             config.recording.path = full_recording_path;
         } else {
 #ifdef USE_FREENECT
+            gm_info(data->log, "Requested device type = Auto (Kinect)");
             config.type = GM_DEVICE_KINECT;
 #else
+            gm_info(data->log, "Requested device type = Auto (NULL)");
             config.type = GM_DEVICE_NULL;
 #endif
         }
 #endif
         break;
     case 1:
+        gm_info(data->log, "Requested device type = Kinect");
         config.type = GM_DEVICE_KINECT;
         break;
     case 2:
+        gm_info(data->log, "Requested device type = Recording");
         config.type = GM_DEVICE_RECORDING;
         config.recording.path = full_recording_path;
         break;
     case 3:
+        gm_info(data->log, "Requested device type = NULL");
         config.type = GM_DEVICE_NULL;
         break;
     }
