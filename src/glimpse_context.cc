@@ -6945,7 +6945,7 @@ gm_skeleton_new_from_json(struct gm_context *ctx,
     struct gm_joint joints[ctx->n_joints];
     memset(joints, 0, ctx->n_joints * sizeof(struct gm_joint));
     for (int j = 0; j < ctx->n_joints; ++j) {
-        char *bone_name = strdup(ctx->joint_names[j]);
+        char *bone_name = strdup(ctx->joint_blender_names[j]);
         char *bone_part = strchr(bone_name, (int)'.');
         if (bone_part) {
             bone_part[0] = '\0';
