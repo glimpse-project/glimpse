@@ -801,7 +801,8 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
     if (ref_skeleton && data->target_resize) {
         resized_skeleton = gm_skeleton_resize(data->ctx,
                                               skeleton, ref_skeleton, 0);
-        skeleton = (const struct gm_skeleton *)resized_skeleton;
+        if (resized_skeleton)
+            skeleton = (const struct gm_skeleton *)resized_skeleton;
     }
 
     data->target_skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
