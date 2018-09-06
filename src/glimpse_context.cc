@@ -7024,8 +7024,8 @@ gm_skeleton_resize(struct gm_context *ctx,
     struct gm_skeleton *resized = new gm_skeleton();
 
     resized->ctx = ctx;
-    resized->joints = ref_skeleton->joints;
-    resized->bones = ref_skeleton->bones;
+    resized->joints = skeleton->joints;
+    resized->bones = skeleton->bones;
 
     // Resize the bones then recalculate the joint positions based on the bones
     std::queue<size_t> leftover_bones;
