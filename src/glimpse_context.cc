@@ -1543,6 +1543,7 @@ refine_skeleton(struct gm_tracking_impl *tracking)
             candidate_skeleton.joints.resize(ctx->n_joints);
 
             Joint *joint = (Joint *)l->data;
+            candidate_skeleton.joints[j].valid = true;
             candidate_skeleton.joints[j].x = joint->x;
             candidate_skeleton.joints[j].y = joint->y;
             candidate_skeleton.joints[j].z = joint->z;
