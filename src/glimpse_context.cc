@@ -7017,7 +7017,11 @@ gm_skeleton_resize(struct gm_context *ctx,
 {
     if (skeleton->bones.size() != ref_skeleton->bones.size()) {
         gm_error(ctx->log,
-                 "Mismatching skeletons passed to gm_skeleton_resize()");
+                 "Mismatching skeletons passed to gm_skeleton_resize(): skel n_joints=%d, n_bones=%d, ref n_joints=%d, n_bones=%d",
+                 (int)skeleton->joints.size(),
+                 (int)skeleton->bones.size(),
+                 (int)ref_skeleton->joints.size(),
+                 (int)ref_skeleton->bones.size());
         return NULL;
     }
 
