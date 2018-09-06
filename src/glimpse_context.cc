@@ -1481,36 +1481,33 @@ calc_skeleton_distance(struct gm_context *ctx,
 }
 
 static void
-build_skeleton(struct gm_context *ctx,
-               InferredJoints *result,
-               struct gm_skeleton &skeleton,
-               int joint_no = 0,
-               int last_joint_no = -1)
+copy_inferred_joints_to_skel_except(struct gm_skeleton &dest,
+                                    InferredJoints *inferred_src,
+                                    int except_joint_no)
 {
-    // Add the highest confidence joints to the skeleton.
-    if (joint_no != last_joint_no) {
-        if (result->joints[joint_no]) {
-            Joint *tail = (Joint *)result->joints[joint_no]->data;
+    struct gm_context *ctx = dest.ctx;
 
-            skeleton.joints[joint_no].valid = true;
-            skeleton.joints[joint_no].x = tail->x;
-            skeleton.joints[joint_no].y = tail->y;
-            skeleton.joints[joint_no].z = tail->z;
-        } else {
-            skeleton.joints[joint_no].valid = false;
-            skeleton.joints[joint_no].x = 0;
-            skeleton.joints[joint_no].y = 0;
-            skeleton.joints[joint_no].z = 0;
-        }
-    }
-
-    // Follow the connections for this joint to build up a whole skeleton
-    for (int i = 0; i < ctx->joint_stats[joint_no].n_connections; ++i) {
-        if (ctx->joint_stats[joint_no].connections[i] == last_joint_no) {
+    for (int i = 0; i < ctx->n_joints; i++) {
+        if (i == except_joint_no)
             continue;
+
+        /* Inference gives us a list of candidate clusters for each joint and
+         * we're only considering the first candidate (with the highest
+         * confidence)
+         */
+        LList *inferred_joint_list = inferred_src->joints[i];
+        if (inferred_joint_list) {
+            Joint *inferred = (Joint *)inferred_joint_list->data;
+            dest.joints[i].valid = true;
+            dest.joints[i].x = inferred->x;
+            dest.joints[i].y = inferred->y;
+            dest.joints[i].z = inferred->z;
+        } else {
+            dest.joints[i].valid = false;
+            dest.joints[i].x = 0;
+            dest.joints[i].y = 0;
+            dest.joints[i].z = 0;
         }
-        build_skeleton(ctx, result, skeleton,
-                       ctx->joint_stats[joint_no].connections[i], joint_no);
     }
 }
 
@@ -1550,7 +1547,9 @@ refine_skeleton(struct gm_tracking_impl *tracking)
             candidate_skeleton.joints[j].y = joint->y;
             candidate_skeleton.joints[j].z = joint->z;
 
-            build_skeleton(ctx, tracking->joints, candidate_skeleton, j, j);
+            copy_inferred_joints_to_skel_except(candidate_skeleton, // dest
+                                                tracking->joints, // src
+                                                j); // Don't overwrite this joint
             build_bones(ctx, candidate_skeleton);
 
             int cand_bone_mismatch =
@@ -3456,7 +3455,9 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    build_skeleton(ctx, tracking->joints, tracking->skeleton);
+    copy_inferred_joints_to_skel_except(tracking->skeleton,
+                                        tracking->joints,
+                                        -1); // no joint to skip copying
     build_bones(ctx, tracking->skeleton);
 
     tracking->skeleton_corrected = tracking->skeleton;
