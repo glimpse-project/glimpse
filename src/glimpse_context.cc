@@ -6497,6 +6497,37 @@ gm_tracking_get_raw_skeleton(struct gm_tracking *_tracking)
     return tracking->success ? &tracking->skeleton : NULL;
 }
 
+static void
+label_probs_to_rgb(struct gm_context *ctx,
+                   float *label_probs,
+                   int n_labels,
+                   uint8_t *rgb_out)
+{
+    if (ctx->debug_label == -1) {
+        uint8_t label = 0;
+        float pr = -1.0;
+
+        for (int l = 0; l < n_labels; l++) {
+            if (label_probs[l] > pr) {
+                label = l;
+                pr = label_probs[l];
+            }
+        }
+
+        rgb_out[0] = default_palette[label].red;
+        rgb_out[1] = default_palette[label].green;
+        rgb_out[2] = default_palette[label].blue;
+    } else {
+        struct color col = stops_color_from_val(ctx->heat_color_stops,
+                                                ctx->n_heat_color_stops,
+                                                1,
+                                                label_probs[ctx->debug_label]);
+        rgb_out[0] = col.r;
+        rgb_out[1] = col.g;
+        rgb_out[2] = col.b;
+    }
+}
+
 bool
 gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
                                  int *width_out, int *height_out, uint8_t **output)
@@ -6524,37 +6555,14 @@ gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
               ctx->debug_label);
 
     foreach_xy_off(width, height) {
-        uint8_t label = 0;
-        float pr = -1.0;
-        float *pr_table = &tracking->label_probs[off * n_labels];
-        for (uint8_t l = 0; l < n_labels; l++) {
-            if (pr_table[l] > pr) {
-                label = l;
-                pr = pr_table[l];
-            }
-        }
+        float *label_probs = &tracking->label_probs[off * n_labels];
 
-        uint8_t r;
-        uint8_t g;
-        uint8_t b;
+        uint8_t rgb[3];
+        label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
 
-        if (ctx->debug_label == -1) {
-            r = default_palette[label].red;
-            g = default_palette[label].green;
-            b = default_palette[label].blue;
-        } else {
-            struct color col = stops_color_from_val(ctx->heat_color_stops,
-                                                    ctx->n_heat_color_stops,
-                                                    1,
-                                                    pr_table[ctx->debug_label]);
-            r = col.r;
-            g = col.g;
-            b = col.b;
-        }
-
-        (*output)[off * 3] = r;
-        (*output)[off * 3 + 1] = g;
-        (*output)[off * 3 + 2] = b;
+        (*output)[off * 3] = rgb[0];
+        (*output)[off * 3 + 1] = rgb[1];
+        (*output)[off * 3 + 2] = rgb[2];
     }
 
     return true;
