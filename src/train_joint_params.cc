@@ -830,7 +830,10 @@ main(int argc, char** argv)
     xfree(best_offsets);
     json_value_free(ctx.joint_map);
     xfree(ctx.joints);
-    rdt_forest_destroy(ctx.forest, ctx.n_trees);
+
+    for (int i = 0; i < ctx.n_trees; i++) {
+        rdt_tree_destroy(ctx.forest[i]);
+    }
 
     clock_gettime(CLOCK_MONOTONIC, &now);
     since_begin = get_time_for_display(&begin, &now);
