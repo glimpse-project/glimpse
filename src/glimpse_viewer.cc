@@ -315,6 +315,7 @@ typedef struct _Data
     GLint cloud_attr_pos;
     GLint cloud_attr_col;
     int n_cloud_points;
+    struct gm_intrinsics cloud_intrinsics;
 
     GLuint lines_bo;
     GLint lines_attr_pos;
@@ -1640,10 +1641,6 @@ draw_tracking_scene_to_texture(Data *data,
                                struct gm_tracking *tracking,
                                ImVec2 win_size, ImVec2 uiScale)
 {
-    const struct gm_intrinsics *depth_intrinsics =
-        gm_tracking_get_depth_camera_intrinsics(tracking);
-    int depth_width = depth_intrinsics->width;
-
     GLint saved_fbo = 0;
     glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
 
@@ -1681,8 +1678,13 @@ draw_tracking_scene_to_texture(Data *data,
         data->cloud_fbo_valid = true;
     }
 
-    if (data->cloud_bo) {
-        glm::mat4 proj = intrinsics_to_project_matrix(depth_intrinsics, 0.01f, 10);
+    if (data->cloud_bo &&
+        data->cloud_intrinsics.width &&
+        data->cloud_intrinsics.height)
+    {
+        struct gm_intrinsics *debug_intrinsics =
+            &data->cloud_intrinsics;
+        glm::mat4 proj = intrinsics_to_project_matrix(debug_intrinsics, 0.01f, 10);
         glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
         mvp = glm::translate(mvp, data->focal_point);
         mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
@@ -1695,7 +1697,9 @@ draw_tracking_scene_to_texture(Data *data,
 
         glUseProgram(data->cloud_program);
         glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-        float pt_size = ceilf((win_size.x * uiScale.x) / depth_width);
+
+        float pt_size = ceilf((win_size.x * uiScale.x) /
+                              debug_intrinsics->width);
         glUniform1f(data->cloud_uniform_pt_size, pt_size);
 
         glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
@@ -2299,8 +2303,11 @@ upload_tracking_textures(Data *data)
     }
 
     int n_points = 0;
+    struct gm_intrinsics debug_cloud_intrinsics = {};
     const struct gm_point_rgba *debug_points =
-        gm_tracking_get_debug_point_cloud(data->latest_tracking, &n_points);
+        gm_tracking_get_debug_point_cloud(data->latest_tracking,
+                                          &n_points,
+                                          &debug_cloud_intrinsics);
     if (n_points) {
         if (!data->cloud_bo)
             glGenBuffers(1, &data->cloud_bo);
@@ -2310,6 +2317,7 @@ upload_tracking_textures(Data *data)
                      debug_points, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         data->n_cloud_points = n_points;
+        data->cloud_intrinsics = debug_cloud_intrinsics;
     }
 
     int n_lines = 0;

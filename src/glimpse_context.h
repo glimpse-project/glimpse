@@ -530,8 +530,9 @@ gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
                                     int *height);
 
 const struct gm_point_rgba *
-gm_tracking_get_debug_point_cloud(struct gm_tracking *tracking,
-                                  int *n_points);
+gm_tracking_get_debug_point_cloud(struct gm_tracking *_tracking,
+                                  int *n_points,
+                                  struct gm_intrinsics *debug_cloud_intrinsics);
 
 const struct gm_point_rgba *
 gm_tracking_get_debug_lines(struct gm_tracking *tracking,
