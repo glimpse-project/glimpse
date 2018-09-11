@@ -95,6 +95,13 @@ gm_data_load_simple(struct gm_logger *log,
                     float** out_joints,
                     char** err);
 
+bool
+gm_data_parse_label_map(struct gm_logger* log,
+                        JSON_Value* label_map_js,
+                        int n_expected_labels,
+                        uint8_t* map,
+                        char** err);
+
 JSON_Value*
 gm_data_load_label_map_from_json(struct gm_logger* log,
                                  const char* filename,

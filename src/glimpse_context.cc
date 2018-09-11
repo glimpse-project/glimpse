@@ -86,6 +86,7 @@
 #include "glimpse_log.h"
 #include "glimpse_mem_pool.h"
 #include "glimpse_assets.h"
+#include "glimpse_data.h"
 #include "glimpse_context.h"
 
 #undef GM_LOG_CONTEXT
@@ -576,6 +577,7 @@ struct gm_context
 
     int n_labels;
 
+    JSON_Value *label_map;
     JSON_Value *joint_map;
     std::vector<const char *> joint_blender_names; // (pointers into joint_map data)
     std::vector<const char *> joint_names;
@@ -703,44 +705,6 @@ struct pipeline_scratch_state
 
     int best_person;
     float confidence;
-};
-
-
-static const char *label_names[] = {
-    "head, left-side",
-    "head, right-side",
-    "head, top-left",
-    "head, top-right",
-    "neck",
-    "clavicle, left",
-    "clavicle, right",
-    "shoulder, left",
-    "upper-arm, left",
-    "shoulder, right",
-    "upper arm, right",
-    "elbow, left",
-    "forearm, left",
-    "elbow, right",
-    "forearm, right",
-    "wrist, left",
-    "hand, left",
-    "wrist, right",
-    "hand, right",
-    "hip, left",
-    "thigh, left",
-    "hip, right",
-    "thigh, right",
-    "knee, left",
-    "shin, left",
-    "knee, right",
-    "shin, right",
-    "ankle, left",
-    "toes, left",
-    "ankle, right",
-    "toes, right",
-    "waist, left",
-    "waist, right",
-    "background",
 };
 
 static png_color default_palette[] = {
@@ -5310,6 +5274,11 @@ gm_context_destroy(struct gm_context *ctx)
         xfree(ctx->joint_stats);
     }
 
+    if (ctx->label_map) {
+        json_value_free(ctx->label_map);
+        ctx->label_map = NULL;
+    }
+
     delete ctx;
 }
 
@@ -5452,8 +5421,53 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_context_destroy(ctx);
     }
 
-    ctx->joint_map = NULL;
+    /* We *optionally* open a label map so that we can describe an _ENUM
+     * property with appropriate label names, but if the file is missing
+     * the enum will simply create names like "Label 0", "Label 1"...
+     */
     char *open_err = NULL;
+    struct gm_asset *label_map_asset = gm_asset_open(logger,
+                                                     "label-map.json",
+                                                     GM_ASSET_MODE_BUFFER,
+                                                     &open_err);
+    if (label_map_asset) {
+        const void *buf = gm_asset_get_buffer(label_map_asset);
+        unsigned len = gm_asset_get_length(label_map_asset);
+
+        /* unfortunately parson doesn't support parsing from a buffer with
+         * a given length and expects a NUL terminated string...
+         */
+        char *js_string = (char *)xmalloc(len + 1);
+
+        memcpy(js_string, buf, len);
+        js_string[len] = '\0';
+
+        ctx->label_map = json_parse_string(js_string);
+
+        uint8_t ignored_mapping[256]; // we only care about the names
+        if (!gm_data_parse_label_map(logger, ctx->label_map,
+                                     ctx->n_labels, ignored_mapping, &open_err))
+        {
+            xfree(open_err);
+            open_err = NULL;
+            json_value_free(ctx->label_map);
+            ctx->label_map = NULL;
+        }
+
+        xfree(js_string);
+        gm_asset_close(label_map_asset);
+    } else {
+        xfree(open_err);
+        open_err = NULL;
+    }
+
+    if (!ctx->label_map) {
+        /* It's not considered an error to be missing this */
+        gm_info(logger, "No label map asset opened, so can't refer to names of labels in properties/debugging");
+    }
+
+
+    ctx->joint_map = NULL;
     struct gm_asset *joint_map_asset = gm_asset_open(logger,
                                                      "joint-map.json",
                                                      GM_ASSET_MODE_BUFFER,
@@ -5780,17 +5794,30 @@ gm_context_new(struct gm_logger *logger, char **err)
     enumerant.val = -1;
     ctx->label_enumerants.push_back(enumerant);
 
-    gm_assert(ctx->log,
-              ctx->n_labels == ARRAY_LEN(label_names),
-              "Mismatched label name count");
+    if (ctx->label_map) {
+        JSON_Array* label_map_array = json_array(ctx->label_map);
 
-    for (int i = 0; i < ctx->n_labels; i++) {
-        enumerant = gm_ui_enumerant();
-        enumerant.name = label_names[i];
-        enumerant.desc = label_names[i];
-        enumerant.val = i;
-        ctx->label_enumerants.push_back(enumerant);
+        for (int i = 0; i < ctx->n_labels; i++) {
+            JSON_Object *mapping = json_array_get_object(label_map_array, i);
+
+            enumerant = gm_ui_enumerant();
+            enumerant.name = strdup(json_object_get_string(mapping, "name"));
+            enumerant.desc = strdup(enumerant.name);
+            enumerant.val = i;
+            ctx->label_enumerants.push_back(enumerant);
+        }
+    } else {
+        for (int i = 0; i < ctx->n_labels; i++) {
+            char tmp_name[256];
+            xsnprintf(tmp_name, sizeof(tmp_name), "Label %d", i);
+            enumerant = gm_ui_enumerant();
+            enumerant.name = strdup(tmp_name);
+            enumerant.desc = strdup(enumerant.name);
+            enumerant.val = i;
+            ctx->label_enumerants.push_back(enumerant);
+        }
     }
+
     prop.enum_state.n_enumerants = ctx->label_enumerants.size();
     prop.enum_state.enumerants = ctx->label_enumerants.data();
     ctx->properties.push_back(prop);

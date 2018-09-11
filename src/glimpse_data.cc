@@ -487,6 +487,51 @@ error:
     return NULL;
 }
 
+bool
+gm_data_parse_label_map(struct gm_logger* log,
+                        JSON_Value* label_map_js,
+                        int n_expected_labels,
+                        uint8_t* map,
+                        char** err)
+{
+    /* Define invalid mappings so we can later assert that the map
+     * covers all possible input values
+     */
+    memset(map, 255, 256);
+
+    JSON_Array* label_map_array = json_array(label_map_js);
+    int n_entries = (int)json_array_get_count(label_map_array);
+    if (n_expected_labels > 0 &&
+        n_entries != n_expected_labels)
+    {
+        gm_throw(log, err, "Label map contains %d labels, but expected %d",
+                 n_entries, n_expected_labels);
+        return false;
+    }
+
+    for (int i = 0; i < n_entries; ++i) {
+        JSON_Object* mapping = json_array_get_object(label_map_array, i);
+        JSON_Array* inputs = json_object_get_array(mapping, "inputs");
+
+        for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
+            int input = json_array_get_number(inputs, j);
+            if (input < 0 || input > 255) {
+                gm_throw(log, err, "Out of range \"%s\" label mapping from %d\n",
+                         json_object_get_string(mapping, "name"), input);
+                return false;
+            }
+            if (map[input] != 255) {
+                gm_throw(log, err, "Input %d sampled by multiple labels\n",
+                         input);
+                return false;
+            }
+            map[input] = i;
+        }
+    }
+
+    return true;
+}
+
 JSON_Value*
 gm_data_load_label_map_from_json(struct gm_logger* log,
                                  const char* filename,
@@ -499,35 +544,14 @@ gm_data_load_label_map_from_json(struct gm_logger* log,
         return NULL;
     }
 
-    /* Define invalid mappings so we can later assert that the map
-     * covers all possible input values
-     */
-    memset(map, 255, 256);
-
-    JSON_Array* label_map_array = json_array(label_map);
-    int n_entries = (int)json_array_get_count(label_map_array);
-    for (int i = 0; i < n_entries; ++i) {
-        JSON_Object* mapping = json_array_get_object(label_map_array, i);
-        JSON_Array* inputs = json_object_get_array(mapping, "inputs");
-
-        for (int j = 0; j < (int)json_array_get_count(inputs); j++) {
-            int input = json_array_get_number(inputs, j);
-            if (input < 0 || input > 255) {
-                gm_throw(log, err, "Out of range \"%s\" label mapping from %d in %s\n",
-                         json_object_get_string(mapping, "name"), input, filename);
-                json_value_free(label_map);
-                return NULL;
-            }
-            if (map[input] != 255) {
-                gm_throw(log, err, "Input %d sampled by multiple labels in %s\n",
-                         input, filename);
-                json_value_free(label_map);
-                return NULL;
-            }
-            map[input] = i;
-        }
+    if (gm_data_parse_label_map(log, label_map,
+                                -1, // no implicit number of expected labels
+                                map, err))
+    {
+        return label_map;
+    } else {
+        json_value_free(label_map);
+        return NULL;
     }
-
-    return label_map;
 }
 
