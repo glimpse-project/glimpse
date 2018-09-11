@@ -124,7 +124,7 @@ print_usage(FILE* stream)
 "Usage: train_joint_params <data dir> \\\n"
 "                          <index name> \\\n"
 "                          <joint map> \\\n"
-"                          <out_file> \\\n"
+"                          <out_file.json> \\\n"
 "                          [OPTIONS] \\\n"
 "                          -- <tree file 1> [tree file 2] ...\n"
 "Given a trained decision tree, train parameters for joint position proposal.\n"
@@ -558,10 +558,21 @@ main(int argc, char** argv)
     }
 
     printf("Loading decision forest...\n");
-    ctx.forest = rdt_forest_load_from_files(ctx.log,
-                                            (const char**)tree_paths,
-                                            ctx.n_trees,
-                                            NULL);
+    RDTree *forest[ctx.n_trees];
+    JSON_Value *forest_js[ctx.n_trees];
+    for (int i = 0; i < ctx.n_trees; i++) {
+        char *tree_path = tree_paths[i];
+
+        printf("> Loading %s...\n", tree_path);
+        forest_js[i] = json_parse_file(tree_path);
+        gm_assert(ctx.log, forest_js[i] != NULL, "Failed to parse %s as JSON", tree_path);
+
+        forest[i] = rdt_tree_load_from_json(ctx.log,
+                                            forest_js[i],
+                                            false, // don't load incomplete trees
+                                            NULL); // abort on error
+    }
+    ctx.forest = forest;
 
     printf("Scanning training directories...\n");
     JSON_Value *meta =
