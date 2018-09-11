@@ -3492,9 +3492,9 @@ stage_project_clusters_cb(struct gm_tracking_impl *tracking,
 
     for (auto &person : persons) {
         float *depth_img = (float *)xmalloc(width * height * sizeof(float));
+        float bg_depth = ctx->decision_trees[0]->header.bg_depth;
         for (int i = 0; i < width * height; ++i) {
-            depth_img[i] = HUGE_DEPTH;
-#warning "should we set tree_header bg_depth here?"
+            depth_img[i] = bg_depth;
         }
 
         for (int idx : person.indices) {
