@@ -215,10 +215,6 @@ typedef struct _Data
     int video_rgb_width;
     int video_rgb_height;
 
-    /* The size of the candidate clusters visualisation texture */
-    int cclusters_rgb_width;
-    int cclusters_rgb_height;
-
     glm::vec3 focal_point;
     float camera_rot_yx[2];
     JSON_Value *joint_map;
@@ -356,8 +352,6 @@ static uint32_t joint_palette[] = {
 
 char *glimpse_recordings_path;
 char *glimpse_targets_path;
-
-static GLuint gl_cclusters_rgb_tex;
 
 static bool pause_profile;
 
@@ -2310,25 +2304,6 @@ upload_tracking_textures(Data *data)
                      0, GL_RGB, GL_UNSIGNED_BYTE, video_rgb);
         free(video_rgb);
     }
-
-    /* Update candidate clusters buffer */
-    uint8_t *cclusters_rgb = NULL;
-    gm_tracking_create_rgb_candidate_clusters(data->latest_tracking,
-                                              &data->cclusters_rgb_width,
-                                              &data->cclusters_rgb_height,
-                                              &cclusters_rgb);
-
-    if (cclusters_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->cclusters_rgb_width, data->cclusters_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, cclusters_rgb);
-        free(cclusters_rgb);
-    }
 }
 
 static void
@@ -2878,11 +2853,6 @@ init_viewer_opengl(Data *data)
             debug_image.height = 0;
         }
     }
-
-    glGenTextures(1, &gl_cclusters_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glGenTextures(1, &data->video_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, data->video_rgb_tex);
