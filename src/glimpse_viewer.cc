@@ -227,10 +227,6 @@ typedef struct _Data
     int cclusters_rgb_width;
     int cclusters_rgb_height;
 
-    /* The size of the labels visualisation texture */
-    int labels_rgb_width;
-    int labels_rgb_height;
-
     glm::vec3 focal_point;
     float camera_rot_yx[2];
     JSON_Value *joint_map;
@@ -369,7 +365,6 @@ static uint32_t joint_palette[] = {
 char *glimpse_recordings_path;
 char *glimpse_targets_path;
 
-static GLuint gl_labels_tex;
 static GLuint gl_depth_rgb_tex;
 static GLuint gl_classify_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
@@ -2388,31 +2383,6 @@ upload_tracking_textures(Data *data)
                      0, GL_RGB, GL_UNSIGNED_BYTE, cclusters_rgb);
         free(cclusters_rgb);
     }
-
-    /*
-     * Update inferred label map
-     */
-    uint8_t *labels_rgb = NULL;
-    gm_tracking_create_rgb_label_map(data->latest_tracking,
-                                     &data->labels_rgb_width,
-                                     &data->labels_rgb_height,
-                                     &labels_rgb);
-
-    if (labels_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_labels_tex);
-
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        /* NB: gles2 only allows npot textures with clamp to edge
-         * coordinate wrapping
-         */
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->labels_rgb_width, data->labels_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, labels_rgb);
-        free(labels_rgb);
-    }
 }
 
 static void
@@ -2976,11 +2946,6 @@ init_viewer_opengl(Data *data)
 
     glGenTextures(1, &gl_cclusters_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-    glGenTextures(1, &gl_labels_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_labels_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
