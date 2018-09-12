@@ -1680,63 +1680,6 @@ class LabelComparator: public pcl::Comparator<PointT>
     float depth_threshold_;
 };
 
-template<typename PointT, typename PointNT>
-class DepthComparator: public pcl::Comparator<PointT>
-{
-  public:
-    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
-    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
-        PointCloudConstPtr;
-
-    typedef typename pcl::PointCloud<PointNT> PointCloudN;
-    typedef typename PointCloudN::Ptr PointCloudNPtr;
-    typedef typename PointCloudN::ConstPtr PointCloudNConstPtr;
-
-    typedef boost::shared_ptr<DepthComparator<PointT, PointNT>> Ptr;
-    typedef boost::shared_ptr<const DepthComparator<PointT, PointNT>> ConstPtr;
-
-    using pcl::Comparator<PointT>::input_;
-
-    DepthComparator()
-      : normals_()
-      , depth_threshold_(0.03f) {
-    }
-
-    virtual
-    ~DepthComparator() {
-    }
-
-    inline void
-    setInputNormals(const PointCloudNConstPtr &normals) {
-        normals_ = normals;
-    }
-
-    inline PointCloudNConstPtr
-    getInputNormals () const {
-        return normals_;
-    }
-
-    inline void
-    setDepthThreshold(float depth_threshold) {
-        depth_threshold_ = depth_threshold;
-    }
-
-    inline float
-    getDepthThreshold() const {
-        return depth_threshold_;
-    }
-
-    virtual bool
-    compare (int idx1, int idx2) const {
-        return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
-            depth_threshold_;
-    }
-
-  protected:
-    PointCloudNConstPtr normals_;
-    float depth_threshold_;
-};
-
 /* TODO: combine the to_start and to_codebook matrices
  */
 static int
