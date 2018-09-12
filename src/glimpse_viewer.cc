@@ -215,10 +215,6 @@ typedef struct _Data
     int video_rgb_width;
     int video_rgb_height;
 
-    /* The size of the depth classification buffer visualisation texture */
-    int classify_rgb_width;
-    int classify_rgb_height;
-
     /* The size of the candidate clusters visualisation texture */
     int cclusters_rgb_width;
     int cclusters_rgb_height;
@@ -361,7 +357,6 @@ static uint32_t joint_palette[] = {
 char *glimpse_recordings_path;
 char *glimpse_targets_path;
 
-static GLuint gl_classify_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
 
 static bool pause_profile;
@@ -2316,25 +2311,6 @@ upload_tracking_textures(Data *data)
         free(video_rgb);
     }
 
-    /* Update depth classification buffer */
-    uint8_t *classify_rgb = NULL;
-    gm_tracking_create_rgb_depth_classification(data->latest_tracking,
-                                                &data->classify_rgb_width,
-                                                &data->classify_rgb_height,
-                                                &classify_rgb);
-
-    if (classify_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_classify_rgb_tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->classify_rgb_width, data->classify_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, classify_rgb);
-        free(classify_rgb);
-    }
-
     /* Update candidate clusters buffer */
     uint8_t *cclusters_rgb = NULL;
     gm_tracking_create_rgb_candidate_clusters(data->latest_tracking,
@@ -2902,12 +2878,6 @@ init_viewer_opengl(Data *data)
             debug_image.height = 0;
         }
     }
-
-    // Generate texture objects
-    glGenTextures(1, &gl_classify_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_classify_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glGenTextures(1, &gl_cclusters_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_cclusters_rgb_tex);
