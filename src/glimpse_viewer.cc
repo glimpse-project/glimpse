@@ -211,10 +211,6 @@ typedef struct _Data
      */
     int prediction_delay;
 
-    /* The size of the depth buffer visualisation texture */
-    int depth_rgb_width;
-    int depth_rgb_height;
-
     /* The size of the video buffer visualisation texture */
     int video_rgb_width;
     int video_rgb_height;
@@ -365,7 +361,6 @@ static uint32_t joint_palette[] = {
 char *glimpse_recordings_path;
 char *glimpse_targets_path;
 
-static GLuint gl_depth_rgb_tex;
 static GLuint gl_classify_rgb_tex;
 static GLuint gl_cclusters_rgb_tex;
 
@@ -2272,31 +2267,6 @@ upload_tracking_textures(Data *data)
         }
     }
 
-    /*
-     * Update the RGB visualization of the depth buffer
-     */
-    uint8_t *depth_rgb = NULL;
-    gm_tracking_create_rgb_depth(data->latest_tracking,
-                                 &data->depth_rgb_width,
-                                 &data->depth_rgb_height,
-                                 &depth_rgb);
-
-    if (depth_rgb) {
-        glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
-
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        /* NB: gles2 only allows npot textures with clamp to edge
-         * coordinate wrapping
-         */
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->depth_rgb_width, data->depth_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, depth_rgb);
-        free(depth_rgb);
-    }
-
     int n_points = 0;
     struct gm_intrinsics debug_cloud_intrinsics = {};
     const struct gm_point_rgba *debug_points =
@@ -2934,11 +2904,6 @@ init_viewer_opengl(Data *data)
     }
 
     // Generate texture objects
-    glGenTextures(1, &gl_depth_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, gl_depth_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
     glGenTextures(1, &gl_classify_rgb_tex);
     glBindTexture(GL_TEXTURE_2D, gl_classify_rgb_tex);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
