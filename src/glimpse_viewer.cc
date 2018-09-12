@@ -211,10 +211,6 @@ typedef struct _Data
      */
     int prediction_delay;
 
-    /* The size of the video buffer visualisation texture */
-    int video_rgb_width;
-    int video_rgb_height;
-
     glm::vec3 focal_point;
     float camera_rot_yx[2];
     JSON_Value *joint_map;
@@ -317,8 +313,6 @@ typedef struct _Data
     int selected_target;
     std::vector<char *> targets;
     std::vector<char *> target_names;
-
-    GLuint video_rgb_tex;
 
     GLuint ar_video_tex_sampler;
     std::vector<GLuint> ar_video_queue;
@@ -2287,23 +2281,6 @@ upload_tracking_textures(Data *data)
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         data->n_lines = n_lines;
     }
-
-    uint8_t *video_rgb = NULL;
-    gm_tracking_create_rgb_video(data->latest_tracking,
-                                 &data->video_rgb_width,
-                                 &data->video_rgb_height,
-                                 &video_rgb);
-    if (video_rgb) {
-        glBindTexture(GL_TEXTURE_2D, data->video_rgb_tex);
-        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                     data->video_rgb_width, data->video_rgb_height,
-                     0, GL_RGB, GL_UNSIGNED_BYTE, video_rgb);
-        free(video_rgb);
-    }
 }
 
 static void
@@ -2853,11 +2830,6 @@ init_viewer_opengl(Data *data)
             debug_image.height = 0;
         }
     }
-
-    glGenTextures(1, &data->video_rgb_tex);
-    glBindTexture(GL_TEXTURE_2D, data->video_rgb_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
 
     glGenFramebuffers(1, &data->cloud_fbo);
     glGenRenderbuffers(1, &data->cloud_depth_renderbuf);
