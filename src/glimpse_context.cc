@@ -745,6 +745,46 @@ static png_color default_palette[] = {
 };
 
 
+/* simple hash to cheaply randomize how we will gaps in our data without
+ * too much bias
+ */
+static uint32_t
+xorshift32(uint32_t *state)
+{
+    uint32_t x = *state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    *state = x;
+    return x;
+}
+
+static glm::mat4
+pose_to_matrix(struct gm_pose &pose)
+{
+    glm::quat rot_start_to_dev(
+        pose.orientation[3],
+        pose.orientation[0],
+        pose.orientation[1],
+        pose.orientation[2]);
+
+    glm::vec3 mov_start_to_dev(
+        pose.translation[0],
+        pose.translation[1],
+        pose.translation[2]);
+
+    return glm::mat4_cast(rot_start_to_dev) *
+        glm::translate(glm::mat4(1.f), mov_start_to_dev);
+}
+
+static inline float
+distance_between(const float *point1, const float *point2)
+{
+    return sqrtf(powf(point1[0] - point2[0], 2.f) +
+                 powf(point1[1] - point2[1], 2.f) +
+                 powf(point1[2] - point2[2], 2.f));
+}
+
 static uint64_t
 get_time(void)
 {
@@ -752,6 +792,29 @@ get_time(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
 
     return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* TODO: clarify what is a 'decayed timestamp' is */
+static uint64_t
+calculate_decayed_timestamp(uint64_t base, uint64_t timestamp,
+                            float max_delta, float delta_decay)
+{
+    uint64_t max_delta_64 = (uint64_t)(max_delta * 1000000.0);
+    uint64_t delta = (timestamp < base) ?
+        base - timestamp : timestamp - base;
+    if (delta <= max_delta_64) {
+        return timestamp;
+    }
+
+    uint64_t max_decay = (uint64_t)(max_delta *
+                                    delta_decay * 1000000.0);
+    uint64_t decay_time = std::min(delta - max_delta_64, max_decay);
+    uint64_t decay = (uint64_t)(sqrt(decay_time / (double)max_decay) *
+                                max_decay);
+
+    return (timestamp < base) ?
+        (base - max_delta_64) - decay :
+        base + max_delta_64 + decay;
 }
 
 static char *
@@ -949,334 +1012,6 @@ create_program(struct gm_context *ctx,
     return program;
 }
 
-void
-gm_context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
-{
-    if (!tracking->face_detect_buf) {
-        LOGI("NULL tracking->face_detect_buf");
-        return;
-    }
-
-    uint64_t start, end, duration_ns;
-    std::vector<dlib::rectangle> face_rects(0);
-    glimpse::wrapped_image<unsigned char> grey_img;
-    dlib::rectangle buf_rect(tracking->face_detect_buf_width, tracking->face_detect_buf_height);
-
-    LOGI("New camera frame to process");
-
-    if (ctx->last_faces.size()) {
-
-        LOGI("Searching %d region[s] for faces", (int)ctx->last_faces.size());
-
-        for (dlib::rectangle &rect : ctx->last_faces) {
-
-            rect = dlib::grow_rect(static_cast<dlib::rectangle&>(rect), (long)((float)rect.width() * 0.4f));
-            rect.intersect(buf_rect);
-
-            grey_img.wrap(rect.width(),
-                          rect.height(),
-                          tracking->face_detect_buf_width, //stride
-                          static_cast<unsigned char *>(tracking->face_detect_buf +
-                                                       rect.top() * tracking->face_detect_buf_width +
-                                                       rect.left()));
-            LOGI("Starting constrained face detection with %dx%d sub image",
-                 (int)rect.width(), (int)rect.height());
-            start = get_time();
-            std::vector<dlib::rectangle> dets = ctx->detector(grey_img);
-            end = get_time();
-            duration_ns = end - start;
-            LOGI("Number of detected faces = %d, %.3f%s",
-                 (int)dets.size(),
-                 get_duration_ns_print_scale(duration_ns),
-                 get_duration_ns_print_scale_suffix(duration_ns));
-
-            if (dets.size() != 1) {
-                LOGE("Constrained search was expected to find exactly one face - fallback");
-                face_rects.resize(0);
-                break;
-            }
-
-            dlib::rectangle mapped_rect =
-                dlib::translate_rect(dets[0], rect.left(), rect.top());
-
-            face_rects.push_back(mapped_rect);
-        }
-    }
-
-    /* Even if not used for full frame face detection, we still want
-     * an image for the full frame for the landmark detection...
-     */
-    grey_img.wrap(tracking->face_detect_buf_width,
-                  tracking->face_detect_buf_height,
-                  tracking->face_detect_buf_width, //stride
-                  static_cast<unsigned char *>(tracking->face_detect_buf));
-
-    /* Fall back to checking full frame if the number of detected
-     * faces has changed
-     */
-    if (face_rects.size() != ctx->last_faces.size() ||
-        face_rects.size() == 0)
-    {
-        LOGI("Starting face detection with %dx%d image",
-             (int)tracking->face_detect_buf_width, (int)tracking->face_detect_buf_height);
-        start = get_time();
-        face_rects = ctx->detector(grey_img);
-        end = get_time();
-        duration_ns = end - start;
-        LOGI("Number of detected faces = %d, %.3f%s",
-             (int)face_rects.size(),
-             get_duration_ns_print_scale(duration_ns),
-             get_duration_ns_print_scale_suffix(duration_ns));
-    }
-
-    ctx->last_faces = face_rects;
-
-
-    std::vector<struct pt> landmarks(0);
-
-    for (unsigned i = 0; i < ctx->last_faces.size(); i++) {
-        struct pt point;
-        dlib::rectangle rect;
-
-        start = get_time();
-        dlib::full_object_detection features = ctx->face_feature_detector(grey_img, ctx->last_faces[i]);
-        end = get_time();
-        duration_ns = end - start;
-
-        LOGI("Detected %d face %d features in %.3f%s",
-             (int)features.num_parts(),
-             (int)i,
-             get_duration_ns_print_scale(duration_ns),
-             get_duration_ns_print_scale_suffix(duration_ns));
-
-        /*
-         * Bounding box
-         */
-        point.x = features.get_rect().left();
-        point.y = features.get_rect().bottom();
-        landmarks.push_back(point);
-        point.x = features.get_rect().left();
-        point.y = features.get_rect().top();
-        landmarks.push_back(point);
-        landmarks.push_back(point);
-        point.x = features.get_rect().right();
-        point.y = features.get_rect().top();
-        landmarks.push_back(point);
-        landmarks.push_back(point);
-        point.x = features.get_rect().right();
-        point.y = features.get_rect().bottom();
-        landmarks.push_back(point);
-        landmarks.push_back(point);
-        point.x = features.get_rect().left();
-        point.y = features.get_rect().bottom();
-        landmarks.push_back(point);
-
-        /*
-         * Chin line
-         */
-
-        point.x = features.part(0).x();
-        point.y = features.part(0).y();
-        landmarks.push_back(point);
-
-        for (int j = 1; j < 16; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(16).x();
-        point.y = features.part(16).y();
-        landmarks.push_back(point);
-
-        /*
-         * Left eyebrow
-         */
-
-        point.x = features.part(17).x();
-        point.y = features.part(17).y();
-        landmarks.push_back(point);
-
-        for (int j = 18; j < 21; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(21).x();
-        point.y = features.part(21).y();
-        landmarks.push_back(point);
-
-        /*
-         * Right eyebrow
-         */
-
-        point.x = features.part(22).x();
-        point.y = features.part(22).y();
-        landmarks.push_back(point);
-
-        for (int j = 23; j < 26; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(26).x();
-        point.y = features.part(26).y();
-        landmarks.push_back(point);
-
-        /*
-         * Nose
-         */
-
-        point.x = features.part(27).x();
-        point.y = features.part(27).y();
-        landmarks.push_back(point);
-
-        for (int j = 28; j < 35; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(35).x();
-        point.y = features.part(35).y();
-        landmarks.push_back(point);
-
-        /*
-         * Left eye
-         */
-
-        point.x = features.part(36).x();
-        point.y = features.part(36).y();
-        landmarks.push_back(point);
-
-        for (int j = 37; j < 42; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(36).x();
-        point.y = features.part(36).y();
-        landmarks.push_back(point);
-
-        /*
-         * Right eye
-         */
-
-        point.x = features.part(42).x();
-        point.y = features.part(42).y();
-        landmarks.push_back(point);
-
-        for (int j = 43; j < 48; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(42).x();
-        point.y = features.part(42).y();
-        landmarks.push_back(point);
-
-        /*
-         * Mouth (outer)
-         */
-
-        point.x = features.part(48).x();
-        point.y = features.part(48).y();
-        landmarks.push_back(point);
-
-        for (int j = 49; j < 60; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(48).x();
-        point.y = features.part(48).y();
-        landmarks.push_back(point);
-
-        /*
-         * Mouth (inner)
-         */
-
-        point.x = features.part(60).x();
-        point.y = features.part(60).y();
-        landmarks.push_back(point);
-
-        for (int j = 61; j < 68; j++) {
-            point.x = features.part(j).x();
-            point.y = features.part(j).y();
-            landmarks.push_back(point);
-            landmarks.push_back(point);
-        }
-
-        point.x = features.part(60).x();
-        point.y = features.part(60).y();
-        landmarks.push_back(point);
-
-    }
-
-    /* Convert into normalized device coordinates */
-    for (unsigned i = 0; i < landmarks.size(); i++) {
-        landmarks[i].x = (landmarks[i].x / (float)tracking->face_detect_buf_width) * 2.f - 1.f;
-        landmarks[i].y = (landmarks[i].y / (float)tracking->face_detect_buf_height) * -2.f + 1.f;
-    }
-
-    /* XXX: This mutex is reused for the grey debug buffer and the
-     * ctx->landmarks array
-     */
-    pthread_mutex_lock(&ctx->debug_viz_mutex);
-    ctx->landmarks.swap(landmarks);
-    pthread_mutex_unlock(&ctx->debug_viz_mutex);
-
-#ifdef VISUALIZE_DETECT_FRAME
-    {
-        uint64_t start = get_time();
-        pthread_mutex_lock(&ctx->debug_viz_mutex);
-        /* Save the frame to display for debug too... */
-        grey_debug_buffer_.resize(tracking->face_detect_buf_width * tracking->face_detect_buf_height);
-        memcpy(&grey_debug_buffer_[0], tracking->face_detect_buf, grey_debug_buffer_.size());
-        grey_debug_width_ = tracking->face_detect_buf_width;
-        grey_debug_height_ = tracking->face_detect_buf_height;
-        pthread_mutex_unlock(&ctx->debug_viz_mutex);
-        uint64_t end = get_time();
-        uint64_t duration_ns = end - start;
-        LOGE("Copied face detect buffer for debug overlay in %.3f%s",
-             get_duration_ns_print_scale(duration_ns),
-             get_duration_ns_print_scale_suffix(duration_ns));
-    }
-#endif
-}
-
-static void
-tracking_draw_line(struct gm_tracking_impl *tracking,
-                   float x0, float y0, float z0,
-                   float x1, float y1, float z1,
-                   uint32_t rgba)
-{
-    struct gm_point_rgba p0 = { x0, -y0, z0, rgba };
-    struct gm_point_rgba p1 = { x1, -y1, z1, rgba };
-    tracking->debug_lines.push_back(p0);
-    tracking->debug_lines.push_back(p1);
-}
-
-static inline float
-distance_between(const float *point1, const float *point2)
-{
-    return sqrtf(powf(point1[0] - point2[0], 2.f) +
-                 powf(point1[1] - point2[1], 2.f) +
-                 powf(point1[2] - point2[2], 2.f));
-}
-
 static inline bool
 is_bone_length_diff(const struct gm_bone &ref_bone,
                     const struct gm_bone &bone,
@@ -1380,12 +1115,6 @@ find_bone(const std::vector<struct gm_bone> &bones, int head, int tail)
     }
 
     return NULL;
-}
-
-const struct gm_bone *
-gm_skeleton_find_bone(const struct gm_skeleton *skeleton, int head, int tail)
-{
-    return find_bone(skeleton->bones, head, tail);
 }
 
 static void
@@ -1583,28 +1312,6 @@ refine_skeleton(struct gm_tracking_impl *tracking)
             }
         }
     }
-}
-
-static uint64_t
-calculate_decayed_timestamp(uint64_t base, uint64_t timestamp,
-                            float max_delta, float delta_decay)
-{
-    uint64_t max_delta_64 = (uint64_t)(max_delta * 1000000.0);
-    uint64_t delta = (timestamp < base) ?
-        base - timestamp : timestamp - base;
-    if (delta <= max_delta_64) {
-        return timestamp;
-    }
-
-    uint64_t max_decay = (uint64_t)(max_delta *
-                                    delta_decay * 1000000.0);
-    uint64_t decay_time = std::min(delta - max_delta_64, max_decay);
-    uint64_t decay = (uint64_t)(sqrt(decay_time / (double)max_decay) *
-                                max_decay);
-
-    return (timestamp < base) ?
-        (base - max_delta_64) - decay :
-        base + max_delta_64 + decay;
 }
 
 static void
@@ -2170,28 +1877,10 @@ update_depth_codebook(struct gm_context *ctx,
          get_duration_ns_print_scale_suffix(duration));
 }
 
-static glm::mat4
-pose_to_matrix(struct gm_pose &pose)
-{
-    glm::quat rot_start_to_dev(
-        pose.orientation[3],
-        pose.orientation[0],
-        pose.orientation[1],
-        pose.orientation[2]);
-
-    glm::vec3 mov_start_to_dev(
-        pose.translation[0],
-        pose.translation[1],
-        pose.translation[2]);
-
-    return glm::mat4_cast(rot_start_to_dev) *
-        glm::translate(glm::mat4(1.f), mov_start_to_dev);
-}
-
 static inline bool
-gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
-                 int x1, int y1, int x2, int y2,
-                 float tolerance)
+compare_point_depths(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
+                     int x1, int y1, int x2, int y2,
+                     float tolerance)
 {
     float d1 = cloud->points[y1 * cloud->width + x1].z;
     float d2 = cloud->points[y2 * cloud->width + x2].z;
@@ -2213,17 +1902,758 @@ gm_compare_depth(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
     return fabsf(d1 - d2) <= tolerance;
 }
 
-/* simple hash to cheaply randomize how we will gaps in our data without
- * too much bias
- */
-static uint32_t xorshift32(uint32_t *state)
+void *
+gm_frame_get_video_buffer(struct gm_frame *frame)
 {
-    uint32_t x = *state;
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    *state = x;
-    return x;
+    return frame->video;
+}
+
+enum gm_format
+gm_frame_get_video_format(struct gm_frame *frame)
+{
+    return frame->video_format;
+}
+
+static struct gm_tracking_impl *
+mem_pool_acquire_tracking(struct gm_mem_pool *pool)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)
+        mem_pool_acquire_resource(pool);
+    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
+              "Tracking object in pool with non-zero ref-count");
+
+    atomic_store(&tracking->base.ref, 1);
+
+    tracking->success = false;
+
+    return tracking;
+}
+
+static void
+tracking_state_free(struct gm_mem_pool *pool,
+                    void *self,
+                    void *user_data)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+
+    free(tracking->depth);
+
+    free(tracking->face_detect_buf);
+
+    if (tracking->frame) {
+        gm_frame_unref(tracking->frame);
+    }
+
+    if (tracking->joints) {
+        free_joints(tracking->joints);
+    }
+
+    delete tracking;
+}
+
+static void
+tracking_state_recycle(struct gm_tracking *self)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+    struct gm_mem_pool *pool = tracking->pool;
+
+    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
+              "Unbalanced tracking unref");
+
+    gm_frame_unref(tracking->frame);
+    tracking->frame = NULL;
+
+    if (tracking->joints) {
+        free_joints(tracking->joints);
+        tracking->joints = NULL;
+    }
+
+    tracking->trail.clear();
+
+    mem_pool_recycle_resource(pool, tracking);
+}
+
+static void
+tracking_add_breadcrumb(struct gm_tracking *self, const char *tag)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+    struct trail_crumb crumb;
+
+    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) >= 0,
+              "Use of frame after free");
+
+    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
+
+    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
+                                  1, // skip top stack frame
+                                  10);
+
+    pthread_mutex_lock(&tracking->trail_lock);
+    tracking->trail.push_back(crumb);
+    pthread_mutex_unlock(&tracking->trail_lock);
+}
+
+static void *
+tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
+{
+    struct gm_context *ctx = (struct gm_context *)user_data;
+    struct gm_tracking_impl *tracking = new gm_tracking_impl();
+
+    atomic_store(&tracking->base.ref, 0);
+    tracking->base.api = &tracking->vtable;
+
+    tracking->vtable.free = tracking_state_recycle;
+    tracking->vtable.add_breadcrumb = tracking_add_breadcrumb;
+
+    tracking->pool = pool;
+    tracking->ctx = ctx;
+
+    tracking->joints = NULL;
+
+    tracking->skeleton.ctx = ctx;
+    tracking->skeleton.joints.resize(ctx->n_joints);
+    tracking->skeleton.bones.clear();
+
+    gm_assert(ctx->log, ctx->max_depth_pixels,
+              "Undefined maximum number of depth pixels");
+
+    tracking->depth = (float *)
+      xcalloc(ctx->max_depth_pixels, sizeof(float));
+
+    tracking->label_probs.resize(ctx->max_depth_pixels);
+
+    gm_assert(ctx->log, ctx->max_video_pixels,
+              "Undefined maximum number of video pixels");
+
+    tracking->stage_data.resize(N_TRACKING_STAGES, {});
+
+#if 0
+    tracking->face_detect_buf =
+        (uint8_t *)xcalloc(video_width * video_height, 1);
+
+#ifdef DOWNSAMPLE_1_2
+#ifdef DOWNSAMPLE_1_4
+    tracking->face_detect_buf_width = video_width / 4;
+    tracking->face_detect_buf_height = video_height / 4;
+#else
+    tracking->face_detect_buf_width = video_width / 2;
+    tracking->face_detect_buf_height = video_height / 2;
+#endif
+#else
+    tracking->face_detect_buf_width = video_width;
+    tracking->face_detect_buf_height = video_height;
+#endif
+#endif
+
+    return tracking;
+}
+
+static void
+label_probs_to_rgb(struct gm_context *ctx,
+                   float *label_probs,
+                   int n_labels,
+                   uint8_t *rgb_out)
+{
+    if (ctx->debug_label == -1) {
+        uint8_t label = 0;
+        float pr = -1.0;
+
+        for (int l = 0; l < n_labels; l++) {
+            if (label_probs[l] > pr) {
+                label = l;
+                pr = label_probs[l];
+            }
+        }
+
+        rgb_out[0] = default_palette[label].red;
+        rgb_out[1] = default_palette[label].green;
+        rgb_out[2] = default_palette[label].blue;
+    } else {
+        struct color col = stops_color_from_val(ctx->heat_color_stops,
+                                                ctx->n_heat_color_stops,
+                                                1,
+                                                label_probs[ctx->debug_label]);
+        rgb_out[0] = col.r;
+        rgb_out[1] = col.g;
+        rgb_out[2] = col.b;
+    }
+}
+
+static bool
+tracking_create_rgb_label_map(struct gm_tracking *_tracking,
+                              int *width_out, int *height_out, uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    uint8_t n_labels = ctx->n_labels;
+
+    int width = (int)tracking->training_camera_intrinsics.width;
+    int height = (int)tracking->training_camera_intrinsics.height;
+
+    if (tracking->label_probs.size() != width * height * n_labels)
+        return false;
+
+    *width_out = width;
+    *height_out = height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc(width * height * 3);
+    }
+
+    gm_assert(ctx->log, ctx->debug_label < n_labels,
+              "Can't create RGB map of invalid label %u",
+              ctx->debug_label);
+
+    foreach_xy_off(width, height) {
+        float *label_probs = &tracking->label_probs[off * n_labels];
+
+        uint8_t rgb[3];
+        label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
+
+        (*output)[off * 3] = rgb[0];
+        (*output)[off * 3 + 1] = rgb[1];
+        (*output)[off * 3 + 2] = rgb[2];
+    }
+
+    return true;
+}
+
+static bool
+tracking_create_rgb_depth(struct gm_tracking *_tracking,
+                          int *width, int *height, uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    *width = (int)tracking->depth_camera_intrinsics.width;
+    *height = (int)tracking->depth_camera_intrinsics.height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        float depth = tracking->depth[off];
+#if 1
+        struct color rgb = stops_color_from_val(ctx->depth_color_stops,
+                                                ctx->n_depth_color_stops,
+                                                ctx->depth_color_stops_range,
+                                                depth);
+        (*output)[off * 3] = rgb.r;
+        (*output)[off * 3 + 1] = rgb.g;
+        (*output)[off * 3 + 2] = rgb.b;
+#else
+        depth = std::max(ctx->min_depth, std::min(ctx->max_depth, depth));
+        uint8_t shade = (uint8_t)
+            ((depth - ctx->min_depth) /
+             (ctx->max_depth - ctx->min_depth) * 255.f);
+        (*output)[off * 3] = shade;
+        (*output)[off * 3 + 1] = shade;
+        (*output)[off * 3 + 2] = shade;
+#endif
+    }
+
+    return true;
+}
+
+static bool
+tracking_create_rgb_video(struct gm_tracking *_tracking,
+                          int *width, int *height, uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+    struct gm_frame *frame = tracking->frame;
+
+    *width = (int)frame->video_intrinsics.width;
+    *height = (int)frame->video_intrinsics.height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    int rot_width = tracking->video_camera_intrinsics.width;
+    enum gm_format format = frame->video_format;
+    enum gm_rotation rotation = frame->camera_rotation;
+    uint8_t *video = (uint8_t *)frame->video->data;
+
+    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
+    // us easily combine our rotation with our copy...
+    //
+    // XXX: it could be worth reading multiple scanlines at a time so we could
+    // write out cache lines at a time instead of only 4 bytes (for rotated
+    // images).
+    //
+    switch(format) {
+    case GM_FORMAT_RGB_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*3];
+                                        (*output)[roff*3+1] = video[off*3+1];
+                                        (*output)[roff*3+2] = video[off*3+2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_BGR_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*3+2];
+                                        (*output)[roff*3+1] = video[off*3+1];
+                                        (*output)[roff*3+2] = video[off*3];
+                                    });
+        }
+        break;
+    case GM_FORMAT_RGBX_U8:
+    case GM_FORMAT_RGBA_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*4];
+                                        (*output)[roff*3+1] = video[off*4+1];
+                                        (*output)[roff*3+2] = video[off*4+2];
+                                    });
+        }
+        break;
+    case GM_FORMAT_BGRX_U8:
+    case GM_FORMAT_BGRA_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        (*output)[roff*3] = video[off*4+2];
+                                        (*output)[roff*3+1] = video[off*4+1];
+                                        (*output)[roff*3+2] = video[off*4];
+                                    });
+        }
+        break;
+    case GM_FORMAT_LUMINANCE_U8:
+        foreach_xy_off(*width, *height) {
+            with_rotated_rx_ry_roff(x, y, *width, *height,
+                                    rotation, rot_width,
+                                    {
+                                        uint8_t lum = video[off];
+                                        (*output)[roff*3] = lum;
+                                        (*output)[roff*3+1] = lum;
+                                        (*output)[roff*3+2] = lum;
+                                    });
+        }
+        break;
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_Z_U16_MM:
+    case GM_FORMAT_Z_F32_M:
+    case GM_FORMAT_Z_F16_M:
+    case GM_FORMAT_POINTS_XYZC_F32_M:
+        gm_assert(ctx->log, 0, "Unexpected format for video buffer");
+        return false;
+    }
+
+    // Output is rotated, so make sure output width/height are correct
+    if (rotation == GM_ROTATION_90 || rotation == GM_ROTATION_270) {
+        std::swap(*width, *height);
+    }
+
+    return true;
+}
+
+static bool
+tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
+                                       int *width, int *height,
+                                       uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    //struct gm_context *ctx = tracking->ctx;
+
+    if (!tracking->cluster_labels) {
+        return false;
+    }
+
+    *width = (int)tracking->cluster_labels->width;
+    *height = (int)tracking->cluster_labels->height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        int label = tracking->cluster_labels->points[off].label;
+        png_color *color =
+            &default_palette[label % ARRAY_LEN(default_palette)];
+        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
+        (*output)[off * 3] = (uint8_t)(color->red * shade);
+        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
+        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
+    }
+
+    return true;
+}
+
+static void
+depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
+{
+    switch(label) {
+    case BG:
+        rgb_out[0] = 0x00;
+        rgb_out[1] = 0x00;
+        rgb_out[2] = 0x00;
+        break;
+    case FL:
+        rgb_out[0] = 0xC0;
+        rgb_out[1] = 0xC0;
+        rgb_out[2] = 0xC0;
+        break;
+    case FLK:
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0x00;
+        rgb_out[2] = 0x00;
+        break;
+    case FL_FLK:
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0xA0;
+        rgb_out[2] = 0x00;
+        break;
+    case TB:
+        rgb_out[0] = 0x00;
+        rgb_out[1] = 0x00;
+        rgb_out[2] = 0xFF;
+        break;
+    case FG:
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0xFF;
+        rgb_out[2] = 0xFF;
+        break;
+    case CAN:
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0xFF;
+        rgb_out[2] = 0x00;
+        break;
+    case TRK:
+        rgb_out[0] = 0x00;
+        rgb_out[1] = 0xFF;
+        rgb_out[2] = 0x00;
+        break;
+    default:
+        // Invalid/unhandled value
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0x00;
+        rgb_out[2] = 0xFF;
+        break;
+    }
+}
+
+static bool
+tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
+                                         int *width, int *height,
+                                         uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    if (!tracking->depth_class) {
+        return false;
+    }
+
+    *width = (int)tracking->depth_class->width;
+    *height = (int)tracking->depth_class->height;
+
+    if (!(*output)) {
+        *output = (uint8_t *)malloc((*width) * (*height) * 3);
+    }
+
+    foreach_xy_off(*width, *height) {
+        depth_classification_to_rgb((enum seg_class)tracking->depth_class->points[off].label,
+                                    (*output) + off * 3);
+    }
+
+    return true;
+}
+
+static void
+tracking_draw_line(struct gm_tracking_impl *tracking,
+                   float x0, float y0, float z0,
+                   float x1, float y1, float z1,
+                   uint32_t rgba)
+{
+    struct gm_point_rgba p0 = { x0, -y0, z0, rgba };
+    struct gm_point_rgba p1 = { x1, -y1, z1, rgba };
+    tracking->debug_lines.push_back(p0);
+    tracking->debug_lines.push_back(p1);
+}
+
+const gm_intrinsics *
+gm_tracking_get_video_camera_intrinsics(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return &tracking->video_camera_intrinsics;
+}
+
+const gm_intrinsics *
+gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return &tracking->depth_camera_intrinsics;
+}
+
+bool
+gm_tracking_has_skeleton(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->success;
+}
+
+const struct gm_skeleton *
+gm_tracking_get_skeleton(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->success ? &tracking->skeleton_corrected : NULL;
+}
+
+const struct gm_skeleton *
+gm_tracking_get_raw_skeleton(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    return tracking->success ? &tracking->skeleton : NULL;
+}
+
+const struct gm_point_rgba *
+gm_tracking_get_debug_point_cloud(struct gm_tracking *_tracking,
+                                  int *n_points,
+                                  struct gm_intrinsics *debug_cloud_intrinsics)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    *n_points = tracking->debug_cloud.size();
+    *debug_cloud_intrinsics = tracking->debug_cloud_intrinsics;
+    return (struct gm_point_rgba *)tracking->debug_cloud.data();
+}
+
+const struct gm_point_rgba *
+gm_tracking_get_debug_lines(struct gm_tracking *_tracking,
+                            int *n_lines)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    gm_assert(tracking->ctx->log,
+              tracking->debug_lines.size() % 2 == 0,
+              "Odd number of points in debug_lines array");
+    *n_lines = tracking->debug_lines.size() / 2;
+    return tracking->debug_lines.data();
+}
+
+uint64_t
+gm_tracking_get_duration(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->duration_ns;
+}
+
+uint64_t
+gm_tracking_get_stage_duration(struct gm_tracking *_tracking,
+                               int stage_index)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    return stage_data.duration_ns;
+}
+
+#if 0
+const struct gm_point_rgba *
+gm_tracking_get_stage_debug_point_cloud(struct gm_tracking *_tracking,
+                                        int stage_index,
+                                        int *n_points)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    return stage_data.debug_point_cloud.data();
+}
+
+const struct gm_point_rgba *
+gm_tracking_get_stage_debug_lines(struct gm_tracking *_tracking,
+                                  int stage_index,
+                                  int *n_lines)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    return stage_data.debug_lines.data();
+}
+#endif
+
+bool
+gm_tracking_create_stage_rgb_image(struct gm_tracking *_tracking,
+                                   int stage_index,
+                                   int image_index,
+                                   int *width,
+                                   int *height,
+                                   uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
+
+    gm_assert(ctx->log, image_index >=0 && image_index < (int)stage.images.size(),
+              "Out of range stage %s image index (%d)", stage.name, image_index);
+
+    if (stage.images[image_index].create_rgb_image)
+        return stage.images[image_index].create_rgb_image(_tracking,
+                                                          width, height,
+                                                          output);
+    else
+        return false;
+}
+
+const float *
+gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
+                                    int *width,
+                                    int *height)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    *width = tracking->training_camera_intrinsics.width;
+    *height = tracking->training_camera_intrinsics.height;
+
+    return tracking->label_probs.data();
+}
+
+uint64_t
+gm_tracking_get_timestamp(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->frame->timestamp;
+}
+
+bool
+gm_tracking_was_successful(struct gm_tracking *_tracking)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    return tracking->success;
+}
+
+static struct gm_prediction_impl *
+mem_pool_acquire_prediction(struct gm_mem_pool *pool)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)
+        mem_pool_acquire_resource(pool);
+    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
+              "Prediction object in pool with non-zero ref-count");
+
+    atomic_store(&prediction->base.ref, 1);
+
+    return prediction;
+}
+
+static void
+prediction_free(struct gm_mem_pool *pool,
+                void *self,
+                void *user_data)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
+
+    gm_assert(prediction->ctx->log, prediction->n_tracking == 0,
+              "Freeing prediction that has tracking references");
+
+    delete prediction;
+}
+
+static void
+prediction_recycle(struct gm_prediction *self)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
+    struct gm_mem_pool *pool = prediction->pool;
+
+    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
+              "Unbalanced prediction unref");
+
+    for (int i = 0; i < prediction->n_tracking; ++i) {
+        gm_tracking_unref((struct gm_tracking *)
+                          prediction->tracking_history[i]);
+    }
+    prediction->n_tracking = 0;
+
+    prediction->trail.clear();
+
+    mem_pool_recycle_resource(pool, prediction);
+}
+
+static void
+prediction_add_breadcrumb(struct gm_prediction *self, const char *tag)
+{
+    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
+    struct trail_crumb crumb;
+
+    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) >= 0,
+              "Use of frame after free");
+
+    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
+
+    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
+                                  1, // skip top stack frame
+                                  10);
+
+    pthread_mutex_lock(&prediction->trail_lock);
+    prediction->trail.push_back(crumb);
+    pthread_mutex_unlock(&prediction->trail_lock);
+}
+
+static void *
+prediction_alloc(struct gm_mem_pool *pool, void *user_data)
+{
+    struct gm_context *ctx = (struct gm_context *)user_data;
+    struct gm_prediction_impl *prediction = new gm_prediction_impl();
+
+    atomic_store(&prediction->base.ref, 0);
+    prediction->base.api = &prediction->vtable;
+
+    prediction->vtable.free = prediction_recycle;
+    prediction->vtable.add_breadcrumb = prediction_add_breadcrumb;
+
+    prediction->pool = pool;
+
+    prediction->ctx = ctx;
+    prediction->n_tracking = 0;
+
+    return (void *)prediction;
+}
+
+uint64_t
+gm_prediction_get_timestamp(struct gm_prediction *_prediction)
+{
+    struct gm_prediction_impl *prediction =
+        (struct gm_prediction_impl *)_prediction;
+    return prediction->timestamp;
+}
+
+const struct gm_skeleton *
+gm_prediction_get_skeleton(struct gm_prediction *_prediction)
+{
+    struct gm_prediction_impl *prediction =
+        (struct gm_prediction_impl *)_prediction;
+    return &prediction->skeleton;
 }
 
 static void
@@ -2481,90 +2911,6 @@ add_debug_cloud_xyz_of_codebook_space(struct gm_context *ctx,
     }
 }
 
-static void
-depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
-{
-    switch(label) {
-    case BG:
-        rgb_out[0] = 0x00;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0x00;
-        break;
-    case FL:
-        rgb_out[0] = 0xC0;
-        rgb_out[1] = 0xC0;
-        rgb_out[2] = 0xC0;
-        break;
-    case FLK:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0x00;
-        break;
-    case FL_FLK:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0xA0;
-        rgb_out[2] = 0x00;
-        break;
-    case TB:
-        rgb_out[0] = 0x00;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0xFF;
-        break;
-    case FG:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0xFF;
-        rgb_out[2] = 0xFF;
-        break;
-    case CAN:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0xFF;
-        rgb_out[2] = 0x00;
-        break;
-    case TRK:
-        rgb_out[0] = 0x00;
-        rgb_out[1] = 0xFF;
-        rgb_out[2] = 0x00;
-        break;
-    default:
-        // Invalid/unhandled value
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0xFF;
-        break;
-    }
-}
-
-static void
-label_probs_to_rgb(struct gm_context *ctx,
-                   float *label_probs,
-                   int n_labels,
-                   uint8_t *rgb_out)
-{
-    if (ctx->debug_label == -1) {
-        uint8_t label = 0;
-        float pr = -1.0;
-
-        for (int l = 0; l < n_labels; l++) {
-            if (label_probs[l] > pr) {
-                label = l;
-                pr = label_probs[l];
-            }
-        }
-
-        rgb_out[0] = default_palette[label].red;
-        rgb_out[1] = default_palette[label].green;
-        rgb_out[2] = default_palette[label].blue;
-    } else {
-        struct color col = stops_color_from_val(ctx->heat_color_stops,
-                                                ctx->n_heat_color_stops,
-                                                1,
-                                                label_probs[ctx->debug_label]);
-        rgb_out[0] = col.r;
-        rgb_out[1] = col.g;
-        rgb_out[2] = col.b;
-    }
-}
-
 /* Used to colour the debug cloud for most pipeline stages... */
 static void
 colour_debug_cloud(struct gm_context *ctx,
@@ -2586,7 +2932,7 @@ colour_debug_cloud(struct gm_context *ctx,
         int vid_width = 0;
         int vid_height = 0;
         uint8_t *vid_rgb = NULL;
-        gm_tracking_create_rgb_video(&tracking->base, &vid_width, &vid_height, &vid_rgb);
+        tracking_create_rgb_video(&tracking->base, &vid_width, &vid_height, &vid_rgb);
         if (vid_rgb) {
             if (indexed_pcl_cloud && indices.size()) {
                 for (unsigned i = 0; i < indices.size(); i++) {
@@ -3150,9 +3496,9 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
             lowest_point = aligned_y;
         }
 
-        if (gm_compare_depth(tracking->depth_class,
-                             point.x, point.y, point.lx, point.ly,
-                             ctx->cluster_tolerance))
+        if (compare_point_depths(tracking->depth_class,
+                                 point.x, point.y, point.lx, point.ly,
+                                 ctx->cluster_tolerance))
         {
             done_mask[idx] = true;
             flood_fill.push({ point.x - 1, point.y, point.x, point.y });
@@ -3258,9 +3604,10 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        if (gm_compare_depth(tracking->depth_class,
-                             point.x, point.y, point.lx, point.ly,
-                             ctx->cluster_tolerance)) {
+        if (compare_point_depths(tracking->depth_class,
+                                 point.x, point.y, point.lx, point.ly,
+                                 ctx->cluster_tolerance))
+        {
             done_mask[idx] = true;
             person_indices.indices.push_back(idx);
             flood_fill.push({ point.x - 1, point.y, point.x, point.y });
@@ -3786,7 +4133,7 @@ run_stage(struct gm_tracking_impl *tracking,
 
     // Note: we use += here because a stage may be used multiple times
     // during tracking and we reset the per-stage durations when we
-    // start gm_context_track_skeleton()
+    // start context_track_skeleton()
     stage_data.duration_ns += duration;
 
     stage.total_time_ns += duration;
@@ -3821,8 +4168,8 @@ pipeline_scratch_state_clear(struct pipeline_scratch_state *state)
 }
 
 static bool
-gm_context_track_skeleton(struct gm_context *ctx,
-                          struct gm_tracking_impl *tracking)
+context_track_skeleton(struct gm_context *ctx,
+                       struct gm_tracking_impl *tracking)
 {
     uint64_t start, end, duration;
     enum tracking_stage debug_stage_id =
@@ -4212,6 +4559,314 @@ gm_context_track_skeleton(struct gm_context *ctx,
     return true;
 }
 
+static void
+context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
+{
+    if (!tracking->face_detect_buf) {
+        LOGI("NULL tracking->face_detect_buf");
+        return;
+    }
+
+    uint64_t start, end, duration_ns;
+    std::vector<dlib::rectangle> face_rects(0);
+    glimpse::wrapped_image<unsigned char> grey_img;
+    dlib::rectangle buf_rect(tracking->face_detect_buf_width, tracking->face_detect_buf_height);
+
+    LOGI("New camera frame to process");
+
+    if (ctx->last_faces.size()) {
+
+        LOGI("Searching %d region[s] for faces", (int)ctx->last_faces.size());
+
+        for (dlib::rectangle &rect : ctx->last_faces) {
+
+            rect = dlib::grow_rect(static_cast<dlib::rectangle&>(rect), (long)((float)rect.width() * 0.4f));
+            rect.intersect(buf_rect);
+
+            grey_img.wrap(rect.width(),
+                          rect.height(),
+                          tracking->face_detect_buf_width, //stride
+                          static_cast<unsigned char *>(tracking->face_detect_buf +
+                                                       rect.top() * tracking->face_detect_buf_width +
+                                                       rect.left()));
+            LOGI("Starting constrained face detection with %dx%d sub image",
+                 (int)rect.width(), (int)rect.height());
+            start = get_time();
+            std::vector<dlib::rectangle> dets = ctx->detector(grey_img);
+            end = get_time();
+            duration_ns = end - start;
+            LOGI("Number of detected faces = %d, %.3f%s",
+                 (int)dets.size(),
+                 get_duration_ns_print_scale(duration_ns),
+                 get_duration_ns_print_scale_suffix(duration_ns));
+
+            if (dets.size() != 1) {
+                LOGE("Constrained search was expected to find exactly one face - fallback");
+                face_rects.resize(0);
+                break;
+            }
+
+            dlib::rectangle mapped_rect =
+                dlib::translate_rect(dets[0], rect.left(), rect.top());
+
+            face_rects.push_back(mapped_rect);
+        }
+    }
+
+    /* Even if not used for full frame face detection, we still want
+     * an image for the full frame for the landmark detection...
+     */
+    grey_img.wrap(tracking->face_detect_buf_width,
+                  tracking->face_detect_buf_height,
+                  tracking->face_detect_buf_width, //stride
+                  static_cast<unsigned char *>(tracking->face_detect_buf));
+
+    /* Fall back to checking full frame if the number of detected
+     * faces has changed
+     */
+    if (face_rects.size() != ctx->last_faces.size() ||
+        face_rects.size() == 0)
+    {
+        LOGI("Starting face detection with %dx%d image",
+             (int)tracking->face_detect_buf_width, (int)tracking->face_detect_buf_height);
+        start = get_time();
+        face_rects = ctx->detector(grey_img);
+        end = get_time();
+        duration_ns = end - start;
+        LOGI("Number of detected faces = %d, %.3f%s",
+             (int)face_rects.size(),
+             get_duration_ns_print_scale(duration_ns),
+             get_duration_ns_print_scale_suffix(duration_ns));
+    }
+
+    ctx->last_faces = face_rects;
+
+
+    std::vector<struct pt> landmarks(0);
+
+    for (unsigned i = 0; i < ctx->last_faces.size(); i++) {
+        struct pt point;
+        dlib::rectangle rect;
+
+        start = get_time();
+        dlib::full_object_detection features = ctx->face_feature_detector(grey_img, ctx->last_faces[i]);
+        end = get_time();
+        duration_ns = end - start;
+
+        LOGI("Detected %d face %d features in %.3f%s",
+             (int)features.num_parts(),
+             (int)i,
+             get_duration_ns_print_scale(duration_ns),
+             get_duration_ns_print_scale_suffix(duration_ns));
+
+        /*
+         * Bounding box
+         */
+        point.x = features.get_rect().left();
+        point.y = features.get_rect().bottom();
+        landmarks.push_back(point);
+        point.x = features.get_rect().left();
+        point.y = features.get_rect().top();
+        landmarks.push_back(point);
+        landmarks.push_back(point);
+        point.x = features.get_rect().right();
+        point.y = features.get_rect().top();
+        landmarks.push_back(point);
+        landmarks.push_back(point);
+        point.x = features.get_rect().right();
+        point.y = features.get_rect().bottom();
+        landmarks.push_back(point);
+        landmarks.push_back(point);
+        point.x = features.get_rect().left();
+        point.y = features.get_rect().bottom();
+        landmarks.push_back(point);
+
+        /*
+         * Chin line
+         */
+
+        point.x = features.part(0).x();
+        point.y = features.part(0).y();
+        landmarks.push_back(point);
+
+        for (int j = 1; j < 16; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(16).x();
+        point.y = features.part(16).y();
+        landmarks.push_back(point);
+
+        /*
+         * Left eyebrow
+         */
+
+        point.x = features.part(17).x();
+        point.y = features.part(17).y();
+        landmarks.push_back(point);
+
+        for (int j = 18; j < 21; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(21).x();
+        point.y = features.part(21).y();
+        landmarks.push_back(point);
+
+        /*
+         * Right eyebrow
+         */
+
+        point.x = features.part(22).x();
+        point.y = features.part(22).y();
+        landmarks.push_back(point);
+
+        for (int j = 23; j < 26; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(26).x();
+        point.y = features.part(26).y();
+        landmarks.push_back(point);
+
+        /*
+         * Nose
+         */
+
+        point.x = features.part(27).x();
+        point.y = features.part(27).y();
+        landmarks.push_back(point);
+
+        for (int j = 28; j < 35; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(35).x();
+        point.y = features.part(35).y();
+        landmarks.push_back(point);
+
+        /*
+         * Left eye
+         */
+
+        point.x = features.part(36).x();
+        point.y = features.part(36).y();
+        landmarks.push_back(point);
+
+        for (int j = 37; j < 42; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(36).x();
+        point.y = features.part(36).y();
+        landmarks.push_back(point);
+
+        /*
+         * Right eye
+         */
+
+        point.x = features.part(42).x();
+        point.y = features.part(42).y();
+        landmarks.push_back(point);
+
+        for (int j = 43; j < 48; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(42).x();
+        point.y = features.part(42).y();
+        landmarks.push_back(point);
+
+        /*
+         * Mouth (outer)
+         */
+
+        point.x = features.part(48).x();
+        point.y = features.part(48).y();
+        landmarks.push_back(point);
+
+        for (int j = 49; j < 60; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(48).x();
+        point.y = features.part(48).y();
+        landmarks.push_back(point);
+
+        /*
+         * Mouth (inner)
+         */
+
+        point.x = features.part(60).x();
+        point.y = features.part(60).y();
+        landmarks.push_back(point);
+
+        for (int j = 61; j < 68; j++) {
+            point.x = features.part(j).x();
+            point.y = features.part(j).y();
+            landmarks.push_back(point);
+            landmarks.push_back(point);
+        }
+
+        point.x = features.part(60).x();
+        point.y = features.part(60).y();
+        landmarks.push_back(point);
+
+    }
+
+    /* Convert into normalized device coordinates */
+    for (unsigned i = 0; i < landmarks.size(); i++) {
+        landmarks[i].x = (landmarks[i].x / (float)tracking->face_detect_buf_width) * 2.f - 1.f;
+        landmarks[i].y = (landmarks[i].y / (float)tracking->face_detect_buf_height) * -2.f + 1.f;
+    }
+
+    /* XXX: This mutex is reused for the grey debug buffer and the
+     * ctx->landmarks array
+     */
+    pthread_mutex_lock(&ctx->debug_viz_mutex);
+    ctx->landmarks.swap(landmarks);
+    pthread_mutex_unlock(&ctx->debug_viz_mutex);
+
+#ifdef VISUALIZE_DETECT_FRAME
+    {
+        uint64_t start = get_time();
+        pthread_mutex_lock(&ctx->debug_viz_mutex);
+        /* Save the frame to display for debug too... */
+        grey_debug_buffer_.resize(tracking->face_detect_buf_width * tracking->face_detect_buf_height);
+        memcpy(&grey_debug_buffer_[0], tracking->face_detect_buf, grey_debug_buffer_.size());
+        grey_debug_width_ = tracking->face_detect_buf_width;
+        grey_debug_height_ = tracking->face_detect_buf_height;
+        pthread_mutex_unlock(&ctx->debug_viz_mutex);
+        uint64_t end = get_time();
+        uint64_t duration_ns = end - start;
+        LOGE("Copied face detect buffer for debug overlay in %.3f%s",
+             get_duration_ns_print_scale(duration_ns),
+             get_duration_ns_print_scale_suffix(duration_ns));
+    }
+#endif
+}
+
 static struct gm_event *
 event_alloc(enum gm_event_type type)
 {
@@ -4556,34 +5211,6 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
     }
 }
 
-static struct gm_tracking_impl *
-mem_pool_acquire_tracking(struct gm_mem_pool *pool)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)
-        mem_pool_acquire_resource(pool);
-    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
-              "Tracking object in pool with non-zero ref-count");
-
-    atomic_store(&tracking->base.ref, 1);
-
-    tracking->success = false;
-
-    return tracking;
-}
-
-static struct gm_prediction_impl *
-mem_pool_acquire_prediction(struct gm_mem_pool *pool)
-{
-    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)
-        mem_pool_acquire_resource(pool);
-    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
-              "Prediction object in pool with non-zero ref-count");
-
-    atomic_store(&prediction->base.ref, 1);
-
-    return prediction;
-}
-
 void
 gm_context_rotate_intrinsics(struct gm_context *ctx,
                              const struct gm_intrinsics *intrinsics_in,
@@ -4770,7 +5397,7 @@ detector_thread_cb(void *data)
 
 #endif
 
-        gm_context_detect_faces(ctx, tracking);
+        context_detect_faces(ctx, tracking);
 #endif
         end = get_time();
         duration = end - start;
@@ -4779,7 +5406,7 @@ detector_thread_cb(void *data)
                  get_duration_ns_print_scale_suffix(duration));
 
         start = get_time();
-        bool tracked = gm_context_track_skeleton(ctx, tracking);
+        bool tracked = context_track_skeleton(ctx, tracking);
 
         end = get_time();
         duration = end - start;
@@ -4850,198 +5477,6 @@ detector_thread_cb(void *data)
     }
 
     return NULL;
-}
-
-static void
-tracking_state_free(struct gm_mem_pool *pool,
-                    void *self,
-                    void *user_data)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
-
-    free(tracking->depth);
-
-    free(tracking->face_detect_buf);
-
-    if (tracking->frame) {
-        gm_frame_unref(tracking->frame);
-    }
-
-    if (tracking->joints) {
-        free_joints(tracking->joints);
-    }
-
-    delete tracking;
-}
-
-static void
-tracking_state_recycle(struct gm_tracking *self)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
-    struct gm_mem_pool *pool = tracking->pool;
-
-    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
-              "Unbalanced tracking unref");
-
-    gm_frame_unref(tracking->frame);
-    tracking->frame = NULL;
-
-    if (tracking->joints) {
-        free_joints(tracking->joints);
-        tracking->joints = NULL;
-    }
-
-    tracking->trail.clear();
-
-    mem_pool_recycle_resource(pool, tracking);
-}
-
-static void
-tracking_add_breadcrumb(struct gm_tracking *self, const char *tag)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
-    struct trail_crumb crumb;
-
-    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) >= 0,
-              "Use of frame after free");
-
-    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
-
-    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
-                                  1, // skip top stack frame
-                                  10);
-
-    pthread_mutex_lock(&tracking->trail_lock);
-    tracking->trail.push_back(crumb);
-    pthread_mutex_unlock(&tracking->trail_lock);
-}
-
-static void *
-tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
-{
-    struct gm_context *ctx = (struct gm_context *)user_data;
-    struct gm_tracking_impl *tracking = new gm_tracking_impl();
-
-    atomic_store(&tracking->base.ref, 0);
-    tracking->base.api = &tracking->vtable;
-
-    tracking->vtable.free = tracking_state_recycle;
-    tracking->vtable.add_breadcrumb = tracking_add_breadcrumb;
-
-    tracking->pool = pool;
-    tracking->ctx = ctx;
-
-    tracking->joints = NULL;
-
-    tracking->skeleton.ctx = ctx;
-    tracking->skeleton.joints.resize(ctx->n_joints);
-    tracking->skeleton.bones.clear();
-
-    gm_assert(ctx->log, ctx->max_depth_pixels,
-              "Undefined maximum number of depth pixels");
-
-    tracking->depth = (float *)
-      xcalloc(ctx->max_depth_pixels, sizeof(float));
-
-    tracking->label_probs.resize(ctx->max_depth_pixels);
-
-    gm_assert(ctx->log, ctx->max_video_pixels,
-              "Undefined maximum number of video pixels");
-
-    tracking->stage_data.resize(N_TRACKING_STAGES, {});
-
-#if 0
-    tracking->face_detect_buf =
-        (uint8_t *)xcalloc(video_width * video_height, 1);
-
-#ifdef DOWNSAMPLE_1_2
-#ifdef DOWNSAMPLE_1_4
-    tracking->face_detect_buf_width = video_width / 4;
-    tracking->face_detect_buf_height = video_height / 4;
-#else
-    tracking->face_detect_buf_width = video_width / 2;
-    tracking->face_detect_buf_height = video_height / 2;
-#endif
-#else
-    tracking->face_detect_buf_width = video_width;
-    tracking->face_detect_buf_height = video_height;
-#endif
-#endif
-
-    return tracking;
-}
-
-static void
-prediction_free(struct gm_mem_pool *pool,
-                void *self,
-                void *user_data)
-{
-    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
-
-    gm_assert(prediction->ctx->log, prediction->n_tracking == 0,
-              "Freeing prediction that has tracking references");
-
-    delete prediction;
-}
-
-static void
-prediction_recycle(struct gm_prediction *self)
-{
-    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
-    struct gm_mem_pool *pool = prediction->pool;
-
-    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
-              "Unbalanced prediction unref");
-
-    for (int i = 0; i < prediction->n_tracking; ++i) {
-        gm_tracking_unref((struct gm_tracking *)
-                          prediction->tracking_history[i]);
-    }
-    prediction->n_tracking = 0;
-
-    prediction->trail.clear();
-
-    mem_pool_recycle_resource(pool, prediction);
-}
-
-static void
-prediction_add_breadcrumb(struct gm_prediction *self, const char *tag)
-{
-    struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
-    struct trail_crumb crumb;
-
-    gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) >= 0,
-              "Use of frame after free");
-
-    snprintf(crumb.tag, sizeof(crumb.tag), "%s", tag);
-
-    crumb.n_frames = gm_backtrace(crumb.backtrace_frame_pointers,
-                                  1, // skip top stack frame
-                                  10);
-
-    pthread_mutex_lock(&prediction->trail_lock);
-    prediction->trail.push_back(crumb);
-    pthread_mutex_unlock(&prediction->trail_lock);
-}
-
-static void *
-prediction_alloc(struct gm_mem_pool *pool, void *user_data)
-{
-    struct gm_context *ctx = (struct gm_context *)user_data;
-    struct gm_prediction_impl *prediction = new gm_prediction_impl();
-
-    atomic_store(&prediction->base.ref, 0);
-    prediction->base.api = &prediction->vtable;
-
-    prediction->vtable.free = prediction_recycle;
-    prediction->vtable.add_breadcrumb = prediction_add_breadcrumb;
-
-    prediction->pool = pool;
-
-    prediction->ctx = ctx;
-    prediction->n_tracking = 0;
-
-    return (void *)prediction;
 }
 
 static void
@@ -5890,14 +6325,14 @@ gm_context_new(struct gm_logger *logger, char **err)
                                {
                                    "video",
                                    "Video frame acquired from camera",
-                                   gm_tracking_create_rgb_video,
+                                   tracking_create_rgb_video,
                                });
 
         stage.images.push_back((struct image_generator)
                                {
                                    "depth",
                                    "Depth frame acquired from camera",
-                                   gm_tracking_create_rgb_depth,
+                                   tracking_create_rgb_depth,
                                });
 
         ctx->apply_depth_distortion = false;
@@ -6125,7 +6560,7 @@ gm_context_new(struct gm_logger *logger, char **err)
                                {
                                    "codebook_classifications",
                                    "Codebook classifications from motion analysis",
-                                   gm_tracking_create_rgb_depth_classification,
+                                   tracking_create_rgb_depth_classification,
                                });
 
         ctx->seg_tb = 0.05f;
@@ -6232,7 +6667,7 @@ gm_context_new(struct gm_logger *logger, char **err)
                                {
                                    "candidate_cluster",
                                    "All candidate clusters found, before selection",
-                                   gm_tracking_create_rgb_candidate_clusters,
+                                   tracking_create_rgb_candidate_clusters,
                                });
 
         ctx->cluster_tolerance = 0.10f;
@@ -6367,7 +6802,7 @@ gm_context_new(struct gm_logger *logger, char **err)
                                {
                                    "labels",
                                    "Inferred labels",
-                                   gm_tracking_create_rgb_label_map,
+                                   tracking_create_rgb_label_map,
                                });
 
         ctx->inf_res = 2;
@@ -6741,752 +7176,6 @@ gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id)
     return ctx->joint_semantics[joint_id];
 }
 
-const gm_intrinsics *
-gm_tracking_get_video_camera_intrinsics(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return &tracking->video_camera_intrinsics;
-}
-
-const gm_intrinsics *
-gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return &tracking->depth_camera_intrinsics;
-}
-
-bool
-gm_tracking_has_skeleton(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->success;
-}
-
-const struct gm_skeleton *
-gm_tracking_get_skeleton(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->success ? &tracking->skeleton_corrected : NULL;
-}
-
-const struct gm_skeleton *
-gm_tracking_get_raw_skeleton(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->success ? &tracking->skeleton : NULL;
-}
-
-bool
-gm_tracking_create_rgb_label_map(struct gm_tracking *_tracking,
-                                 int *width_out, int *height_out, uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    uint8_t n_labels = ctx->n_labels;
-
-    int width = (int)tracking->training_camera_intrinsics.width;
-    int height = (int)tracking->training_camera_intrinsics.height;
-
-    if (tracking->label_probs.size() != width * height * n_labels)
-        return false;
-
-    *width_out = width;
-    *height_out = height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc(width * height * 3);
-    }
-
-    gm_assert(ctx->log, ctx->debug_label < n_labels,
-              "Can't create RGB map of invalid label %u",
-              ctx->debug_label);
-
-    foreach_xy_off(width, height) {
-        float *label_probs = &tracking->label_probs[off * n_labels];
-
-        uint8_t rgb[3];
-        label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
-
-        (*output)[off * 3] = rgb[0];
-        (*output)[off * 3 + 1] = rgb[1];
-        (*output)[off * 3 + 2] = rgb[2];
-    }
-
-    return true;
-}
-
-bool
-gm_tracking_create_rgb_depth(struct gm_tracking *_tracking,
-                             int *width, int *height, uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    *width = (int)tracking->depth_camera_intrinsics.width;
-    *height = (int)tracking->depth_camera_intrinsics.height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        float depth = tracking->depth[off];
-#if 1
-        struct color rgb = stops_color_from_val(ctx->depth_color_stops,
-                                                ctx->n_depth_color_stops,
-                                                ctx->depth_color_stops_range,
-                                                depth);
-        (*output)[off * 3] = rgb.r;
-        (*output)[off * 3 + 1] = rgb.g;
-        (*output)[off * 3 + 2] = rgb.b;
-#else
-        depth = std::max(ctx->min_depth, std::min(ctx->max_depth, depth));
-        uint8_t shade = (uint8_t)
-            ((depth - ctx->min_depth) /
-             (ctx->max_depth - ctx->min_depth) * 255.f);
-        (*output)[off * 3] = shade;
-        (*output)[off * 3 + 1] = shade;
-        (*output)[off * 3 + 2] = shade;
-#endif
-    }
-
-    return true;
-}
-
-bool
-gm_tracking_create_rgb_video(struct gm_tracking *_tracking,
-                             int *width, int *height, uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-    struct gm_frame *frame = tracking->frame;
-
-    *width = (int)frame->video_intrinsics.width;
-    *height = (int)frame->video_intrinsics.height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    int rot_width = tracking->video_camera_intrinsics.width;
-    enum gm_format format = frame->video_format;
-    enum gm_rotation rotation = frame->camera_rotation;
-    uint8_t *video = (uint8_t *)frame->video->data;
-
-    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
-    // us easily combine our rotation with our copy...
-    //
-    // XXX: it could be worth reading multiple scanlines at a time so we could
-    // write out cache lines at a time instead of only 4 bytes (for rotated
-    // images).
-    //
-    switch(format) {
-    case GM_FORMAT_RGB_U8:
-        foreach_xy_off(*width, *height) {
-            with_rotated_rx_ry_roff(x, y, *width, *height,
-                                    rotation, rot_width,
-                                    {
-                                        (*output)[roff*3] = video[off*3];
-                                        (*output)[roff*3+1] = video[off*3+1];
-                                        (*output)[roff*3+2] = video[off*3+2];
-                                    });
-        }
-        break;
-    case GM_FORMAT_BGR_U8:
-        foreach_xy_off(*width, *height) {
-            with_rotated_rx_ry_roff(x, y, *width, *height,
-                                    rotation, rot_width,
-                                    {
-                                        (*output)[roff*3] = video[off*3+2];
-                                        (*output)[roff*3+1] = video[off*3+1];
-                                        (*output)[roff*3+2] = video[off*3];
-                                    });
-        }
-        break;
-    case GM_FORMAT_RGBX_U8:
-    case GM_FORMAT_RGBA_U8:
-        foreach_xy_off(*width, *height) {
-            with_rotated_rx_ry_roff(x, y, *width, *height,
-                                    rotation, rot_width,
-                                    {
-                                        (*output)[roff*3] = video[off*4];
-                                        (*output)[roff*3+1] = video[off*4+1];
-                                        (*output)[roff*3+2] = video[off*4+2];
-                                    });
-        }
-        break;
-    case GM_FORMAT_BGRX_U8:
-    case GM_FORMAT_BGRA_U8:
-        foreach_xy_off(*width, *height) {
-            with_rotated_rx_ry_roff(x, y, *width, *height,
-                                    rotation, rot_width,
-                                    {
-                                        (*output)[roff*3] = video[off*4+2];
-                                        (*output)[roff*3+1] = video[off*4+1];
-                                        (*output)[roff*3+2] = video[off*4];
-                                    });
-        }
-        break;
-    case GM_FORMAT_LUMINANCE_U8:
-        foreach_xy_off(*width, *height) {
-            with_rotated_rx_ry_roff(x, y, *width, *height,
-                                    rotation, rot_width,
-                                    {
-                                        uint8_t lum = video[off];
-                                        (*output)[roff*3] = lum;
-                                        (*output)[roff*3+1] = lum;
-                                        (*output)[roff*3+2] = lum;
-                                    });
-        }
-        break;
-    case GM_FORMAT_UNKNOWN:
-    case GM_FORMAT_Z_U16_MM:
-    case GM_FORMAT_Z_F32_M:
-    case GM_FORMAT_Z_F16_M:
-    case GM_FORMAT_POINTS_XYZC_F32_M:
-        gm_assert(ctx->log, 0, "Unexpected format for video buffer");
-        return false;
-    }
-
-    // Output is rotated, so make sure output width/height are correct
-    if (rotation == GM_ROTATION_90 || rotation == GM_ROTATION_270) {
-        std::swap(*width, *height);
-    }
-
-    return true;
-}
-
-bool
-gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
-                                          int *width, int *height,
-                                          uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
-
-    if (!tracking->cluster_labels) {
-        return false;
-    }
-
-    *width = (int)tracking->cluster_labels->width;
-    *height = (int)tracking->cluster_labels->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        int label = tracking->cluster_labels->points[off].label;
-        png_color *color =
-            &default_palette[label % ARRAY_LEN(default_palette)];
-        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
-        (*output)[off * 3] = (uint8_t)(color->red * shade);
-        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
-        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
-    }
-
-    return true;
-}
-
-bool
-gm_tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
-                                            int *width, int *height,
-                                            uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    if (!tracking->depth_class) {
-        return false;
-    }
-
-    *width = (int)tracking->depth_class->width;
-    *height = (int)tracking->depth_class->height;
-
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
-
-    foreach_xy_off(*width, *height) {
-        depth_classification_to_rgb((enum seg_class)tracking->depth_class->points[off].label,
-                                    (*output) + off * 3);
-    }
-
-    return true;
-}
-
-const struct gm_point_rgba *
-gm_tracking_get_debug_point_cloud(struct gm_tracking *_tracking,
-                                  int *n_points,
-                                  struct gm_intrinsics *debug_cloud_intrinsics)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    *n_points = tracking->debug_cloud.size();
-    *debug_cloud_intrinsics = tracking->debug_cloud_intrinsics;
-    return (struct gm_point_rgba *)tracking->debug_cloud.data();
-}
-
-const struct gm_point_rgba *
-gm_tracking_get_debug_lines(struct gm_tracking *_tracking,
-                            int *n_lines)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    gm_assert(tracking->ctx->log,
-              tracking->debug_lines.size() % 2 == 0,
-              "Odd number of points in debug_lines array");
-    *n_lines = tracking->debug_lines.size() / 2;
-    return tracking->debug_lines.data();
-}
-
-uint64_t
-gm_tracking_get_duration(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    return tracking->duration_ns;
-}
-
-uint64_t
-gm_tracking_get_stage_duration(struct gm_tracking *_tracking,
-                               int stage_index)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
-              "Out of range stage index");
-
-    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
-
-    return stage_data.duration_ns;
-}
-
-#if 0
-const struct gm_point_rgba *
-gm_tracking_get_stage_debug_point_cloud(struct gm_tracking *_tracking,
-                                        int stage_index,
-                                        int *n_points)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
-              "Out of range stage index");
-
-    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
-
-    return stage_data.debug_point_cloud.data();
-}
-
-const struct gm_point_rgba *
-gm_tracking_get_stage_debug_lines(struct gm_tracking *_tracking,
-                                  int stage_index,
-                                  int *n_lines)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
-              "Out of range stage index");
-
-    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
-
-    return stage_data.debug_lines.data();
-}
-#endif
-
-bool
-gm_tracking_create_stage_rgb_image(struct gm_tracking *_tracking,
-                                   int stage_index,
-                                   int image_index,
-                                   int *width,
-                                   int *height,
-                                   uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
-              "Out of range stage index");
-
-    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
-
-    gm_assert(ctx->log, image_index >=0 && image_index < (int)stage.images.size(),
-              "Out of range stage %s image index (%d)", stage.name, image_index);
-
-    if (stage.images[image_index].create_rgb_image)
-        return stage.images[image_index].create_rgb_image(_tracking,
-                                                          width, height,
-                                                          output);
-    else
-        return false;
-}
-
-const float *
-gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
-                                    int *width,
-                                    int *height)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    *width = tracking->training_camera_intrinsics.width;
-    *height = tracking->training_camera_intrinsics.height;
-
-    return tracking->label_probs.data();
-}
-
-uint64_t
-gm_tracking_get_timestamp(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    return tracking->frame->timestamp;
-}
-
-bool
-gm_tracking_was_successful(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    return tracking->success;
-}
-
-struct gm_skeleton *
-gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints)
-{
-    struct gm_skeleton *skeleton = new gm_skeleton();
-
-    skeleton->ctx = ctx;
-
-    skeleton->joints.resize(ctx->n_joints);
-    for (int j = 0; j < ctx->n_joints; ++j) {
-        skeleton->joints[j] = joints[j];
-    }
-
-    build_bones(ctx, *skeleton);
-
-    return skeleton;
-}
-
-struct gm_skeleton *
-gm_skeleton_new_from_json(struct gm_context *ctx,
-                          const char *asset_name)
-{
-    char *catch_err = NULL;
-    struct gm_asset *json_asset = gm_asset_open(ctx->log,
-                                                asset_name,
-                                                GM_ASSET_MODE_BUFFER,
-                                                &catch_err);
-    if (!json_asset) {
-        gm_error(ctx->log,
-                 "Failed to open skeleton json asset '%s': %s",
-                 asset_name, catch_err);
-        free(catch_err);
-        return NULL;
-    }
-
-    const char *buffer = (const char *)gm_asset_get_buffer(json_asset);
-    JSON_Value *js;
-    if (!buffer || !(js = json_parse_string(buffer))) {
-        gm_error(ctx->log,
-                 "Failed to parse JSON asset '%s'", asset_name);
-        gm_asset_close(json_asset);
-        return NULL;
-    }
-
-    JSON_Array *bones = json_object_get_array(json_object(js), "bones");
-    if (!bones) {
-        gm_error(ctx->log,
-                 "Failed to find bones in JSON asset '%s'", asset_name);
-        json_value_free(js);
-        gm_asset_close(json_asset);
-        return NULL;
-    }
-
-    struct gm_joint joints[ctx->n_joints];
-    memset(joints, 0, ctx->n_joints * sizeof(struct gm_joint));
-    for (int j = 0; j < ctx->n_joints; ++j) {
-        char *bone_name = strdup(ctx->joint_blender_names[j]);
-        char *bone_part = strchr(bone_name, (int)'.');
-        if (bone_part) {
-            bone_part[0] = '\0';
-            ++bone_part;
-
-            bool found = false;
-            for (size_t b = 0; b < json_array_get_count(bones); ++b) {
-                JSON_Object *bone_obj = json_array_get_object(bones, b);
-                if (strcmp(json_object_get_string(bone_obj, "name"),
-                           bone_name) == 0) {
-                    if (json_object_has_value(bone_obj, bone_part)) {
-                        JSON_Array *joint_array =
-                            json_object_get_array(bone_obj, bone_part);
-                        joints[j].x = (float)
-                            json_array_get_number(joint_array, 0);
-                        joints[j].y = (float)
-                            json_array_get_number(joint_array, 1);
-                        joints[j].z = (float)
-                            json_array_get_number(joint_array, 2);
-                        joints[j].valid = true;
-                        found = true;
-                        break;
-                    }
-                }
-            }
-
-            if (!found) {
-                gm_warn(ctx->log, "Joint '%s' not found in JSON asset '%s'",
-                        bone_name, asset_name);
-            }
-        } else {
-            gm_warn(ctx->log, "Can't derive bone name from joint name '%s'",
-                    bone_name);
-        }
-        free(bone_name);
-    }
-
-    json_value_free(js);
-    gm_asset_close(json_asset);
-
-    return gm_skeleton_new(ctx, joints);
-}
-
-void
-displace_joints(const struct gm_context *ctx,
-                struct gm_skeleton *skeleton,
-                struct gm_bone &bone,
-                float *displacement)
-{
-    skeleton->joints[bone.tail].x -= displacement[0];
-    skeleton->joints[bone.tail].y -= displacement[1];
-    skeleton->joints[bone.tail].z -= displacement[2];
-
-    for (size_t b = 0; b < skeleton->bones.size(); ++b) {
-        struct gm_bone &candidate_bone = skeleton->bones[b];
-        if (candidate_bone.head == bone.tail) {
-            displace_joints(ctx, skeleton, candidate_bone, displacement);
-        }
-    }
-}
-
-struct gm_skeleton *
-gm_skeleton_resize(struct gm_context *ctx,
-                   const struct gm_skeleton *skeleton,
-                   const struct gm_skeleton *ref_skeleton,
-                   int parent_joint)
-{
-    if (skeleton->bones.size() != ref_skeleton->bones.size()) {
-        gm_error(ctx->log,
-                 "Mismatching skeletons passed to gm_skeleton_resize(): skel n_joints=%d, n_bones=%d, ref n_joints=%d, n_bones=%d",
-                 (int)skeleton->joints.size(),
-                 (int)skeleton->bones.size(),
-                 (int)ref_skeleton->joints.size(),
-                 (int)ref_skeleton->bones.size());
-        return NULL;
-    }
-
-    struct gm_skeleton *resized = new gm_skeleton();
-
-    resized->ctx = ctx;
-    resized->joints = skeleton->joints;
-    resized->bones = skeleton->bones;
-
-    // Resize the bones then recalculate the joint positions based on the bones
-    std::queue<size_t> leftover_bones;
-
-    for (size_t b = 0; b < resized->bones.size(); ++b) {
-        resized->bones[b].length = ref_skeleton->bones[b].length;
-        if (resized->bones[b].head == parent_joint) {
-            leftover_bones.push(b);
-        }
-    }
-
-    while (!leftover_bones.empty()) {
-        size_t b = leftover_bones.front();
-        leftover_bones.pop();
-        struct gm_bone &bone = resized->bones[b];
-
-        // Recalculate tail position
-        float length_mult = ref_skeleton->bones[b].length /
-            skeleton->bones[b].length;
-        float displacement[3];
-        displacement[0] =
-            resized->joints[bone.tail].x -
-            (resized->joints[bone.head].x +
-             ((skeleton->joints[bone.tail].x - skeleton->joints[bone.head].x) *
-              length_mult));
-        displacement[1] =
-            resized->joints[bone.tail].y -
-            (resized->joints[bone.head].y +
-             ((skeleton->joints[bone.tail].y - skeleton->joints[bone.head].y) *
-              length_mult));
-        displacement[2] =
-            resized->joints[bone.tail].z -
-            (resized->joints[bone.head].z +
-             ((skeleton->joints[bone.tail].z - skeleton->joints[bone.head].z) *
-              length_mult));
-
-        // Shift all the connected bones' tail joints
-        displace_joints(ctx, resized, bone, displacement);
-
-        // Place the next bones onto the list
-        for (size_t b = 0; b < resized->bones.size(); ++b) {
-            if (resized->bones[b].head == bone.tail) {
-                leftover_bones.push(b);
-            }
-        }
-    }
-
-    return resized;
-}
-
-bool
-gm_skeleton_save(const struct gm_skeleton *skeleton,
-                 const char *filename)
-{
-    struct gm_context *ctx = skeleton->ctx;
-    JSON_Value *root = json_value_init_object();
-    JSON_Value *bones = json_value_init_array();
-    json_object_set_value(json_object(root), "bones", bones);
-
-    int n_joints = gm_skeleton_get_n_joints(skeleton);
-    for (int i = 0; i < n_joints ; i++) {
-        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-
-        // Don't save a skeleton if a joint wasn't able to be inferred
-        if (!joint) {
-            json_value_free(root);
-            return false;
-        }
-
-        char *bone_name = strdup(ctx->joint_blender_names[i]);
-        char *bone_part = strchr(bone_name, (int)'.');
-        if (bone_part) {
-            bone_part[0] = '\0';
-            ++bone_part;
-
-            // Find bone, or create one if this is the first encounter
-            JSON_Value *bone = NULL;
-            for (int c = 0;
-                 c < json_array_get_count(json_array(bones)); ++c)
-            {
-                JSON_Value *bone_obj =
-                    json_array_get_value(json_array(bones), c);
-                if (strcmp(json_object_get_string(json_object(bone_obj),
-                                                  "name"), bone_name) == 0)
-                {
-                    bone = bone_obj;
-                    break;
-                }
-            }
-            if (!bone) {
-                bone = json_value_init_object();
-                json_object_set_string(json_object(bone), "name", bone_name);
-                json_array_append_value(json_array(bones), bone);
-            }
-
-            JSON_Value *joint_array = json_value_init_array();
-            json_object_set_value(json_object(bone), bone_part, joint_array);
-            json_array_append_number(json_array(joint_array), joint->x);
-            json_array_append_number(json_array(joint_array), joint->y);
-            json_array_append_number(json_array(joint_array), joint->z);
-        }
-        free(bone_name);
-    }
-
-    json_serialize_to_file_pretty(root, filename);
-
-    json_value_free(root);
-
-    return true;
-}
-
-void
-gm_skeleton_free(struct gm_skeleton *skeleton)
-{
-    delete skeleton;
-}
-
-int
-gm_skeleton_get_n_joints(const struct gm_skeleton *skeleton)
-{
-    return (int)skeleton->joints.size();
-}
-
-int
-gm_skeleton_get_n_bones(const struct gm_skeleton *skeleton)
-{
-    return (int)skeleton->bones.size();
-}
-
-const struct gm_bone *
-gm_skeleton_get_bone(const struct gm_skeleton *skeleton, int bone)
-{
-    return &skeleton->bones[bone];
-}
-
-const struct gm_joint *
-gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint)
-{
-    /* For now a NULL name is what indicates that we failed to track
-     * this joint...
-     */
-    if (skeleton->joints[joint].valid)
-        return &skeleton->joints[joint];
-    else
-        return NULL;
-}
-
-float
-gm_skeleton_compare_angle(const struct gm_skeleton *skel_a,
-                          const struct gm_skeleton *skel_b,
-                          const struct gm_bone *bone)
-{
-    return bone_angle_diff(bone, skel_a, skel_b);
-}
-
-float
-gm_skeleton_angle_diff_cumulative(const struct gm_skeleton *skel_a,
-                                  const struct gm_skeleton *skel_b)
-{
-    float cumulative_angle = 0.f;
-    for (int b = 0; b < gm_skeleton_get_n_bones(skel_a); ++b) {
-        cumulative_angle +=
-            gm_skeleton_compare_angle(skel_a, skel_b,
-                                      gm_skeleton_get_bone(skel_a, b));
-    }
-
-    return cumulative_angle;
-}
-
-int
-gm_bone_get_head(const struct gm_bone *bone)
-{
-    return bone->head;
-}
-
-int
-gm_bone_get_tail(const struct gm_bone *bone)
-{
-    return bone->tail;
-}
-
-float
-gm_bone_get_length(const struct gm_bone *bone)
-{
-    return bone->length;
-}
-
-void
-gm_bone_get_angle(const struct gm_bone *bone, float *out_xyzw)
-{
-    if (out_xyzw) {
-        out_xyzw[0] = bone->angle.x;
-        out_xyzw[1] = bone->angle.y;
-        out_xyzw[2] = bone->angle.z;
-        out_xyzw[3] = bone->angle.w;
-    }
-}
-
 /* Note this may be called via any arbitrary thread
  */
 bool
@@ -7708,22 +7397,6 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
     }
 
     return &prediction->base;
-}
-
-uint64_t
-gm_prediction_get_timestamp(struct gm_prediction *_prediction)
-{
-    struct gm_prediction_impl *prediction =
-        (struct gm_prediction_impl *)_prediction;
-    return prediction->timestamp;
-}
-
-const struct gm_skeleton *
-gm_prediction_get_skeleton(struct gm_prediction *_prediction)
-{
-    struct gm_prediction_impl *prediction =
-        (struct gm_prediction_impl *)_prediction;
-    return &prediction->skeleton;
 }
 
 void
@@ -8223,15 +7896,344 @@ gm_context_disable(struct gm_context *ctx)
 {
 }
 
-void *
-gm_frame_get_video_buffer(struct gm_frame *frame)
+int
+gm_bone_get_head(const struct gm_bone *bone)
 {
-    return frame->video;
+    return bone->head;
 }
 
-enum gm_format
-gm_frame_get_video_format(struct gm_frame *frame)
+int
+gm_bone_get_tail(const struct gm_bone *bone)
 {
-    return frame->video_format;
+    return bone->tail;
 }
 
+float
+gm_bone_get_length(const struct gm_bone *bone)
+{
+    return bone->length;
+}
+
+void
+gm_bone_get_angle(const struct gm_bone *bone, float *out_xyzw)
+{
+    if (out_xyzw) {
+        out_xyzw[0] = bone->angle.x;
+        out_xyzw[1] = bone->angle.y;
+        out_xyzw[2] = bone->angle.z;
+        out_xyzw[3] = bone->angle.w;
+    }
+}
+
+struct gm_skeleton *
+gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints)
+{
+    struct gm_skeleton *skeleton = new gm_skeleton();
+
+    skeleton->ctx = ctx;
+
+    skeleton->joints.resize(ctx->n_joints);
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        skeleton->joints[j] = joints[j];
+    }
+
+    build_bones(ctx, *skeleton);
+
+    return skeleton;
+}
+
+struct gm_skeleton *
+gm_skeleton_new_from_json(struct gm_context *ctx,
+                          const char *asset_name)
+{
+    char *catch_err = NULL;
+    struct gm_asset *json_asset = gm_asset_open(ctx->log,
+                                                asset_name,
+                                                GM_ASSET_MODE_BUFFER,
+                                                &catch_err);
+    if (!json_asset) {
+        gm_error(ctx->log,
+                 "Failed to open skeleton json asset '%s': %s",
+                 asset_name, catch_err);
+        free(catch_err);
+        return NULL;
+    }
+
+    const char *buffer = (const char *)gm_asset_get_buffer(json_asset);
+    JSON_Value *js;
+    if (!buffer || !(js = json_parse_string(buffer))) {
+        gm_error(ctx->log,
+                 "Failed to parse JSON asset '%s'", asset_name);
+        gm_asset_close(json_asset);
+        return NULL;
+    }
+
+    JSON_Array *bones = json_object_get_array(json_object(js), "bones");
+    if (!bones) {
+        gm_error(ctx->log,
+                 "Failed to find bones in JSON asset '%s'", asset_name);
+        json_value_free(js);
+        gm_asset_close(json_asset);
+        return NULL;
+    }
+
+    struct gm_joint joints[ctx->n_joints];
+    memset(joints, 0, ctx->n_joints * sizeof(struct gm_joint));
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        char *bone_name = strdup(ctx->joint_blender_names[j]);
+        char *bone_part = strchr(bone_name, (int)'.');
+        if (bone_part) {
+            bone_part[0] = '\0';
+            ++bone_part;
+
+            bool found = false;
+            for (size_t b = 0; b < json_array_get_count(bones); ++b) {
+                JSON_Object *bone_obj = json_array_get_object(bones, b);
+                if (strcmp(json_object_get_string(bone_obj, "name"),
+                           bone_name) == 0) {
+                    if (json_object_has_value(bone_obj, bone_part)) {
+                        JSON_Array *joint_array =
+                            json_object_get_array(bone_obj, bone_part);
+                        joints[j].x = (float)
+                            json_array_get_number(joint_array, 0);
+                        joints[j].y = (float)
+                            json_array_get_number(joint_array, 1);
+                        joints[j].z = (float)
+                            json_array_get_number(joint_array, 2);
+                        joints[j].valid = true;
+                        found = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!found) {
+                gm_warn(ctx->log, "Joint '%s' not found in JSON asset '%s'",
+                        bone_name, asset_name);
+            }
+        } else {
+            gm_warn(ctx->log, "Can't derive bone name from joint name '%s'",
+                    bone_name);
+        }
+        free(bone_name);
+    }
+
+    json_value_free(js);
+    gm_asset_close(json_asset);
+
+    return gm_skeleton_new(ctx, joints);
+}
+
+void
+displace_joints(const struct gm_context *ctx,
+                struct gm_skeleton *skeleton,
+                struct gm_bone &bone,
+                float *displacement)
+{
+    skeleton->joints[bone.tail].x -= displacement[0];
+    skeleton->joints[bone.tail].y -= displacement[1];
+    skeleton->joints[bone.tail].z -= displacement[2];
+
+    for (size_t b = 0; b < skeleton->bones.size(); ++b) {
+        struct gm_bone &candidate_bone = skeleton->bones[b];
+        if (candidate_bone.head == bone.tail) {
+            displace_joints(ctx, skeleton, candidate_bone, displacement);
+        }
+    }
+}
+
+struct gm_skeleton *
+gm_skeleton_resize(struct gm_context *ctx,
+                   const struct gm_skeleton *skeleton,
+                   const struct gm_skeleton *ref_skeleton,
+                   int parent_joint)
+{
+    if (skeleton->bones.size() != ref_skeleton->bones.size()) {
+        gm_error(ctx->log,
+                 "Mismatching skeletons passed to gm_skeleton_resize(): skel n_joints=%d, n_bones=%d, ref n_joints=%d, n_bones=%d",
+                 (int)skeleton->joints.size(),
+                 (int)skeleton->bones.size(),
+                 (int)ref_skeleton->joints.size(),
+                 (int)ref_skeleton->bones.size());
+        return NULL;
+    }
+
+    struct gm_skeleton *resized = new gm_skeleton();
+
+    resized->ctx = ctx;
+    resized->joints = skeleton->joints;
+    resized->bones = skeleton->bones;
+
+    // Resize the bones then recalculate the joint positions based on the bones
+    std::queue<size_t> leftover_bones;
+
+    for (size_t b = 0; b < resized->bones.size(); ++b) {
+        resized->bones[b].length = ref_skeleton->bones[b].length;
+        if (resized->bones[b].head == parent_joint) {
+            leftover_bones.push(b);
+        }
+    }
+
+    while (!leftover_bones.empty()) {
+        size_t b = leftover_bones.front();
+        leftover_bones.pop();
+        struct gm_bone &bone = resized->bones[b];
+
+        // Recalculate tail position
+        float length_mult = ref_skeleton->bones[b].length /
+            skeleton->bones[b].length;
+        float displacement[3];
+        displacement[0] =
+            resized->joints[bone.tail].x -
+            (resized->joints[bone.head].x +
+             ((skeleton->joints[bone.tail].x - skeleton->joints[bone.head].x) *
+              length_mult));
+        displacement[1] =
+            resized->joints[bone.tail].y -
+            (resized->joints[bone.head].y +
+             ((skeleton->joints[bone.tail].y - skeleton->joints[bone.head].y) *
+              length_mult));
+        displacement[2] =
+            resized->joints[bone.tail].z -
+            (resized->joints[bone.head].z +
+             ((skeleton->joints[bone.tail].z - skeleton->joints[bone.head].z) *
+              length_mult));
+
+        // Shift all the connected bones' tail joints
+        displace_joints(ctx, resized, bone, displacement);
+
+        // Place the next bones onto the list
+        for (size_t b = 0; b < resized->bones.size(); ++b) {
+            if (resized->bones[b].head == bone.tail) {
+                leftover_bones.push(b);
+            }
+        }
+    }
+
+    return resized;
+}
+
+bool
+gm_skeleton_save(const struct gm_skeleton *skeleton,
+                 const char *filename)
+{
+    struct gm_context *ctx = skeleton->ctx;
+    JSON_Value *root = json_value_init_object();
+    JSON_Value *bones = json_value_init_array();
+    json_object_set_value(json_object(root), "bones", bones);
+
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
+    for (int i = 0; i < n_joints ; i++) {
+        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+
+        // Don't save a skeleton if a joint wasn't able to be inferred
+        if (!joint) {
+            json_value_free(root);
+            return false;
+        }
+
+        char *bone_name = strdup(ctx->joint_blender_names[i]);
+        char *bone_part = strchr(bone_name, (int)'.');
+        if (bone_part) {
+            bone_part[0] = '\0';
+            ++bone_part;
+
+            // Find bone, or create one if this is the first encounter
+            JSON_Value *bone = NULL;
+            for (int c = 0;
+                 c < json_array_get_count(json_array(bones)); ++c)
+            {
+                JSON_Value *bone_obj =
+                    json_array_get_value(json_array(bones), c);
+                if (strcmp(json_object_get_string(json_object(bone_obj),
+                                                  "name"), bone_name) == 0)
+                {
+                    bone = bone_obj;
+                    break;
+                }
+            }
+            if (!bone) {
+                bone = json_value_init_object();
+                json_object_set_string(json_object(bone), "name", bone_name);
+                json_array_append_value(json_array(bones), bone);
+            }
+
+            JSON_Value *joint_array = json_value_init_array();
+            json_object_set_value(json_object(bone), bone_part, joint_array);
+            json_array_append_number(json_array(joint_array), joint->x);
+            json_array_append_number(json_array(joint_array), joint->y);
+            json_array_append_number(json_array(joint_array), joint->z);
+        }
+        free(bone_name);
+    }
+
+    json_serialize_to_file_pretty(root, filename);
+
+    json_value_free(root);
+
+    return true;
+}
+
+void
+gm_skeleton_free(struct gm_skeleton *skeleton)
+{
+    delete skeleton;
+}
+
+int
+gm_skeleton_get_n_joints(const struct gm_skeleton *skeleton)
+{
+    return (int)skeleton->joints.size();
+}
+
+int
+gm_skeleton_get_n_bones(const struct gm_skeleton *skeleton)
+{
+    return (int)skeleton->bones.size();
+}
+
+const struct gm_bone *
+gm_skeleton_get_bone(const struct gm_skeleton *skeleton, int bone)
+{
+    return &skeleton->bones[bone];
+}
+
+const struct gm_bone *
+gm_skeleton_find_bone(const struct gm_skeleton *skeleton, int head, int tail)
+{
+    return find_bone(skeleton->bones, head, tail);
+}
+
+const struct gm_joint *
+gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint)
+{
+    /* For now a NULL name is what indicates that we failed to track
+     * this joint...
+     */
+    if (skeleton->joints[joint].valid)
+        return &skeleton->joints[joint];
+    else
+        return NULL;
+}
+
+float
+gm_skeleton_compare_angle(const struct gm_skeleton *skel_a,
+                          const struct gm_skeleton *skel_b,
+                          const struct gm_bone *bone)
+{
+    return bone_angle_diff(bone, skel_a, skel_b);
+}
+
+float
+gm_skeleton_angle_diff_cumulative(const struct gm_skeleton *skel_a,
+                                  const struct gm_skeleton *skel_b)
+{
+    float cumulative_angle = 0.f;
+    for (int b = 0; b < gm_skeleton_get_n_bones(skel_a); ++b) {
+        cumulative_angle +=
+            gm_skeleton_compare_angle(skel_a, skel_b,
+                                      gm_skeleton_get_bone(skel_a, b));
+    }
+
+    return cumulative_angle;
+}

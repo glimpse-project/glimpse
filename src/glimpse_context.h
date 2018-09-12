@@ -579,42 +579,6 @@ gm_tracking_get_timestamp(struct gm_tracking *tracking);
 bool
 gm_tracking_was_successful(struct gm_tracking *tracking);
 
-/* Creates an RGB visualisation of the label map. */
-bool
-gm_tracking_create_rgb_label_map(struct gm_tracking *tracking,
-                                 int *width,
-                                 int *height,
-                                 uint8_t **output);
-
-
-/* Creates an RGB visualisation of the depth buffer. */
-bool
-gm_tracking_create_rgb_depth(struct gm_tracking *tracking,
-                             int *width,
-                             int *height,
-                             uint8_t **output);
-
-/* Creates an RGB visualisation of the video buffer. */
-bool
-gm_tracking_create_rgb_video(struct gm_tracking *tracking,
-                             int *width,
-                             int *height,
-                             uint8_t **output);
-
-/* Creates an RGB visualisation of the depth pixel classification. */
-bool
-gm_tracking_create_rgb_depth_classification(struct gm_tracking *tracking,
-                                            int *width,
-                                            int *height,
-                                            uint8_t **output);
-
-/* Creates an RGB visualisation of the candidate person clusters. */
-bool
-gm_tracking_create_rgb_candidate_clusters(struct gm_tracking *tracking,
-                                          int *width,
-                                          int *height,
-                                          uint8_t **output);
-
 const struct gm_point_rgba *
 gm_tracking_get_pipeline_stage_data(struct gm_tracking *tracking,
                                     int *n_points);
