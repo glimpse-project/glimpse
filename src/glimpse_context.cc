@@ -443,7 +443,7 @@ struct gm_context
     pthread_mutex_t liveness_lock;
     /* A pre-requisite to destroying the context is to stop tracking, which
      * will stop  the tracking thread. It's possible to only stop tracking
-     * without destroying the context via gm_context_stop_tracking()
+     * without destroying the context via stop_tracking_thread()
      */
     bool stopping;
     bool destroying;
@@ -471,7 +471,7 @@ struct gm_context
     std::vector<std::vector<struct seg_codeword>> depth_seg;
     std::vector<struct seg_codeword *> depth_seg_bg;
 
-    pthread_t detect_thread;
+    pthread_t tracking_thread;
     dlib::frontal_face_detector detector;
 
     dlib::shape_predictor face_feature_detector;
@@ -5108,18 +5108,18 @@ gm_context_clear_tracking(struct gm_context *ctx)
 }
 
 static int
-gm_context_start_tracking(struct gm_context *ctx, char **err)
+start_tracking_thread(struct gm_context *ctx, char **err)
 {
     /* XXX: maybe make it an explicit, public api to start running detection
      */
-    int ret = pthread_create(&ctx->detect_thread,
+    int ret = pthread_create(&ctx->tracking_thread,
                              nullptr, /* default attributes */
                              detector_thread_cb,
                              ctx);
 
 #ifdef __linux__
     if (ret == 0) {
-        pthread_setname_np(ctx->detect_thread, "Glimpse Track");
+        pthread_setname_np(ctx->tracking_thread, "Glimpse Track");
     }
 #endif
 
@@ -5127,7 +5127,7 @@ gm_context_start_tracking(struct gm_context *ctx, char **err)
 }
 
 static void
-gm_context_stop_tracking(struct gm_context *ctx)
+stop_tracking_thread(struct gm_context *ctx)
 {
     gm_debug(ctx->log, "stopping context tracking");
 
@@ -5161,14 +5161,14 @@ gm_context_stop_tracking(struct gm_context *ctx)
     pthread_cond_signal(&ctx->scaled_frame_available_cond);
     pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 
-    if (ctx->detect_thread) {
+    if (ctx->tracking_thread) {
         void *tracking_retval = NULL;
-        int ret = pthread_join(ctx->detect_thread, &tracking_retval);
+        int ret = pthread_join(ctx->tracking_thread, &tracking_retval);
         if (ret < 0) {
             gm_error(ctx->log, "Failed waiting for tracking thread to complete: %s",
                      strerror(ret));
         } else {
-            ctx->detect_thread = 0;
+            ctx->tracking_thread = 0;
         }
 
         if (tracking_retval != 0) {
@@ -5198,7 +5198,7 @@ gm_context_destroy(struct gm_context *ctx)
      * callers responsibility to ensure that the render hook doesn't continue
      * to be called with a context pointer that's about to become invalid. I.e.
      * We're only concerned about render hooks that are already running when
-     * gm_context_stop_tracking() is called.
+     * stop_tracking_thread() is called.
      *
      * Any other thread-safe entry-points should take the liveness_lock and
      * assert ctx->destroying == false. We should expect that the caller has
@@ -5221,7 +5221,7 @@ gm_context_destroy(struct gm_context *ctx)
      */
     pthread_mutex_unlock(&ctx->liveness_lock);
 
-    gm_context_stop_tracking(ctx);
+    stop_tracking_thread(ctx);
     gm_context_clear_tracking(ctx);
 
     /* Free the prediction pool. The user must have made sure to unref any
@@ -5414,10 +5414,10 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     ctx->n_labels = ctx->decision_trees[0]->header.n_labels;
 
-    int ret = gm_context_start_tracking(ctx, err);
+    int ret = start_tracking_thread(ctx, err);
     if (ret != 0) {
         gm_throw(logger, err,
-                 "Failed to start face detector thread: %s", strerror(ret));
+                 "Failed to start tracking thread: %s", strerror(ret));
         gm_context_destroy(ctx);
     }
 
@@ -7524,7 +7524,7 @@ gm_context_notify_frame(struct gm_context *ctx,
 void
 gm_context_flush(struct gm_context *ctx, char **err)
 {
-    gm_context_stop_tracking(ctx);
+    stop_tracking_thread(ctx);
 
     gm_context_clear_tracking(ctx);
 
@@ -7538,10 +7538,10 @@ gm_context_flush(struct gm_context *ctx, char **err)
     ctx->stopping = false;
     gm_debug(ctx->log, "Glimpse context flushed, restarting tracking thread");
 
-    int ret = gm_context_start_tracking(ctx, NULL);
+    int ret = start_tracking_thread(ctx, NULL);
     if (ret != 0) {
         gm_throw(ctx->log, err,
-                 "Failed to start face detector thread: %s", strerror(ret));
+                 "Failed to start tracking thread: %s", strerror(ret));
     }
 }
 
