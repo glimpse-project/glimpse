@@ -45,7 +45,7 @@ including:
   content based on the skeltal data from Glimpse.
 
 Here's a recording from March 2018 of Glimpse running on an Android, Zenfone AR:
-[![](http://i.vimeocdn.com/video/686380376_640.jpg)](https://vimeo.com/258250667)
+![](https://raw.githubusercontent.com/wiki/glimpse-project/glimpse/images/glimpse-golem.gif)
 
 and a screenshot of the Glimpse Viewer debug tool:
 ![](https://raw.githubusercontent.com/wiki/glimpse-project/glimpse/images/screenshot-2018-07-05.png)
