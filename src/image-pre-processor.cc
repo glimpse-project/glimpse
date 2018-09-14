@@ -169,6 +169,7 @@ static bool write_pfm_depth = false;
 static int seed_opt = 0;
 
 static const char *config_opt = NULL;
+static bool no_flip_opt = false;
 
 static std::vector<noise_op> noise_ops;
 
@@ -1002,6 +1003,7 @@ worker_thread_cb(void *data)
     struct worker_state *state = (struct worker_state *)data;
     struct image *noisy_labels = NULL, *noisy_depth = NULL;
     struct image *flipped_labels = NULL, *flipped_depth = NULL;
+
     char filename[1024];
 
     debug("Running worker thread\n");
@@ -1127,37 +1129,40 @@ worker_thread_cb(void *data)
                       frame.path);
             fwrite(index_name, strlen(index_name), 1, index_fp);
 
-            flip_frame_labels(labels, flipped_labels);
-            flip_frame_depth(depth, flipped_depth);
-            out_frame_no = frame.frame_no * 2 + 1;
-            frame_add_noise(flipped_labels,
-                            flipped_depth,
-                            noisy_labels,
-                            noisy_depth,
-                            out_frame_no);
+            // do the same for the flipped image (if flipped is on)
+            if(!no_flip_opt) {
+                flip_frame_labels(labels, flipped_labels);
+                flip_frame_depth(depth, flipped_depth);
+
+                out_frame_no = frame.frame_no * 2 + 1;
+                frame_add_noise(flipped_labels,
+                                flipped_depth,
+                                noisy_labels,
+                                noisy_depth,
+                                out_frame_no);
 
 
-            sanity_check_frame(noisy_labels, noisy_depth);
-            xsnprintf(filename, "%.*s-flipped.png",
-                      (int)strlen(frame.path) - 4,
-                      frame.path);
-            save_frame_labels(work.dir, filename, noisy_labels);
+                sanity_check_frame(noisy_labels, noisy_depth);
+                xsnprintf(filename, "%.*s-flipped.png",
+                          (int)strlen(frame.path) - 4,
+                          frame.path);
+                save_frame_labels(work.dir, filename, noisy_labels);
 
-            xsnprintf(filename, "%.*s-flipped.exr",
-                      (int)strlen(frame.path) - 4,
-                      frame.path);
-            save_frame_depth(work.dir, filename, noisy_depth);
+                xsnprintf(filename, "%.*s-flipped.exr",
+                          (int)strlen(frame.path) - 4,
+                          frame.path);
+                save_frame_depth(work.dir, filename, noisy_depth);
 
-            xsnprintf(index_name, "%s/%.*s-flipped\n",
-                      work.dir,
-                      (int)strlen(frame.path) - 4,
-                      frame.path);
-            fwrite(index_name, strlen(index_name), 1, index_fp);
+                xsnprintf(index_name, "%s/%.*s-flipped\n",
+                          work.dir,
+                          (int)strlen(frame.path) - 4,
+                          frame.path);
+                fwrite(index_name, strlen(index_name), 1, index_fp);
+            }
 
             // Note: we don't free the labels here because they are preserved
             // for comparing with the next frame
             free_image(depth);
-
 
             /*
              * Copy the frame's .json metadata
@@ -1189,42 +1194,44 @@ worker_thread_cb(void *data)
                             strerror(errno));
                 }
 
-                /* For the -flipped frame we have to flip the x position of
-                 * the associated bones...
-                 */
-                JSON_Value *root_value = json_parse_string((char *)json_data);
-                JSON_Object *root = json_object(root_value);
-                JSON_Array *bones = json_object_get_array(root, "bones");
-                int n_bones = json_array_get_count(bones);
+                if(!no_flip_opt) {
+                    /* For the -flipped frame we have to flip the x position of
+                     * the associated bones...
+                     */
+                     JSON_Value *root_value = json_parse_string((char *)json_data);
+                     JSON_Object *root = json_object(root_value);
+                     JSON_Array *bones = json_object_get_array(root, "bones");
+                     int n_bones = json_array_get_count(bones);
 
-                for (int b = 0; b < n_bones; b++) {
-                    JSON_Object *bone = json_array_get_object(bones, b);
-                    //const char *name = json_object_get_string(bone, "name");
-                    float x;
+                     for (int b = 0; b < n_bones; b++) {
+                        JSON_Object *bone = json_array_get_object(bones, b);
+                        //const char *name = json_object_get_string(bone, "name");
+                        float x;
 
-                    JSON_Array *head = json_object_get_array(bone, "head");
-                    x = json_array_get_number(head, 0);
-                    json_array_replace_number(head, 0, -x);
+                        JSON_Array *head = json_object_get_array(bone, "head");
+                        x = json_array_get_number(head, 0);
+                        json_array_replace_number(head, 0, -x);
 
-                    JSON_Array *tail = json_object_get_array(bone, "tail");
-                    x = json_array_get_number(tail, 0);
-                    json_array_replace_number(tail, 0, -x);
-                }
+                        JSON_Array *tail = json_object_get_array(bone, "tail");
+                        x = json_array_get_number(tail, 0);
+                        json_array_replace_number(tail, 0, -x);
+                     }
 
-                /* For consistency... */
-                xsnprintf(filename, "%s/labels/%s/%.*s-flipped.json",
-                          top_out_dir,
-                          work.dir,
-                          (int)strlen(frame.path) - 4,
-                          frame.path);
-                if (json_serialize_to_file_pretty(root_value, filename) != JSONSuccess) {
-                    fprintf(stderr, "WARNING: Failed to serialize flipped frame's json meta data to %s: %s\n",
-                            filename,
-                            strerror(errno));
-                }
+                     /* For consistency... */
+                     xsnprintf(filename, "%s/labels/%s/%.*s-flipped.json",
+                               top_out_dir,
+                               work.dir,
+                               (int)strlen(frame.path) - 4,
+                               frame.path);
+                     if (json_serialize_to_file_pretty(root_value, filename) != JSONSuccess) {
+                         fprintf(stderr, "WARNING: Failed to serialize flipped frame's json meta data to %s: %s\n",
+                         filename,
+                         strerror(errno));
+                     }
 
-                json_value_free(root_value);
-                free(json_data);
+                    json_value_free(root_value);
+                    free(json_data);
+                 }
             }
         }
 
@@ -1260,6 +1267,7 @@ usage(void)
 "    -g,--grey                  Write greyscale not palletized label PNGs\n"
 "    -p,--pfm                   Write depth data as PFM files\n"
 "                               (otherwise depth data is written in EXR format)\n"
+"    -n,--noflip                Disable flipping of the images                 \n"
 "\n"
 "    -c,--config=<json>         Configure pre-processing details\n"
 "    -s,--seed=<n>              Seed to use for RNG (default: 0).\n"
@@ -1315,12 +1323,13 @@ main(int argc, char **argv)
     pthread_mutex_init(&properties_state.lock, NULL);
     properties_state.properties = &properties[0];
 
-    const char *short_options="hfgpc:j:m:";
+    const char *short_options="hfgpnc:j:m:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
         {"full",            no_argument,        0, 'f'},
         {"grey",            no_argument,        0, 'g'},
         {"pfm",             no_argument,        0, 'p'},
+        {"noflip",          no_argument,        0, 'n'},
         {"config",          required_argument,  0, 'c'},
         {"seed",            required_argument,  0, 's'},
         {"threads",         required_argument,  0, 'j'},
@@ -1345,6 +1354,9 @@ main(int argc, char **argv)
                 break;
             case 'p':
                 write_pfm_depth = true;
+                break;
+            case 'n':
+                no_flip_opt = true;
                 break;
             case 'c':
                 config_opt = strdup(optarg);
