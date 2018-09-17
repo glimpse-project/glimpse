@@ -129,7 +129,7 @@ enum gm_pose_type
 
 struct gm_pose {
     enum gm_pose_type type;
-    float orientation[4];
+    float orientation[4]; // x, y, z, w
     float translation[3];
 };
 
