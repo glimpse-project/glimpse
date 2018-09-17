@@ -1214,7 +1214,7 @@ recording_open(struct gm_device *dev,
     dev->recording.max_frame = -1;
     prop = gm_ui_property();
     prop.object = dev;
-    prop.name = "max frame";
+    prop.name = "max_frame";
     prop.desc = "Maximum frame number to replay";
     prop.type = GM_PROPERTY_INT;
     prop.int_state.ptr = &dev->recording.max_frame;
