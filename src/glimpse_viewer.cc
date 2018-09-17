@@ -43,6 +43,9 @@
 
 #include <list>
 #include <vector>
+#include <string>
+#include <utility>
+#include <unordered_map>
 
 #include <epoxy/gl.h>
 
@@ -122,6 +125,14 @@
             exit(1); \
     } while(0)
 
+
+typedef struct _Data Data;
+
+typedef void (*control_prop_draw_callback_t)(Data *data,
+                                             struct gm_ui_properties *props,
+                                             struct gm_ui_property *prop,
+                                             const char *readable_name);
+
 enum event_type
 {
     EVENT_DEVICE,
@@ -163,7 +174,7 @@ typedef struct {
     int n_bones;
 } GLSkeleton;
 
-typedef struct _Data
+struct _Data
 {
     struct gm_logger *log;
     FILE *log_fp;
@@ -321,7 +332,18 @@ typedef struct _Data
 
     std::vector<struct stage_textures> stage_textures;
     int current_stage;
-} Data;
+
+    /* Overrides drawing specific property widgets... */
+
+    /* Hmm, It doesn't seem to Just Work (tm) to declare a type safe function
+     * pointer value so we just use void*... strange; I distinctly remember the
+     * C++ fanatic telling me something about improved type safety.. blah
+     * blah...
+     */
+    std::unordered_map<std::string, void*> dev_control_overrides;
+    std::unordered_map<std::string, void*> ctx_control_overrides;
+    std::unordered_map<std::string, void*> stage_control_overrides;
+};
 
 #ifdef __ANDROID__
 static JavaVM *android_jvm_singleton;
@@ -561,7 +583,110 @@ index_targets(Data *data)
 }
 
 static void
-draw_properties(struct gm_ui_properties *props)
+draw_int_property(Data *data,
+                  struct gm_ui_properties *props,
+                  struct gm_ui_property *prop,
+                  const char *readable_name)
+{
+    int current_val = gm_prop_get_int(prop), save_val = current_val;
+    ImGui::SliderInt(readable_name, &current_val,
+                     prop->int_state.min, prop->int_state.max);
+    if (current_val != save_val)
+        gm_prop_set_int(prop, current_val);
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", prop->desc);
+}
+
+static void
+draw_enum_property(Data *data,
+                   struct gm_ui_properties *props,
+                   struct gm_ui_property *prop,
+                   const char *readable_name)
+{
+    int current_enumerant = 0, save_enumerant = 0;
+    int current_val = gm_prop_get_enum(prop);
+
+    for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
+        if (prop->enum_state.enumerants[i].val == current_val) {
+            current_enumerant = save_enumerant = i;
+            break;
+        }
+    }
+
+    std::vector<const char*> labels(prop->enum_state.n_enumerants);
+    for (int i = 0; i < prop->enum_state.n_enumerants; i++) {
+        labels[i] = prop->enum_state.enumerants[i].name;
+    }
+
+    ImGui::Combo(readable_name, &current_enumerant, labels.data(),
+                 labels.size());
+
+    if (current_enumerant != save_enumerant) {
+        int e = current_enumerant;
+        gm_prop_set_enum(prop, prop->enum_state.enumerants[e].val);
+    }
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", prop->desc);
+}
+
+static void
+draw_bool_property(Data *data,
+                   struct gm_ui_properties *props,
+                   struct gm_ui_property *prop,
+                   const char *readable_name)
+{
+    bool current_val = gm_prop_get_bool(prop),
+         save_val = current_val;
+    ImGui::Checkbox(readable_name, &current_val);
+    if (current_val != save_val)
+        gm_prop_set_bool(prop, current_val);
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", prop->desc);
+}
+
+static void
+draw_float_property(Data *data,
+                    struct gm_ui_properties *props,
+                    struct gm_ui_property *prop,
+                    const char *readable_name)
+{
+    float current_val = gm_prop_get_float(prop), save_val = current_val;
+    ImGui::SliderFloat(readable_name, &current_val,
+                       prop->float_state.min, prop->float_state.max);
+    if (current_val != save_val)
+        gm_prop_set_float(prop, current_val);
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", prop->desc);
+}
+
+static void
+draw_vec3_property(Data *data,
+                   struct gm_ui_properties *props,
+                   struct gm_ui_property *prop,
+                   const char *readable_name)
+{
+    if (prop->read_only) {
+        ImGui::LabelText(readable_name, "%.3f,%.3f,%.3f",
+                         //prop->vec3_state.components[0],
+                         prop->vec3_state.ptr[0],
+                         //prop->vec3_state.components[1],
+                         prop->vec3_state.ptr[1],
+                         //prop->vec3_state.components[2],
+                         prop->vec3_state.ptr[2]);
+    } // else TODO
+
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", prop->desc);
+}
+
+static void
+draw_properties(Data *data,
+                struct gm_ui_properties *props,
+                std::unordered_map<std::string, void*> &overrides)
 {
     for (int i = 0; i < props->n_properties; i++) {
         struct gm_ui_property *prop = &props->properties[i];
@@ -575,86 +700,48 @@ draw_properties(struct gm_ui_properties *props)
         char readable_name[64];
         make_readable_name(prop_name, readable_name, sizeof(readable_name));
 
-        switch (prop->type) {
-        case GM_PROPERTY_INT:
-            {
-                int current_val = gm_prop_get_int(prop), save_val = current_val;
-                ImGui::SliderInt(readable_name, &current_val,
-                                 prop->int_state.min, prop->int_state.max);
-                if (current_val != save_val)
-                    gm_prop_set_int(prop, current_val);
-            }
-            break;
-        case GM_PROPERTY_ENUM:
-            {
-                int current_enumerant = 0, save_enumerant = 0;
-                int current_val = gm_prop_get_enum(prop);
+        if (overrides.find(prop_name) != overrides.end())
+        {
+            control_prop_draw_callback_t callback =
+                (control_prop_draw_callback_t)overrides.at(prop_name);
 
-                for (int j = 0; j < prop->enum_state.n_enumerants; j++) {
-                    if (prop->enum_state.enumerants[j].val == current_val) {
-                        current_enumerant = save_enumerant = j;
-                        break;
+            // We might associate a property with a NULL callback as a way
+            // of skipping/hiding the property (maybe because we have manually
+            // drawn a widget somewhere else).
+            if (callback)
+                callback(data, props, prop, readable_name);
+        }
+        else
+        {
+            switch (prop->type) {
+            case GM_PROPERTY_INT:
+                draw_int_property(data, props, prop, readable_name);
+                break;
+            case GM_PROPERTY_ENUM:
+                draw_enum_property(data, props, prop, readable_name);
+                break;
+            case GM_PROPERTY_BOOL:
+                draw_bool_property(data, props, prop, readable_name);
+                break;
+            case GM_PROPERTY_SWITCH:
+                {
+                    if (i && props->properties[i-1].type == GM_PROPERTY_SWITCH) {
+                        ImGui::SameLine();
+                    }
+                    if (ImGui::Button(readable_name)) {
+                        gm_prop_set_switch(prop);
                     }
                 }
-
-                std::vector<const char*> labels(prop->enum_state.n_enumerants);
-                for (int j = 0; j < prop->enum_state.n_enumerants; j++) {
-                    labels[j] = prop->enum_state.enumerants[j].name;
-                }
-
-                ImGui::Combo(readable_name, &current_enumerant, labels.data(),
-                             labels.size());
-
-                if (current_enumerant != save_enumerant) {
-                    int e = current_enumerant;
-                    gm_prop_set_enum(prop, prop->enum_state.enumerants[e].val);
-                }
+                break;
+            case GM_PROPERTY_FLOAT:
+                draw_float_property(data, props, prop, readable_name);
+                break;
+            case GM_PROPERTY_FLOAT_VEC3:
+                draw_vec3_property(data, props, prop, readable_name);
+                break;
+            // FIXME: Handle GM_PROPERTY_STRING
             }
-            break;
-        case GM_PROPERTY_BOOL:
-            {
-                bool current_val = gm_prop_get_bool(prop),
-                     save_val = current_val;
-                ImGui::Checkbox(readable_name, &current_val);
-                if (current_val != save_val)
-                    gm_prop_set_bool(prop, current_val);
-            }
-            break;
-        case GM_PROPERTY_SWITCH:
-            {
-                if (i && props->properties[i-1].type == GM_PROPERTY_SWITCH) {
-                    ImGui::SameLine();
-                }
-                if (ImGui::Button(readable_name)) {
-                    gm_prop_set_switch(prop);
-                }
-            }
-            break;
-        case GM_PROPERTY_FLOAT:
-            {
-                float current_val = gm_prop_get_float(prop), save_val = current_val;
-                ImGui::SliderFloat(readable_name, &current_val,
-                                   prop->float_state.min, prop->float_state.max);
-                if (current_val != save_val)
-                    gm_prop_set_float(prop, current_val);
-            }
-            break;
-        case GM_PROPERTY_FLOAT_VEC3:
-            if (prop->read_only) {
-                ImGui::LabelText(readable_name, "%.3f,%.3f,%.3f",
-                                 //prop->vec3_state.components[0],
-                                 prop->vec3_state.ptr[0],
-                                 //prop->vec3_state.components[1],
-                                 prop->vec3_state.ptr[1],
-                                 //prop->vec3_state.components[2],
-                                 prop->vec3_state.ptr[2]);
-            } // else TODO
-            break;
-        // FIXME: Handle GM_PROPERTY_STRING
         }
-
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%s", prop->desc);
 
         if (prop->read_only) {
             ImGui::PopStyleVar();
@@ -1300,7 +1387,9 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
     ImGui::Spacing();
 
-    draw_properties(gm_device_get_ui_properties(data->active_device));
+    draw_properties(data,
+                    gm_device_get_ui_properties(data->active_device),
+                    data->dev_control_overrides);
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1308,7 +1397,9 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Separator();
     ImGui::Spacing();
 
-    draw_properties(ctx_props);
+    draw_properties(data,
+                    ctx_props,
+                    data->ctx_control_overrides);
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1403,7 +1494,9 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         }
 
         if (show_props) {
-            draw_properties(stage_props);
+            draw_properties(data,
+                            stage_props,
+                            data->stage_control_overrides);
         }
 
         ImGui::Spacing();
