@@ -389,11 +389,11 @@ struct gm_tracking_impl
     // The unprojected full-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_cloud;
 
+    // The depth cloud downsampled for segmentation
+    pcl::PointCloud<pcl::PointXYZL>::Ptr downsampled_cloud;
+
     // The ground-aligned segmentation-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr ground_cloud;
-
-    // Labels based on depth value classification
-    pcl::PointCloud<pcl::PointXYZL>::Ptr depth_class;
 
     // Labels based on clustering after plane removal
     pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
@@ -464,12 +464,6 @@ struct gm_context
      * and let us group statistics and UI properties
      */
     std::vector<struct gm_pipeline_stage> stages;
-
-    bool reset_codebook;
-    struct gm_pose codebook_pose;
-    glm::mat4 start_to_codebook;
-    std::vector<std::vector<struct seg_codeword>> depth_seg;
-    std::vector<struct seg_codeword *> depth_seg_bg;
 
     pthread_t tracking_thread;
     dlib::frontal_face_detector detector;
@@ -553,25 +547,6 @@ struct gm_context
 
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
-
-    /* We maintain tracking_history[] as an ordered array of tracking
-     * state from [0] = newest to oldest. Initially with no tracking
-     * history then n_tracking == 0 and all array entries are NULL.
-     * n_tracking only increases up to TRACK_FRAMES at which point
-     * tracking_history[] is a FIFO
-     *
-     * We only add to the history if we successfully detect a person
-     *
-     * We clear the history when tracking failed to detect a person
-     *
-     * We always store a reference to the last tracking state in
-     * latest_tracking, even if we failed to detect a person.
-     */
-    struct gm_mem_pool *tracking_pool;
-    pthread_mutex_t tracking_swap_mutex;
-    struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
-    struct gm_tracking_impl *latest_tracking;
-    int n_tracking;
 
     struct gm_mem_pool *prediction_pool;
 
@@ -664,6 +639,37 @@ struct gm_context
      * get swapped into the latest tracking object
      */
     std::vector<float> label_probs_backbuffer;
+
+    /* When paused we're careful to not preserve any results for tracking
+     * frames so the future frames will be processed with the same initial
+     * state.
+     */
+    bool paused;
+
+    /* We maintain tracking_history[] as an ordered array of tracking
+     * state from [0] = newest to oldest. Initially with no tracking
+     * history then n_tracking == 0 and all array entries are NULL.
+     * n_tracking only increases up to TRACK_FRAMES at which point
+     * tracking_history[] is a FIFO
+     *
+     * We only add to the history if we successfully detect a person
+     *
+     * We clear the history when tracking failed to detect a person
+     *
+     * We always store a reference to the last tracking state in
+     * latest_tracking, even if we failed to detect a person.
+     */
+    struct gm_mem_pool *tracking_pool;
+    pthread_mutex_t tracking_swap_mutex;
+    struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
+    struct gm_tracking_impl *latest_tracking;
+    int n_tracking;
+
+    struct gm_pose codebook_pose;
+    glm::mat4 start_to_codebook;
+    std::vector<std::vector<struct seg_codeword>> seg_codebook;
+    std::vector<struct seg_codeword *> seg_codebook_bg;
+
 };
 
 struct PointCmp {
@@ -1734,9 +1740,9 @@ update_depth_codebook(struct gm_context *ctx,
     int n_codewords = 0;
     struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
 
-    unsigned depth_class_size = tracking->depth_class->points.size();
-    for (unsigned depth_off = 0; depth_off < depth_class_size; ++depth_off) {
-        pcl::PointXYZL point = tracking->depth_class->points[depth_off];
+    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
+    for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off) {
+        pcl::PointXYZL point = tracking->downsampled_cloud->points[depth_off];
 
         if (std::isnan(point.z)) {
             continue;
@@ -1756,7 +1762,7 @@ update_depth_codebook(struct gm_context *ctx,
 
             // Look to see if this pixel falls into an existing codeword
             struct seg_codeword *codeword = NULL;
-            std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
+            std::vector<struct seg_codeword> &codewords = ctx->seg_codebook[off];
             std::vector<struct seg_codeword>::iterator it;
             for (it = codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
@@ -1768,7 +1774,7 @@ update_depth_codebook(struct gm_context *ctx,
             }
 
             // Don't update pixels that we're tracking
-            if (tracking->depth_class->points[depth_off].label == TRK) {
+            if (tracking->downsampled_cloud->points[depth_off].label == TRK) {
                 if (codeword) {
                     if (codewords.size() > 2) {
                         std::swap(*it, codewords.back());
@@ -1814,8 +1820,8 @@ update_depth_codebook(struct gm_context *ctx,
     uint64_t end = get_time();
     uint64_t duration = end - start;
     LOGI("Codeword update (%.2f codewords/pix) took %.3f%s",
-         n_codewords / (float)(tracking->depth_class->width *
-                               tracking->depth_class->height),
+         n_codewords / (float)(tracking->downsampled_cloud->width *
+                               tracking->downsampled_cloud->height),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
 }
@@ -2295,19 +2301,19 @@ tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
 
-    if (!tracking->depth_class) {
+    if (!tracking->downsampled_cloud) {
         return false;
     }
 
-    *width = (int)tracking->depth_class->width;
-    *height = (int)tracking->depth_class->height;
+    *width = (int)tracking->downsampled_cloud->width;
+    *height = (int)tracking->downsampled_cloud->height;
 
     if (!(*output)) {
         *output = (uint8_t *)malloc((*width) * (*height) * 3);
     }
 
     foreach_xy_off(*width, *height) {
-        depth_classification_to_rgb((enum seg_class)tracking->depth_class->points[off].label,
+        depth_classification_to_rgb((enum seg_class)tracking->downsampled_cloud->points[off].label,
                                     (*output) + off * 3);
     }
 
@@ -2818,7 +2824,7 @@ add_debug_cloud_person_masks_except(struct gm_tracking_impl *tracking,
         if (i == except_person)
             continue;
         add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                      tracking->depth_class,
+                                                      tracking->downsampled_cloud,
                                                       state->persons[i].indices);
     }
 }
@@ -3024,33 +3030,33 @@ stage_downsample_cb(struct gm_tracking_impl *tracking,
     // doing so and give us less useful data structures.
     int seg_res = ctx->seg_res;
     if (seg_res == 1) {
-        tracking->depth_class = tracking->depth_cloud;
+        tracking->downsampled_cloud = tracking->depth_cloud;
     } else {
-        if (!tracking->depth_class ||
-            tracking->depth_class == tracking->depth_cloud) {
-            tracking->depth_class = pcl::PointCloud<pcl::PointXYZL>::Ptr(
+        if (!tracking->downsampled_cloud ||
+            tracking->downsampled_cloud == tracking->depth_cloud) {
+            tracking->downsampled_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
                 new pcl::PointCloud<pcl::PointXYZL>);
         }
 
-        tracking->depth_class->width = tracking->depth_cloud->width / seg_res;
-        tracking->depth_class->height = tracking->depth_cloud->height / seg_res;
-        tracking->depth_class->points.resize(tracking->depth_class->width *
-                                             tracking->depth_class->height);
-        tracking->depth_class->is_dense = false;
+        tracking->downsampled_cloud->width = tracking->depth_cloud->width / seg_res;
+        tracking->downsampled_cloud->height = tracking->depth_cloud->height / seg_res;
+        tracking->downsampled_cloud->points.resize(tracking->downsampled_cloud->width *
+                                                   tracking->downsampled_cloud->height);
+        tracking->downsampled_cloud->is_dense = false;
 
         int n_lores_points = 0;
-        foreach_xy_off(tracking->depth_class->width,
-                       tracking->depth_class->height) {
+        foreach_xy_off(tracking->downsampled_cloud->width,
+                       tracking->downsampled_cloud->height) {
             int hoff = (y * seg_res) * tracking->depth_cloud->width +
                 (x * seg_res);
-            tracking->depth_class->points[off].x =
+            tracking->downsampled_cloud->points[off].x =
                 tracking->depth_cloud->points[hoff].x;
-            tracking->depth_class->points[off].y =
+            tracking->downsampled_cloud->points[off].y =
                 tracking->depth_cloud->points[hoff].y;
-            tracking->depth_class->points[off].z =
+            tracking->downsampled_cloud->points[off].z =
                 tracking->depth_cloud->points[hoff].z;
-            tracking->depth_class->points[off].label = -1;
-            if (!std::isnan(tracking->depth_class->points[off].z)) {
+            tracking->downsampled_cloud->points[off].label = -1;
+            if (!std::isnan(tracking->downsampled_cloud->points[off].z)) {
                 ++n_lores_points;
             }
         }
@@ -3064,7 +3070,7 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     int seg_res = ctx->seg_res;
 
-    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
     tracking->debug_cloud_intrinsics.height /= seg_res;
@@ -3072,7 +3078,7 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.cy /= seg_res;
     tracking->debug_cloud_intrinsics.fx /= seg_res;
     tracking->debug_cloud_intrinsics.fy /= seg_res;
-    colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 }
 
 static void
@@ -3088,11 +3094,11 @@ stage_ground_project_cb(struct gm_tracking_impl *tracking,
             new pcl::PointCloud<pcl::PointXYZL>);
     }
     if (ctx->codebook_pose.type != GM_POSE_INVALID) {
-        unsigned depth_class_size = tracking->depth_class->points.size();
+        unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
 
-        tracking->ground_cloud->width = tracking->depth_class->width;
-        tracking->ground_cloud->height = tracking->depth_class->height;
-        tracking->ground_cloud->points.resize(depth_class_size);
+        tracking->ground_cloud->width = tracking->downsampled_cloud->width;
+        tracking->ground_cloud->height = tracking->downsampled_cloud->height;
+        tracking->ground_cloud->points.resize(downsampled_cloud_size);
         tracking->ground_cloud->is_dense = false;
 
         float nan = std::numeric_limits<float>::quiet_NaN();
@@ -3100,11 +3106,11 @@ stage_ground_project_cb(struct gm_tracking_impl *tracking,
         invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
         invalid_pt.label = -1;
 
-        foreach_xy_off(tracking->depth_class->width,
-                       tracking->depth_class->height)
+        foreach_xy_off(tracking->downsampled_cloud->width,
+                       tracking->downsampled_cloud->height)
         {
             pcl::PointXYZL &point =
-                tracking->depth_class->points[off];
+                tracking->downsampled_cloud->points[off];
             if (std::isnan(point.z)) {
                 tracking->ground_cloud->points[off] = invalid_pt;
                 continue;
@@ -3131,12 +3137,12 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
 
     if (ctx->codebook_pose.type != GM_POSE_INVALID) {
         add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
-                                                      tracking->depth_class,
+                                                      tracking->downsampled_cloud,
                                                       state->to_ground);
-        colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+        colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
     } else {
-        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
-        colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
+        colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
     }
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
@@ -3158,9 +3164,9 @@ stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
     int seg_res = ctx->seg_res;
 
     add_debug_cloud_xyz_of_codebook_space(
-        ctx, tracking, tracking->depth_class, to_start,
+        ctx, tracking, tracking->downsampled_cloud, to_start,
         start_to_codebook, &tracking->depth_camera_intrinsics, seg_res);
-    colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -3178,13 +3184,13 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     glm::mat4 to_start = state->to_start;
     glm::mat4 start_to_codebook = ctx->start_to_codebook;
-    unsigned depth_class_size = tracking->depth_class->points.size();
+    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     int seg_res = ctx->seg_res;
 
     // Remove depth classification old codewords
-    for (unsigned off = 0; off < ctx->depth_seg.size(); ++off) {
-        std::vector<struct seg_codeword> &codewords = ctx->depth_seg[off];
-        ctx->depth_seg_bg[off] = NULL;
+    for (unsigned off = 0; off < ctx->seg_codebook.size(); ++off) {
+        std::vector<struct seg_codeword> &codewords = ctx->seg_codebook[off];
+        ctx->seg_codebook_bg[off] = NULL;
         for (unsigned i = 0; i < codewords.size();) {
             struct seg_codeword &codeword = codewords[i];
             if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
@@ -3193,9 +3199,9 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
                 std::swap(codeword, codewords.back());
                 codewords.pop_back();
             } else {
-                if (!ctx->depth_seg_bg[off] ||
-                    codeword.n > ctx->depth_seg_bg[off]->n) {
-                    ctx->depth_seg_bg[off] = &codeword;
+                if (!ctx->seg_codebook_bg[off] ||
+                    codeword.n > ctx->seg_codebook_bg[off]->n) {
+                    ctx->seg_codebook_bg[off] = &codeword;
                 }
                 ++i;
             }
@@ -3203,15 +3209,15 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     }
 
     // Do classification of depth buffer
-    for (unsigned depth_off = 0; depth_off < depth_class_size; ++depth_off)
+    for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off)
     {
         pcl::PointXYZL point =
-            tracking->depth_class->points[depth_off];
+            tracking->downsampled_cloud->points[depth_off];
 
         if (std::isnan(point.z)) {
             // We'll never cluster a nan value, so we can immediately
             // classify it as background.
-            tracking->depth_class->points[depth_off].label = BG;
+            tracking->downsampled_cloud->points[depth_off].label = BG;
             continue;
         } else {
             int off = project_point_into_codebook(
@@ -3236,10 +3242,10 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
 
             // Look to see if this pixel falls into an existing codeword
             struct seg_codeword *codeword = NULL;
-            struct seg_codeword *bg_codeword = ctx->depth_seg_bg[off];
+            struct seg_codeword *bg_codeword = ctx->seg_codebook_bg[off];
 
             std::vector<struct seg_codeword> &codewords =
-                ctx->depth_seg[off];
+                ctx->seg_codebook[off];
             for (std::vector<struct seg_codeword>::iterator it =
                  codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
@@ -3259,9 +3265,9 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
                 100000000.f;
 
             if (!codeword) {
-                tracking->depth_class->points[depth_off].label = FG;
+                tracking->downsampled_cloud->points[depth_off].label = FG;
             } else if (codeword->n == bg_codeword->n) {
-                tracking->depth_class->points[depth_off].label = BG;
+                tracking->downsampled_cloud->points[depth_off].label = BG;
             } else {
                 bool flat = false, flickering = false;
                 float mean_diff = fabsf(codeword->m - bg_codeword->m);
@@ -3274,16 +3280,16 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
                     flickering = true;
                 }
                 if (flat || flickering) {
-                    tracking->depth_class->points[depth_off].label =
+                    tracking->downsampled_cloud->points[depth_off].label =
                         (flat && flickering) ?
                             FL_FLK : (flat ?  FL : FLK);
                 } else {
                     if (codeword->n > alpha &&
                         ((codeword->tl - codeword->ts) / frame_time) /
                         (float)codeword->n >= psi) {
-                        tracking->depth_class->points[depth_off].label = TB;
+                        tracking->downsampled_cloud->points[depth_off].label = TB;
                     } else {
-                        tracking->depth_class->points[depth_off].label = FG;
+                        tracking->downsampled_cloud->points[depth_off].label = FG;
                     }
                 }
             }
@@ -3300,7 +3306,7 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     int seg_res = ctx->seg_res;
 
-    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->depth_class);
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -3310,7 +3316,7 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.fx /= seg_res;
     tracking->debug_cloud_intrinsics.fy /= seg_res;
 
-    colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 }
 
 static void
@@ -3318,15 +3324,15 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
                             struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    unsigned depth_class_size = tracking->depth_class->points.size();
+    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
 
     // If we've not tracked a human yet, the depth classification may not
     // be reliable - just use a simple clustering technique to find a
     // human and separate them from the floor, then rely on motion detection
     // for subsequent frames.
-    int width = (int)tracking->depth_class->width;
-    int height = (int)tracking->depth_class->height;
+    int width = (int)tracking->downsampled_cloud->width;
+    int height = (int)tracking->downsampled_cloud->height;
     int fx = width / 2;
     int fy = height / 2;
     int fidx = fy * width + fx;
@@ -3349,7 +3355,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
         for (int x = x0; x < (x0 + fw); x++) {
             int idx = y * width + x;
             pcl::PointXYZL &point =
-                tracking->depth_class->points[idx];
+                tracking->downsampled_cloud->points[idx];
             if (!std::isnan(point.z))
                 focal_region[fr_i++] = { point.z, idx };
         }
@@ -3376,8 +3382,8 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
     if (ctx->debug_cloud_mode) {
         // Draw the lines of focus...
         if (fz != FLT_MAX) {
-            float line_x = tracking->depth_class->points[focal_region[fr_i].idx].x;
-            float line_y = tracking->depth_class->points[focal_region[fr_i].idx].y;
+            float line_x = tracking->downsampled_cloud->points[focal_region[fr_i].idx].x;
+            float line_y = tracking->downsampled_cloud->points[focal_region[fr_i].idx].y;
             tracking_draw_line(tracking,
                                0, 0, 0,
                                0, 0, 4,
@@ -3406,10 +3412,10 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
     flood_fill.push({ fx, fy, fx, fy });
 
     std::vector<bool> &done_mask = state->done_mask;
-    done_mask.resize(depth_class_size, false);
+    done_mask.resize(downsampled_cloud_size, false);
 
     pcl::PointXYZL &focus_pt =
-        tracking->depth_class->points[fidx];
+        tracking->downsampled_cloud->points[fidx];
 
     float lowest_point = -FLT_MAX;
     while (!flood_fill.empty()) {
@@ -3425,7 +3431,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
         }
 
         pcl::PointXYZL &pcl_pt =
-            tracking->depth_class->points[idx];
+            tracking->downsampled_cloud->points[idx];
 
         if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width ||
             fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth) {
@@ -3434,12 +3440,12 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
 
         float aligned_y = (ctx->codebook_pose.type != GM_POSE_INVALID) ?
             tracking->ground_cloud->points[idx].y :
-            tracking->depth_class->points[idx].y;
+            tracking->downsampled_cloud->points[idx].y;
         if (aligned_y > lowest_point) {
             lowest_point = aligned_y;
         }
 
-        if (compare_point_depths(tracking->depth_class,
+        if (compare_point_depths(tracking->downsampled_cloud,
                                  point.x, point.y, point.lx, point.ly,
                                  ctx->cluster_tolerance))
         {
@@ -3456,9 +3462,9 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
             {
                 struct gm_point_rgba debug_point;
 
-                debug_point.x = tracking->depth_class->points[idx].x;
-                debug_point.y = -tracking->depth_class->points[idx].y; // FIXME
-                debug_point.z = tracking->depth_class->points[idx].z;
+                debug_point.x = tracking->downsampled_cloud->points[idx].x;
+                debug_point.y = -tracking->downsampled_cloud->points[idx].y; // FIXME
+                debug_point.z = tracking->downsampled_cloud->points[idx].z;
                 debug_point.rgba = 0xffffffff;
 
                 tracking->debug_cloud.push_back(debug_point);
@@ -3479,7 +3485,7 @@ stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
 
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
-    colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -3497,14 +3503,14 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
 
-    int width = (int)tracking->depth_class->width;
-    int height = (int)tracking->depth_class->height;
+    int width = (int)tracking->downsampled_cloud->width;
+    int height = (int)tracking->downsampled_cloud->height;
 
     int fx = state->naive_fx;
     int fy = state->naive_fy;
 
     int fidx = fy * width + fx;
-    pcl::PointXYZL &focus_pt = tracking->depth_class->points[fidx];
+    pcl::PointXYZL &focus_pt = tracking->downsampled_cloud->points[fidx];
 
     float lowest_point = state->naive_floor_y;
 
@@ -3529,7 +3535,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
         }
 
         pcl::PointXYZL &pcl_pt =
-            tracking->depth_class->points[idx];
+            tracking->downsampled_cloud->points[idx];
 
         // Avoid building a cloud that would be considered invalid. We
         // assume the focus point is somewhere near the center of the body,
@@ -3542,12 +3548,12 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
 
         float aligned_y = (ctx->codebook_pose.type != GM_POSE_INVALID) ?
             tracking->ground_cloud->points[idx].y :
-            tracking->depth_class->points[idx].y;
+            tracking->downsampled_cloud->points[idx].y;
         if (aligned_y > lowest_point - ctx->floor_threshold) {
             continue;
         }
 
-        if (compare_point_depths(tracking->depth_class,
+        if (compare_point_depths(tracking->downsampled_cloud,
                                  point.x, point.y, point.lx, point.ly,
                                  ctx->cluster_tolerance))
         {
@@ -3565,9 +3571,9 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             {
                 struct gm_point_rgba debug_point;
 
-                debug_point.x = tracking->depth_class->points[idx].x;
-                debug_point.y = -tracking->depth_class->points[idx].y; // FIXME
-                debug_point.z = tracking->depth_class->points[idx].z;
+                debug_point.x = tracking->downsampled_cloud->points[idx].x;
+                debug_point.y = -tracking->downsampled_cloud->points[idx].y; // FIXME
+                debug_point.z = tracking->downsampled_cloud->points[idx].z;
                 debug_point.rgba = 0xffffffff;
 
                 tracking->debug_cloud.push_back(debug_point);
@@ -3591,7 +3597,7 @@ stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
 
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
-    colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -3612,14 +3618,14 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
 
     LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
         new LabelComparator<pcl::PointXYZL>);
-    label_cluster->setInputCloud(tracking->depth_class);
+    label_cluster->setInputCloud(tracking->downsampled_cloud);
     label_cluster->setDepthThreshold(ctx->cluster_tolerance);
 
     tracking->cluster_labels =
         pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
     pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
         depth_connector(label_cluster);
-    depth_connector.setInputCloud(tracking->depth_class);
+    depth_connector.setInputCloud(tracking->downsampled_cloud);
     depth_connector.segment(*tracking->cluster_labels, cluster_indices);
 }
 
@@ -3657,7 +3663,7 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
 
         // Check if the cluster has human-ish dimensions
         Eigen::Vector4f min, max;
-        pcl::getMinMax3D(*tracking->depth_class, points, min, max);
+        pcl::getMinMax3D(*tracking->downsampled_cloud, points, min, max);
         Eigen::Vector4f diff = max - min;
         if (diff[0] < ctx->cluster_min_width ||
             diff[0] > ctx->cluster_max_width ||
@@ -3679,7 +3685,7 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
         // Note that I guess humans are actually quite frequently in a state
         // of semi-falling, so we have a pretty generous tolerance.
         Eigen::VectorXf centroid;
-        pcl::computeNDCentroid(*tracking->depth_class, points,
+        pcl::computeNDCentroid(*tracking->downsampled_cloud, points,
                                centroid);
 
         // Reproject this point into the depth buffer space to get an offset
@@ -3752,8 +3758,8 @@ stage_project_clusters_cb(struct gm_tracking_impl *tracking,
         }
 
         for (int idx : person.indices) {
-            int lx = idx % tracking->depth_class->width;
-            int ly = idx / tracking->depth_class->width;
+            int lx = idx % tracking->downsampled_cloud->width;
+            int ly = idx / tracking->downsampled_cloud->width;
             for (int hy = (int)(ly * seg_res), ey = 0;
                  hy < (int)tracking->depth_cloud->height && ey < seg_res;
                  ++hy, ++ey) {
@@ -3996,9 +4002,9 @@ stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
 
     add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->depth_class,
+                                                  tracking->downsampled_cloud,
                                                   state->persons[state->best_person].indices);
-    colour_debug_cloud(ctx, state, tracking, tracking->depth_class);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     add_debug_cloud_person_masks_except(tracking, state, state->best_person);
 }
@@ -4162,17 +4168,17 @@ context_track_skeleton(struct gm_context *ctx,
               stage_downsample_debug_cb,
               &state);
 
-    unsigned depth_class_size = tracking->depth_class->points.size();
+    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     bool motion_detection = ctx->motion_detection;
 
 
-    ctx->reset_codebook = false;
+    bool reset_codebook = false;
 
-    if (ctx->depth_seg.size() != depth_class_size ||
+    if (ctx->seg_codebook.size() != downsampled_cloud_size ||
         (ctx->codebook_pose.type != tracking->frame->pose.type))
     {
         gm_debug(ctx->log, "XXX: Resetting pose");
-        ctx->reset_codebook = true;
+        reset_codebook = true;
     } else if (tracking->frame->pose.type == GM_POSE_TO_START) {
         // Check if the angle or distance between the current frame and the
         // reference frame exceeds a certain threshold, and in that case,
@@ -4209,7 +4215,7 @@ context_track_skeleton(struct gm_context *ctx,
             // We've strayed too far from the initial pose, reset
             // segmentation and use this as the home pose.
             gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
-            ctx->reset_codebook = true;
+            reset_codebook = true;
         }
     }
 
@@ -4227,10 +4233,10 @@ context_track_skeleton(struct gm_context *ctx,
         break;
     }
 
-    if (ctx->reset_codebook) {
-        ctx->depth_seg.clear();
-        ctx->depth_seg.resize(depth_class_size);
-        ctx->depth_seg_bg.resize(depth_class_size);
+    if (reset_codebook) {
+        ctx->seg_codebook.clear();
+        ctx->seg_codebook.resize(downsampled_cloud_size);
+        ctx->seg_codebook_bg.resize(downsampled_cloud_size);
         ctx->codebook_pose = tracking->frame->pose;
         ctx->start_to_codebook = glm::inverse(state.to_start);
 
@@ -4264,7 +4270,7 @@ context_track_skeleton(struct gm_context *ctx,
     if (!motion_detection ||
         !ctx->latest_tracking ||
         !ctx->latest_tracking->success ||
-        ctx->reset_codebook)
+        reset_codebook)
     {
         run_stage(tracking,
                   TRACKING_STAGE_NAIVE_FLOOR,
@@ -4426,7 +4432,7 @@ context_track_skeleton(struct gm_context *ctx,
     pcl::PointIndices &best_person = state.persons[state.best_person];
     int tracked_label = valid_skeleton ? TRK : CAN;
     for (auto &idx : best_person.indices) {
-        tracking->depth_class->points[idx].label = tracked_label;
+        tracking->downsampled_cloud->points[idx].label = tracked_label;
     }
 #warning "XXX: Seems like a bug that we set a 'CAN' (candidate that failed to track) label but skip update_codebook in this case"
 #warning "XXX: Should we set the 'CAN' label on all the candidates we found?"
@@ -4447,9 +4453,9 @@ context_track_skeleton(struct gm_context *ctx,
         (!ctx->latest_tracking || !ctx->latest_tracking->success))
     {
 #if 0
-        foreach_xy_off(tracking->depth_class->width,
-                       tracking->depth_class->height) {
-            std::list<struct seg_codeword> &codewords = ctx->depth_seg[off];
+        foreach_xy_off(tracking->downsampled_cloud->width,
+                       tracking->downsampled_cloud->height) {
+            std::list<struct seg_codeword> &codewords = ctx->seg_codebook[off];
             if (codewords.size() <= 1) {
                 continue;
             }
@@ -4472,9 +4478,9 @@ context_track_skeleton(struct gm_context *ctx,
             }
         }
 #else
-        ctx->depth_seg.clear();
-        ctx->depth_seg.resize(depth_class_size);
-        ctx->depth_seg_bg.resize(depth_class_size);
+        ctx->seg_codebook.clear();
+        ctx->seg_codebook.resize(downsampled_cloud_size);
+        ctx->seg_codebook_bg.resize(downsampled_cloud_size);
 #endif
     }
 
