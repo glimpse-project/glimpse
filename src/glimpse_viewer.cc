@@ -1084,6 +1084,44 @@ draw_playback_controls(Data *data)
     }
 
     ImGui::Checkbox("Track while recording", &data->track_while_recording);
+
+    if (data->playback_device) {
+        struct gm_ui_properties *props =
+            gm_device_get_ui_properties(data->playback_device);
+        struct gm_ui_property *prop;
+
+        ImGui::PushItemFlag(ImGuiItemFlags_Disabled, true);
+        ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.5f);
+        prop = gm_props_lookup(props, "frame");
+        draw_int_property(data, props, prop, "Frame");
+        ImGui::PopStyleVar();
+        ImGui::PopItemFlag();
+
+        prop = gm_props_lookup(props, "max_frame");
+        draw_int_property(data, props, prop, "Max Frame");
+
+        prop = gm_props_lookup(props, "loop");
+        draw_bool_property(data, props, prop, "Loop");
+        prop = gm_props_lookup(props, "frame_skip");
+        draw_bool_property(data, props, prop, "Frame Skip");
+        prop = gm_props_lookup(props, "frame_throttle");
+        draw_bool_property(data, props, prop, "Frame Throttle");
+
+        prop = gm_props_lookup(props, "<<");
+        if (ImGui::Button("<<")) {
+            gm_prop_set_switch(prop);
+        }
+        ImGui::SameLine();
+        prop = gm_props_lookup(props, "||>");
+        if (ImGui::Button("||>")) {
+            gm_prop_set_switch(prop);
+        }
+        prop = gm_props_lookup(props, ">>");
+        ImGui::SameLine();
+        if (ImGui::Button(">>")) {
+            gm_prop_set_switch(prop);
+        }
+    }
 }
 
 static bool
