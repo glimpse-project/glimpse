@@ -252,6 +252,15 @@ struct gm_frame
     struct gm_buffer *video;
     enum gm_format video_format; // ignore if video is NULL
     struct gm_intrinsics video_intrinsics; // ignore if video is NULL
+
+    /* If true then this frame should not be compared with any
+     * previous frames. It might imply a signficant camera
+     * re-configuration has happened or a recording may have
+     * looped.
+     *
+     * E.g. This can trigger a reset of any motion tracking state
+     */
+    bool discontinuity;
 };
 
 inline void

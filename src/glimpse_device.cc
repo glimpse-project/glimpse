@@ -266,6 +266,15 @@ struct gm_device
     uint64_t frame_time;
     struct gm_pose frame_pose;
 
+    /* Should be set for any device reset/reconfiguration or e.g. in the case
+     * of recording playback if a recording loops.
+     *
+     * This will be propogated with the next frame so that the consumer knows
+     * not to compare the frame to earlier frames (e.g. as part of motion
+     * analysis).
+     */
+    bool frame_discontinuity;
+
     struct gm_mem_pool *frame_pool;
     struct gm_frame *last_frame;
 
@@ -1339,13 +1348,23 @@ swap_recorded_frame(struct gm_device *dev,
                     struct gm_buffer *depth_buffer,
                     struct gm_intrinsics *depth_intrinsics,
                     struct gm_buffer *video_buffer,
-                    struct gm_intrinsics *video_intrinsics)
+                    struct gm_intrinsics *video_intrinsics,
+                    bool discontinuity)
 {
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
         dev->display_rotation = camera_rotation;
         dev->frame_time = timestamp;
         dev->frame_pose = pose;
+
+        /* We can't simply replace (potentially clearing) this value because
+         * it's important to guarantee that any discontinuity gets reported via
+         * _get_latest_frame() first but there's the chance of a frame being
+         * superseded via multiple swap_recorded_frame() calls
+         */
+        dev->frame_discontinuity |= discontinuity;
+        //gm_info(dev->log, "swapping recording frame with discontinuity = %s",
+        //        dev->frame_discontinuity ? "true" : "false");
 
         if (depth_buffer) {
             dev->depth_intrinsics = *depth_intrinsics;
@@ -1464,6 +1483,11 @@ recording_io_thread_cb(void *userdata)
      */
     uint64_t loop_prev_frame_timestamp = frame_start_timestamp;
 
+    /* Set each time the recording loops to inform the frame consumer
+     * that it shouldn't do motion analysis between the last and first
+     * frame of a recording
+     */
+    bool discontinuity = true;
 
     while (dev->running) {
         int n_frames = dev->recording.max_frame >= 0 ?
@@ -1604,7 +1628,9 @@ recording_io_thread_cb(void *userdata)
                             depth_buffer,
                             &depth_intrinsics,
                             video_buffer,
-                            &video_intrinsics);
+                            &video_intrinsics,
+                            discontinuity);
+        discontinuity = false;
 
         if (depth_buffer)
             gm_buffer_unref(depth_buffer);
@@ -1702,6 +1728,7 @@ recording_io_thread_cb(void *userdata)
                 loop_prev_frame_timestamp = frame_start_timestamp - 16000000;
 
                 next_frame = 0;
+                discontinuity = true;
             } else {
                 int last_frame_no = n_frames - 1;
 
@@ -2974,6 +3001,8 @@ gm_device_start(struct gm_device *dev)
     ios_begin_generating_device_orientation_notifications();
 #endif
 
+    dev->frame_discontinuity = true;
+
     switch (dev->type) {
     case GM_DEVICE_NULL:
         dev->running = true;
@@ -3202,8 +3231,10 @@ gm_device_get_latest_frame(struct gm_device *dev)
     frame->base.timestamp = dev->frame_time;
     frame->base.pose = dev->frame_pose;
     frame->base.camera_rotation = device_get_camera_rotation(dev);
+    frame->base.discontinuity = dev->frame_discontinuity;
 
     dev->frame_ready_buffers_mask = 0;
+    dev->frame_discontinuity = false;
 
     /* Get a ref() for the caller */
     gm_frame_ref(&frame->base);
@@ -3235,6 +3266,10 @@ gm_device_combine_frames(struct gm_device *dev, struct gm_frame *master,
     frame->base.timestamp = master->timestamp;
     frame->base.pose = master->pose;
     frame->base.camera_rotation = master->camera_rotation;
+    frame->base.discontinuity =
+        master->discontinuity ||
+        depth->discontinuity ||
+        video->discontinuity;
 
     frame->base.depth = gm_buffer_ref(depth->depth);
     frame->base.depth_format = depth->depth_format;
