@@ -2916,32 +2916,15 @@ gm_device_close(struct gm_device *dev)
 
     }
 
-    /* Make sure to release current back/ready buffers to their
-     * pools to avoid assertions when destroying the pools...
+    /* gm_device_stop() should also imply a device_flush()
+     * which we assert here since before we destroy the
+     * memory pools
      */
-
-    if (dev->last_frame) {
-        gm_frame_unref(dev->last_frame);
-        dev->last_frame = NULL;
-    }
-
-    if (dev->depth_buf_back) {
-        gm_buffer_unref(&dev->depth_buf_back->base);
-        dev->depth_buf_back = NULL;
-    }
-    if (dev->depth_buf_ready) {
-        gm_buffer_unref(&dev->depth_buf_ready->base);
-        dev->depth_buf_ready = NULL;
-    }
-
-    if (dev->video_buf_back) {
-        gm_buffer_unref(&dev->video_buf_back->base);
-        dev->video_buf_back = NULL;
-    }
-    if (dev->video_buf_ready) {
-        gm_buffer_unref(&dev->video_buf_ready->base);
-        dev->video_buf_ready = NULL;
-    }
+    gm_assert(dev->log, dev->last_frame == NULL, "device_flush missing during _stop");
+    gm_assert(dev->log, dev->depth_buf_back == NULL, "device_flush missing during _stop");
+    gm_assert(dev->log, dev->depth_buf_ready == NULL, "device_flush missing during _stop");
+    gm_assert(dev->log, dev->video_buf_back == NULL, "device_flush missing during _stop");
+    gm_assert(dev->log, dev->video_buf_ready == NULL, "device_flush missing during _stop");
 
     /* We free the pools in order of dependence (parents, then children) so
      * that if we hit any assertions for resource leaks then we will know about
@@ -3022,6 +3005,40 @@ gm_device_start(struct gm_device *dev)
 #endif
 }
 
+static void
+device_flush(struct gm_device *dev)
+{
+    pthread_mutex_lock(&dev->swap_buffers_lock);
+
+    if (dev->last_frame) {
+        gm_frame_unref(dev->last_frame);
+        dev->last_frame = NULL;
+    }
+
+    if (dev->depth_buf_back) {
+        gm_buffer_unref(&dev->depth_buf_back->base);
+        dev->depth_buf_back = NULL;
+    }
+    if (dev->depth_buf_ready) {
+        gm_buffer_unref(&dev->depth_buf_ready->base);
+        dev->depth_buf_ready = NULL;
+    }
+
+    if (dev->video_buf_back) {
+        gm_buffer_unref(&dev->video_buf_back->base);
+        dev->video_buf_back = NULL;
+    }
+    if (dev->video_buf_ready) {
+        gm_buffer_unref(&dev->video_buf_ready->base);
+        dev->video_buf_ready = NULL;
+    }
+
+    dev->frame_ready_buffers_mask = 0;
+    dev->frame_time = 0;
+
+    pthread_mutex_unlock(&dev->swap_buffers_lock);
+}
+
 void
 gm_device_stop(struct gm_device *dev)
 {
@@ -3062,6 +3079,16 @@ gm_device_stop(struct gm_device *dev)
 #if TARGET_OS_IOS == 1
     ios_end_generating_device_orientation_notifications();
 #endif
+
+    /* Flush any buffered frame state
+     *
+     * XXX: Note that gm_device_close() calls gm_device_stop() and assumes
+     * a _flush() is done before the memory pools are destroyed.
+     *
+     * Done after the device-specific _stop code since the device code
+     * may be multi-threaded.
+     */
+    device_flush(dev);
 }
 
 int
