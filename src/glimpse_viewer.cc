@@ -376,6 +376,8 @@ static bool permissions_check_failed;
 static bool permissions_check_passed;
 #endif
 
+static const char *log_filename_opt = NULL;
+
 #ifdef USE_FREENECT
 static enum gm_device_type device_type_opt = GM_DEVICE_KINECT;
 #else
@@ -3477,6 +3479,8 @@ usage(void)
 "                                            any frame capture\n"
 "    -r,--recording=NAME        Name or recording to play\n"
 "\n"
+"    -l,--log=FILE              Write logging to given file\n"
+"\n"
 "    -h,--help                  Display this help\n\n"
 "\n"
     );
@@ -3492,12 +3496,10 @@ parse_args(Data *data, int argc, char **argv)
 #define DEVICE_OPT              (CHAR_MAX + 1)
 #define RECORDING_OPT           (CHAR_MAX + 1)
 
-    /* N.B. The initial '+' means that getopt will stop looking for options
-     * after the first non-option argument...
-     */
-    const char *short_options="+hd:r:";
+    const char *short_options="hl:d:r:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
+        {"log",             required_argument,  0, 'l'},
         {"device",          required_argument,  0, DEVICE_OPT},
         {"recording",       required_argument,  0, RECORDING_OPT},
         {0, 0, 0, 0}
@@ -3510,6 +3512,9 @@ parse_args(Data *data, int argc, char **argv)
             case 'h':
                 usage();
                 return;
+            case 'l':
+                log_filename_opt = strdup(optarg);
+                break;
             case 'd':
                 if (strcmp(optarg, "kinect") == 0)
                     device_type_opt = GM_DEVICE_KINECT;
@@ -3558,7 +3563,15 @@ main(int argc, char **argv)
 
     const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
     char *assets_root = strdup(assets_root_env ? assets_root_env : "");
-    data->log_fp = stderr;
+
+    if (log_filename_opt) {
+        data->log_fp = fopen(log_filename_opt, "w");
+        if (!data->log_fp) {
+            fprintf(stderr, "Failed to open %s\n", log_filename_opt);
+            exit(1);
+        }
+    } else
+        data->log_fp = stderr;
 #endif
 
     data->log = gm_logger_new(logger_cb, data);
