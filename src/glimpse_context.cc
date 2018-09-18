@@ -849,6 +849,32 @@ get_duration_ns_print_scale(uint64_t duration_ns)
         return duration_ns;
 }
 
+static void
+print_trail_for(struct gm_logger *log, void *object, std::vector<struct trail_crumb> *trail)
+{
+    gm_debug(log, "Trail for %p:", object);
+
+    for (unsigned i = 0; i < trail->size(); i++) {
+        struct trail_crumb crumb = trail->at(i);
+        if (crumb.n_frames) {
+            struct gm_backtrace backtrace = {
+                crumb.n_frames,
+                (const void **)crumb.backtrace_frame_pointers
+            };
+            int line_len = 100;
+            char *formatted = (char *)alloca(crumb.n_frames * line_len);
+
+            gm_debug(log, "%d) tag = %s", i, crumb.tag);
+            gm_logger_get_backtrace_strings(log, &backtrace,
+                                            line_len, (char *)formatted);
+            for (int i = 0; i < crumb.n_frames; i++) {
+                char *line = formatted + line_len * i;
+                gm_debug(log, "   #%i %s", i, line);
+            }
+        }
+    }
+}
+
 static struct color
 stops_color_from_val(struct color_stop *stops,
                      int n_stops,
@@ -1898,6 +1924,23 @@ tracking_state_free(struct gm_mem_pool *pool,
     }
 
     delete tracking;
+}
+
+static void
+print_tracking_info_cb(struct gm_mem_pool *pool,
+                       void *resource,
+                       void *user_data)
+{
+    struct gm_context *ctx = (struct gm_context *)user_data;
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)resource;
+
+    gm_assert(ctx->log, tracking != NULL, "Spurious NULL tracking resource");
+    gm_error(ctx->log, "Unreleased tracking object %p, ref count = %d, paper trail len = %d",
+             tracking, atomic_load(&tracking->base.ref),
+             (int)tracking->trail.size());
+
+    if (tracking->trail.size())
+        print_trail_for(ctx->log, tracking, &tracking->trail);
 }
 
 static void
@@ -4097,6 +4140,39 @@ run_stage(struct gm_tracking_impl *tracking,
     run_stage_debug(tracking, stage_id, stage_debug_callback, state);
 }
 
+static void
+context_clear_tracking_history_locked(struct gm_context *ctx)
+{
+    for (int i = 0; i < ctx->n_tracking; ++i) {
+        gm_tracking_unref(&ctx->tracking_history[i]->base);
+        ctx->tracking_history[i] = NULL;
+    }
+    ctx->n_tracking = 0;
+}
+
+/* XXX: this API must either be called with the tracking_swap_mutex held or
+ * at some time when synchronization with the tracking thread is guaranteed
+ * (such as when destroying the context).
+ */
+static void
+context_clear_tracking_locked(struct gm_context *ctx, bool clear_pools)
+{
+    if (ctx->latest_tracking) {
+        gm_tracking_unref(&ctx->latest_tracking->base);
+        ctx->latest_tracking = NULL;
+    }
+
+    context_clear_tracking_history_locked(ctx);
+
+    if (clear_pools) {
+        mem_pool_foreach(ctx->tracking_pool,
+                         print_tracking_info_cb,
+                         ctx);
+        mem_pool_free_resources(ctx->tracking_pool);
+        mem_pool_free_resources(ctx->prediction_pool);
+    }
+}
+
 /* The scratch state itself is stack allocated so we don't need to free
  * the struct itself, but there are a few members that may contain non-RAII
  * allocations...
@@ -4171,13 +4247,26 @@ context_track_skeleton(struct gm_context *ctx,
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     bool motion_detection = ctx->motion_detection;
 
-
     bool reset_codebook = false;
+    if (tracking->frame->discontinuity) {
+        gm_debug(ctx->log, "Resetting codebook (frame discontinuity)");
+        reset_codebook = true;
+
+        /* TODO: we shouldn't need to clear the history here, we should be
+         * copying history pointers into a scratch history array (or not
+         * for discontinuities) so we will be able to neatly avoid any
+         * context state modification during tracking when paused.
+         */
+        gm_debug(ctx->log, "Clearing tracking history (frame discontinuity)");
+        pthread_mutex_lock(&ctx->tracking_swap_mutex);
+        context_clear_tracking_history_locked(ctx);
+        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+    }
 
     if (ctx->seg_codebook.size() != downsampled_cloud_size ||
         (ctx->codebook_pose.type != tracking->frame->pose.type))
     {
-        gm_debug(ctx->log, "XXX: Resetting pose");
+        gm_debug(ctx->log, "Resetting codebook (pose type changed or inconsistent size)");
         reset_codebook = true;
     } else if (tracking->frame->pose.type == GM_POSE_TO_START) {
         // Check if the angle or distance between the current frame and the
@@ -4193,7 +4282,9 @@ context_track_skeleton(struct gm_context *ctx,
                 tracking->frame->pose.orientation[0],
                 tracking->frame->pose.orientation[1],
                 tracking->frame->pose.orientation[2])))));
-        while (angle > 180.f) angle -= 360.f;
+
+        while (angle > 180.f)
+            angle -= 360.f;
 
         float distance = glm::distance(
             glm::vec3(ctx->codebook_pose.translation[0],
@@ -4203,7 +4294,7 @@ context_track_skeleton(struct gm_context *ctx,
                       tracking->frame->pose.translation[1],
                       tracking->frame->pose.translation[2]));
 
-        gm_debug(ctx->log, "XXX: Angle: %.2f, "
+        gm_debug(ctx->log, "Pose Angle: %.2f, "
                  "Distance: %.2f (%.2f, %.2f, %.2f)", angle, distance,
                  tracking->frame->pose.translation[0] -
                  ctx->codebook_pose.translation[0],
@@ -4214,7 +4305,7 @@ context_track_skeleton(struct gm_context *ctx,
         if (angle > 10.f || distance > 0.3f) {
             // We've strayed too far from the initial pose, reset
             // segmentation and use this as the home pose.
-            gm_debug(ctx->log, "XXX: Resetting pose (moved too much)");
+            gm_debug(ctx->log, "Resetting codebook (moved too much)");
             reset_codebook = true;
         }
     }
@@ -4241,7 +4332,7 @@ context_track_skeleton(struct gm_context *ctx,
         ctx->start_to_codebook = glm::inverse(state.to_start);
 
         if (tracking->frame->pose.type != GM_POSE_TO_START)
-            gm_debug(ctx->log, "XXX: No tracking pose");
+            gm_debug(ctx->log, "No tracking pose");
     }
 
     run_stage(tracking,
@@ -5369,17 +5460,10 @@ detector_thread_cb(void *data)
         if (tracked) {
             tracking->success = true;
 
-            // Clear the tracking history if we've gone back in time
-            if (ctx->n_tracking && tracking->frame->timestamp <
-                ctx->tracking_history[0]->frame->timestamp) {
-                gm_warn(ctx->log,
-                        "Tracking has gone back in time, clearing history");
-
-                for (int i = 0; i < ctx->n_tracking; ++i) {
-                    gm_tracking_unref(&ctx->tracking_history[i]->base);
-                    ctx->tracking_history[i] = NULL;
-                }
-                ctx->n_tracking = 0;
+            if (ctx->n_tracking) {
+                gm_assert(ctx->log,
+                          tracking->frame->timestamp > ctx->tracking_history[0]->frame->timestamp,
+                          "Tracking can't be added to history with old timestamp");
             }
 
             for (int i = TRACK_FRAMES - 1; i > 0; i--)
@@ -5409,7 +5493,7 @@ detector_thread_cb(void *data)
         }
 
         /* Hold onto the latest tracking regardless of whether it was
-         * successful so that a user can still access the all the information
+         * successful so that a user can still access all the information
          * related to tracking.
          */
         if (ctx->latest_tracking)
@@ -5426,69 +5510,6 @@ detector_thread_cb(void *data)
     }
 
     return NULL;
-}
-
-static void
-print_trail_for(struct gm_logger *log, void *object, std::vector<struct trail_crumb> *trail)
-{
-    gm_debug(log, "Trail for %p:", object);
-
-    for (unsigned i = 0; i < trail->size(); i++) {
-        struct trail_crumb crumb = trail->at(i);
-        if (crumb.n_frames) {
-            struct gm_backtrace backtrace = {
-                crumb.n_frames,
-                (const void **)crumb.backtrace_frame_pointers
-            };
-            int line_len = 100;
-            char *formatted = (char *)alloca(crumb.n_frames * line_len);
-
-            gm_debug(log, "%d) tag = %s", i, crumb.tag);
-            gm_logger_get_backtrace_strings(log, &backtrace,
-                                            line_len, (char *)formatted);
-            for (int i = 0; i < crumb.n_frames; i++) {
-                char *line = formatted + line_len * i;
-                gm_debug(log, "   #%i %s", i, line);
-            }
-        }
-    }
-}
-
-static void
-print_tracking_info_cb(struct gm_mem_pool *pool,
-                       void *resource,
-                       void *user_data)
-{
-    struct gm_context *ctx = (struct gm_context *)user_data;
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)resource;
-
-    gm_assert(ctx->log, tracking != NULL, "Spurious NULL tracking resource");
-    gm_error(ctx->log, "Unreleased tracking object %p, ref count = %d, paper trail len = %d",
-             tracking, atomic_load(&tracking->base.ref),
-             (int)tracking->trail.size());
-
-    if (tracking->trail.size())
-        print_trail_for(ctx->log, tracking, &tracking->trail);
-}
-
-static void
-gm_context_clear_tracking(struct gm_context *ctx)
-{
-    if (ctx->latest_tracking) {
-        gm_tracking_unref(&ctx->latest_tracking->base);
-        ctx->latest_tracking = NULL;
-    }
-    for (int i = 0; i < ctx->n_tracking; ++i) {
-        gm_tracking_unref(&ctx->tracking_history[i]->base);
-        ctx->tracking_history[i] = NULL;
-    }
-    ctx->n_tracking = 0;
-
-    mem_pool_foreach(ctx->tracking_pool,
-                     print_tracking_info_cb,
-                     ctx);
-    mem_pool_free_resources(ctx->tracking_pool);
-    mem_pool_free_resources(ctx->prediction_pool);
 }
 
 static int
@@ -5606,7 +5627,12 @@ gm_context_destroy(struct gm_context *ctx)
     pthread_mutex_unlock(&ctx->liveness_lock);
 
     stop_tracking_thread(ctx);
-    gm_context_clear_tracking(ctx);
+
+    /* XXX: we don't need to hold the tracking_swap_mutex here because we've
+     * stopped the tracking thread...
+     */
+    context_clear_tracking_locked(ctx,
+                                  true); // and clear tracking/prediction pools
 
     /* Free the prediction pool. The user must have made sure to unref any
      * predictions before destroying the context.
@@ -7164,7 +7190,11 @@ gm_context_flush(struct gm_context *ctx, char **err)
 {
     stop_tracking_thread(ctx);
 
-    gm_context_clear_tracking(ctx);
+    /* XXX: we don't need to hold the tracking_swap_mutex here because we've
+     * stopped the tracking thread...
+     */
+    context_clear_tracking_locked(ctx,
+                                  true); // and clear tracking/prediction pools
 
     pthread_mutex_lock(&ctx->frame_ready_mutex);
     if (ctx->frame_ready) {
