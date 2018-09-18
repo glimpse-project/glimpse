@@ -275,6 +275,8 @@ struct gm_device
      */
     bool frame_discontinuity;
 
+    bool frame_paused;
+
     struct gm_mem_pool *frame_pool;
     struct gm_frame *last_frame;
 
@@ -1073,13 +1075,16 @@ recording_playpause(struct gm_ui_property *prop)
         return;
     }
 
-    if (dev->recording.loop) {
-        dev->recording.max_frame = dev->recording.frame;
+    if (dev->recording.max_frame == -1) {
         dev->recording.loop = false;
-    } else if (dev->recording.max_frame >= dev->recording.frame) {
+        /* We pause on the next frame because we want don't want to
+         * repeatedly send a frame that may already be pre-destined
+         * to reach the tracking context (and may polute motion
+         * detection state)
+         */
+        dev->recording.max_frame = dev->recording.frame + 1;
+    } else
         dev->recording.max_frame = -1;
-        dev->recording.loop = true;
-    }
 }
 
 static void
@@ -1087,12 +1092,14 @@ recording_step_back(struct gm_ui_property *prop)
 {
     struct gm_device *dev = (struct gm_device *)prop->object;
 
-    if (!dev->running || dev->recording.frame < 1) {
+    if (!dev->running ||
+        dev->recording.frame < 1 ||
+        dev->recording.max_frame == -1)
+    {
         return;
     }
 
     dev->recording.max_frame--;
-    dev->recording.loop = false;
 }
 
 static void
@@ -1100,12 +1107,13 @@ recording_step_forward(struct gm_ui_property *prop)
 {
     struct gm_device *dev = (struct gm_device *)prop->object;
 
-    if (!dev->running) {
+    if (!dev->running ||
+        dev->recording.max_frame == -1)
+    {
         return;
     }
 
     dev->recording.max_frame++;
-    dev->recording.loop = false;
 }
 
 static bool
@@ -1349,7 +1357,8 @@ swap_recorded_frame(struct gm_device *dev,
                     struct gm_intrinsics *depth_intrinsics,
                     struct gm_buffer *video_buffer,
                     struct gm_intrinsics *video_intrinsics,
-                    bool discontinuity)
+                    bool discontinuity,
+                    bool paused)
 {
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
@@ -1365,6 +1374,8 @@ swap_recorded_frame(struct gm_device *dev,
         dev->frame_discontinuity |= discontinuity;
         //gm_info(dev->log, "swapping recording frame with discontinuity = %s",
         //        dev->frame_discontinuity ? "true" : "false");
+
+        dev->frame_paused = paused;
 
         if (depth_buffer) {
             dev->depth_intrinsics = *depth_intrinsics;
@@ -1451,43 +1462,62 @@ recording_io_thread_cb(void *userdata)
         json_object_get_array(json_object(dev->recording.json), "frames");
     int n_recorded_frames = json_array_get_count(frames);
 
-    JSON_Object *frame0 = json_array_get_object(frames, 0);
-    uint64_t frame0_timestamp = (uint64_t)
-            json_object_get_number(frame0, "timestamp");
-
     /* Note: we might not start replay from frame[0]... */
-    JSON_Object *frame_start = json_array_get_object(frames, dev->recording.frame);
-    uint64_t frame_start_timestamp = (uint64_t)
-            json_object_get_number(frame_start, "timestamp");
+    JSON_Object *start_frame = json_array_get_object(frames, dev->recording.frame);
+    uint64_t start_frame_timestamp = (uint64_t)
+            json_object_get_number(start_frame, "timestamp");
 
     struct gm_pose pose;
 
-    /* Even though the recording loops and the playback can be paused
-     * we still guarantee a monotonic increasing clock for each frame.
+    /* Even though the recording loops we still provide a monotonic increasing
+     * clock for each frame.
      *
-     * This is the clock we maintain by adding frame deltas to it.
+     * This is a logical clock we maintain by adding frame deltas to it but
+     * since it's based on the deltas read from the recorded frames it may not
+     * represent the real progress of time.
+     *
+     * For the purposes of image processing and tracking with motion based
+     * analysis though it's more appropriate to forward the recorded progress
+     * of time.
+     *
+     * We pause updates to this clock when we reach the last/max frame and also
+     * mark these frames as 'paused'.
      */
     uint64_t monotonic_clock = get_time();
 
-    /* We want to play back in real-time so at the start of playback
-     * we update this reference point for the real wall clock time.
+    /* Our monotonic timestamps are derived by calculating the delta between
+     * sequential frames. This tracks the previous frame's timestamp for
+     * calculating a delta.
      */
-    uint64_t playback_start_time = get_time();
+    uint64_t prev_frame_timestamp = start_frame_timestamp;
 
-    /* Our monotonic timestamps are derived by calculating the delta
-     * between sequential frames. This tracks the previous frame's
-     * timestamp for calculating a delta.
+    /* We want to play back in real-time so at the start of playback we update
+     * this reference point for the real wall clock time.
      *
-     * This resets whenever the recording playback loops back to the
-     * first frame (i.e. it's not monotonic itself)
+     * This resets whenever the recording playback loops back to the first
+     * frame or when we unpause playback.
+     *
+     * It's not monotonic and it doesn't necessarily correspond to frame[0] -
+     * it just has to relate to the corresponding start_frame_timestamp so we
+     * can compare the logical progress of time according to the recording vs
+     * real time progress.
      */
-    uint64_t loop_prev_frame_timestamp = frame_start_timestamp;
+    uint64_t start_real_timestamp = get_time();
 
-    /* Set each time the recording loops to inform the frame consumer
-     * that it shouldn't do motion analysis between the last and first
-     * frame of a recording
+    /* Set each time the recording loops to inform the frame consumer that it
+     * shouldn't do motion analysis between the last and first frame of a
+     * recording.
      */
     bool discontinuity = true;
+
+    /* Once we reach the last/max frame we enter a paused state so that the
+     * viewer and tracking context understand that they will be recieving the
+     * same frame over and over and can use that knowledge to enable debugging
+     * functionality for investigating the tracking pipeline for paused frames
+     * with repeatable/deterministic results. (For example, statistics about
+     * motion won't continue to be affected by paused frames).
+     */
+    bool paused = false;
 
     while (dev->running) {
         int n_frames = dev->recording.max_frame >= 0 ?
@@ -1508,7 +1538,6 @@ recording_io_thread_cb(void *userdata)
                                                    recording_frame_no);
         uint64_t frame_timestamp = (uint64_t)
             json_object_get_number(frame, "timestamp");
-        uint64_t recording_progress = frame_timestamp - frame_start_timestamp;
 
         JSON_Object *json_pose = json_object_get_object(frame, "pose");
         if (json_pose) {
@@ -1572,32 +1601,88 @@ recording_io_thread_cb(void *userdata)
         /********************************************************************
          *
          * Calculate our logical (based on recorded timestamps) and real
-         * (wall-clock) progress and then handle any required throttling
-         * (either because we are reading too fast or because no frame
-         * has actually been requested yet)...
+         * (wall-clock) progress, update our monotonic timestamp and handle any
+         * required throttling (either because we are reading too fast or
+         * because no frame has actually been requested yet)...
          *
          */
 
-        uint64_t frame_delta;
-        if (frame_timestamp < loop_prev_frame_timestamp) {
-            gm_error(dev->log, "Recorded frame timestamps went backwards");
-            frame_delta = 16000000;
-        } else {
-            frame_delta = frame_timestamp - loop_prev_frame_timestamp;
-        }
-        monotonic_clock += frame_delta;
-        loop_prev_frame_timestamp = frame_timestamp;
-
-        uint64_t real_progress = get_time() - playback_start_time;
-
-        if (dev->recording.frame_throttle) {
-            /* Throttle playback according to the timestamps in the recorded
-             * frames
+        if (frame_timestamp < prev_frame_timestamp) {
+            /* If we've looped around or single stepped backwards through
+             * frames then we will see the timestamps go backwards...
              */
-            while (recording_progress > real_progress) {
-                uint64_t delay_us = (recording_progress - real_progress) / 1000;
-                usleep(delay_us);
-                real_progress = get_time() - playback_start_time;
+            gm_debug(dev->log, "Negative timestep (e.g. looped or steped backwards), reseting timer state");
+
+            start_real_timestamp = get_time();
+
+            /* 'recording_progress' is measured relative to this
+             * start_frame_timestamp (considering playback might not initially
+             * start on frame[0]), but once we loop around then progress should
+             * become relative to frame[0] instead...
+             */
+            start_frame_timestamp = frame_timestamp;
+
+            /* Just in case the consumer might get confused seeing the same
+             * timestamp back-to-back for different frames we make it look like
+             * there was a 16ms timestep when we loop or jump backwards...
+             */
+            prev_frame_timestamp = start_frame_timestamp - 16000000;
+
+            discontinuity = true;
+        }
+
+        uint64_t frame_delta = frame_timestamp - prev_frame_timestamp;
+
+        /* If we've reached the last/max frame and looping is disabled then
+         * start marking frames as 'paused' so that the viewer/tracking context
+         * know to expect the same frame repeated and e.g. won't update motion
+         * analysis statistics. With this it's possible to investigate the
+         * tracking pipeline for paused frames with the same initial state for
+         * each iteration.
+         *
+         * XXX: It's important we mark the frame paused before it's first
+         * forwarded otherwise the tracking context will see multiple frames
+         * with no time progression after already updating it motion
+         * statistics.
+         *
+         * If we single step forward a frame then we will end up first
+         * forwarding the last paused frame but not marked as 'paused' before
+         * the new end frame starts being submitted as paused. In this way
+         * motion analyisis should be updated consistently while single
+         * stepping forwards.
+         */
+        if (recording_frame_no == (n_frames - 1) &&
+            dev->recording.loop == false)
+        {
+            paused = true;
+        }
+        else if (paused)
+        {
+            /* We froze the clock while paused so reset it... */
+            start_frame_timestamp = prev_frame_timestamp;
+            start_real_timestamp = get_time() - frame_delta;
+            paused = false;
+        }
+
+        uint64_t recording_progress = frame_timestamp - start_frame_timestamp;
+        uint64_t real_progress = 0; // unused while paused
+
+        if (!paused) {
+            monotonic_clock += frame_delta;
+
+            prev_frame_timestamp = frame_timestamp;
+
+            real_progress = get_time() - start_real_timestamp;
+
+            if (dev->recording.frame_throttle) {
+                /* Throttle playback according to the timestamps in the recorded
+                 * frames
+                 */
+                while (recording_progress > real_progress) {
+                    uint64_t delay_us = (recording_progress - real_progress) / 1000;
+                    usleep(delay_us);
+                    real_progress = get_time() - start_real_timestamp;
+                }
             }
         }
 
@@ -1618,8 +1703,9 @@ recording_io_thread_cb(void *userdata)
          *
          */
 
-        gm_debug(dev->log, "recording IO unblocked after frame request received (delivering frame %d)",
-                 recording_frame_no);
+        gm_debug(dev->log, "recording IO unblocked after frame request received, delivering frame %d (%spaused)",
+                 recording_frame_no,
+                 paused ? "" : "not-");
 
         swap_recorded_frame(dev,
                             monotonic_clock,
@@ -1629,7 +1715,8 @@ recording_io_thread_cb(void *userdata)
                             &depth_intrinsics,
                             video_buffer,
                             &video_intrinsics,
-                            discontinuity);
+                            discontinuity,
+                            paused);
         discontinuity = false;
 
         if (depth_buffer)
@@ -1645,6 +1732,10 @@ recording_io_thread_cb(void *userdata)
          * frame to read next...
          *
          */
+
+        if (paused) // Nothing to consider if we know we're paused
+            continue;
+
         int next_frame = recording_frame_no + 1; // default if we don't skip/loop
 
 
@@ -1656,7 +1747,7 @@ recording_io_thread_cb(void *userdata)
          */
 
         // Update considering we may have blocked waiting for a frame request
-        real_progress = get_time() - playback_start_time;
+        real_progress = get_time() - start_real_timestamp;
 
         /* Skip frames if we're > 33ms behind */
         if (dev->recording.frame_skip &&
@@ -1673,7 +1764,7 @@ recording_io_thread_cb(void *userdata)
                 frame = json_array_get_object(frames, i);
                 frame_timestamp = (uint64_t)
                     json_object_get_number(frame, "timestamp");
-                recording_progress = frame_timestamp - frame_start_timestamp;
+                recording_progress = frame_timestamp - start_frame_timestamp;
 
                 /* If we're skipping frames that's likely due to the size of
                  * video buffers we're loading.
@@ -1712,41 +1803,10 @@ recording_io_thread_cb(void *userdata)
          */
 
         if (next_frame >= n_frames) {
-            if (dev->recording.loop) {
-                playback_start_time = get_time();
-
-                /* 'recording_progress' is measured relative to this
-                 * _start_timestamp (considering playback might not initially
-                 * start on frame[0]), but once we loop around then progress
-                 * should become relative to frame[0] instead...
-                 */
-                frame_start_timestamp = frame0_timestamp;
-
-                /* Make it look like the loop closure from end to re-start
-                 * takes 16 milliseconds.
-                 */
-                loop_prev_frame_timestamp = frame_start_timestamp - 16000000;
-
+            if (dev->recording.loop)
                 next_frame = 0;
-                discontinuity = true;
-            } else {
-                int last_frame_no = n_frames - 1;
-
-                /* Note: due to the possability of skipping frames we don't
-                 * assume that last_frame_no == the current recording_frame_no
-                 */
-                JSON_Object *last_frame =
-                    json_array_get_object(frames, last_frame_no);
-                uint64_t last_frame_timestamp = (uint64_t)
-                    json_object_get_number(last_frame, "timestamp");
-
-                /* Even though we are repeating the same frame, make it
-                 * seem like 16ms is elapsing between frames...
-                 */
-                loop_prev_frame_timestamp = last_frame_timestamp - 16000000;
-
-                next_frame = last_frame_no;
-            }
+            else
+                next_frame = n_frames - 1;
         }
 
         dev->recording.frame = next_frame;
@@ -3064,6 +3124,7 @@ device_flush(struct gm_device *dev)
 
     dev->frame_ready_buffers_mask = 0;
     dev->frame_time = 0;
+    dev->frame_paused = false;
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 }
@@ -3232,6 +3293,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
     frame->base.pose = dev->frame_pose;
     frame->base.camera_rotation = device_get_camera_rotation(dev);
     frame->base.discontinuity = dev->frame_discontinuity;
+    frame->base.paused = dev->frame_paused;
 
     dev->frame_ready_buffers_mask = 0;
     dev->frame_discontinuity = false;
@@ -3270,6 +3332,11 @@ gm_device_combine_frames(struct gm_device *dev, struct gm_frame *master,
         master->discontinuity ||
         depth->discontinuity ||
         video->discontinuity;
+
+    frame->base.paused =
+        master->paused ||
+        depth->paused ||
+        video->paused;
 
     frame->base.depth = gm_buffer_ref(depth->depth);
     frame->base.depth_format = depth->depth_format;

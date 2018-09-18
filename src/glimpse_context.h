@@ -261,6 +261,16 @@ struct gm_frame
      * E.g. This can trigger a reset of any motion tracking state
      */
     bool discontinuity;
+
+    /* Paused frames will toggle on some debug functionality within the viewer
+     * and context whereby tracking state for paused frames won't be saved and
+     * so it's possible to investigate the effects of various tracking
+     * properties while knowing that each re-iteration of the same frame will
+     * start with the same state (e.g.  motion based analysis for the paused
+     * frame will be repeatable instead of being interpreted like nothing is
+     * moving)
+     */
+    bool paused;
 };
 
 inline void
