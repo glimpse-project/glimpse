@@ -413,6 +413,9 @@ struct gm_tracking_impl
     // Whether any person clouds were tracked in this frame
     bool success;
 
+    // Whether the tracking was done based on a 'paused' camera frame
+    bool paused;
+
     // Inferred joint positions
     InferredJoints *joints;
     struct gm_skeleton skeleton;
@@ -662,14 +665,46 @@ struct gm_context
     struct gm_mem_pool *tracking_pool;
     pthread_mutex_t tracking_swap_mutex;
     struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
-    struct gm_tracking_impl *latest_tracking;
     int n_tracking;
 
+    /* Whether we succeed or fail to track a frame we store the resulting
+     * tracking object here after processing a frame. latest_tracking->success
+     * should be checked to know if we detected a person.
+     * This is what _get_latest_tracking() will return, unless
+     * latest_paused_frame is non-NULL (see below).
+     */
+    struct gm_tracking_impl *latest_tracking;
+
+    /* Tracking objects resulting from processing paused frames will never
+     * update ctx->latest_tracking, since tracking itself may refer to
+     * ctx->latest_tracking and while paused we need to be able to
+     * repeatedly process the same frame consistently if no properties are
+     * changed. At the end of tracking we instead save paused tracking
+     * objects here and _get_latest_tracking() will return this if
+     * not NULL.
+     */
+    struct gm_tracking_impl *latest_paused_tracking;
+
+    /* Note: we need to be careful about updating this codebook state when
+     * processing paused frames to have a deterministic initial state for
+     * each iteration of the same paused frame...
+     */
     struct gm_pose codebook_pose;
     glm::mat4 start_to_codebook;
     std::vector<std::vector<struct seg_codeword>> seg_codebook;
-    std::vector<struct seg_codeword *> seg_codebook_bg;
 
+    /* If we're processing a paused frame then we will start by making a full
+     * copy of the codebook into here so that we can make temporary updates
+     * which will be discarded at the end so as to avoid changing the ctx
+     * state seen for the next iteration of the same paused frame.
+     */
+    std::vector<std::vector<struct seg_codeword>> pause_frame_seg_codebook;
+
+    /* This vector is only used for temporary state during the motion based
+     * segmentation stage but we hang the vector off the context to avoid
+     * having to repeatedly allocate a buffer for each tracking iteration
+     */
+    std::vector<struct seg_codeword *> seg_codebook_bg;
 };
 
 struct PointCmp {
@@ -679,10 +714,35 @@ struct PointCmp {
     int ly;
 };
 
+/* As a general rule anything that's needed from the ctx for tracking that
+ * might need modifying will be copied over to this scratch_state object and
+ * becomes the authority for that state for tracking. At the end of tracking we
+ * will only copy modifications back to the context for non-'paused' frames.
+ *
+ * This design lets us use the glimpse_viewer to pause playback of a recording
+ * and while we are paused the same frame can be repeatedly processed with the
+ * same starting state each time so we can understand the effect of property
+ * changes including the motion based segmentation that wont behave as if all
+ * movement has stopped.
+ */
 struct pipeline_scratch_state
 {
+    bool paused;
+
+    /* The reason we copy the tracking history here at the start of tracking is
+     * that we might have a frame that's marked as a discontinuity which should
+     * result in us clearing the tracking history, but as noted above we need
+     * to avoid any ctx state changes for paused frames.
+     */
+    //struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
+    //int n_tracking;
+
     glm::mat4 to_start;
     glm::mat4 to_ground;
+
+    struct gm_pose codebook_pose;
+    glm::mat4 start_to_codebook;
+    std::vector<std::vector<struct seg_codeword>> *seg_codebook;
 
     // naive or codebook segmentation/clustering
     std::vector<pcl::PointIndices> cluster_indices;
@@ -1757,10 +1817,13 @@ project_point_into_codebook(pcl::PointXYZL *point,
 static void
 update_depth_codebook(struct gm_context *ctx,
                       struct gm_tracking_impl *tracking,
+                      struct pipeline_scratch_state *state,
                       glm::mat4 to_start,
                       glm::mat4 to_codebook,
                       int seg_res)
 {
+    std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+        *state->seg_codebook;
     uint64_t start = get_time();
 
     int n_codewords = 0;
@@ -1788,7 +1851,7 @@ update_depth_codebook(struct gm_context *ctx,
 
             // Look to see if this pixel falls into an existing codeword
             struct seg_codeword *codeword = NULL;
-            std::vector<struct seg_codeword> &codewords = ctx->seg_codebook[off];
+            std::vector<struct seg_codeword> &codewords = seg_codebook[off];
             std::vector<struct seg_codeword>::iterator it;
             for (it = codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
@@ -1799,7 +1862,7 @@ update_depth_codebook(struct gm_context *ctx,
                 }
             }
 
-            // Don't update pixels that we're tracking
+            // Delete the codeword if it matches a tracked point
             if (tracking->downsampled_cloud->points[depth_off].label == TRK) {
                 if (codeword) {
                     if (codewords.size() > 2) {
@@ -1816,7 +1879,14 @@ update_depth_codebook(struct gm_context *ctx,
 
             // Create a new codeword if one didn't fit
             if (!codeword) {
-                codewords.push_back({ 0, 0, t, t, 0 });
+                /* Oh if only C++ had named member initializers... */
+                codewords.push_back({
+                    0, // mean
+                    0, // number of depth values in this codeword
+                    t, // creation timestamp
+                    t, // last use timestamp
+                    0  // number times depth values consecutively fell here
+                });
                 codeword = &codewords.back();
             }
 
@@ -3136,7 +3206,7 @@ stage_ground_project_cb(struct gm_tracking_impl *tracking,
         tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
     }
-    if (ctx->codebook_pose.type != GM_POSE_INVALID) {
+    if (state->codebook_pose.type != GM_POSE_INVALID) {
         unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
 
         tracking->ground_cloud->width = tracking->downsampled_cloud->width;
@@ -3178,7 +3248,7 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     int seg_res = ctx->seg_res;
 
-    if (ctx->codebook_pose.type != GM_POSE_INVALID) {
+    if (state->codebook_pose.type != GM_POSE_INVALID) {
         add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
                                                       tracking->downsampled_cloud,
                                                       state->to_ground);
@@ -3203,7 +3273,7 @@ stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
     glm::mat4 to_start = state->to_start;
-    glm::mat4 start_to_codebook = ctx->start_to_codebook;
+    glm::mat4 start_to_codebook = state->start_to_codebook;
     int seg_res = ctx->seg_res;
 
     add_debug_cloud_xyz_of_codebook_space(
@@ -3225,17 +3295,25 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
+    std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+        *state->seg_codebook;
     glm::mat4 to_start = state->to_start;
-    glm::mat4 start_to_codebook = ctx->start_to_codebook;
+    glm::mat4 start_to_codebook = state->start_to_codebook;
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     int seg_res = ctx->seg_res;
+    uint64_t seg_timeout_ns = ctx->seg_timeout * 1e9;
 
-    // Remove depth classification old codewords
-    for (unsigned off = 0; off < ctx->seg_codebook.size(); ++off) {
-        std::vector<struct seg_codeword> &codewords = ctx->seg_codebook[off];
+    ctx->seg_codebook_bg.resize(downsampled_cloud_size);
+
+    // Retire old codewords and then ranked by codeword.n (the number of times
+    // points have matched it consecutively) pick the codeword with the highest
+    // number of consecutive matches as our default background codeword.
+    for (unsigned off = 0; off < seg_codebook.size(); off++) {
+        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
         ctx->seg_codebook_bg[off] = NULL;
         for (unsigned i = 0; i < codewords.size();) {
             struct seg_codeword &codeword = codewords[i];
+
             if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
                 ctx->seg_timeout)
             {
@@ -3243,10 +3321,11 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
                 codewords.pop_back();
             } else {
                 if (!ctx->seg_codebook_bg[off] ||
-                    codeword.n > ctx->seg_codebook_bg[off]->n) {
+                    codeword.n > ctx->seg_codebook_bg[off]->n)
+                {
                     ctx->seg_codebook_bg[off] = &codeword;
                 }
-                ++i;
+                i++;
             }
         }
     }
@@ -3287,10 +3366,10 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             struct seg_codeword *codeword = NULL;
             struct seg_codeword *bg_codeword = ctx->seg_codebook_bg[off];
 
-            std::vector<struct seg_codeword> &codewords =
-                ctx->seg_codebook[off];
+            std::vector<struct seg_codeword> &codewords = seg_codebook[off];
             for (std::vector<struct seg_codeword>::iterator it =
-                 codewords.begin(); it != codewords.end(); ++it) {
+                 codewords.begin(); it != codewords.end(); ++it)
+            {
                 struct seg_codeword &candidate = *it;
 
                 float dist = fabsf(depth - candidate.m);
@@ -3481,7 +3560,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        float aligned_y = (ctx->codebook_pose.type != GM_POSE_INVALID) ?
+        float aligned_y = (state->codebook_pose.type != GM_POSE_INVALID) ?
             tracking->ground_cloud->points[idx].y :
             tracking->downsampled_cloud->points[idx].y;
         if (aligned_y > lowest_point) {
@@ -3589,7 +3668,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        float aligned_y = (ctx->codebook_pose.type != GM_POSE_INVALID) ?
+        float aligned_y = (state->codebook_pose.type != GM_POSE_INVALID) ?
             tracking->ground_cloud->points[idx].y :
             tracking->downsampled_cloud->points[idx].y;
         if (aligned_y > lowest_point - ctx->floor_threshold) {
@@ -4058,8 +4137,8 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    update_depth_codebook(ctx, tracking,
-                          state->to_start, ctx->start_to_codebook,
+    update_depth_codebook(ctx, tracking, state,
+                          state->to_start, state->start_to_codebook,
                           ctx->seg_res);
 }
 
@@ -4157,6 +4236,11 @@ context_clear_tracking_history_locked(struct gm_context *ctx)
 static void
 context_clear_tracking_locked(struct gm_context *ctx, bool clear_pools)
 {
+    if (ctx->latest_paused_tracking) {
+        gm_tracking_unref(&ctx->latest_paused_tracking->base);
+        ctx->latest_paused_tracking = NULL;
+    }
+
     if (ctx->latest_tracking) {
         gm_tracking_unref(&ctx->latest_tracking->base);
         ctx->latest_tracking = NULL;
@@ -4201,6 +4285,11 @@ context_track_skeleton(struct gm_context *ctx,
         (enum tracking_stage)ctx->debug_pipeline_stage;
     struct pipeline_scratch_state state = {};
 
+    tracking->success = false;
+
+    state.paused = tracking->frame->paused;
+    tracking->paused = state.paused;
+
     for (int i = 0; i < tracking->stage_data.size(); i++) {
         tracking->stage_data[i].duration_ns = 0;
     }
@@ -4211,6 +4300,27 @@ context_track_skeleton(struct gm_context *ctx,
                sizeof(tracking->debug_cloud_intrinsics));
         tracking->debug_cloud_indices.resize(0);
         tracking->debug_lines.resize(0);
+    }
+
+    /* Discontinuities will e.g. happen when a recording loops or if we jump
+     * frames in a recording.
+     */
+    if (tracking->frame->discontinuity) {
+        gm_debug(ctx->log, "Wiping codebook (frame discontinuity)");
+
+        /* Note: this isn't the same as resetting the codebook
+         * later in cases that the pose has changed since we don't
+         * affect the codebook_pose here.
+         */
+        unsigned int codebook_size = ctx->seg_codebook.size();
+        ctx->seg_codebook.clear();
+        ctx->seg_codebook.resize(codebook_size);
+
+        gm_debug(ctx->log, "Clearing tracking history (frame discontinuity)");
+
+        pthread_mutex_lock(&ctx->tracking_swap_mutex);
+        context_clear_tracking_history_locked(ctx);
+        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
     }
 
     float nan = std::numeric_limits<float>::quiet_NaN();
@@ -4248,21 +4358,6 @@ context_track_skeleton(struct gm_context *ctx,
     bool motion_detection = ctx->motion_detection;
 
     bool reset_codebook = false;
-    if (tracking->frame->discontinuity) {
-        gm_debug(ctx->log, "Resetting codebook (frame discontinuity)");
-        reset_codebook = true;
-
-        /* TODO: we shouldn't need to clear the history here, we should be
-         * copying history pointers into a scratch history array (or not
-         * for discontinuities) so we will be able to neatly avoid any
-         * context state modification during tracking when paused.
-         */
-        gm_debug(ctx->log, "Clearing tracking history (frame discontinuity)");
-        pthread_mutex_lock(&ctx->tracking_swap_mutex);
-        context_clear_tracking_history_locked(ctx);
-        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
-    }
-
     if (ctx->seg_codebook.size() != downsampled_cloud_size ||
         (ctx->codebook_pose.type != tracking->frame->pose.type))
     {
@@ -4325,14 +4420,35 @@ context_track_skeleton(struct gm_context *ctx,
     }
 
     if (reset_codebook) {
-        ctx->seg_codebook.clear();
-        ctx->seg_codebook.resize(downsampled_cloud_size);
-        ctx->seg_codebook_bg.resize(downsampled_cloud_size);
-        ctx->codebook_pose = tracking->frame->pose;
-        ctx->start_to_codebook = glm::inverse(state.to_start);
+        if (state.paused)
+            state.seg_codebook = &ctx->pause_frame_seg_codebook;
+        else
+            state.seg_codebook = &ctx->seg_codebook;
+
+        state.seg_codebook->clear();
+        state.seg_codebook->resize(downsampled_cloud_size);
+        state.codebook_pose = tracking->frame->pose;
+        state.start_to_codebook = glm::inverse(state.to_start);
+
+        // Don't modify context state for paused frames
+        if (!state.paused) {
+            ctx->codebook_pose = state.codebook_pose;
+            ctx->start_to_codebook = state.start_to_codebook;
+        }
 
         if (tracking->frame->pose.type != GM_POSE_TO_START)
             gm_debug(ctx->log, "No tracking pose");
+    } else {
+        if (state.paused) {
+            // Relying on C++ assignment operator magic to do a deep copy of
+            // the codebook here...
+            ctx->pause_frame_seg_codebook = ctx->seg_codebook;
+            state.seg_codebook = &ctx->pause_frame_seg_codebook;
+        } else
+            state.seg_codebook = &ctx->seg_codebook;
+
+        state.codebook_pose = ctx->codebook_pose;
+        state.start_to_codebook = ctx->start_to_codebook;
     }
 
     run_stage(tracking,
@@ -4363,6 +4479,18 @@ context_track_skeleton(struct gm_context *ctx,
         !ctx->latest_tracking->success ||
         reset_codebook)
     {
+        if (!motion_detection) {
+            gm_debug(ctx->log, "Running naive segmentation while motion based segmentation disabled");
+        }
+        if (ctx->latest_tracking == NULL ||
+            ctx->latest_tracking->success == false)
+        {
+            gm_debug(ctx->log, "Running naive segmentation since last tracking attempt failed");
+        }
+        if (reset_codebook) {
+            gm_debug(ctx->log, "Running naive segmentation since motion analysis codebook has been reset");
+        }
+
         run_stage(tracking,
                   TRACKING_STAGE_NAIVE_FLOOR,
                   stage_naive_detect_floor_cb,
@@ -4390,9 +4518,11 @@ context_track_skeleton(struct gm_context *ctx,
 
     if (state.persons.size() == 0) {
         if (ctx->motion_detection) {
-            update_depth_codebook(ctx, tracking,
+            update_depth_codebook(ctx,
+                                  tracking,
+                                  &state,
                                   state.to_start,
-                                  ctx->start_to_codebook,
+                                  state.start_to_codebook,
                                   ctx->seg_res);
         }
         pipeline_scratch_state_clear(&state);
@@ -4544,9 +4674,11 @@ context_track_skeleton(struct gm_context *ctx,
         (!ctx->latest_tracking || !ctx->latest_tracking->success))
     {
 #if 0
+        std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+            *state.seg_codebook;
         foreach_xy_off(tracking->downsampled_cloud->width,
                        tracking->downsampled_cloud->height) {
-            std::list<struct seg_codeword> &codewords = ctx->seg_codebook[off];
+            std::list<struct seg_codeword> &codewords = seg_codebook[off];
             if (codewords.size() <= 1) {
                 continue;
             }
@@ -4569,9 +4701,8 @@ context_track_skeleton(struct gm_context *ctx,
             }
         }
 #else
-        ctx->seg_codebook.clear();
-        ctx->seg_codebook.resize(downsampled_cloud_size);
-        ctx->seg_codebook_bg.resize(downsampled_cloud_size);
+        state.seg_codebook->clear();
+        state.seg_codebook->resize(downsampled_cloud_size);
 #endif
     }
 
@@ -4595,6 +4726,8 @@ context_track_skeleton(struct gm_context *ctx,
     }
 
     pipeline_scratch_state_clear(&state);
+
+    tracking->success = true;
 
     return true;
 }
@@ -5455,11 +5588,15 @@ detector_thread_cb(void *data)
                  get_duration_ns_print_scale_suffix(duration));
         tracking->duration_ns = duration;
 
+        if (tracked) {
+            gm_info(ctx->log, "Successfully tracked frame");
+        } else {
+            gm_info(ctx->log, "Failed to track frame");
+        }
+
         pthread_mutex_lock(&ctx->tracking_swap_mutex);
 
-        if (tracked) {
-            tracking->success = true;
-
+        if (tracked && tracking->paused == false) {
             if (ctx->n_tracking) {
                 gm_assert(ctx->log,
                           tracking->frame->timestamp > ctx->tracking_history[0]->frame->timestamp,
@@ -5495,10 +5632,25 @@ detector_thread_cb(void *data)
         /* Hold onto the latest tracking regardless of whether it was
          * successful so that a user can still access all the information
          * related to tracking.
+         *
+         * We don't want to touch ctx->latest_tracking if we've processed
+         * a paused frame since ctx->latest_tracking affects the behaviour
+         * of tracking which we don't want while we may be repeatedly
+         * re-processing the same frame over and over.
          */
-        if (ctx->latest_tracking)
-            gm_tracking_unref(&ctx->latest_tracking->base);
-        ctx->latest_tracking = tracking;
+        if (tracking->paused) {
+            if (ctx->latest_paused_tracking)
+                gm_tracking_unref(&ctx->latest_paused_tracking->base);
+            ctx->latest_paused_tracking = tracking;
+        } else {
+            if (ctx->latest_paused_tracking)
+                gm_tracking_unref(&ctx->latest_paused_tracking->base);
+            ctx->latest_paused_tracking = NULL;
+
+            if (ctx->latest_tracking)
+                gm_tracking_unref(&ctx->latest_tracking->base);
+            ctx->latest_tracking = tracking;
+        }
 
         pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
@@ -7219,7 +7371,13 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     struct gm_tracking *tracking = NULL;
 
     pthread_mutex_lock(&ctx->tracking_swap_mutex);
-    if (ctx->latest_tracking) {
+    if (ctx->latest_paused_tracking) {
+        tracking = gm_tracking_ref(&ctx->latest_paused_tracking->base);
+
+        gm_debug(ctx->log, "get_latest_tracking = %p (ref = %d) (paused)\n",
+                 ctx->latest_paused_tracking,
+                 atomic_load(&ctx->latest_paused_tracking->base.ref));
+    } else if (ctx->latest_tracking) {
         tracking = gm_tracking_ref(&ctx->latest_tracking->base);
 
         gm_debug(ctx->log, "get_latest_tracking = %p (ref = %d)\n",
