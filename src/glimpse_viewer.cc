@@ -3446,6 +3446,18 @@ viewer_init(Data *data)
     data->target_error = 0.25f;
     data->target_progress = true;
 
+    /* FIXME: really these overrides should only affect the playback_device */
+    data->dev_control_overrides.insert({
+        { "frame", NULL },
+        { "max_frame", NULL },
+        { "loop", NULL },
+        { "frame_skip", NULL },
+        { "frame_throttle", NULL },
+        { "<<", NULL },
+        { "||>", NULL },
+        { ">>", NULL },
+    });
+
     data->initialized = true;
 }
 
