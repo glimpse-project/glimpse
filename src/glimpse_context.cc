@@ -313,8 +313,17 @@ struct gm_pipeline_stage {
     const char *name;
     const char *desc;
 
+    /* So we can report average durations in UIs */
     uint64_t total_time_ns;
     int n_invocations;
+    int n_frames; // average across whole frames (possibly multiple invocations)
+
+    /* So we can report median filtered durations in UIs */
+    std::vector<int> invocation_duration_hist;
+    int invocation_duration_hist_head; // circular buffer ptr
+
+    std::vector<int> frame_duration_hist;
+    int frame_duration_hist_head; // circular buffer ptr
 
     std::vector<image_generator> images;
 
@@ -326,7 +335,11 @@ struct gm_pipeline_stage {
  * _stage_data can track information about a specific tracking run
  */
 struct gm_pipeline_stage_data {
-    uint64_t duration_ns;
+
+    // NB: a stage like label inference may be invoked multiple times
+    // per-frame while tracking for different candidate clusters
+    uint64_t frame_duration_ns; // total over frame
+    std::vector<uint64_t> durations; // individual invocations
 
     //std::vector<struct gm_point_rgba> debug_point_cloud;
     //std::vector<struct gm_point_rgba> debug_lines;
@@ -705,6 +718,11 @@ struct gm_context
      * having to repeatedly allocate a buffer for each tracking iteration
      */
     std::vector<struct seg_codeword *> seg_codebook_bg;
+
+    /* Note: this lock covers the aggregated metrics under ctx->stages[] too */
+    pthread_mutex_t aggregate_metrics_mutex;
+    int n_frames;
+    uint64_t total_tracking_duration;
 };
 
 struct PointCmp {
@@ -2523,7 +2541,49 @@ gm_tracking_get_stage_duration(struct gm_tracking *_tracking,
 
     struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
 
-    return stage_data.duration_ns;
+    return stage_data.frame_duration_ns;
+}
+
+uint64_t
+gm_tracking_get_stage_run_duration_avg(struct gm_tracking *_tracking,
+                                       int stage_index)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    if (stage_data.frame_duration_ns)
+        return stage_data.frame_duration_ns / stage_data.durations.size();
+    else
+        return 0;
+}
+
+uint64_t
+gm_tracking_get_stage_run_duration_median(struct gm_tracking *_tracking,
+                                          int stage_index)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage_data &stage_data = tracking->stage_data[stage_index];
+
+    if (stage_data.durations.size() <= 1)
+        return stage_data.frame_duration_ns;
+
+    int len = stage_data.durations.size();
+    uint64_t tmp[len];
+    for (int i = 0; i < len; i++)
+        tmp[i] = stage_data.durations[i];
+    std::sort(tmp, tmp + len);
+
+    return tmp[len/2];
 }
 
 #if 0
@@ -4202,13 +4262,12 @@ run_stage(struct gm_tracking_impl *tracking,
     } else
         duration = 0;
 
-    // Note: we use += here because a stage may be used multiple times
-    // during tracking and we reset the per-stage durations when we
-    // start context_track_skeleton()
-    stage_data.duration_ns += duration;
+    // Note we append to a vector since a stage (such as label inference)
+    // may be run multiple times over different candidate clusters.
+    stage_data.durations.push_back(duration);
+    stage_data.frame_duration_ns += duration;
 
     stage.total_time_ns += duration;
-    stage.n_invocations++;
 
     gm_info(ctx->log,
             "Stage: %s took %.3f%s",
@@ -4291,7 +4350,8 @@ context_track_skeleton(struct gm_context *ctx,
     tracking->paused = state.paused;
 
     for (int i = 0; i < tracking->stage_data.size(); i++) {
-        tracking->stage_data[i].duration_ns = 0;
+        tracking->stage_data[i].frame_duration_ns = 0;
+        tracking->stage_data[i].durations.clear();
     }
 
     if (ctx->debug_cloud_mode) {
@@ -5586,7 +5646,6 @@ detector_thread_cb(void *data)
         gm_debug(ctx->log, "Skeletal tracking took %.3f%s",
                  get_duration_ns_print_scale(duration),
                  get_duration_ns_print_scale_suffix(duration));
-        tracking->duration_ns = duration;
 
         if (tracked) {
             gm_info(ctx->log, "Successfully tracked frame");
@@ -5659,6 +5718,51 @@ detector_thread_cb(void *data)
         gm_debug(ctx->log, "Requesting new frame for skeletal tracking");
         /* We throttle frame acquisition according to our tracking rate... */
         request_frame(ctx);
+
+
+        /* Maintain running statistics about pipeline stage timings
+         */
+        pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+
+        tracking->duration_ns = duration;
+        ctx->total_tracking_duration += duration;
+        ctx->n_frames++;
+        for (int i = 0; i < tracking->stage_data.size(); i++) {
+            const int max_hist_len = 30;
+
+            struct gm_pipeline_stage &stage = ctx->stages[i];
+            struct gm_pipeline_stage_data &stage_data = tracking->stage_data[i];
+
+            uint64_t frame_duration_ns = 0;
+
+            for (int invocation_duration_ns : tracking->stage_data[i].durations)
+            {
+                frame_duration_ns += invocation_duration_ns;
+
+                stage.n_invocations++;
+
+                if (stage.invocation_duration_hist.size() < max_hist_len) {
+                    stage.invocation_duration_hist.push_back(invocation_duration_ns);
+                } else {
+                    int head = stage.invocation_duration_hist_head;
+                    stage.invocation_duration_hist[head] = invocation_duration_ns;
+                    stage.invocation_duration_hist_head++;
+                    stage.invocation_duration_hist_head %= max_hist_len;
+                }
+            }
+
+            stage.n_frames++;
+            if (stage.frame_duration_hist.size() < max_hist_len) {
+                stage.frame_duration_hist.push_back(frame_duration_ns);
+            } else {
+                int head = stage.frame_duration_hist_head;
+                stage.frame_duration_hist[head] = frame_duration_ns;
+                stage.frame_duration_hist_head++;
+                stage.frame_duration_hist_head %= max_hist_len;
+            }
+        }
+
+        pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
     }
 
     return NULL;
@@ -5861,6 +5965,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     pthread_mutex_init(&ctx->tracking_swap_mutex, NULL);
     pthread_mutex_init(&ctx->frame_ready_mutex, NULL);
     pthread_cond_init(&ctx->frame_ready_cond, NULL);
+    pthread_mutex_init(&ctx->aggregate_metrics_mutex, NULL);
 
     ctx->tracking_pool = mem_pool_alloc(logger,
                                         "tracking",
@@ -7217,6 +7322,96 @@ gm_context_get_stage_description(struct gm_context *ctx,
     return ctx->stages[stage].desc;
 }
 
+uint64_t
+gm_context_get_stage_frame_duration_avg(struct gm_context *ctx,
+                                        int stage_index)
+{
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
+
+    uint64_t ret;
+
+    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    if (stage.n_frames)
+        ret = stage.total_time_ns / stage.n_frames;
+    else
+        ret = 0;
+    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    return ret;
+}
+
+uint64_t
+gm_context_get_stage_frame_duration_median(struct gm_context *ctx,
+                                           int stage_index)
+{
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
+
+    if (stage.frame_duration_hist.size() <= 1)
+        return stage.total_time_ns;
+
+    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    int len = stage.frame_duration_hist.size();
+    uint32_t tmp[len]; // Assume durations less than 4.3 seconds
+    for (int i = 0; i < len; i++)
+        tmp[i] = (uint32_t)stage.frame_duration_hist[i];
+    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    std::sort(tmp, tmp + len);
+
+    return tmp[len/2];
+}
+
+uint64_t
+gm_context_get_stage_run_duration_avg(struct gm_context *ctx,
+                                      int stage_index)
+{
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
+
+    uint64_t ret;
+
+    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    if (stage.n_frames)
+        ret = stage.total_time_ns / stage.n_invocations;
+    else
+        ret = 0;
+    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    return ret;
+}
+
+uint64_t
+gm_context_get_stage_run_duration_median(struct gm_context *ctx,
+                                         int stage_index)
+{
+    gm_assert(ctx->log, stage_index >=0 && stage_index < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    struct gm_pipeline_stage &stage = ctx->stages[stage_index];
+
+    if (stage.invocation_duration_hist.size() <= 1)
+        return stage.total_time_ns;
+
+    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    int len = stage.invocation_duration_hist.size();
+    uint32_t tmp[len]; // Assume durations less than 4.3 seconds
+    for (int i = 0; i < len; i++)
+        tmp[i] = (uint32_t)stage.invocation_duration_hist[i];
+    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    std::sort(tmp, tmp + len);
+
+    return tmp[len/2];
+}
+
 int
 gm_context_get_stage_n_images(struct gm_context *ctx,
                               int stage_id)
@@ -7268,13 +7463,18 @@ gm_context_get_stage_ui_properties(struct gm_context *ctx, int stage)
 }
 
 uint64_t
-gm_context_get_average_stage_duration(struct gm_context *ctx,
-                                      int stage)
+gm_context_get_average_frame_duration(struct gm_context *ctx)
 {
-    gm_assert(ctx->log, stage >=0 && stage < (int)ctx->stages.size(),
-              "Out of range stage index");
+    uint64_t ret;
 
-    return 0; // FIXME
+    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    if (ctx->n_frames <= 1)
+        ret = ctx->total_tracking_duration;
+    else
+        ret = ctx->total_tracking_duration / ctx->n_frames;
+    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    return ret;
 }
 
 int
@@ -7337,6 +7537,28 @@ gm_context_notify_frame(struct gm_context *ctx,
     return true;
 }
 
+static void
+context_clear_metrics(struct gm_context *ctx)
+{
+    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+
+    /* Clear all metrics */
+    ctx->total_tracking_duration = 0;
+    ctx->n_frames = 0;
+
+    for (int i = 0; i < ctx->stages.size(); i++) {
+
+        struct gm_pipeline_stage &stage = ctx->stages[i];
+
+        stage.frame_duration_hist.clear();
+        stage.frame_duration_hist_head = 0;
+        stage.invocation_duration_hist.clear();
+        stage.invocation_duration_hist_head = 0;
+    }
+
+    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+}
+
 void
 gm_context_flush(struct gm_context *ctx, char **err)
 {
@@ -7347,6 +7569,8 @@ gm_context_flush(struct gm_context *ctx, char **err)
      */
     context_clear_tracking_locked(ctx,
                                   true); // and clear tracking/prediction pools
+
+    context_clear_metrics(ctx);
 
     pthread_mutex_lock(&ctx->frame_ready_mutex);
     if (ctx->frame_ready) {

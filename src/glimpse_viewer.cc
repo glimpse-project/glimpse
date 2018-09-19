@@ -214,6 +214,8 @@ struct _Data
     bool show_profiler;
     bool show_joint_summary;
 
+    int stage_stats_mode;
+
     /* In realtime mode, we use predicted joint positions so that the
      * presented skeleton keeps up with the video. This allows us to add a
      * synthetic delay to the timestamp we request in this mode, which adds
@@ -1361,6 +1363,21 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         update_ar_video_queue_len(data, queue_len);
     }
 
+    static const char *stage_stat_modes[] = {
+        "Aggregated per-frame average",
+        "Aggregated per-frame median",
+        "Aggregated per-run average",
+        "Aggregated per-run median",
+        "Latest per-frame",
+        "Latest per-run average",
+        "Latest per-run median",
+    };
+    ImGui::Combo("Stage stats mode", &data->stage_stats_mode, stage_stat_modes,
+                 ARRAY_LEN(stage_stat_modes));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Affects the way that the per-stage timing bar-graphs are updated");
+
+
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
     ImGui::SliderInt("Prediction delay", &data->prediction_delay,
                      0, 1000000000);
@@ -1408,6 +1425,11 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::TextDisabled("Tracking Pipeline...");
     ImGui::Separator();
     ImGui::Spacing();
+
+    uint64_t avg_frame_duration_ns = gm_context_get_average_frame_duration(data->ctx);
+    uint64_t tracking_duration_ns = 0;
+    if (data->latest_tracking)
+        tracking_duration_ns = gm_tracking_get_duration(data->latest_tracking);
 
     int n_stages = gm_context_get_n_stages(data->ctx);
     for (int i = 0; i < n_stages; i++) {
@@ -1482,10 +1504,48 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         }
 
         if (data->latest_tracking) {
-            uint64_t duration_ns = gm_tracking_get_duration(data->latest_tracking);
-            uint64_t stage_duration_ns =
-                gm_tracking_get_stage_duration(data->latest_tracking, i);
-            float fraction = (double)stage_duration_ns / duration_ns;
+            uint64_t ref_duration_ns = 0;
+            uint64_t stage_duration_ns = 0;
+
+            switch (data->stage_stats_mode)
+            {
+            case 0: // "Aggregated per-frame average",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_frame_duration_avg(data->ctx, i);
+                break;
+            case 1: // "Aggregated per-frame median",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_frame_duration_median(data->ctx, i);
+                break;
+            case 2: // "Aggregated per-run average",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_run_duration_avg(data->ctx, i);
+                break;
+            case 3: // "Aggregated per-run median",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_run_duration_median(data->ctx, i);
+                break;
+            case 4: // "Latest per-frame",
+                ref_duration_ns = tracking_duration_ns;
+                stage_duration_ns =
+                    gm_tracking_get_stage_duration(data->latest_tracking, i);
+                break;
+            case 5: // "Latest per-run average",
+                ref_duration_ns = tracking_duration_ns;
+                stage_duration_ns =
+                    gm_tracking_get_stage_run_duration_avg(data->latest_tracking, i);
+                break;
+            case 6: // "Latest per-run median",
+                ref_duration_ns = tracking_duration_ns;
+                stage_duration_ns =
+                    gm_tracking_get_stage_run_duration_median(data->latest_tracking, i);
+                break;
+            }
+            float fraction = (double)stage_duration_ns / ref_duration_ns;
 
             char duration_s16[16];
             format_duration_s16(stage_duration_ns, duration_s16);
@@ -3447,6 +3507,8 @@ viewer_init(Data *data)
 
     data->target_error = 0.25f;
     data->target_progress = true;
+
+    data->stage_stats_mode = 1; // aggregated per-frame median
 
     /* FIXME: really these overrides should only affect the playback_device */
     data->dev_control_overrides.insert({

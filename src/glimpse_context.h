@@ -496,6 +496,25 @@ const char *
 gm_context_get_stage_description(struct gm_context *ctx,
                                  int stage);
 
+// We maintain a per-stage circular buffer of duration measurements
+// (both across full frames and individual invocations)
+//
+// This lets us query more stable/aggregated statistics for each
+// stage, useful for displaying in a UI.
+
+uint64_t
+gm_context_get_stage_frame_duration_avg(struct gm_context *ctx,
+                                        int stage);
+uint64_t
+gm_context_get_stage_frame_duration_median(struct gm_context *ctx,
+                                           int stage);
+uint64_t
+gm_context_get_stage_run_duration_avg(struct gm_context *ctx,
+                                      int stage);
+uint64_t
+gm_context_get_stage_run_duration_median(struct gm_context *ctx,
+                                         int stage);
+
 int
 gm_context_get_stage_n_images(struct gm_context *ctx,
                               int stage);
@@ -514,8 +533,7 @@ struct gm_ui_properties *
 gm_context_get_stage_ui_properties(struct gm_context *ctx, int stage);
 
 uint64_t
-gm_context_get_average_stage_duration(struct gm_context *ctx,
-                                      int stage);
+gm_context_get_average_frame_duration(struct gm_context *ctx);
 
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
@@ -559,9 +577,22 @@ gm_tracking_get_debug_lines(struct gm_tracking *tracking,
 
 uint64_t
 gm_tracking_get_duration(struct gm_tracking *tracking);
+
+// Total duration for the whole frame, considering that one stage (such
+// as label inference) may be run multiple times per-frame
 uint64_t
 gm_tracking_get_stage_duration(struct gm_tracking *tracking,
                                int stage);
+// In case the stage was run multiple times then what was the average
+// duration
+uint64_t
+gm_tracking_get_stage_run_duration_avg(struct gm_tracking *_tracking,
+                                       int stage_index);
+// In case the stage was run multiple times then what was the median
+// duration
+uint64_t
+gm_tracking_get_stage_run_duration_median(struct gm_tracking *_tracking,
+                                          int stage_index);
 
 #if 0
 const struct gm_point_rgba *
