@@ -254,6 +254,8 @@ struct seg_codeword
                      // into this codeword
 };
 
+// FIXME: We *really* need to change all of these to better human readable /
+// self-documenting names...
 // Depth pixel classification for segmentation
 enum seg_class
 {
@@ -603,14 +605,17 @@ struct gm_context
     float cluster_max_depth;
 
     bool motion_detection;
-    float seg_tb;
-    float seg_tf;
-    int seg_N;
-    int seg_b;
-    int seg_gamma;
-    int seg_alpha;
-    float seg_psi;
-    float seg_timeout;
+
+    // FIXME: We *really* need to change all of these to better human readable /
+    // self-documenting names...
+    float seg_tb; // Segmentation bucket threshold
+    float seg_tf; // Segmentation flickering threshold
+    int seg_N; // Segmentation max existing mean weight
+    int seg_b; // Segmentation flickering frame consecutiveness threshold
+    int seg_gamma; // Segmentation max flickering frame occurrence
+    int seg_alpha; // Segmentation frame-time for uninteresting objects
+    float seg_psi; // Segmentation ratio for uninteresting object matches
+    float seg_timeout; // Unused segmentation codeword recycle timeout
 
     int inf_res;
     bool use_threads;
@@ -1852,119 +1857,6 @@ project_point_into_codebook(pcl::PointXYZL *point,
     }
 
     return width * dny + dnx;
-}
-
-static void
-update_depth_codebook(struct gm_context *ctx,
-                      struct gm_tracking_impl *tracking,
-                      struct pipeline_scratch_state *state,
-                      glm::mat4 to_start,
-                      glm::mat4 to_codebook,
-                      int seg_res)
-{
-    std::vector<std::vector<struct seg_codeword>> &seg_codebook =
-        *state->seg_codebook;
-    uint64_t start = get_time();
-
-    int n_codewords = 0;
-    struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
-
-    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
-    for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off) {
-        pcl::PointXYZL point = tracking->downsampled_cloud->points[depth_off];
-
-        if (std::isnan(point.z)) {
-            continue;
-        } else {
-            int off = project_point_into_codebook(&point,
-                                                  to_start,
-                                                  to_codebook,
-                                                  &intrinsics,
-                                                  seg_res);
-            // Falls outside of codebook so we can't classify...
-            if (off < 0)
-                continue;
-
-            // At this point z has been projected into the coordinate space of
-            // the codebook
-            float depth = point.z;
-
-            // Look to see if this pixel falls into an existing codeword
-            struct seg_codeword *codeword = NULL;
-            std::vector<struct seg_codeword> &codewords = seg_codebook[off];
-            std::vector<struct seg_codeword>::iterator it;
-            for (it = codewords.begin(); it != codewords.end(); ++it) {
-                struct seg_codeword &candidate = *it;
-
-                if (fabsf(depth - candidate.m) < ctx->seg_tb) {
-                    codeword = &candidate;
-                    break;
-                }
-            }
-
-            // Delete the codeword if it matches a tracked point
-            if (tracking->downsampled_cloud->points[depth_off].label == TRK) {
-                if (codeword) {
-                    if (codewords.size() > 2) {
-                        std::swap(*it, codewords.back());
-                        codewords.pop_back();
-                    } else {
-                        codewords.erase(it);
-                    }
-                }
-                continue;
-            }
-
-            const uint64_t t = tracking->frame->timestamp;
-
-            // Create a new codeword if one didn't fit
-            if (!codeword) {
-                /* Oh if only C++ had named member initializers... */
-                codewords.push_back({
-                    0, // mean
-                    0, // number of depth values in this codeword
-                    t, // creation timestamp
-                    t, // last use timestamp
-                    0  // number times depth values consecutively fell here
-                });
-                codeword = &codewords.back();
-            }
-
-            // Update the codeword info
-            // Update the mean depth
-            float n = (float)std::min(ctx->seg_N, codeword->n);
-            codeword->m = ((n * codeword->m) + depth) / (n + 1.f);
-
-            // Increment number of depth values
-            ++codeword->n;
-
-            // Increment consecutive number of depth values if its happened in
-            // consecutive frames
-            if (!ctx->n_tracking ||
-                codeword->tl != ctx->last_codebook_update_time) {
-                ++codeword->nc;
-            }
-
-            // Track the latest timestamp to touch this codeword
-            codeword->tl = t;
-
-            // Keep track of the amount of codewords we have
-            n_codewords += (int)codewords.size();
-        }
-    }
-
-    uint64_t end = get_time();
-    uint64_t duration = end - start;
-    gm_info(ctx->log,
-            "Codeword update (%.2f codewords/pix) took %.3f%s",
-            n_codewords / (float)(tracking->downsampled_cloud->width *
-                                  tracking->downsampled_cloud->height),
-            get_duration_ns_print_scale(duration),
-            get_duration_ns_print_scale_suffix(duration));
-
-    if (!state->paused) {
-        ctx->last_codebook_update_time = tracking->frame->timestamp;
-    }
 }
 
 static inline bool
@@ -4081,9 +3973,10 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     pcl::PointCloud<pcl::PointXYZL>::VectorType &downsampled_points =
         tracking->downsampled_cloud->points;
 
-    const float tb = ctx->seg_tb;
-    const float tf = ctx->seg_tf;
-    const int b = ctx->seg_b;
+    // FIXME: choose better human readable / self-documenting names
+    const float tb = ctx->seg_tb; // Segmentation bucket threshold
+    const float tf = ctx->seg_tf; // Segmentation flickering threshold
+    const int b = ctx->seg_b; // Segmentation flickering frame consecutiveness threshold
     const int gamma = (float)ctx->seg_gamma;
     const int alpha = ctx->seg_alpha;
     const float psi = ctx->seg_psi;
@@ -4114,18 +4007,25 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
 
         // Look to see if this pixel falls into an existing codeword
         struct seg_codeword *codeword = NULL;
+        float best_codeword_distance = FLT_MAX;
         struct seg_codeword *bg_codeword = seg_codebook_bg[off];
 
         std::vector<struct seg_codeword> &codewords = seg_codebook[off];
-        for (std::vector<struct seg_codeword>::iterator it =
-             codewords.begin(); it != codewords.end(); ++it)
-        {
-            struct seg_codeword &candidate = *it;
+        for (auto &candidate : codewords) {
+            /* The codewords are sorted from closest to farthest */
             float dist = fabsf(depth - candidate.m);
-            if (dist < tb) {
+            if (dist < best_codeword_distance) {
                 codeword = &candidate;
+                best_codeword_distance = dist;
+            } else {
+                // Any other codewords will be even farther away
                 break;
             }
+        }
+
+        // NB: tb = Segmentation bucket threshold
+        if (best_codeword_distance > tb) {
+            codeword = NULL;
         }
 
         gm_assert(ctx->log,
@@ -4914,9 +4814,158 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    update_depth_codebook(ctx, tracking, state,
-                          state->to_start, state->start_to_codebook,
-                          ctx->seg_res);
+    // XXX: should copy to state to shield from async seg_res changes via
+    // glimpse_viewer in the middle of tracking
+    int seg_res = ctx->seg_res;
+
+    glm::mat4 to_start = state->to_start;
+    glm::mat4 to_codebook = state->start_to_codebook;
+
+    std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+        *state->seg_codebook;
+
+    struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
+
+    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
+    for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off)
+    {
+        pcl::PointXYZL point = tracking->downsampled_cloud->points[depth_off];
+
+        if (std::isnan(point.z))
+            continue;
+
+        int off = project_point_into_codebook(&point,
+                                              to_start,
+                                              to_codebook,
+                                              &intrinsics,
+                                              seg_res);
+        // Falls outside of codebook so we can't classify...
+        if (off < 0)
+            continue;
+
+        // At this point z has been projected into the coordinate space of
+        // the codebook
+        float depth = point.z;
+
+        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
+
+        // Delete any codewords that match a tracked point's distance
+        //
+        // Note: we don't assume the threshold testing can only match one
+        // codeword, since the mean distance of a codeword can change
+        // and drift over time resulting in codewords becoming arbitrarily
+        // close together. (Considering this it may even make sense for us
+        // to merge codewords that get too close).
+        //
+        if (point.label == TRK) {
+            for (int i = 0; i < (int)codewords.size(); ) {
+                struct seg_codeword &candidate = codewords[i];
+
+                float dist = fabsf(depth - candidate.m);
+
+                /* XXX: It would probably be reasonable to use a larger
+                 * threshold for clearing codewords that clash with tracked
+                 * foreground points - maybe +15cm behind point and 5cm in
+                 * front.
+                 *
+                 * Note: we don't typically expect many codewords so don't
+                 * expect array removal to really be a significant cost
+                 */
+                if (dist < ctx->seg_tb) {
+                    codewords.erase(codewords.begin() + i);
+                } else
+                    i++;
+            }
+            continue;
+        }
+
+        // Look to see if this pixel falls into an existing codeword
+
+        struct seg_codeword *codeword = NULL;
+        float best_codeword_distance = FLT_MAX;
+
+        for (int i = 0; i < codewords.size(); i++) {
+            struct seg_codeword &candidate = codewords[i];
+
+            /* The codewords are sorted from closest to farthest */
+            float dist = fabsf(depth - candidate.m);
+            if (dist < best_codeword_distance) {
+                codeword = &candidate;
+                best_codeword_distance = dist;
+            } else {
+                // Any other codewords will be even farther away
+                break;
+            }
+        }
+        // NB: ->seg_tb = Segmentation bucket threshold
+        if (best_codeword_distance > ctx->seg_tb)
+            codeword = NULL;
+
+        uint64_t frame_time = tracking->frame->timestamp;
+
+        // Create a new codeword if one didn't fit
+        if (!codeword) {
+            // FIXME: rename these members;, we currently have to spell out what
+            // each member is otherwise it's unreadable what any of this means...
+            struct seg_codeword new_codeword = {};
+            new_codeword.m = depth; // mean depth
+            new_codeword.n = 1; // The number of depth values in this codeword
+            new_codeword.ts = frame_time; // The frame timestamp this codeword was created on
+            new_codeword.tl = frame_time; // The last frame timestamp this codeword was used
+            new_codeword.nc = 0; // The number of times depth values consecutively fell
+                                 // into this codeword
+
+            // We insert sorted so that our matching logic can bail as soon
+            // as it sees the distance increasing while looking for the
+            // nearest match...
+            bool inserted = false;
+            for (int i = 0; i < codewords.size(); i++) {
+                if (codewords[i].m > depth) {
+                    codewords.insert(codewords.begin() + i, new_codeword);
+                    inserted = true;
+                    break;
+                }
+            }
+            if (!inserted)
+                codewords.push_back(new_codeword);
+        } else {
+            // NB: seg_N = Segmentation max existing mean weight
+            // ->n is the number of depth values that the mean is based on
+            //
+            // We clamp the 'n' value used to update the mean so that we limit
+            // the dampening effect that large n values have on the influence
+            // of newer depth values...
+            float effective_n = (float)std::min(ctx->seg_N, codeword->n);
+            codeword->m = (((effective_n * codeword->m) + depth) /
+                           (effective_n + 1.f));
+
+            codeword->n++;
+
+            /* XXX: I don't understand why this isn't:
+             *
+             * if (codeword->tl == ctx->last_codebook_update_time)
+             *     codeword->nc++;
+             *
+             * But notably, trying that seems to break things. Surely
+             * this is incrementing for each NON-consecutive update
+             * of a codeword if the codeword was NOT updated during
+             * the last update?
+             */
+#warning "XXX: check/understand the logic for updating codeword->nc"
+            // NB: ->nc is (afaiu) the count of consecutive frames...
+            if (!ctx->n_tracking ||
+                codeword->tl != ctx->last_codebook_update_time)
+            {
+                codeword->nc++;
+            }
+
+            // NB: ->tl is the last frame timestamp this codeword was used...
+            codeword->tl = frame_time;
+        }
+    }
+
+    if (!state->paused)
+        ctx->last_codebook_update_time = tracking->frame->timestamp;
 }
 
 #if 0
@@ -5337,12 +5386,11 @@ context_track_skeleton(struct gm_context *ctx,
 
     if (state.persons.size() == 0) {
         if (ctx->motion_detection) {
-            update_depth_codebook(ctx,
-                                  tracking,
-                                  &state,
-                                  state.to_start,
-                                  state.start_to_codebook,
-                                  ctx->seg_res);
+            run_stage(tracking,
+                      TRACKING_STAGE_UPDATE_CODEBOOK,
+                      stage_update_codebook_cb,
+                      NULL,
+                      &state);
         }
         pipeline_scratch_state_clear(&state);
         gm_info(ctx->log, "Give up tracking frame: Could not find a person cluster");
