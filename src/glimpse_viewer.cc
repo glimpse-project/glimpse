@@ -2209,12 +2209,14 @@ upload_tracking_textures(Data *data)
         int height;
         int n_images = gm_context_get_stage_n_images(data->ctx, i);
         struct stage_textures &stage_textures = data->stage_textures[i];
+        uint64_t stage_duration = gm_tracking_get_stage_duration(data->latest_tracking, i);
 
         for (int n = 0; n < n_images; n++) {
             struct debug_image &debug_image = stage_textures.images[n];
             uint8_t *rgb_data = NULL;
 
-            if (gm_tracking_create_stage_rgb_image(data->latest_tracking,
+            if (stage_duration &&
+                gm_tracking_create_stage_rgb_image(data->latest_tracking,
                                                    i,
                                                    n,
                                                    &width,
