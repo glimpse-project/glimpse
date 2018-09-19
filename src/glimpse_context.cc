@@ -1874,6 +1874,9 @@ update_depth_codebook(struct gm_context *ctx,
             for (it = codewords.begin(); it != codewords.end(); ++it) {
                 struct seg_codeword &candidate = *it;
 
+#warning "Is it not possible to have multiple codebook buckets within the threshold distance?"
+#warning "- If so don't we want to pick the nearest not first?"
+#warning "I guess it must be since the mean distance can drift over time so they could drift arbitrarily close"
                 if (fabsf(depth - candidate.m) < ctx->seg_tb) {
                     codeword = &candidate;
                     break;
@@ -1918,6 +1921,9 @@ update_depth_codebook(struct gm_context *ctx,
 
             // Increment consecutive number of depth values if its happened in
             // consecutive frames
+#warning "What if a number of previous frames fail to track will we still update the codebook?"
+#warning "- If we only update when we track successfully then we probably shouldn't refer to ctx->latest_tracking (could represent a failure)"
+#warning "- Either way it would probably be safer to track a ctx->last_codebook_update_time"
             if (!ctx->n_tracking ||
                 codeword->tl != ctx->latest_tracking->frame->timestamp) {
                 ++codeword->nc;
@@ -3435,6 +3441,10 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
              codewords.begin(); it != codewords.end(); ++it)
         {
             struct seg_codeword &candidate = *it;
+
+#warning "Is it not possible to have multiple codebook buckets within the threshold distance?"
+#warning "- If so don't we want to pick the nearest not first?"
+#warning "I guess it must be since the mean distance can drift over time so they could drift arbitrarily close"
             float dist = fabsf(depth - candidate.m);
             if (dist < tb) {
                 codeword = &candidate;
