@@ -3357,122 +3357,125 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     std::vector<std::vector<struct seg_codeword>> &seg_codebook =
         *state->seg_codebook;
+    std::vector<struct seg_codeword *> &seg_codebook_bg = ctx->seg_codebook_bg;
     glm::mat4 to_start = state->to_start;
     glm::mat4 start_to_codebook = state->start_to_codebook;
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     int seg_res = ctx->seg_res;
+    uint64_t frame_timestamp = tracking->frame->timestamp;
     uint64_t seg_timeout_ns = ctx->seg_timeout * 1e9;
 
-    ctx->seg_codebook_bg.resize(downsampled_cloud_size);
+    seg_codebook_bg.resize(downsampled_cloud_size);
 
     // Retire old codewords and then ranked by codeword.n (the number of times
     // points have matched it consecutively) pick the codeword with the highest
     // number of consecutive matches as our default background codeword.
     for (unsigned off = 0; off < seg_codebook.size(); off++) {
         std::vector<struct seg_codeword> &codewords = seg_codebook[off];
-        ctx->seg_codebook_bg[off] = NULL;
+        seg_codebook_bg[off] = NULL;
+
         for (unsigned i = 0; i < codewords.size();) {
             struct seg_codeword &codeword = codewords[i];
 
-            if ((tracking->frame->timestamp - codeword.tl) / 1000000000.0 >=
-                ctx->seg_timeout)
+            if ((frame_timestamp - codeword.tl) >= seg_timeout_ns)
             {
                 std::swap(codeword, codewords.back());
                 codewords.pop_back();
             } else {
                 if (!ctx->seg_codebook_bg[off] ||
-                    codeword.n > ctx->seg_codebook_bg[off]->n)
+                    codeword.n > seg_codebook_bg[off]->n)
                 {
-                    ctx->seg_codebook_bg[off] = &codeword;
+                    seg_codebook_bg[off] = &codeword;
                 }
                 i++;
             }
         }
     }
 
+    pcl::PointCloud<pcl::PointXYZL>::VectorType &downsampled_points =
+        tracking->downsampled_cloud->points;
+
+    const float tb = ctx->seg_tb;
+    const float tf = ctx->seg_tf;
+    const int b = ctx->seg_b;
+    const int gamma = (float)ctx->seg_gamma;
+    const int alpha = ctx->seg_alpha;
+    const float psi = ctx->seg_psi;
+
     // Do classification of depth buffer
     for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off)
     {
-        pcl::PointXYZL point =
-            tracking->downsampled_cloud->points[depth_off];
+        pcl::PointXYZL point = downsampled_points[depth_off];
 
         if (std::isnan(point.z)) {
             // We'll never cluster a nan value, so we can immediately
             // classify it as background.
-            tracking->downsampled_cloud->points[depth_off].label = BG;
+            downsampled_points[depth_off].label = BG;
             continue;
-        } else {
-            int off = project_point_into_codebook(
-                &point, to_start, start_to_codebook,
-                &tracking->depth_camera_intrinsics, seg_res);
+        }
 
-            // Falls outside of codebook so we can't classify...
-            if (off < 0)
-                continue;
+        int off = project_point_into_codebook(
+            &point, to_start, start_to_codebook,
+            &tracking->depth_camera_intrinsics, seg_res);
 
-            // At this point z has been projected into the coordinate space
-            // of the codebook
-            float depth = point.z;
+        // Falls outside of codebook so we can't classify...
+        if (off < 0)
+            continue;
 
-            const uint64_t t = tracking->frame->timestamp;
-            const float tb = ctx->seg_tb;
-            const float tf = ctx->seg_tf;
-            const int b = ctx->seg_b;
-            const int gamma = (float)ctx->seg_gamma;
-            const int alpha = ctx->seg_alpha;
-            const float psi = ctx->seg_psi;
+        // At this point z has been projected into the coordinate space
+        // of the codebook
+        float depth = point.z;
 
-            // Look to see if this pixel falls into an existing codeword
-            struct seg_codeword *codeword = NULL;
-            struct seg_codeword *bg_codeword = ctx->seg_codebook_bg[off];
+        // Look to see if this pixel falls into an existing codeword
+        struct seg_codeword *codeword = NULL;
+        struct seg_codeword *bg_codeword = seg_codebook_bg[off];
 
-            std::vector<struct seg_codeword> &codewords = seg_codebook[off];
-            for (std::vector<struct seg_codeword>::iterator it =
-                 codewords.begin(); it != codewords.end(); ++it)
-            {
-                struct seg_codeword &candidate = *it;
-
-                float dist = fabsf(depth - candidate.m);
-                if (dist < tb) {
-                    codeword = &candidate;
-                    break;
-                }
+        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
+        for (std::vector<struct seg_codeword>::iterator it =
+             codewords.begin(); it != codewords.end(); ++it)
+        {
+            struct seg_codeword &candidate = *it;
+            float dist = fabsf(depth - candidate.m);
+            if (dist < tb) {
+                codeword = &candidate;
+                break;
             }
+        }
 
-            assert(bg_codeword || (!bg_codeword && !codeword));
+        gm_assert(ctx->log,
+                  bg_codeword || (!bg_codeword && !codeword),
+                  "If no default background codeword, we shouldn't match any codeword based on mean distance");
 
-            // Classify this depth value
-            const float frame_time = ctx->n_tracking ?
-                (float)(t - ctx->tracking_history[0]->frame->timestamp) :
-                100000000.f;
+        // Classify this depth value
+        const float frame_time = ctx->n_tracking ?
+            (float)(frame_timestamp - ctx->tracking_history[0]->frame->timestamp) :
+            100000000.f;
 
-            if (!codeword) {
-                tracking->downsampled_cloud->points[depth_off].label = FG;
-            } else if (codeword->n == bg_codeword->n) {
-                tracking->downsampled_cloud->points[depth_off].label = BG;
+        if (!codeword) {
+            downsampled_points[depth_off].label = FG;
+        } else if (codeword->n == bg_codeword->n) {
+            downsampled_points[depth_off].label = BG;
+        } else {
+            bool flat = false, flickering = false;
+            float mean_diff = fabsf(codeword->m - bg_codeword->m);
+            if ((tb < mean_diff) && (mean_diff <= tf)) {
+                flat = true;
+            }
+            if ((b * codeword->nc) > codeword->n &&
+                (int)(((frame_timestamp - codeword->ts) / frame_time) / gamma) <=
+                codeword->nc) {
+                flickering = true;
+            }
+            if (flat || flickering) {
+                downsampled_points[depth_off].label =
+                    (flat && flickering) ? FL_FLK : (flat ?  FL : FLK);
             } else {
-                bool flat = false, flickering = false;
-                float mean_diff = fabsf(codeword->m - bg_codeword->m);
-                if ((tb < mean_diff) && (mean_diff <= tf)) {
-                    flat = true;
-                }
-                if ((b * codeword->nc) > codeword->n &&
-                    (int)(((t - codeword->ts) / frame_time) / gamma) <=
-                    codeword->nc) {
-                    flickering = true;
-                }
-                if (flat || flickering) {
-                    tracking->downsampled_cloud->points[depth_off].label =
-                        (flat && flickering) ?
-                            FL_FLK : (flat ?  FL : FLK);
+                if (codeword->n > alpha &&
+                    ((codeword->tl - codeword->ts) / frame_time) /
+                    (float)codeword->n >= psi) {
+                    downsampled_points[depth_off].label = TB;
                 } else {
-                    if (codeword->n > alpha &&
-                        ((codeword->tl - codeword->ts) / frame_time) /
-                        (float)codeword->n >= psi) {
-                        tracking->downsampled_cloud->points[depth_off].label = TB;
-                    } else {
-                        tracking->downsampled_cloud->points[depth_off].label = FG;
-                    }
+                    downsampled_points[depth_off].label = FG;
                 }
             }
         }
