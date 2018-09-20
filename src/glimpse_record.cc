@@ -53,7 +53,7 @@ struct gm_recording {
 };
 
 static JSON_Value *
-gm_record_get_json_intrinsics(const struct gm_intrinsics *intrinsics)
+get_json_intrinsics(const struct gm_intrinsics *intrinsics)
 {
     JSON_Value *json_intrinsics = json_value_init_object();
     json_object_set_number(json_object(json_intrinsics), "width",
@@ -140,8 +140,8 @@ delete_files(struct gm_logger *log, const char *path, const char *suffix)
 }
 
 static void
-gm_record_write_bin(struct gm_logger *log, const char *path,
-                    void *data, size_t len)
+write_bin(struct gm_logger *log, const char *path,
+          void *data, size_t len)
 {
     FILE *bin_file = fopen(path, "w");
     if (bin_file) {
@@ -356,8 +356,8 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
             snprintf(bin_path, bin_path_size, "%s%s/%04d%s",
                      r->path, DEPTH_PATH, r->n_frames, DEPTH_SUFFIX);
 
-            gm_record_write_bin(r->log, bin_path, frame->depth->data,
-                                frame->depth->len);
+            write_bin(r->log, bin_path, frame->depth->data,
+                      frame->depth->len);
 
             json_object_set_string(json_object(frame_meta), "depth_file",
                                    bin_path + path_len);
@@ -368,7 +368,7 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
             const struct gm_intrinsics *depth_intrinsics =
                 &frame->depth_intrinsics;
             json_object_set_value(json_object(frame_meta), "depth_intrinsics",
-                                  gm_record_get_json_intrinsics(depth_intrinsics));
+                                  get_json_intrinsics(depth_intrinsics));
         }
     }
 
@@ -392,8 +392,8 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
             snprintf(bin_path, bin_path_size, "%s%s/%04d%s",
                      r->path, VIDEO_PATH, r->n_frames, VIDEO_SUFFIX);
 
-            gm_record_write_bin(r->log, bin_path, frame->video->data,
-                                frame->video->len);
+            write_bin(r->log, bin_path, frame->video->data,
+                      frame->video->len);
 
             json_object_set_string(json_object(frame_meta), "video_file",
                                    bin_path + path_len);
@@ -404,7 +404,7 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
             const struct gm_intrinsics *video_intrinsics =
                 &frame->video_intrinsics;
             json_object_set_value(json_object(frame_meta), "video_intrinsics",
-                                  gm_record_get_json_intrinsics(video_intrinsics));
+                                  get_json_intrinsics(video_intrinsics));
         }
     }
 
