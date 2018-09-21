@@ -1,8 +1,6 @@
 #pragma once
 
-#ifdef __linux__
 #include <cstdint>
-#endif
 
 namespace ImGuiControl
 {
@@ -21,8 +19,7 @@ namespace ImGuiControl
 #elif defined(__linux__)
         uint64_t m_start;
 #elif defined (__APPLE__)
-        unsigned long m_start_sec;
-        unsigned long m_start_usec;
+        uint64_t m_start;
 #endif
     };
 }
