@@ -4265,8 +4265,11 @@ run_stage(struct gm_tracking_impl *tracking,
 
         uint64_t end = get_time();
         duration = end - start;
-    } else
-        duration = 0;
+    } else {
+        // so analytics at least see it was run if they only check the
+        // duration...
+        duration = 1;
+    }
 
     // Note we append to a vector since a stage (such as label inference)
     // may be run multiple times over different candidate clusters.
@@ -4394,9 +4397,13 @@ context_track_skeleton(struct gm_context *ctx,
     invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
     invalid_pt.label = -1;
 
-    // X increases to the right
-    // Y increases downwards
-    // Z increases outwards
+    // No actual work to do here but we want to 'run' it for
+    // consistent metrics...
+    run_stage(tracking,
+              TRACKING_STAGE_START,
+              NULL, // no real work to do
+              NULL, // no debug
+              &state);
 
     if (debug_stage_id == TRACKING_STAGE_START &&
         ctx->debug_cloud_mode)
