@@ -2463,8 +2463,8 @@ tracking_draw_line(struct gm_tracking_impl *tracking,
                    float x1, float y1, float z1,
                    uint32_t rgba)
 {
-    struct gm_point_rgba p0 = { x0, -y0, z0, rgba };
-    struct gm_point_rgba p1 = { x1, -y1, z1, rgba };
+    struct gm_point_rgba p0 = { x0, y0, z0, rgba };
+    struct gm_point_rgba p1 = { x1, y1, z1, rgba };
     tracking->debug_lines.push_back(p0);
     tracking->debug_lines.push_back(p1);
 }
@@ -2832,7 +2832,7 @@ pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
             continue; \
         } \
         point.x = (x - cx) * point.z * inv_fx; \
-        point.y = ((y - cy) * point.z * inv_fy); \
+        point.y = -((y - cy) * point.z * inv_fy); \
         point.label = -1; \
         pcl_cloud->points[row + x] = point; \
     } \
@@ -2882,7 +2882,12 @@ pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
             }
 
             point.x = (x - cx) * point.z * inv_fx;
-            point.y = ((y - cy) * point.z * inv_fy);
+
+            /* We want Y for our point cloud to point up, so flip as we project
+             * the 2D image coordinates (where y=0 is at the top)
+             */
+            point.y = -((y - cy) * point.z * inv_fy);
+
             point.label = -1;
             pcl_cloud->points[off] = point;
         }
@@ -2904,7 +2909,7 @@ add_debug_cloud_xyz_from_pcl_xyzl(struct gm_context *ctx,
 
     for (unsigned i = 0; i < pcl_cloud->size(); i++) {
         debug_cloud[i].x = pcl_cloud->points[i].x;
-        debug_cloud[i].y = -pcl_cloud->points[i].y; // FIXME
+        debug_cloud[i].y = pcl_cloud->points[i].y;
         debug_cloud[i].z = pcl_cloud->points[i].z;
         debug_cloud[i].rgba = 0xffffffff;
         debug_cloud_indices[i] = i;
@@ -2930,7 +2935,7 @@ add_debug_cloud_xyz_from_pcl_xyzl_transformed(struct gm_context *ctx,
         pt = (transform * pt);
 
         debug_cloud[i].x = pt.x;
-        debug_cloud[i].y = - pt.y; // FIXME
+        debug_cloud[i].y = pt.y;
         debug_cloud[i].z = pt.z;
         debug_cloud[i].rgba = 0xffffffff;
         debug_cloud_indices[i] = i;
@@ -2950,7 +2955,7 @@ add_debug_cloud_xyz_from_pcl_xyzl_and_indices(struct gm_context *ctx,
 
     for (unsigned i = 0; i < indices.size(); i++) {
         debug_cloud[i].x = pcl_cloud->points[indices[i]].x;
-        debug_cloud[i].y = -pcl_cloud->points[indices[i]].y; // FIXME
+        debug_cloud[i].y = pcl_cloud->points[indices[i]].y;
         debug_cloud[i].z = pcl_cloud->points[indices[i]].z;
         debug_cloud[i].rgba = 0xffffffff;
         debug_cloud_indices[i] = indices[i];
@@ -2984,7 +2989,11 @@ add_debug_cloud_xyz_from_dense_depth_buf(struct gm_context *ctx,
             continue;
 
         point.x = (x - cx) * point.z * inv_fx;
-        point.y = -((y - cy) * point.z * inv_fy); // FIXME
+
+        /* NB: 2D depth coords have y=0 at the top, and we want +Y to extend
+         * upwards...
+         */
+        point.y = -((y - cy) * point.z * inv_fy);
 
         debug_cloud.push_back(point);
     }
@@ -3030,7 +3039,7 @@ add_debug_cloud_xyz_of_codebook_space(struct gm_context *ctx,
                                     &tracking->depth_camera_intrinsics,
                                     seg_res);
         point.x = pcl_point.x;
-        point.y = -pcl_point.y; // FIXME
+        point.y = pcl_point.y;
         point.z = pcl_point.z;
         point.rgba = 0xffffffff;
 
@@ -3074,7 +3083,12 @@ colour_debug_cloud(struct gm_context *ctx,
                     // Reproject the depth coordinates into video space
                     // TODO: Support extrinsics
                     int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width - 1);
-                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height - 1);
+
+                    // NB: 2D tex coords have y=0 at the top, extending down
+                    // while we have y+ extending upwards, so we need to flip
+                    // when mapping back to 2D coords...
+                    int vy = clampf(y * -vid_fy / z + vid_cy, 0.0f,
+                                    (float)vid_height - 1);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
                     debug_cloud[i].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
@@ -3085,7 +3099,7 @@ colour_debug_cloud(struct gm_context *ctx,
             } else {
                 for (unsigned off = 0; off < debug_cloud.size(); off++) {
                     float x = debug_cloud[off].x;
-                    float y = -debug_cloud[off].y; // FIXME
+                    float y = debug_cloud[off].y;
                     float z = debug_cloud[off].z;
 
                     if (!std::isnormal(z))
@@ -3094,7 +3108,12 @@ colour_debug_cloud(struct gm_context *ctx,
                     // Reproject the depth coordinates into video space
                     // TODO: Support extrinsics
                     int vx = clampf(x * vid_fx / z + vid_cx, 0.0f, (float)vid_width - 1);
-                    int vy = clampf(y * vid_fy / z + vid_cy, 0.0f, (float)vid_height - 1);
+
+                    // NB: 2D tex coords have y=0 at the top, extending down
+                    // while we have y+ extending upwards, so we need to flip
+                    // when mapping back to 2D coords...
+                    int vy = clampf(y * -vid_fy / z + vid_cy, 0.0f,
+                                    (float)vid_height - 1);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
                     debug_cloud[off].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
@@ -3639,7 +3658,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
         float aligned_y = (state->codebook_pose.type != GM_POSE_INVALID) ?
             tracking->ground_cloud->points[idx].y :
             tracking->downsampled_cloud->points[idx].y;
-        if (aligned_y > lowest_point) {
+        if (aligned_y < lowest_point) {
             lowest_point = aligned_y;
         }
 
@@ -3661,7 +3680,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
                 struct gm_point_rgba debug_point;
 
                 debug_point.x = tracking->downsampled_cloud->points[idx].x;
-                debug_point.y = -tracking->downsampled_cloud->points[idx].y; // FIXME
+                debug_point.y = tracking->downsampled_cloud->points[idx].y;
                 debug_point.z = tracking->downsampled_cloud->points[idx].z;
                 debug_point.rgba = 0xffffffff;
 
@@ -3747,7 +3766,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
         float aligned_y = (state->codebook_pose.type != GM_POSE_INVALID) ?
             tracking->ground_cloud->points[idx].y :
             tracking->downsampled_cloud->points[idx].y;
-        if (aligned_y > lowest_point - ctx->floor_threshold) {
+        if (aligned_y < lowest_point + ctx->floor_threshold) {
             continue;
         }
 
@@ -3770,7 +3789,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
                 struct gm_point_rgba debug_point;
 
                 debug_point.x = tracking->downsampled_cloud->points[idx].x;
-                debug_point.y = -tracking->downsampled_cloud->points[idx].y; // FIXME
+                debug_point.y = tracking->downsampled_cloud->points[idx].y;
                 debug_point.z = tracking->downsampled_cloud->points[idx].z;
                 debug_point.rgba = 0xffffffff;
 
@@ -3980,8 +3999,11 @@ stage_project_clusters_cb(struct gm_tracking_impl *tracking,
                         continue;
                     }
 
+                    /* NB: we need to invert Y here since we're going from Y+
+                     * going upwards to 2D coordinates with y=0 at the top
+                     */
                     int y = (int)
-                        ((point_t.y * tracking->training_camera_intrinsics.fy /
+                        ((-point_t.y * tracking->training_camera_intrinsics.fy /
                           point_t.z) + tracking->training_camera_intrinsics.cy);
 
                     if (y < 0 || y >= height) {

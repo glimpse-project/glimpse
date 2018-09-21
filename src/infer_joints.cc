@@ -310,6 +310,7 @@ infer_joints_fast(float* depth_image, float* pr_table, float* weights,
 
             // Reproject and offset point
             float s = (x / half_width) - 1.f;
+            // NB: The coordinate space for joints has Y+ extending upwards...
             float t = -((y / half_height) - 1.f);
             float depth = (float)depth_image[y * width + x];
             joint->x = (tan_half_hfov * depth) * s;
