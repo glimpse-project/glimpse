@@ -3564,7 +3564,10 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
     fy = idx / width;
     fz = focal_region[fr_i].fz;
 
-    if (ctx->debug_cloud_mode) {
+    if (ctx->debug_cloud_mode &&
+        (ctx->debug_pipeline_stage == TRACKING_STAGE_NAIVE_FLOOR ||
+         ctx->debug_pipeline_stage == TRACKING_STAGE_NAIVE_CLUSTER))
+    {
         // Draw the lines of focus...
         if (fz != FLT_MAX) {
             float line_x = tracking->downsampled_cloud->points[focal_region[fr_i].idx].x;
