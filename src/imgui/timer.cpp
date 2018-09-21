@@ -74,7 +74,12 @@ float Timer::GetMilliseconds() const
 
 #elif defined (__APPLE__)
 
-#include <sys/time.h>
+#include <cstdint>
+#include <mach/clock.h>
+#include <mach/mach.h>
+#include <mach/mach_time.h>
+
+static double mach_abs_time_scale;
 
 Timer::Timer()
 {
@@ -83,17 +88,22 @@ Timer::Timer()
 
 void Timer::Reset()
 {
-    timeval t;
-    gettimeofday(&t, 0);
-    m_start_sec = t.tv_sec;
-    m_start_usec = t.tv_usec;
+    if (!mach_abs_time_scale) {
+        mach_timebase_info_data_t timebase;
+
+        mach_timebase_info(&timebase);
+        mach_abs_time_scale = timebase.numer / timebase.denom;
+    }
+
+    m_start = mach_absolute_time() * mach_abs_time_scale;
 }
 
 float Timer::GetMilliseconds() const
 {
-    timeval t;
-    gettimeofday(&t, 0);
-    return 1000.0f * (t.tv_sec - m_start_sec) + 0.001f * (t.tv_usec - m_start_usec);
+    uint64_t end = mach_absolute_time() * mach_abs_time_scale;
+    uint64_t duration = end - m_start;
+
+    return duration / 1000000.0f;
 }
 
 #else
