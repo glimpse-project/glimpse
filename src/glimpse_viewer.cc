@@ -224,8 +224,10 @@ struct _Data
      */
     int prediction_delay;
 
+    float view_zoom;
     glm::vec3 focal_point;
     float camera_rot_yx[2];
+
     JSON_Value *joint_map;
 
     /* When we request gm_device for a frame we set a buffers_mask for what the
@@ -473,9 +475,10 @@ on_profiler_pause_cb(bool pause)
     pause_profile = pause;
 }
 
-glm::mat4
-intrinsics_to_project_matrix(const struct gm_intrinsics *intrinsics,
-                             float near, float far)
+static glm::mat4
+intrinsics_to_zoomed_project_matrix(const struct gm_intrinsics *intrinsics,
+                                    float near, float far,
+                                    float zoom)
 {
   float width = intrinsics->width;
   float height = intrinsics->height;
@@ -486,10 +489,13 @@ intrinsics_to_project_matrix(const struct gm_intrinsics *intrinsics,
   float offsetx = (intrinsics->cx - width / 2.0) * scalex;
   float offsety = (intrinsics->cy - height / 2.0) * scaley;
 
-  return glm::frustum(scalex * -width / 2.0f - offsetx,
-                      scalex * width / 2.0f - offsetx,
-                      scaley * height / 2.0f - offsety,
-                      scaley * -height / 2.0f - offsety, near, far);
+  float inverse_zoom = 1.0f / zoom;
+
+  return glm::frustum(inverse_zoom * (scalex * -width / 2.0f - offsetx), // left
+                      inverse_zoom * (scalex *  width / 2.0f - offsetx), // right
+                      inverse_zoom * (scaley * -height / 2.0f - offsety), // bottom
+                      inverse_zoom * (scaley *  height / 2.0f - offsety), // top
+                      near, far);
 }
 
 static bool
@@ -1850,8 +1856,27 @@ draw_tracking_scene_to_texture(Data *data,
     {
         struct gm_intrinsics *debug_intrinsics =
             &data->cloud_intrinsics;
-        glm::mat4 proj = intrinsics_to_project_matrix(debug_intrinsics, 0.01f, 10);
-        glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, 1.0, -1.0));
+        glm::mat4 proj = intrinsics_to_zoomed_project_matrix(debug_intrinsics,
+                                                             0.01f, 10, // near, far
+                                                             data->view_zoom);
+
+        /* NB: we're rendering to an intermediate 2D texture with a bottom left
+         * origin of (0,0).
+         *
+         * By default ImGui::Image() assumes you're mapping uv0=(0,0) and
+         * uv1=(1,1) to the top-left and bottom-right of a quad, respectively.
+         *
+         * We flip Y here so our render-to-texture results will be the right
+         * after the texture is sampled (with a second flips) via ImGui::Image().
+         *
+         * We don't want to mess with the uv coordinates we pass to
+         * ImGui::Image() since it would probably be better to just be
+         * consistent with what ImGui expects by default (notably convenient
+         * for cases where images are loaded in scanline order from memory,
+         * which technically leaves them 'upside down' by GL conventions and
+         * typically need flipping too.)
+         */
+        glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, -1.0, -1.0));
         mvp = glm::translate(mvp, data->focal_point);
         mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
         mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
@@ -2183,8 +2208,10 @@ draw_ar_video(Data *data)
                                      rotation);
 
         float pt_size = ((float)data->win_width / 240.0f) * aspect_x_scale;
-        glm::mat4 proj = intrinsics_to_project_matrix(&rotated_intrinsics, 0.01f, 10);
-        glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, -aspect_y_scale, -1.0));
+        glm::mat4 proj = intrinsics_to_zoomed_project_matrix(&rotated_intrinsics,
+                                                             0.01f, 10, // near, far
+                                                             data->view_zoom);
+        glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, aspect_y_scale, -1.0));
 
         if (update_skeleton_wireframe_gl_bos(data,
                                              data->last_video_frame->timestamp -
@@ -3511,6 +3538,8 @@ viewer_init(Data *data)
     data->target_progress = true;
 
     data->stage_stats_mode = 1; // aggregated per-frame median
+
+    data->view_zoom = 1;
 
     /* FIXME: really these overrides should only affect the playback_device */
     data->dev_control_overrides.insert({
