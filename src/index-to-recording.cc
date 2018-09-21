@@ -32,6 +32,8 @@
 
 #include "png.h"
 
+#include "image_utils.h"
+
 #include "rdt_tree.h"
 
 #include "glimpse_data.h"
@@ -83,6 +85,151 @@ get_time(void)
     clock_gettime(CLOCK_MONOTONIC, &ts);
 
     return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+struct data_loader
+{
+    struct gm_logger *log;
+    uint64_t last_update;
+    int width;
+    int height;
+    JSON_Value *frames;
+    const char *out_dir;
+
+    std::vector<float> depth_image;
+    std::vector<uint8_t> label_image;
+
+    float bg_depth;
+
+};
+
+#define xsnprintf(dest, n, fmt, ...) do { \
+        if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
+            exit(1); \
+} while(0)
+
+static bool
+load_frame_data_cb(struct gm_data_index *data_index,
+                   int index,
+                   const char *frame_path,
+                   void *user_data,
+                   char **err)
+{
+    struct data_loader *loader = (struct data_loader *)user_data;
+    struct gm_logger *log = loader->log;
+    const char *out_dir = loader->out_dir;
+    int width = loader->width;
+    int height = loader->height;
+    JSON_Value *frames = loader->frames;
+
+    uint8_t *labels = loader->label_image.data();
+    uint64_t current_time = get_time();
+    uint8_t *rgba_image = (uint8_t *)xmalloc(width * height * 4);
+
+    const char* top_dir = gm_data_index_get_top_dir(data_index);
+
+    char labels_filename[512];
+    char depth_filename[512];
+    char json_filename[512];
+
+    xsnprintf(labels_filename, sizeof(labels_filename), "%s/labels/%s.png", top_dir, frame_path);
+    xsnprintf(depth_filename, sizeof(depth_filename), "%s/depth/%s.exr", top_dir, frame_path);
+    xsnprintf(json_filename, sizeof(json_filename), "%s/labels/%s.json", top_dir, frame_path);
+    JSON_Value *frame_js = json_parse_file(json_filename);
+    if (!frame_js) {
+        gm_throw(log, err, "Failed to parse %s", json_filename);
+        return false;
+    }
+
+
+    IUImageSpec label_spec = { width, height, IU_FORMAT_U8 };
+    uint8_t* output_label = loader->label_image.data();
+    if (iu_read_png_from_file(labels_filename, &label_spec, &output_label,
+                              NULL, // palette output
+                              NULL) // palette size
+        != SUCCESS)
+    {
+        gm_throw(log, err, "Failed to read image '%s'\n", labels_filename);
+        return false;
+    }
+
+    IUImageSpec depth_spec = { width, height, IU_FORMAT_FLOAT };
+    void* output_depth = loader->depth_image.data();
+    if (iu_read_exr_from_file(depth_filename, &depth_spec, &output_depth) != SUCCESS) {
+        gm_throw(log, err, "Failed to read image '%s'\n", depth_filename);
+        return false;
+    }
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int pos = y * width + x;
+            uint8_t label = labels[pos];
+
+            rgba_image[pos*4+0] = palette[label].red;
+            rgba_image[pos*4+1] = palette[label].green;
+            rgba_image[pos*4+2] = palette[label].blue;
+            rgba_image[pos*4+3] = 0xff;
+        }
+    }
+
+    JSON_Value *frame = json_value_init_object();
+    json_object_set_number(json_object(frame), "timestamp", current_time);
+    current_time += 16000000;
+
+    JSON_Object *camera = json_object_get_object(json_object(frame_js), "camera");
+    JSON_Object *pose_meta = json_object_get_object(camera, "pose");
+    if(pose_meta) {
+        JSON_Array *pose_orientation = json_object_get_array(pose_meta, "orientation");
+        JSON_Value *orientation_pose = json_value_init_object();
+        JSON_Value *rot_pose = json_value_init_array();
+
+        for (int i = 0; i < json_array_get_count(pose_orientation); i++)
+            json_array_append_number(json_array(rot_pose), json_array_get_number(pose_orientation, i));
+
+        json_object_set_value(json_object(orientation_pose), "orientation", rot_pose);
+
+        JSON_Value *translate_pose = json_value_init_array();
+
+        for (int i = 0; i < 3; i++)
+            json_array_append_number(json_array(translate_pose), 0);
+
+        json_object_set_value(json_object(orientation_pose), "translation", translate_pose);
+        json_object_set_number(json_object(orientation_pose), "type", 2);
+        json_object_set_value(json_object(frame), "pose", orientation_pose);
+    }
+
+    char bin_filename[512];
+    xsnprintf(bin_filename, sizeof(bin_filename), "%s/depth/frame%06d.bin",
+             out_dir, index);
+    FILE *fp = fopen(bin_filename, "w");
+    gm_assert(log, fp != NULL, "Failed to open %s", bin_filename);
+    if (fwrite(output_depth, width * height * 4, 1, fp) != 1) {
+        gm_error(log, "Failed to write %s", bin_filename);
+        exit(1);
+    }
+    fclose(fp);
+    fp = NULL;
+    xsnprintf(bin_filename, sizeof(bin_filename), "/depth/frame%06d.bin", index);
+    json_object_set_string(json_object(frame), "depth_file", bin_filename);
+    json_object_set_number(json_object(frame), "depth_len", width * height * 4);
+
+    xsnprintf(bin_filename, sizeof(bin_filename), "%s/video/frame%06d.bin",
+             out_dir, index);
+    fp = fopen(bin_filename, "w");
+    gm_assert(log, fp != NULL, "Failed to open %s", bin_filename);
+    if (fwrite(rgba_image, width * height * 4, 1, fp) != 1) {
+        gm_error(log, "Failed to write %s", bin_filename);
+        exit(1);
+    }
+    fclose(fp);
+    xsnprintf(bin_filename, sizeof(bin_filename), "/video/frame%06d.bin", index);
+    json_object_set_string(json_object(frame), "video_file", bin_filename);
+    json_object_set_number(json_object(frame), "video_len", width * height * 4);
+
+    json_object_set_number(json_object(frame), "camera_rotation", 0);
+    json_array_append_value(json_array(frames), frame);
+
+    return true;
 }
 
 static void
@@ -166,31 +313,22 @@ main(int argc, char **argv)
         exit(1);
     }
 
-    int width;
-    int height;
-    int n_images;
+    struct gm_data_index *data_index =
+        gm_data_index_open(log,
+                           data_dir,
+                           index_name,
+                           NULL); // abort on error
+    if (!data_index)
+        return 1;
 
-    float *depth_images;
-    uint8_t *label_images;
+    JSON_Value *meta = gm_data_index_get_meta(data_index);
+    int width = gm_data_index_get_width(data_index);
+    int height = gm_data_index_get_height(data_index);
 
-    JSON_Value *meta =
-        gm_data_load_simple(log,
-                            data_dir,
-                            index_name,
-                            NULL, // no joint map
-                            &n_images,
-                            NULL, // n_joints
-                            &width,
-                            &height,
-                            &depth_images,
-                            &label_images,
-                            NULL, // no joint data
-                            NULL); // abort on error
-    JSON_Object* camera = json_object_get_object(json_object(meta), "camera");
+    JSON_Object *camera = json_object_get_object(json_object(meta), "camera");
     float vfov = json_object_get_number(camera, "vertical_fov") * (M_PI / 180.0);
 
     JSON_Value *recording = json_value_init_object();
-
     JSON_Value *intrinsics = json_value_init_object();
     json_object_set_number(json_object(intrinsics), "width", width);
     json_object_set_number(json_object(intrinsics), "height", height);
@@ -222,68 +360,36 @@ main(int argc, char **argv)
 
     json_object_set_number(json_object(recording), "depth_format", 2); // f32
     json_object_set_number(json_object(recording), "video_format", 7); // rgba u8
+
     JSON_Value *frames = json_value_init_array();
     json_object_set_value(json_object(recording), "frames", frames);
 
-    uint64_t current_time = get_time();
-
+    //uint64_t current_time = get_time();
     uint8_t *rgba_image = (uint8_t *)xmalloc(width * height * 4);
-    for (int i = 0; i < n_images; i++) {
-        int64_t img_off = (int64_t)i * width * height;
-        float *depth = &depth_images[img_off];
-        uint8_t *labels = &label_images[img_off];
 
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int pos = y * width + x;
-                uint8_t label = labels[pos];
+    struct data_loader loader;
+    loader.log = log;
+    loader.last_update = get_time();
+    loader.width = width;
+    loader.height = height;
+    loader.frames = frames;
+    loader.out_dir = out_dir;
+    loader.depth_image = std::vector<float>((int64_t)width *
+                                             height);
+    loader.label_image = std::vector<uint8_t>((int64_t)width *
+                                               height);
 
-                rgba_image[pos*4+0] = palette[label].red;
-                rgba_image[pos*4+1] = palette[label].green;
-                rgba_image[pos*4+2] = palette[label].blue;
-                rgba_image[pos*4+3] = 0xff;
-            }
-        }
+    printf("Processing frames...\n");
 
-        JSON_Value *frame = json_value_init_object();
-        json_object_set_number(json_object(frame), "timestamp", current_time);
-        current_time += 16000000;
-
-        char bin_filename[512];
-        snprintf(bin_filename, sizeof(bin_filename), "%s/depth/frame%06d.bin",
-                 out_dir, i);
-        FILE *fp = fopen(bin_filename, "w");
-        gm_assert(log, fp != NULL, "Failed to open %s", bin_filename);
-        if (fwrite(depth, width * height * 4, 1, fp) != 1) {
-            gm_error(log, "Failed to write %s", bin_filename);
-            exit(1);
-        }
-        fclose(fp);
-        fp = NULL;
-        snprintf(bin_filename, sizeof(bin_filename), "/depth/frame%06d.bin", i);
-        json_object_set_string(json_object(frame), "depth_file", bin_filename);
-        json_object_set_number(json_object(frame), "depth_len", width * height * 4);
-
-        snprintf(bin_filename, sizeof(bin_filename), "%s/video/frame%06d.bin",
-                 out_dir, i);
-        fp = fopen(bin_filename, "w");
-        gm_assert(log, fp != NULL, "Failed to open %s", bin_filename);
-        if (fwrite(rgba_image, width * height * 4, 1, fp) != 1) {
-            gm_error(log, "Failed to write %s", bin_filename);
-            exit(1);
-        }
-        fclose(fp);
-        snprintf(bin_filename, sizeof(bin_filename), "/video/frame%06d.bin", i);
-        json_object_set_string(json_object(frame), "video_file", bin_filename);
-        json_object_set_number(json_object(frame), "video_len", width * height * 4);
-
-        json_object_set_number(json_object(frame), "camera_rotation", 0);
-
-        json_array_append_value(json_array(frames), frame);
+    if (!gm_data_index_foreach(data_index,
+                               load_frame_data_cb,
+                               &loader,
+                               NULL)) // abort on error
+    {
+        return 1;
     }
 
     xfree(rgba_image);
-
     json_serialize_to_file_pretty(recording, out_filename);
     json_value_free(recording);
 
