@@ -2470,6 +2470,92 @@ tracking_draw_line(struct gm_tracking_impl *tracking,
     tracking->debug_lines.push_back(p1);
 }
 
+static void
+tracking_draw_transformed_line(struct gm_tracking_impl *tracking,
+                               float *start,
+                               float *end,
+                               uint32_t color,
+                               glm::mat4 transform)
+{
+    glm::vec4 start_vec4(start[0], start[1], start[2], 1.f);
+    glm::vec4 end_vec4(end[0], end[1], end[2], 1.f);
+
+    start_vec4 = (transform * start_vec4);
+    end_vec4 = (transform * end_vec4);
+
+    tracking_draw_line(tracking,
+                       start_vec4.x, start_vec4.y, start_vec4.z,
+                       end_vec4.x, end_vec4.y, end_vec4.z,
+                       color);
+}
+
+static void
+tracking_draw_transformed_crosshair(struct gm_tracking_impl *tracking,
+                                    float *pos,
+                                    float size,
+                                    uint32_t color,
+                                    glm::mat4 transform)
+{
+    float half_size = size / 2.f;
+    glm::vec4 axis_origin(pos[0], pos[1], pos[2], 1.f);
+    glm::vec4 axis_x0(pos[0] - half_size, pos[1], pos[2], 1.f);
+    glm::vec4 axis_x1(pos[0] + half_size, pos[1], pos[2], 1.f);
+    glm::vec4 axis_y0(pos[0], pos[1] - half_size, pos[2], 1.f);
+    glm::vec4 axis_y1(pos[0], pos[1] + half_size, pos[2], 1.f);
+    glm::vec4 axis_z0(pos[0], pos[1], pos[2] - half_size, 1.f);
+    glm::vec4 axis_z1(pos[0], pos[1], pos[2] + half_size, 1.f);
+
+    axis_x0 = (transform * axis_x0);
+    axis_x1 = (transform * axis_x1);
+    axis_y0 = (transform * axis_y0);
+    axis_y1 = (transform * axis_y1);
+    axis_z0 = (transform * axis_z0);
+    axis_z1 = (transform * axis_z1);
+
+    tracking_draw_line(tracking,
+                       axis_x0.x, axis_x0.y, axis_x0.z,
+                       axis_x1.x, axis_x1.y, axis_x1.z,
+                       color);
+    tracking_draw_line(tracking,
+                       axis_y0.x, axis_y0.y, axis_y0.z,
+                       axis_y1.x, axis_y1.y, axis_y1.z,
+                       color);
+    tracking_draw_line(tracking,
+                       axis_z0.x, axis_z0.y, axis_z0.z,
+                       axis_z1.x, axis_z1.y, axis_z1.z,
+                       color);
+}
+
+static void
+tracking_draw_transformed_axis(struct gm_tracking_impl *tracking,
+                               float *pos,
+                               uint32_t *colors,
+                               glm::mat4 transform)
+{
+    glm::vec4 axis_origin(pos[0], pos[1], pos[2], 1.f);
+    glm::vec4 axis_x(pos[0] + 1.f, pos[1], pos[2], 1.f);
+    glm::vec4 axis_y(pos[0], pos[1] + 1.f, pos[2], 1.f);
+    glm::vec4 axis_z(pos[0], pos[1], pos[2] + 1.f, 1.f);
+
+    axis_origin = (transform * axis_origin);
+    axis_x = (transform * axis_x);
+    axis_y = (transform * axis_y);
+    axis_z = (transform * axis_z);
+
+    tracking_draw_line(tracking,
+                       axis_origin.x, axis_origin.y, axis_origin.z,
+                       axis_x.x, axis_x.y, axis_x.z,
+                       colors[0]);
+    tracking_draw_line(tracking,
+                       axis_origin.x, axis_origin.y, axis_origin.z,
+                       axis_y.x, axis_y.y, axis_y.z,
+                       colors[1]);
+    tracking_draw_line(tracking,
+                       axis_origin.x, axis_origin.y, axis_origin.z,
+                       axis_z.x, axis_z.y, axis_z.z,
+                       colors[2]);
+}
+
 const gm_intrinsics *
 gm_tracking_get_video_camera_intrinsics(struct gm_tracking *_tracking)
 {
@@ -3379,6 +3465,26 @@ stage_start_debug_cb(struct gm_tracking_impl *tracking,
                                              &tracking->depth_camera_intrinsics);
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     colour_debug_cloud(ctx, state, tracking, NULL);
+
+    if (tracking->frame->gravity_valid) {
+        float start[3] = { 0, 0, 1 };
+        float *gravity = tracking->frame->gravity;
+        float end[3] = {
+            start[0] + gravity[0],
+            start[1] + gravity[1],
+            start[2] + gravity[2]
+        };
+
+        tracking_draw_transformed_axis(tracking,
+                                       (float[3]){ 0, 0, 1 }, // pos
+                                       (uint32_t[3]){ 0xff0000ff, 0x00ff00ff, 0x0000ffff },
+                                       glm::mat4(1.0));
+
+        tracking_draw_line(tracking,
+                           start[0], start[1], start[2],
+                           end[0], end[1], end[2],
+                           0x008080ff);
+    }
 }
 
 static void
@@ -3464,6 +3570,12 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
     int seg_res = ctx->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
+
+    tracking_draw_transformed_axis(tracking,
+                                   (float[3]){ 0, 0, 1 }, // pos
+                                   (uint32_t[3]){ 0xff0000ff, 0x00ff00ff, 0x0000ffff },
+                                   glm::mat4(1.0));
+
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
     tracking->debug_cloud_intrinsics.height /= seg_res;
@@ -3533,6 +3645,35 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
                                                       tracking->downsampled_cloud,
                                                       state->to_ground);
         colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+        tracking_draw_transformed_axis(tracking,
+                                       (float[3]){ 0, 0, 1 }, // pos
+                                       (uint32_t[3]){ 0xff0000ff, 0x00ff00ff, 0x0000ffff },
+                                       state->to_ground);
+
+        tracking_draw_transformed_axis(tracking,
+                                       (float[3]){ 0, 0, 1 }, // pos
+                                       (uint32_t[3]){ 0x800000ff, 0x008000ff, 0x000080ff },
+                                       glm::mat4(1.0));
+
+        if (tracking->frame->gravity_valid) {
+            float start[3] = { 0, 0, 1 };
+            float *gravity = tracking->frame->gravity;
+            float end[3] = {
+                start[0] + gravity[0],
+                start[1] + gravity[1],
+                start[2] + gravity[2]
+            };
+
+            tracking_draw_transformed_line(tracking,
+                                           start,
+                                           end,
+                                           0x00ffffff,
+                                           state->to_ground);
+            tracking_draw_line(tracking,
+                               start[0], start[1], start[2],
+                               end[0], end[1], end[2],
+                               0x008080ff);
+        }
     } else {
         add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
         colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
