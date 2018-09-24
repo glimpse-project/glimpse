@@ -311,6 +311,13 @@ gm_recording_save_frame(struct gm_recording *r, struct gm_frame *frame)
     json_object_set_number(json_object(frame_meta), "timestamp",
                            (double)frame->timestamp);
 
+    if (frame->gravity_valid) {
+        JSON_Value *gravity = json_value_init_array();
+        for (int i = 0; i < 3; i++)
+            json_array_append_number(json_array(gravity), frame->gravity[i]);
+        json_object_set_value(json_object(frame_meta), "gravity", gravity);
+    }
+
     if (frame->pose.type != GM_POSE_INVALID) {
         // Write out frame pose data
         JSON_Value *pose = json_value_init_object();
