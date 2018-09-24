@@ -211,6 +211,8 @@ struct _Data
      */
     bool realtime_ar_mode;
 
+    bool show_skeleton;
+    bool show_view_cam_controls;
     bool show_profiler;
     bool show_joint_summary;
 
@@ -1360,6 +1362,8 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         }
     }
 
+    ImGui::Checkbox("Show skeleton", &data->show_skeleton);
+    ImGui::Checkbox("Show view camera controls", &data->show_view_cam_controls);
     ImGui::Checkbox("Show profiler", &data->show_profiler);
     ImGui::Checkbox("Show joint summary", &data->show_joint_summary);
 
@@ -1889,7 +1893,7 @@ draw_tracking_scene_to_texture(Data *data,
         glUseProgram(data->cloud_program);
         glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
 
-        float pt_size = ceilf((win_size.x * uiScale.x) /
+        float pt_size = ceilf((win_size.x * uiScale.x * data->view_zoom) /
                               debug_intrinsics->width);
         glUniform1f(data->cloud_uniform_pt_size, pt_size);
 
@@ -1921,7 +1925,8 @@ draw_tracking_scene_to_texture(Data *data,
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glUseProgram(0);
 
-        if (update_skeleton_wireframe_gl_bos(data,
+        if (data->show_skeleton &&
+            update_skeleton_wireframe_gl_bos(data,
                                              gm_tracking_get_timestamp(data->latest_tracking)))
         {
             if (data->target) {
@@ -1975,6 +1980,33 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
     return focused;
 }
 
+static void
+reset_view(Data *data)
+{
+    data->view_zoom = 1;
+    data->focal_point = glm::vec3(0.0, 0.0, 2.5);
+    data->camera_rot_yx[0] = 0;
+    data->camera_rot_yx[1] = 0;
+}
+
+static void
+draw_view_camera_controls(Data *data)
+{
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 0);
+
+    ImGui::Begin("Camera Controls");
+
+    ImGui::SliderFloat("Zoom", &data->view_zoom, 0.1, 3);
+
+    if (ImGui::Button("Reset")) {
+        reset_view(data);
+    }
+    ImGui::End();
+
+    ImGui::PopStyleVar(); // ImGuiStyleVar_FrameRounding
+    ImGui::PopStyleVar(); // ImGuiStyleVar_WindowPadding
+}
 static void
 draw_ui(Data *data)
 {
@@ -2071,6 +2103,13 @@ draw_ui(Data *data)
         ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
         draw_joint_summary(data);
     }
+
+    if (data->show_view_cam_controls) {
+        ImGui::SetNextWindowPos(origin, ImGuiCond_Once);
+        draw_view_camera_controls(data);
+    }
+
+    //ImGui::ShowTestWindow();
 
     ImGui::Render();
 }
@@ -2199,7 +2238,7 @@ draw_ar_video(Data *data)
 
     glUseProgram(0);
 
-    if (data->latest_tracking) {
+    if (data->show_skeleton && data->latest_tracking) {
         struct gm_intrinsics rotated_intrinsics;
 
         gm_context_rotate_intrinsics(data->ctx,
@@ -3534,6 +3573,9 @@ viewer_init(Data *data)
 
     update_ar_video_queue_len(data, 6);
 
+    data->show_skeleton = true;
+    data->show_view_cam_controls = false;
+
     data->target_error = 0.25f;
     data->target_progress = true;
 
@@ -3696,7 +3738,8 @@ main(int argc, char **argv)
     pthread_cond_init(&data->event_notify_cond, NULL);
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
-    data->focal_point = glm::vec3(0.0, 0.0, 2.5);
+
+    reset_view(data);
 
 #ifdef USE_GLFM
     init_winsys_glfm(data, display);
