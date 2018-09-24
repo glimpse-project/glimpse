@@ -2872,6 +2872,8 @@ on_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
     Data *data = (Data *)glfwGetWindowUserPointer(window);
 
+    ImGui_ImplGlfwGLES3_KeyCallback(window, key, scancode, action, mods);
+
     if (action != GLFW_PRESS)
         return;
 
@@ -2881,8 +2883,6 @@ on_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mods)
         glfwSetWindowShouldClose(data->window, 1);
         break;
     }
-
-    ImGui_ImplGlfwGLES3_KeyCallback(window, key, scancode, action, mods);
 }
 
 static void
