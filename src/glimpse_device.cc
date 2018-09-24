@@ -212,6 +212,7 @@ struct gm_device
 #ifdef USE_TANGO
         struct {
             TangoConfig tango_config;
+            enum gm_rotation android_display_rotation;
         } tango;
 #endif
 
@@ -222,8 +223,7 @@ struct gm_device
 #endif
     };
 
-    enum gm_rotation display_rotation;
-    enum gm_rotation display_to_camera_rotation;
+    enum gm_rotation device_to_camera_rotation;
     int user_camera_rotation; // user override property (enum gm_rotation)
 
     int max_depth_pixels;
@@ -265,6 +265,9 @@ struct gm_device
 
     uint64_t frame_time;
     struct gm_pose frame_pose;
+    bool frame_gravity_valid;
+    float frame_gravity[3];
+    enum gm_rotation frame_rotation;
 
     /* Should be set for any device reset/reconfiguration or e.g. in the case
      * of recording playback if a recording loops.
@@ -671,15 +674,12 @@ maybe_notify_frame_locked(struct gm_device *dev)
 }
 
 static enum gm_rotation
-device_get_camera_rotation(struct gm_device *dev)
+calc_frame_rotation(struct gm_device *dev,
+                    enum gm_rotation device_rotation)
 {
-#if TARGET_OS_IOS == 1
-    int camera_rotation = (int)ios_get_device_rotation();
-#else
-    int camera_rotation = (int)dev->display_rotation;
-#endif
+    int camera_rotation = (int)device_rotation;
 
-    camera_rotation += (int)dev->display_to_camera_rotation;
+    camera_rotation += (int)dev->device_to_camera_rotation;
     camera_rotation += (int)dev->user_camera_rotation;
 
     return (enum gm_rotation)(camera_rotation % 4);
@@ -703,6 +703,15 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
     //       nanoseconds
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
+
+    dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
+
+    /* XXX: assuming that the kinect is stationary.... */
+    dev->frame_gravity_valid = true;
+    dev->frame_gravity[0] = dev->kinect.accel[0];
+    dev->frame_gravity[1] = dev->kinect.accel[1];
+    dev->frame_gravity[2] = dev->kinect.accel[2];
+
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
 
     freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
@@ -732,6 +741,7 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     //dev->frame_time = (uint64_t)timestamp;
     dev->frame_time = get_time();
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+    dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
 
     freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
     if (old)
@@ -1351,8 +1361,9 @@ read_frame_buffer(struct gm_device *dev,
 static void
 swap_recorded_frame(struct gm_device *dev,
                     uint64_t timestamp,
-                    struct gm_pose &pose,
                     enum gm_rotation camera_rotation,
+                    float *gravity,
+                    struct gm_pose &pose,
                     struct gm_buffer *depth_buffer,
                     struct gm_intrinsics *depth_intrinsics,
                     struct gm_buffer *video_buffer,
@@ -1362,8 +1373,14 @@ swap_recorded_frame(struct gm_device *dev,
 {
         pthread_mutex_lock(&dev->swap_buffers_lock);
 
-        dev->display_rotation = camera_rotation;
         dev->frame_time = timestamp;
+        dev->frame_rotation = calc_frame_rotation(dev, camera_rotation);
+        if (gravity) {
+            dev->frame_gravity_valid = true;
+            dev->frame_gravity[0] = gravity[0];
+            dev->frame_gravity[1] = gravity[1];
+            dev->frame_gravity[2] = gravity[2];
+        }
         dev->frame_pose = pose;
 
         /* We can't simply replace (potentially clearing) this value because
@@ -1539,6 +1556,16 @@ recording_io_thread_cb(void *userdata)
         uint64_t frame_timestamp = (uint64_t)
             json_object_get_number(frame, "timestamp");
 
+        bool gravity_valid = false;
+        float gravity[3];
+        JSON_Array *json_gravity = json_object_get_array(frame, "gravity");
+        if (json_gravity) {
+            gravity_valid = true;
+            for (int i = 0; i < 3; ++i) {
+                gravity[i] = json_array_get_number(json_gravity, i);
+            }
+        }
+
         JSON_Object *json_pose = json_object_get_object(frame, "pose");
         if (json_pose) {
             JSON_Array *orientation = json_object_get_array(json_pose,
@@ -1709,8 +1736,9 @@ recording_io_thread_cb(void *userdata)
 
         swap_recorded_frame(dev,
                             monotonic_clock,
-                            pose,
                             rotation,
+                            gravity_valid ? gravity : NULL,
+                            pose,
                             depth_buffer,
                             &depth_intrinsics,
                             video_buffer,
@@ -1927,7 +1955,7 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         TANGO_COORDINATE_FRAME_START_OF_SERVICE,
         TANGO_SUPPORT_ENGINE_OPENGL,
         TANGO_SUPPORT_ENGINE_OPENGL,
-        (TangoSupportRotation)dev->display_rotation,
+        (TangoSupportRotation)dev->tango.android_display_rotation,
         &pose);
 
     pthread_mutex_lock(&dev->swap_buffers_lock);
@@ -1952,6 +1980,8 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
     }
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
     gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);
+
+    dev->frame_rotation = calc_frame_rotation(dev, dev->tango.android_display_rotation);
 
     if (old)
         gm_buffer_unref(&old->base);
@@ -2032,6 +2062,7 @@ tango_frame_available_cb(void *context,
     dev->video_buf_ready = video_buf_back;
     dev->frame_time = (uint64_t)(buffer->timestamp * 1e9);
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+    dev->frame_rotation = calc_frame_rotation(dev, dev->tango.android_display_rotation);
 
     gm_debug(dev->log, "tango_frame_available_cb video ready = %p", dev->video_buf_ready);
 
@@ -2465,8 +2496,8 @@ tango_connect(struct gm_device *dev, char **err)
          DEGREES(ir_hfov), DEGREES(ir_vfov));
 #endif
 
-    dev->display_to_camera_rotation = tango_infer_camera_orientation(dev);
-    dev->display_rotation = tango_display_rotation;
+    dev->device_to_camera_rotation = tango_infer_camera_orientation(dev);
+    dev->tango.android_display_rotation = tango_display_rotation;
 
     return true;
 }
@@ -2590,6 +2621,7 @@ on_avf_video_cb(struct ios_av_session *session,
     // FIXME: get time from AVF
     dev->frame_time = get_time();
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+    dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
 
     gm_debug(dev->log, "on_avf_video_cb video ready = %p", dev->video_buf_ready);
 
@@ -2635,12 +2667,67 @@ on_avf_depth_cb(struct ios_av_session *session,
 
     dev->depth_intrinsics = *intrinsics;
 
+    // TODO: get timestamp from avf
+    dev->frame_time = get_time();
+    dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
+
     memset(&dev->frame_pose, 0, sizeof(struct gm_pose));
     dev->frame_pose.type = GM_POSE_TO_GROUND;
 
+    float frame_accel[3];
+
+    /* We want to report our gravity vector in the coordinate space of our
+     * rotated frame, taking into account the orientation of the device...
+     *
+     * Note we flip the X axis of the accelerometer data because CoreMotion
+     * defines the coordinate space such that +X extends to the right of
+     * the phone (while portrait) as you look at the screen, whereas we want
+     * to match the point-of-view of the front-facing camera where +X extends
+     * to the right if looking at the back of the phone (in the direction
+     * of the camera).
+     *
+     * See here for more details about CoreMotion's defined axis:
+     *
+     *   https://developer.apple.com/documentation/coremotion/getting_raw_accelerometer_events
+     *
+     * Y+ being up and +Z extending in the viewing direction of the front-facing
+     * camera is consistent with what we want while the phone is in a portrait
+     * orientation (GM_ROTATION_270)
+     */
+    switch (dev->frame_rotation) {
+    case GM_ROTATION_0:
+        frame_accel[0] = -acceleration[1];
+        frame_accel[1] = -acceleration[0];
+        frame_accel[2] = acceleration[2];
+        break;
+    case GM_ROTATION_90:
+        frame_accel[0] = acceleration[0];
+        frame_accel[1] = -acceleration[1];
+        frame_accel[2] = acceleration[2];
+        break;
+    case GM_ROTATION_180:
+        frame_accel[0] = acceleration[1];
+        frame_accel[1] = acceleration[0];
+        frame_accel[2] = acceleration[2];
+        break;
+    case GM_ROTATION_270:
+        /* This corresponds to a portrait orientation where Y+ for the
+         * accelerometer matches the Y+ we want for the frame.
+         */
+        frame_accel[0] = -acceleration[0];
+        frame_accel[1] = acceleration[1];
+        frame_accel[2] = acceleration[2];
+        break;
+    }
+
+    dev->frame_gravity_valid = true;
+    dev->frame_gravity[0] = frame_accel[0];
+    dev->frame_gravity[1] = frame_accel[1];
+    dev->frame_gravity[2] = frame_accel[2];
+
     glm::vec3 ground(0.f, -1.f, 0.f);
     glm::vec3 current = glm::normalize(
-        glm::vec3(acceleration[0], acceleration[1], acceleration[2]));
+        glm::vec3(frame_accel[0], frame_accel[1], frame_accel[2]));
     glm::vec3 axis = glm::normalize(glm::cross(current, ground));
     float angle = acosf(glm::dot(ground, current));
     glm::quat orientation = glm::angleAxis(angle, axis);
@@ -2650,15 +2737,15 @@ on_avf_depth_cb(struct ios_av_session *session,
     dev->frame_pose.orientation[2] = orientation.z;
     dev->frame_pose.orientation[3] = orientation.w;
 
+    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+
     struct gm_device_buffer *old = dev->depth_buf_ready;
     dev->depth_buf_ready = depth_buf_back;
-    // TODO: get timestamp from avf
-    dev->frame_time = get_time();
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
-    gm_debug(dev->log, "avf depth ready = %p", dev->depth_buf_ready);
-
     if (old)
         gm_buffer_unref(&old->base);
+
+    gm_debug(dev->log, "avf depth ready = %p", dev->depth_buf_ready);
+
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 
@@ -2685,7 +2772,7 @@ avf_open(struct gm_device *dev, const struct gm_device_config *config,
     dev->depth_format = GM_FORMAT_Z_F32_M;
     dev->max_depth_pixels = 640 * 480;
 
-    dev->display_to_camera_rotation = GM_ROTATION_270;
+    dev->device_to_camera_rotation = GM_ROTATION_270;
 
     dev->avf.session = ios_util_av_session_new(dev->log,
                                                on_avf_configure_finished_cb,
@@ -3125,6 +3212,8 @@ device_flush(struct gm_device *dev)
     dev->frame_ready_buffers_mask = 0;
     dev->frame_time = 0;
     dev->frame_paused = false;
+    dev->frame_rotation = GM_ROTATION_0;
+    dev->frame_gravity_valid = false;
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 }
@@ -3291,9 +3380,16 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     frame->base.timestamp = dev->frame_time;
     frame->base.pose = dev->frame_pose;
-    frame->base.camera_rotation = device_get_camera_rotation(dev);
+    frame->base.camera_rotation = dev->frame_rotation;
     frame->base.discontinuity = dev->frame_discontinuity;
     frame->base.paused = dev->frame_paused;
+
+    if (dev->frame_gravity_valid) {
+        frame->base.gravity_valid = true;
+        frame->base.gravity[0] = dev->frame_gravity[0];
+        frame->base.gravity[1] = dev->frame_gravity[1];
+        frame->base.gravity[2] = dev->frame_gravity[2];
+    }
 
     dev->frame_ready_buffers_mask = 0;
     dev->frame_discontinuity = false;
@@ -3326,8 +3422,16 @@ gm_device_combine_frames(struct gm_device *dev, struct gm_frame *master,
               "Spurious request to combine frame with video frame having no video buffer");
 
     frame->base.timestamp = master->timestamp;
-    frame->base.pose = master->pose;
+
     frame->base.camera_rotation = master->camera_rotation;
+
+    frame->base.gravity_valid = master->gravity_valid;
+    frame->base.gravity[0] = master->gravity[0];
+    frame->base.gravity[1] = master->gravity[1];
+    frame->base.gravity[2] = master->gravity[2];
+
+    frame->base.pose = master->pose;
+
     frame->base.discontinuity =
         master->discontinuity ||
         depth->discontinuity ||
@@ -3373,7 +3477,7 @@ handle_jni_OnDisplayRotate(jint rotation)
     tango_display_rotation = (enum gm_rotation)rotation;
 
     if (tango_singleton_dev) {
-        tango_singleton_dev->display_rotation = tango_display_rotation;
+        tango_singleton_dev->tango.android_display_rotation = tango_display_rotation;
     } else {
         __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onDisplayRotate JNI");
     }
