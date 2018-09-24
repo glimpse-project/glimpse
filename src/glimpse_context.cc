@@ -2779,6 +2779,173 @@ gm_prediction_get_skeleton(struct gm_prediction *_prediction)
 }
 
 static void
+copy_and_rotate_depth_buffer(struct gm_context *ctx,
+                             struct gm_tracking_impl *tracking,
+                             struct gm_intrinsics *frame_intrinsics,
+                             enum gm_format format,
+                             struct gm_buffer *buffer)
+{
+    int width = frame_intrinsics->width;
+    int height = frame_intrinsics->height;
+    int rot_width = tracking->depth_camera_intrinsics.width;
+    enum gm_rotation rotation = tracking->frame->camera_rotation;
+    void *depth = buffer->data;
+    float *depth_copy = tracking->depth;
+
+    int num_points;
+
+    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
+    // us easily combine our rotation with our copy...
+    //
+    // XXX: it could be worth reading multiple scanlines at a time so we could
+    // write out cache lines at a time instead of only 4 bytes (for rotated
+    // images).
+    //
+    switch (format) {
+    case GM_FORMAT_Z_U16_MM:
+        foreach_xy_off(width, height) {
+            float depth_m = ((uint16_t *)depth)[off] / 1000.f;
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = depth_m; });
+        }
+        break;
+    case GM_FORMAT_Z_F32_M:
+        foreach_xy_off(width, height) {
+            float depth_m = ((float *)depth)[off];
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = depth_m; });
+        }
+        break;
+    case GM_FORMAT_Z_F16_M:
+        foreach_xy_off(width, height) {
+            float depth_m = ((half *)depth)[off];
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                                    { depth_copy[roff] = depth_m; });
+        }
+        break;
+    case GM_FORMAT_POINTS_XYZC_F32_M: {
+
+        /* XXX: Tango doesn't give us a 2D depth buffer which we would prefer
+         * and we can't be sure that the re-projected point cloud will fill our
+         * 2D depth buffer 100% so we're forced to clear it first too :(
+         */
+        memset(depth_copy, 0, width * height * sizeof(float));
+
+        num_points = buffer->len / 16;
+
+        float fx = frame_intrinsics->fx;
+        float fy = frame_intrinsics->fy;
+        float cx = frame_intrinsics->cx;
+        float cy = frame_intrinsics->cy;
+
+        float k1, k2, k3;
+        k1 = k2 = k3 = 0.f;
+
+        /* XXX: we only support applying the brown's model... */
+        bool apply_distortion = ctx->apply_depth_distortion;
+        if (apply_distortion) {
+            switch (frame_intrinsics->distortion_model) {
+            case GM_DISTORTION_NONE:
+                apply_distortion = false;
+                break;
+            case GM_DISTORTION_FOV_MODEL:
+                apply_distortion = false;
+                break;
+            case GM_DISTORTION_BROWN_K1_K2:
+                k1 = frame_intrinsics->distortion[0];
+                k2 = frame_intrinsics->distortion[1];
+                k3 = 0;
+                break;
+            case GM_DISTORTION_BROWN_K1_K2_K3:
+                k1 = frame_intrinsics->distortion[0];
+                k2 = frame_intrinsics->distortion[1];
+                k3 = frame_intrinsics->distortion[2];
+                break;
+            case GM_DISTORTION_BROWN_K1_K2_P1_P2_K3:
+                k1 = frame_intrinsics->distortion[0];
+                k2 = frame_intrinsics->distortion[1];
+                k3 = frame_intrinsics->distortion[4];
+                /* Ignoring tangential distortion */
+                break;
+            }
+        }
+
+        for (int off = 0; off < num_points; off++) {
+            float *xyzc = ((float *)buffer->data) + 4 * off;
+            float rd, ru;
+
+            // Reproject this point into training camera space
+            glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
+
+            int x;
+            if (apply_distortion) {
+                ru = sqrtf((point_t.x*point_t.x + point_t.y*point_t.y) /
+                           (point_t.z*point_t.z));
+
+                // Google documented their POLY_3 distortion model should
+                // be evaluated as:
+                //   rd = ru + k1 * ru^3 + k2 * ru^5 + k3 * ru^7
+                // they also refer to the same model as Brown's with only
+                // k1, k2 and k3 coefficients, but e.g. referencing Wikipedia
+                // and looking for other interpretations of the Brown-Conrady
+                // model then it looks like there's some inconsistency with
+                // the ru exponents used. Wikipedia uses:
+                //   k1 * ru^2 + k2 * ru^4 + k3 * ru^6
+#if 0
+                float ru2 = ru*ru;
+                float ru3 = ru2*ru;
+                float ru5 = ru3*ru2;
+                float ru7 = ru5*ru2;
+                rd = ru + k1 * ru3 + k2 * ru5 + k3 * ru7;
+#else
+                float ru2 = ru*ru;
+                float ru4 = ru2*ru2;
+                float ru6 = ru2*ru4;
+                rd = ru + k1 * ru2 + k2 * ru4 + k3 * ru6;
+#endif
+
+                x = (int)(point_t.x / point_t.z * fx * rd / ru + cx);
+            } else
+                x = (int)((point_t.x * fx / point_t.z) + cx);
+
+            if (x < 0 || x >= width) {
+                continue;
+            }
+
+            int y;
+            if (apply_distortion)
+                y = (int)(point_t.y / point_t.z * fy * rd / ru + cy);
+            else
+                y = (int)((point_t.y * fy / point_t.z) + cy);
+            if (y < 0 || y >= height) {
+                continue;
+            }
+
+            with_rotated_rx_ry_roff(x, y, width, height,
+                                    rotation, rot_width,
+                {
+                    depth_copy[roff] = point_t.z;
+                });
+        }
+        break;
+    }
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_LUMINANCE_U8:
+    case GM_FORMAT_RGB_U8:
+    case GM_FORMAT_RGBX_U8:
+    case GM_FORMAT_RGBA_U8:
+    case GM_FORMAT_BGR_U8:
+    case GM_FORMAT_BGRX_U8:
+    case GM_FORMAT_BGRA_U8:
+        gm_assert(ctx->log, 0, "Unexpected format for depth buffer");
+        break;
+    }
+}
+
+static void
 pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
                                                 struct gm_tracking_impl *tracking,
                                                 pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud,
@@ -3178,6 +3345,33 @@ colour_debug_cloud(struct gm_context *ctx,
         gm_assert(ctx->log, 0, "Shouldn't be reached: spurious cloud mode value");
         break;
     }
+}
+
+static void
+stage_start_cb(struct gm_tracking_impl *tracking,
+                 struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    struct gm_frame *frame = tracking->frame;
+
+    copy_and_rotate_depth_buffer(ctx,
+                                 tracking,
+                                 &frame->depth_intrinsics,
+                                 frame->depth_format,
+                                 frame->depth);
+}
+
+static void
+stage_start_debug_cb(struct gm_tracking_impl *tracking,
+                        struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
+                                             tracking->depth,
+                                             &tracking->depth_camera_intrinsics);
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    colour_debug_cloud(ctx, state, tracking, NULL);
 }
 
 static void
@@ -4419,23 +4613,12 @@ context_track_skeleton(struct gm_context *ctx,
     invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
     invalid_pt.label = -1;
 
-    // No actual work to do here but we want to 'run' it for
-    // consistent metrics...
+    // copy + rotate the latest depth buffer
     run_stage(tracking,
               TRACKING_STAGE_START,
-              NULL, // no real work to do
-              NULL, // no debug
+              stage_start_cb,
+              stage_start_debug_cb,
               &state);
-
-    if (debug_stage_id == TRACKING_STAGE_START &&
-        ctx->debug_cloud_mode)
-    {
-        add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                                 tracking->depth,
-                                                 &tracking->depth_camera_intrinsics);
-        tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-        colour_debug_cloud(ctx, &state, tracking, NULL);
-    }
 
     run_stage(tracking,
               TRACKING_STAGE_GAP_FILLED,
@@ -5312,173 +5495,6 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
 #endif // !DOWNSAMPLE_ON_GPU
 }
 
-static void
-copy_and_rotate_depth_buffer(struct gm_context *ctx,
-                             struct gm_tracking_impl *tracking,
-                             struct gm_intrinsics *frame_intrinsics,
-                             enum gm_format format,
-                             struct gm_buffer *buffer)
-{
-    int width = frame_intrinsics->width;
-    int height = frame_intrinsics->height;
-    int rot_width = tracking->depth_camera_intrinsics.width;
-    enum gm_rotation rotation = tracking->frame->camera_rotation;
-    void *depth = buffer->data;
-    float *depth_copy = tracking->depth;
-
-    int num_points;
-
-    // Not ideal how we use `with_rotated_rx_ry_roff` per-pixel, but it lets
-    // us easily combine our rotation with our copy...
-    //
-    // XXX: it could be worth reading multiple scanlines at a time so we could
-    // write out cache lines at a time instead of only 4 bytes (for rotated
-    // images).
-    //
-    switch (format) {
-    case GM_FORMAT_Z_U16_MM:
-        foreach_xy_off(width, height) {
-            float depth_m = ((uint16_t *)depth)[off] / 1000.f;
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                                    { depth_copy[roff] = depth_m; });
-        }
-        break;
-    case GM_FORMAT_Z_F32_M:
-        foreach_xy_off(width, height) {
-            float depth_m = ((float *)depth)[off];
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                                    { depth_copy[roff] = depth_m; });
-        }
-        break;
-    case GM_FORMAT_Z_F16_M:
-        foreach_xy_off(width, height) {
-            float depth_m = ((half *)depth)[off];
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                                    { depth_copy[roff] = depth_m; });
-        }
-        break;
-    case GM_FORMAT_POINTS_XYZC_F32_M: {
-
-        /* XXX: Tango doesn't give us a 2D depth buffer which we would prefer
-         * and we can't be sure that the re-projected point cloud will fill our
-         * 2D depth buffer 100% so we're forced to clear it first too :(
-         */
-        memset(depth_copy, 0, width * height * sizeof(float));
-
-        num_points = buffer->len / 16;
-
-        float fx = frame_intrinsics->fx;
-        float fy = frame_intrinsics->fy;
-        float cx = frame_intrinsics->cx;
-        float cy = frame_intrinsics->cy;
-
-        float k1, k2, k3;
-        k1 = k2 = k3 = 0.f;
-
-        /* XXX: we only support applying the brown's model... */
-        bool apply_distortion = ctx->apply_depth_distortion;
-        if (apply_distortion) {
-            switch (frame_intrinsics->distortion_model) {
-            case GM_DISTORTION_NONE:
-                apply_distortion = false;
-                break;
-            case GM_DISTORTION_FOV_MODEL:
-                apply_distortion = false;
-                break;
-            case GM_DISTORTION_BROWN_K1_K2:
-                k1 = frame_intrinsics->distortion[0];
-                k2 = frame_intrinsics->distortion[1];
-                k3 = 0;
-                break;
-            case GM_DISTORTION_BROWN_K1_K2_K3:
-                k1 = frame_intrinsics->distortion[0];
-                k2 = frame_intrinsics->distortion[1];
-                k3 = frame_intrinsics->distortion[2];
-                break;
-            case GM_DISTORTION_BROWN_K1_K2_P1_P2_K3:
-                k1 = frame_intrinsics->distortion[0];
-                k2 = frame_intrinsics->distortion[1];
-                k3 = frame_intrinsics->distortion[4];
-                /* Ignoring tangential distortion */
-                break;
-            }
-        }
-
-        for (int off = 0; off < num_points; off++) {
-            float *xyzc = ((float *)buffer->data) + 4 * off;
-            float rd, ru;
-
-            // Reproject this point into training camera space
-            glm::vec3 point_t(xyzc[0], xyzc[1], xyzc[2]);
-
-            int x;
-            if (apply_distortion) {
-                ru = sqrtf((point_t.x*point_t.x + point_t.y*point_t.y) /
-                           (point_t.z*point_t.z));
-
-                // Google documented their POLY_3 distortion model should
-                // be evaluated as:
-                //   rd = ru + k1 * ru^3 + k2 * ru^5 + k3 * ru^7
-                // they also refer to the same model as Brown's with only
-                // k1, k2 and k3 coefficients, but e.g. referencing Wikipedia
-                // and looking for other interpretations of the Brown-Conrady
-                // model then it looks like there's some inconsistency with
-                // the ru exponents used. Wikipedia uses:
-                //   k1 * ru^2 + k2 * ru^4 + k3 * ru^6
-#if 0
-                float ru2 = ru*ru;
-                float ru3 = ru2*ru;
-                float ru5 = ru3*ru2;
-                float ru7 = ru5*ru2;
-                rd = ru + k1 * ru3 + k2 * ru5 + k3 * ru7;
-#else
-                float ru2 = ru*ru;
-                float ru4 = ru2*ru2;
-                float ru6 = ru2*ru4;
-                rd = ru + k1 * ru2 + k2 * ru4 + k3 * ru6;
-#endif
-
-                x = (int)(point_t.x / point_t.z * fx * rd / ru + cx);
-            } else
-                x = (int)((point_t.x * fx / point_t.z) + cx);
-
-            if (x < 0 || x >= width) {
-                continue;
-            }
-
-            int y;
-            if (apply_distortion)
-                y = (int)(point_t.y / point_t.z * fy * rd / ru + cy);
-            else
-                y = (int)((point_t.y * fy / point_t.z) + cy);
-            if (y < 0 || y >= height) {
-                continue;
-            }
-
-            with_rotated_rx_ry_roff(x, y, width, height,
-                                    rotation, rot_width,
-                {
-                    depth_copy[roff] = point_t.z;
-                });
-        }
-        break;
-    }
-    case GM_FORMAT_UNKNOWN:
-    case GM_FORMAT_LUMINANCE_U8:
-    case GM_FORMAT_RGB_U8:
-    case GM_FORMAT_RGBX_U8:
-    case GM_FORMAT_RGBA_U8:
-    case GM_FORMAT_BGR_U8:
-    case GM_FORMAT_BGRX_U8:
-    case GM_FORMAT_BGRA_U8:
-        gm_assert(ctx->log, 0, "Unexpected format for depth buffer");
-        break;
-    }
-}
-
 void
 gm_context_rotate_intrinsics(struct gm_context *ctx,
                              const struct gm_intrinsics *intrinsics_in,
@@ -5630,12 +5646,6 @@ detector_thread_cb(void *data)
             tracking->training_camera_intrinsics.fy =
                 tracking->training_camera_intrinsics.height /
                 (2 * tanf(ctx->decision_trees[0]->header.fov / 2));
-
-        copy_and_rotate_depth_buffer(ctx,
-                                     tracking,
-                                     &frame->depth_intrinsics,
-                                     frame->depth_format,
-                                     frame->depth);
 
         /* FIXME: re-enable support for face detection */
 #if 0
