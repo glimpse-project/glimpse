@@ -2416,8 +2416,15 @@ depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
         rgb_out[1] = 0xFF;
         rgb_out[2] = 0x00;
         break;
-    default:
+    case -1:
         // Invalid/unhandled value
+        rgb_out[0] = 0xFF;
+        rgb_out[1] = 0x80;
+        rgb_out[2] = 0x80;
+        break;
+
+    default:
+        // unhandled value
         rgb_out[0] = 0xFF;
         rgb_out[1] = 0x00;
         rgb_out[2] = 0xFF;
