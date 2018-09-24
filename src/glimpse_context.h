@@ -242,8 +242,14 @@ struct gm_frame
      * want a stable ABI.
      */
     uint64_t timestamp;
-    struct gm_pose pose;
     enum gm_rotation camera_rotation;
+
+    // Note it's assumed the frame will be rotated according to the camera
+    // rotation before interpreting the pose or gravity vector...
+    //
+    struct gm_pose pose;
+    bool gravity_valid;
+    float gravity[3];
 
     struct gm_buffer *depth;
     enum gm_format depth_format; // ignore if depth is NULL
