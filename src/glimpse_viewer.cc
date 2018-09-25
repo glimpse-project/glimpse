@@ -2461,7 +2461,8 @@ upload_tracking_textures(Data *data)
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         data->n_cloud_points = n_points;
         data->cloud_intrinsics = debug_cloud_intrinsics;
-    }
+    } else
+        data->n_cloud_points = 0;
 
     int n_lines = 0;
     const struct gm_point_rgba *debug_lines =
@@ -2475,7 +2476,8 @@ upload_tracking_textures(Data *data)
                      debug_lines, GL_DYNAMIC_DRAW);
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         data->n_lines = n_lines;
-    }
+    } else
+        data->n_lines = 0;
 }
 
 static void
