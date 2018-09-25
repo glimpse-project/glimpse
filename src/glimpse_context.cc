@@ -714,6 +714,7 @@ struct gm_context
     struct gm_pose codebook_pose;
     glm::mat4 start_to_codebook;
     std::vector<std::vector<struct seg_codeword>> seg_codebook;
+    uint64_t last_codebook_update_time;
 
     /* If we're processing a paused frame then we will start by making a full
      * copy of the codebook into here so that we can make temporary updates
@@ -1940,7 +1941,7 @@ update_depth_codebook(struct gm_context *ctx,
             // Increment consecutive number of depth values if its happened in
             // consecutive frames
             if (!ctx->n_tracking ||
-                codeword->tl != ctx->latest_tracking->frame->timestamp) {
+                codeword->tl != ctx->last_codebook_update_time) {
                 ++codeword->nc;
             }
 
@@ -1959,6 +1960,10 @@ update_depth_codebook(struct gm_context *ctx,
                                tracking->downsampled_cloud->height),
          get_duration_ns_print_scale(duration),
          get_duration_ns_print_scale_suffix(duration));
+
+    if (!state->paused) {
+        ctx->last_codebook_update_time = tracking->frame->timestamp;
+    }
 }
 
 static inline bool
