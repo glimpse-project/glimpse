@@ -179,6 +179,7 @@ enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_DEPTH,
     DEBUG_CLOUD_MODE_CODEBOOK_LABELS,
     DEBUG_CLOUD_MODE_LABELS,
+    DEBUG_CLOUD_MODE_EDGES,
 
     N_DEBUG_CLOUD_MODES
 };
@@ -187,6 +188,7 @@ enum tracking_stage {
     TRACKING_STAGE_START,
     TRACKING_STAGE_GAP_FILLED,
     TRACKING_STAGE_DOWNSAMPLED,
+    TRACKING_STAGE_EDGE_DETECT,
     TRACKING_STAGE_GROUND_SPACE,
 
     TRACKING_STAGE_NAIVE_FLOOR,
@@ -210,6 +212,13 @@ enum tracking_stage {
     TRACKING_STAGE_UPDATE_CODEBOOK,
 
     N_TRACKING_STAGES
+};
+
+enum edge_detect_mode {
+    EDGE_DETECT_MODE_NONE,
+    EDGE_DETECT_MODE_X_ONLY,
+    EDGE_DETECT_MODE_Y_ONLY,
+    EDGE_DETECT_MODE_XY,
 };
 
 enum image_format {
@@ -723,6 +732,16 @@ struct gm_context
     pthread_mutex_t aggregate_metrics_mutex;
     int n_frames;
     uint64_t total_tracking_duration;
+
+    int edge_detect_mode;
+    std::vector<struct gm_ui_enumerant> edge_detect_mode_enumerants;
+    float edge_threshold;
+    bool delete_edges;
+    int edge_break_x;
+    int edge_break_y;
+
+    // Note: vector<bool> is implemented as an array of bits as a special case...
+    std::vector<bool> edge_detect_scratch;
 };
 
 struct PointCmp {
@@ -746,6 +765,8 @@ struct PointCmp {
 struct pipeline_scratch_state
 {
     bool paused;
+
+    bool done_edge_detect;
 
     /* The reason we copy the tracking history here at the start of tracking is
      * that we might have a frame that's marked as a discontinuity which should
@@ -3432,7 +3453,20 @@ colour_debug_cloud(struct gm_context *ctx,
             }
         }
         break;
-
+    case DEBUG_CLOUD_MODE_EDGES:
+        if (state->done_edge_detect &&
+            ctx->debug_pipeline_stage == TRACKING_STAGE_EDGE_DETECT)
+        {
+            std::vector<bool> &edge_mask = ctx->edge_detect_scratch;
+            for (int i = 0; i < debug_cloud.size(); i++) {
+                if (edge_mask[i]) {
+                    debug_cloud[i].rgba = 0xffffffff;
+                } else {
+                    debug_cloud[i].rgba = 0x202020ff;
+                }
+            }
+        }
+        break;
     case DEBUG_CLOUD_MODE_NONE:
     case N_DEBUG_CLOUD_MODES:
         gm_assert(ctx->log, 0, "Shouldn't be reached: spurious cloud mode value");
@@ -3584,6 +3618,253 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.fx /= seg_res;
     tracking->debug_cloud_intrinsics.fy /= seg_res;
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+}
+
+/* 'edge' in this context specifically means finding gradients that *very*
+ * closely match the viewing angle at that point.
+ *
+ * We are primarily concerned with the significant artefacts that are seen in
+ * iPhone depth buffers where it looks like geometry is smeared/interpolated at
+ * the edges of objects which really interferes with clustering neighbouring
+ * points based on distance thresholding (everything is closely connected).
+ */
+static void
+stage_edge_detect_cb(struct gm_tracking_impl *tracking,
+                     struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    int width = tracking->downsampled_cloud->width;
+    int height = tracking->downsampled_cloud->height;
+
+    pcl::PointCloud<pcl::PointXYZL>::VectorType &points =
+        tracking->downsampled_cloud->points;
+
+    std::vector<bool> &edge_mask = ctx->edge_detect_scratch;
+    edge_mask.resize(width * height);
+
+    bool x_edges = false;
+    bool y_edges = false;
+
+    switch ((enum edge_detect_mode)ctx->edge_detect_mode)
+    {
+    case EDGE_DETECT_MODE_X_ONLY:
+        x_edges = true;
+        break;
+    case EDGE_DETECT_MODE_Y_ONLY:
+        y_edges = true;
+        break;
+    case EDGE_DETECT_MODE_XY:
+        x_edges = true;
+        y_edges = true;
+        break;
+    case EDGE_DETECT_MODE_NONE:
+        break;
+    }
+
+    int edge_break = -1;
+
+    if (ctx->edge_break_x >= 0 &&
+        ctx->edge_break_x < width &&
+        ctx->edge_break_y >=0 &&
+        ctx->edge_break_y < height)
+    {
+        edge_break = ctx->edge_break_y * width + ctx->edge_break_x;
+    }
+
+    float edge_threshold = ctx->edge_threshold;
+
+    // XXX: we don't use memset because vector<bool> is rather special and
+    // implemented as an array of bits whose size we don't really know.
+    std::fill(edge_mask.begin(), edge_mask.end(), 0);
+
+    if (x_edges) {
+        foreach_xy_off(width, height) {
+            pcl::PointXYZL &point = points[off];
+            if (std::isnan(point.z)) {
+                edge_mask[off] = 1;
+                continue;
+            }
+            if (x == 0 || x == width - 1) {
+                continue;
+            }
+
+            /* XXX: look at thresholding based on the squared distances instead
+             * so we can avoid normalizing 3 vectors for every pixel
+             *
+             * XXX: also look at working with a scanline since point becomes
+             * point_l and point_r becomes point for the next iteration so we
+             * could avoid one of the normalizations each horizontal step.
+             *
+             * XXX: really we only need to use glm::vec2() for this
+             */
+
+            glm::vec3 eye = glm::normalize(glm::vec3(point.x, 0, point.z));
+
+            pcl::PointXYZL &point_l = points[off-1];
+
+            glm::vec3 grad_l = glm::normalize(
+                glm::vec3(point_l.x, 0, point_l.z) -
+                glm::vec3(point.x, 0, point.z));
+
+            float compare = glm::dot(grad_l, eye);
+            if (compare > edge_threshold) {
+                edge_mask[off] = 1;
+            } else {
+                pcl::PointXYZL &point_r = points[off+1];
+
+                glm::vec3 grad_r = glm::normalize(
+                    glm::vec3(point_r.x, 0, point_r.z) -
+                    glm::vec3(point.x, 0, point.z));
+
+                float compare = glm::dot(grad_r, eye);
+                if (compare > edge_threshold) {
+                    edge_mask[off] = 1;
+                }
+            }
+        }
+    }
+
+    if (y_edges) {
+        foreach_xy_off(width, height) {
+            pcl::PointXYZL &point = points[off];
+            if (std::isnan(point.z)) {
+                edge_mask[off] = 1;
+                continue;
+            }
+            if (y == 0 || y == height - 1) {
+                continue;
+            }
+
+            pcl::PointXYZL &point_u = points[off-width];
+
+            /* XXX: look at thresholding based on the squared distances instead
+             * so we can avoid normalizing 3 vectors for every pixel
+             *
+             * XXX: also look at working with a scanline since point becomes
+             * point_l and point_r becomes point for the next iteration so we
+             * could avoid one of the normalizations each horizontal step.
+             *
+             * XXX: really we only need to use glm::vec2() for this
+             */
+
+            glm::vec3 eye = glm::normalize(glm::vec3(0, point.y, point.z));
+
+            glm::vec3 grad_u = glm::normalize(
+                glm::vec3(0, point_u.y, point_u.z) -
+                glm::vec3(0, point.y, point.z));
+
+            float compare = glm::dot(grad_u, eye);
+            if (fabs(compare) > edge_threshold) {
+                edge_mask[off] = 1;
+            } else {
+                pcl::PointXYZL &point_d = points[off+width];
+
+                glm::vec3 grad_d = glm::normalize(
+                    glm::vec3(0, point_d.y, point_d.z) -
+                    glm::vec3(0, point.y, point.z));
+                float compare = glm::dot(grad_d, eye);
+                if (fabs(compare) > edge_threshold) {
+                    edge_mask[off] = 1;
+                }
+            }
+        }
+    }
+
+    /* We might be running this stage even if !ctx->delete_edges, just
+     * for the debug visualization of what would be deleted...
+     */
+    if (ctx->delete_edges) {
+        float nan = std::numeric_limits<float>::quiet_NaN();
+
+        foreach_xy_off(width, height) {
+            if (edge_mask[off]) {
+                pcl::PointXYZL &point = points[off];
+                point.x = point.y = point.z = nan;
+                point.label = -1;
+            }
+        }
+    }
+
+    state->done_edge_detect = true;
+}
+
+static void
+stage_edge_detect_debug_cb(struct gm_tracking_impl *tracking,
+                           struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int seg_res = ctx->seg_res;
+
+    add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    int width = tracking->downsampled_cloud->width;
+    int height = tracking->downsampled_cloud->height;
+
+    pcl::PointCloud<pcl::PointXYZL>::VectorType &points =
+        tracking->downsampled_cloud->points;
+
+    std::vector<bool> &edge_mask = ctx->edge_detect_scratch;
+
+    int edge_break = -1;
+
+    if (ctx->edge_break_x >= 0 &&
+        ctx->edge_break_x < width &&
+        ctx->edge_break_y >=0 &&
+        ctx->edge_break_y < height)
+    {
+        edge_break = ctx->edge_break_y * width + ctx->edge_break_x;
+    }
+
+    if (edge_break >= 0 && edge_break < edge_mask.size()) {
+        int off = edge_break;
+
+        pcl::PointXYZL &point = points[off];
+        if (std::isnan(point.z)) {
+            return;
+        }
+
+        tracking_draw_transformed_crosshair(
+            tracking,
+            (float[3]){ point.x, point.y, point.z },
+            0.01, // 1cm
+            0x00ff00ff,
+            glm::mat4(1.0));
+
+        int x = off % width;
+        if (x == 0 || x == width - 1) {
+            return;
+        }
+        pcl::PointXYZL &point_l = points[off-1];
+        pcl::PointXYZL &point_r = points[off+1];
+
+        glm::vec3 eye = glm::normalize(glm::vec3(point.x, 0, point.z));
+
+        glm::vec3 grad_l = glm::normalize(
+            glm::vec3(point_l.x, 0, point_l.z) -
+            glm::vec3(point.x, 0, point.z));
+        glm::vec3 grad_r = glm::normalize(
+            glm::vec3(point_r.x, 0, point_r.z) -
+            glm::vec3(point.x, 0, point.z));
+
+        tracking_draw_line(tracking,
+                           0, 0, 0,
+                           eye.x, eye.y, eye.z,
+                           0xff0000ff);
+        tracking_draw_line(tracking,
+                           0, 0, 0,
+                           grad_l.x, grad_l.y, grad_l.z,
+                           0xff0000ff);
+    }
 }
 
 static void
@@ -4798,6 +5079,21 @@ context_track_skeleton(struct gm_context *ctx,
               stage_downsample_cb,
               stage_downsample_debug_cb,
               &state);
+
+    /* Note: we also run this stage when ctx->delete_edges == false
+     * if selected for debugging, just so we can visualize what
+     * points would get deleted...
+     */
+    if (ctx->delete_edges ||
+        (ctx->debug_cloud_mode &&
+         ctx->debug_pipeline_stage == TRACKING_STAGE_EDGE_DETECT))
+    {
+        run_stage(tracking,
+                  TRACKING_STAGE_EDGE_DETECT,
+                  stage_edge_detect_cb,
+                  stage_edge_detect_debug_cb,
+                  &state);
+    }
 
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     bool motion_detection = ctx->motion_detection;
@@ -6571,6 +6867,14 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
+    ctx->delete_edges = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "delete_edges";
+    prop.desc = "Detect edges and invalidate edge points";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->delete_edges;
+    ctx->properties.push_back(prop);
 
     ctx->motion_detection = true;
     prop = gm_ui_property();
@@ -6739,6 +7043,12 @@ gm_context_new(struct gm_logger *logger, char **err)
     enumerant.val = DEBUG_CLOUD_MODE_LABELS;
     ctx->cloud_mode_enumerants.push_back(enumerant);
 
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "edges";
+    enumerant.desc = "Edges";
+    enumerant.val = DEBUG_CLOUD_MODE_EDGES;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
     prop.enum_state.n_enumerants = ctx->cloud_mode_enumerants.size();
     prop.enum_state.enumerants = ctx->cloud_mode_enumerants.data();
     ctx->properties.push_back(prop);
@@ -6852,6 +7162,88 @@ gm_context_new(struct gm_logger *logger, char **err)
         pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_EDGE_DETECT;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "edge_detect";
+        stage.desc = "Detect gradients coincident with viewing angle";
+
+        ctx->edge_detect_mode = EDGE_DETECT_MODE_XY;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "edge_detect_mode";
+        prop.desc = "Edge detection strategy";
+        prop.type = GM_PROPERTY_ENUM;
+        prop.enum_state.ptr = &ctx->edge_detect_mode;
+
+        enumerant = gm_ui_enumerant();
+        enumerant.name = "none";
+        enumerant.desc = "Don't detect any edges";
+        enumerant.val = EDGE_DETECT_MODE_NONE;
+        ctx->edge_detect_mode_enumerants.push_back(enumerant);
+
+        enumerant = gm_ui_enumerant();
+        enumerant.name = "x_only";
+        enumerant.desc = "Only detect horizontal edges";
+        enumerant.val = EDGE_DETECT_MODE_X_ONLY;
+        ctx->edge_detect_mode_enumerants.push_back(enumerant);
+
+        enumerant = gm_ui_enumerant();
+        enumerant.name = "y_only";
+        enumerant.desc = "Only detect vertical edges";
+        enumerant.val = EDGE_DETECT_MODE_Y_ONLY;
+        ctx->edge_detect_mode_enumerants.push_back(enumerant);
+
+        enumerant = gm_ui_enumerant();
+        enumerant.name = "xy";
+        enumerant.desc = "Detect horizontal and vertical edges";
+        enumerant.val = EDGE_DETECT_MODE_XY;
+        ctx->edge_detect_mode_enumerants.push_back(enumerant);
+
+        prop.enum_state.n_enumerants = ctx->edge_detect_mode_enumerants.size();
+        prop.enum_state.enumerants = ctx->edge_detect_mode_enumerants.data();
+        stage.properties.push_back(prop);
+
+        ctx->edge_threshold = 0.99f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "edge_detect_threshold";
+        prop.desc = "Threshold for considering eye vector and gradient coincident";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->edge_threshold;
+        prop.float_state.min = 0;
+        prop.float_state.max = 1;
+        stage.properties.push_back(prop);
+
+        ctx->edge_break_x = -1;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "edge_detect_break_x";
+        prop.desc = "Focus debugging on a specific point during edge detect";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->edge_break_x;
+        prop.int_state.min = -1;
+        prop.int_state.max = 320; // FIXME: set according to resolution
+        stage.properties.push_back(prop);
+
+        ctx->edge_break_y = -1;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "edge_detect_break_y";
+        prop.desc = "Focus debugging on a specific point during edge detect";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->edge_break_y;
+        prop.int_state.min = -1;
+        prop.int_state.max = 240; // FIXME: set according to resolution
+        stage.properties.push_back(prop);
+
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
     {
         enum tracking_stage stage_id = TRACKING_STAGE_GROUND_SPACE;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
