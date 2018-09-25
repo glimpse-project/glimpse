@@ -6911,7 +6911,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "naive_cluster";
         stage.desc = "Cluster based on assumptions about single-person tracking";
 
-        ctx->cluster_tolerance = 0.10f;
+        ctx->cluster_tolerance = 0.05f;
         prop = gm_ui_property();
         prop.object = ctx;
         prop.name = "na_cluster_tolerance";
