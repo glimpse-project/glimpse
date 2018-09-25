@@ -4036,6 +4036,25 @@ stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
     // stage_naive_cluster_cb above, so we just need the color..
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
+    float floor_y = state->naive_floor_y;
+    float size = 0.25f;
+    float center[] = { 0, floor_y, 2 };
+    uint32_t color = 0x00ffffff;
+    glm::mat4 ground_to_downsampled = glm::inverse(state->to_ground);
+
+    float corner0[] = { center[0] - size, center[1], center[2] - size };
+    float corner1[] = { center[0] - size, center[1], center[2] + size };
+    float corner2[] = { center[0] + size, center[1], center[2] + size };
+    float corner3[] = { center[0] + size, center[1], center[2] - size };
+    tracking_draw_transformed_line(tracking, corner0, corner1,
+                                   color, ground_to_downsampled);
+    tracking_draw_transformed_line(tracking, corner1, corner2,
+                                   color, ground_to_downsampled);
+    tracking_draw_transformed_line(tracking, corner2, corner3,
+                                   color, ground_to_downsampled);
+    tracking_draw_transformed_line(tracking, corner3, corner0,
+                                   color, ground_to_downsampled);
+
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
     tracking->debug_cloud_intrinsics.height /= seg_res;
