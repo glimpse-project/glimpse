@@ -1989,7 +1989,7 @@ compare_point_depths(pcl::PointCloud<pcl::PointXYZL>::Ptr cloud,
     if (d1 < d2)
         return true;
 
-    return fabsf(d1 - d2) <= tolerance;
+    return (d1 - d2) <= tolerance;
 }
 
 void *
