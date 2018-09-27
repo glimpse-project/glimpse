@@ -95,8 +95,6 @@
 #else
 #define GM_LOG_CONTEXT "ctx"
 #endif
-#define LOGI(...) gm_info(ctx->log, __VA_ARGS__)
-#define LOGE(...) gm_error(ctx->log, __VA_ARGS__)
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
@@ -1955,11 +1953,12 @@ update_depth_codebook(struct gm_context *ctx,
 
     uint64_t end = get_time();
     uint64_t duration = end - start;
-    LOGI("Codeword update (%.2f codewords/pix) took %.3f%s",
-         n_codewords / (float)(tracking->downsampled_cloud->width *
-                               tracking->downsampled_cloud->height),
-         get_duration_ns_print_scale(duration),
-         get_duration_ns_print_scale_suffix(duration));
+    gm_info(ctx->log,
+            "Codeword update (%.2f codewords/pix) took %.3f%s",
+            n_codewords / (float)(tracking->downsampled_cloud->width *
+                                  tracking->downsampled_cloud->height),
+            get_duration_ns_print_scale(duration),
+            get_duration_ns_print_scale_suffix(duration));
 
     if (!state->paused) {
         ctx->last_codebook_update_time = tracking->frame->timestamp;
@@ -5482,7 +5481,7 @@ static void
 context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
 {
     if (!tracking->face_detect_buf) {
-        LOGI("NULL tracking->face_detect_buf");
+        gm_info(ctx->log, "NULL tracking->face_detect_buf");
         return;
     }
 
@@ -5491,11 +5490,11 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
     glimpse::wrapped_image<unsigned char> grey_img;
     dlib::rectangle buf_rect(tracking->face_detect_buf_width, tracking->face_detect_buf_height);
 
-    LOGI("New camera frame to process");
+    gm_info(ctx->log, "New camera frame to process");
 
     if (ctx->last_faces.size()) {
 
-        LOGI("Searching %d region[s] for faces", (int)ctx->last_faces.size());
+        gm_info(ctx->log, "Searching %d region[s] for faces", (int)ctx->last_faces.size());
 
         for (dlib::rectangle &rect : ctx->last_faces) {
 
@@ -5508,19 +5507,19 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
                           static_cast<unsigned char *>(tracking->face_detect_buf +
                                                        rect.top() * tracking->face_detect_buf_width +
                                                        rect.left()));
-            LOGI("Starting constrained face detection with %dx%d sub image",
-                 (int)rect.width(), (int)rect.height());
+            gm_info(ctx->log, "Starting constrained face detection with %dx%d sub image",
+                    (int)rect.width(), (int)rect.height());
             start = get_time();
             std::vector<dlib::rectangle> dets = ctx->detector(grey_img);
             end = get_time();
             duration_ns = end - start;
-            LOGI("Number of detected faces = %d, %.3f%s",
-                 (int)dets.size(),
-                 get_duration_ns_print_scale(duration_ns),
-                 get_duration_ns_print_scale_suffix(duration_ns));
+            gm_info(ctx->log, "Number of detected faces = %d, %.3f%s",
+                    (int)dets.size(),
+                    get_duration_ns_print_scale(duration_ns),
+                    get_duration_ns_print_scale_suffix(duration_ns));
 
             if (dets.size() != 1) {
-                LOGE("Constrained search was expected to find exactly one face - fallback");
+                gm_error(ctx->log, "Constrained search was expected to find exactly one face - fallback");
                 face_rects.resize(0);
                 break;
             }
@@ -5546,16 +5545,17 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
     if (face_rects.size() != ctx->last_faces.size() ||
         face_rects.size() == 0)
     {
-        LOGI("Starting face detection with %dx%d image",
-             (int)tracking->face_detect_buf_width, (int)tracking->face_detect_buf_height);
+        gm_info(ctx->log, "Starting face detection with %dx%d image",
+                (int)tracking->face_detect_buf_width,
+                (int)tracking->face_detect_buf_height);
         start = get_time();
         face_rects = ctx->detector(grey_img);
         end = get_time();
         duration_ns = end - start;
-        LOGI("Number of detected faces = %d, %.3f%s",
-             (int)face_rects.size(),
-             get_duration_ns_print_scale(duration_ns),
-             get_duration_ns_print_scale_suffix(duration_ns));
+        gm_info(ctx->log, "Number of detected faces = %d, %.3f%s",
+                (int)face_rects.size(),
+                get_duration_ns_print_scale(duration_ns),
+                get_duration_ns_print_scale_suffix(duration_ns));
     }
 
     ctx->last_faces = face_rects;
@@ -5572,11 +5572,11 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
         end = get_time();
         duration_ns = end - start;
 
-        LOGI("Detected %d face %d features in %.3f%s",
-             (int)features.num_parts(),
-             (int)i,
-             get_duration_ns_print_scale(duration_ns),
-             get_duration_ns_print_scale_suffix(duration_ns));
+        gm_info(ctx->log, "Detected %d face %d features in %.3f%s",
+                (int)features.num_parts(),
+                (int)i,
+                get_duration_ns_print_scale(duration_ns),
+                get_duration_ns_print_scale_suffix(duration_ns));
 
         /*
          * Bounding box
@@ -5779,9 +5779,9 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
         pthread_mutex_unlock(&ctx->debug_viz_mutex);
         uint64_t end = get_time();
         uint64_t duration_ns = end - start;
-        LOGE("Copied face detect buffer for debug overlay in %.3f%s",
-             get_duration_ns_print_scale(duration_ns),
-             get_duration_ns_print_scale_suffix(duration_ns));
+        gm_error(ctx->log, "Copied face detect buffer for debug overlay in %.3f%s",
+                 get_duration_ns_print_scale(duration_ns),
+                 get_duration_ns_print_scale_suffix(duration_ns));
     }
 #endif
 }
@@ -5936,15 +5936,15 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
 #endif
 
 #ifdef DOWNSAMPLE_1_2
-    LOGI("Started resizing frame");
+    gm_info(ctx->log, "Started resizing frame");
     start = get_time();
     dlib::resize_image(orig_grey_img, grey_1_2_img,
                        dlib::interpolate_bilinear());
     end = get_time();
     duration_ns = end - start;
-    LOGI("Frame scaled to 1/2 size on CPU in %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log, "Frame scaled to 1/2 size on CPU in %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 
 #ifdef DOWNSAMPLE_1_4
     start = get_time();
@@ -5953,9 +5953,9 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
     end = get_time();
     duration_ns = end - start;
 
-    LOGI("Frame scaled to 1/4 size on CPU in %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log, "Frame scaled to 1/4 size on CPU in %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 #endif // DOWNSAMPLE_1_4
 #endif // DOWNSAMPLE_1_2
 
@@ -6022,10 +6022,10 @@ detector_thread_cb(void *data)
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
 
-    //LOGI("Dropped all but the first (front-facing HOG) from the DLib face detector");
+    //gm_info(ctx->log, "Dropped all but the first (front-facing HOG) from the DLib face detector");
     //ctx->detector.w.resize(1);
 
-    //LOGI("Detector debug %p", &ctx->detector.scanner);
+    //gm_info(ctx->log, "Detector debug %p", &ctx->detector.scanner);
 
     char *err = NULL;
     struct gm_asset *predictor_asset =
@@ -6053,7 +6053,7 @@ detector_thread_cb(void *data)
     while (!ctx->stopping) {
         struct gm_frame *frame = NULL;
 
-        LOGI("Waiting for new frame to start tracking\n");
+        gm_info(ctx->log, "Waiting for new frame to start tracking\n");
         pthread_mutex_lock(&ctx->frame_ready_mutex);
         while (!ctx->frame_ready && !ctx->stopping) {
             pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
@@ -8422,7 +8422,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     uint64_t start, end, duration_ns;
 
 
-    LOGI("Downsampling via GLES");
+    gm_info(ctx->log, "Downsampling via GLES");
 
     if (!attrib_quad_rot_scale_bo_) {
         glGenBuffers(1, &attrib_quad_rot_scale_bo_);
@@ -8439,7 +8439,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     bool need_portrait_downsample_fb;
 
     if (display_rotation_ != current_attrib_bo_rotation_) {
-        LOGI("Orientation change to account for with face detection");
+        gm_info(ctx->log, "Orientation change to account for with face detection");
         float coords[] = { 0, 1, 0, 0, 1, 1, 1, 0 };
         float out_coords[8];
 
@@ -8461,19 +8461,19 @@ gm_context_render_thread_hook(struct gm_context *ctx)
         switch(display_rotation_) {
         case GM_ROTATION_0:
             need_portrait_downsample_fb = true;
-            LOGI("> rotation = 0");
+            gm_info(ctx->log, "> rotation = 0");
             break;
         case GM_ROTATION_90:
             need_portrait_downsample_fb = false;
-            LOGI("> rotation = 90");
+            gm_info(ctx->log, "> rotation = 90");
             break;
         case GM_ROTATION_180:
             need_portrait_downsample_fb = true;
-            LOGI("> rotation = 180");
+            gm_info(ctx->log, "> rotation = 180");
             break;
         case GM_ROTATION_270:
             need_portrait_downsample_fb = false;
-            LOGI("> rotation = 270");
+            gm_info(ctx->log, "> rotation = 270");
             break;
         }
         current_attrib_bo_rotation_ = display_rotation_;
@@ -8490,28 +8490,28 @@ gm_context_render_thread_hook(struct gm_context *ctx)
         rotated_frame_width = ctx->grey_width;
         rotated_frame_height = ctx->grey_height;
     }
-    LOGI("rotated frame width = %d, height = %d",
-         (int)rotated_frame_width, (int)rotated_frame_height);
+    gm_info(ctx->log, "rotated frame width = %d, height = %d",
+            (int)rotated_frame_width, (int)rotated_frame_height);
 
     if (need_portrait_downsample_fb != have_portrait_downsample_fb_) {
         if (downsample_fbo_) {
-            LOGI("Discarding previous downsample fbo and texture");
+            gm_info(ctx->log, "Discarding previous downsample fbo and texture");
             glDeleteFramebuffers(1, &downsample_fbo_);
             downsample_fbo_ = 0;
             glDeleteTextures(1, &downsample_tex2d_);
             downsample_tex2d_ = 0;
         }
         if (ctx->read_back_fbo) {
-            LOGI("Discarding previous read_back_fbo and texture");
+            gm_info(ctx->log, "Discarding previous read_back_fbo and texture");
             glDeleteFramebuffers(1, &ctx->read_back_fbo);
             ctx->read_back_fbo = 0;
         }
     }
 
     if (!downsample_fbo_) {
-        LOGI("Allocating new %dx%d downsample fbo + texture",
-             (int)(rotated_frame_width / 2),
-             (int)(rotated_frame_height / 2));
+        gm_info(ctx->log, "Allocating new %dx%d downsample fbo + texture",
+                (int)(rotated_frame_width / 2),
+                (int)(rotated_frame_height / 2));
 
         glGenFramebuffers(1, &downsample_fbo_);
         glBindFramebuffer(GL_FRAMEBUFFER, downsample_fbo_);
@@ -8531,7 +8531,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
                                GL_TEXTURE_2D, downsample_tex2d_, 0);
 
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-            LOGE("Framebuffer complete check (for downsample fbo) failed");
+            gm_error(ctx->log, "Framebuffer complete check (for downsample fbo) failed");
 
         have_portrait_downsample_fb_ = need_portrait_downsample_fb;
     }
@@ -8579,7 +8579,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
         glUniform1i(uniform_tex_sampler_, 0);
 
-        LOGI("Created level0 scale shader");
+        gm_info(ctx->log, "Created level0 scale shader");
     }
 
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, video_overlay_->GetTextureId());
@@ -8623,7 +8623,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
         glUniform1i(uniform_tex_sampler_, 0);
 
-        LOGI("Created scale shader");
+        gm_info(ctx->log, "Created scale shader");
     }
 
     if (!ctx->cam_tex) {
@@ -8662,9 +8662,10 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     end = get_time();
     duration_ns = end - start;
 
-    LOGI("Uploaded top level luminance texture to GPU via glTexSubImage2D in %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log,
+            "Uploaded top level luminance texture to GPU via glTexSubImage2D in %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 
     glUseProgram(scale_program_);
 #endif
@@ -8691,9 +8692,9 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     */
     glBindFramebuffer(GL_FRAMEBUFFER, downsample_fbo_);
 
-    //LOGI("Allocated pyramid level texture + fbo in %.3f%s",
-    //     get_duration_ns_print_scale(duration_ns),
-    //     get_duration_ns_print_scale_suffix(duration_ns));
+    //gm_info(ctx->log, "Allocated pyramid level texture + fbo in %.3f%s",
+    //        get_duration_ns_print_scale(duration_ns),
+    //        get_duration_ns_print_scale_suffix(duration_ns));
 
     glViewport(0, 0, rotated_frame_width / 2, rotated_frame_height / 2);
 
@@ -8713,9 +8714,9 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     end = get_time();
     duration_ns = end - start;
 
-    LOGI("Submitted level0 downsample in %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log, "Submitted level0 downsample in %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 
 #if 0
     /* NB: gles2 only allows npot textures with clamp to edge
@@ -8736,9 +8737,9 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     end = get_time();
     duration_ns = end - start;
 
-    LOGI("glGenerateMipmap took %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log, "glGenerateMipmap took %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 
     glBindTexture(GL_TEXTURE_2D, 0);
 
@@ -8753,11 +8754,11 @@ gm_context_render_thread_hook(struct gm_context *ctx)
                                downsample_tex2d_, 1);
 
         if (glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-            LOGE("Famebuffer complete check failed");
+            gm_error(ctx->log, "Famebuffer complete check failed");
 
-        //LOGI("Allocated pyramid level texture + fbo in %.3f%s",
-        //     get_duration_ns_print_scale(duration_ns),
-        //     get_duration_ns_print_scale_suffix(duration_ns));
+        //gm_info(ctx->log, "Allocated pyramid level texture + fbo in %.3f%s",
+        //        get_duration_ns_print_scale(duration_ns),
+        //        get_duration_ns_print_scale_suffix(duration_ns));
 
         glBindBuffer(GL_PIXEL_PACK_BUFFER, ctx->read_back_pbo);
         glBufferData(GL_PIXEL_PACK_BUFFER,
@@ -8786,9 +8787,9 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     end = get_time();
     duration_ns = end - start;
 
-    LOGI("glReadPixels took %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log, "glReadPixels took %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
@@ -8800,9 +8801,9 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     end = get_time();
     duration_ns = end - start;
 
-    LOGI("glMapBufferRange took %.3f%s",
-         get_duration_ns_print_scale(duration_ns),
-         get_duration_ns_print_scale_suffix(duration_ns));
+    gm_info(ctx->log, "glMapBufferRange took %.3f%s",
+            get_duration_ns_print_scale(duration_ns),
+            get_duration_ns_print_scale_suffix(duration_ns));
 
     {
         dlib::timing::timer lv0_cpy_timer("Copied pyramid level0 frame for face detection from PBO in");
@@ -8813,14 +8814,17 @@ gm_context_render_thread_hook(struct gm_context *ctx)
         /* TODO: avoid copying out of the PBO later (assuming we can get a
          * cached mapping)
          */
-        LOGI("face detect scratch width = %d, height = %d",
-             (int)tracking->face_detect_buf_width,
-             (int)tracking->face_detect_buf_height);
-        ctx->grey_face_detect_scratch.resize(tracking->face_detect_buf_width * tracking->face_detect_buf_height);
-        memcpy(ctx->grey_face_detect_scratch.data(), pbo_ptr, ctx->grey_face_detect_scratch.size());
+        gm_info(ctx->log, "face detect scratch width = %d, height = %d",
+                (int)tracking->face_detect_buf_width,
+                (int)tracking->face_detect_buf_height);
+        ctx->grey_face_detect_scratch.resize(tracking->face_detect_buf_width *
+                                             tracking->face_detect_buf_height);
+        memcpy(ctx->grey_face_detect_scratch.data(),
+               pbo_ptr, ctx->grey_face_detect_scratch.size());
 
         tracking->face_detect_buf = ctx->grey_face_detect_scratch.data();
-        LOGI("tracking->face_detect_buf = %p", tracking->face_detect_buf);
+        gm_info(ctx->log, "tracking->face_detect_buf = %p",
+                tracking->face_detect_buf);
     }
 
     glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
