@@ -3888,8 +3888,11 @@ stage_ground_project_cb(struct gm_tracking_impl *tracking,
     if (state->to_ground_valid) {
         unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
 
-        tracking->ground_cloud->width = tracking->downsampled_cloud->width;
-        tracking->ground_cloud->height = tracking->downsampled_cloud->height;
+        int width = tracking->downsampled_cloud->width;
+        int height = tracking->downsampled_cloud->height;
+
+        tracking->ground_cloud->width = width;
+        tracking->ground_cloud->height = height;
         tracking->ground_cloud->points.resize(downsampled_cloud_size);
         tracking->ground_cloud->is_dense = false;
 
@@ -3898,11 +3901,8 @@ stage_ground_project_cb(struct gm_tracking_impl *tracking,
         invalid_pt.x = invalid_pt.y = invalid_pt.z = nan;
         invalid_pt.label = -1;
 
-        foreach_xy_off(tracking->downsampled_cloud->width,
-                       tracking->downsampled_cloud->height)
-        {
-            pcl::PointXYZL &point =
-                tracking->downsampled_cloud->points[off];
+        foreach_xy_off(width, height) {
+            pcl::PointXYZL &point = tracking->downsampled_cloud->points[off];
             if (std::isnan(point.z)) {
                 tracking->ground_cloud->points[off] = invalid_pt;
                 continue;
