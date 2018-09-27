@@ -2583,6 +2583,40 @@ tracking_draw_transformed_axis(struct gm_tracking_impl *tracking,
                        colors[2]);
 }
 
+static void
+tracking_draw_transformed_grid(struct gm_tracking_impl *tracking,
+                               float *center,
+                               float full_size,
+                               float cell_size,
+                               uint32_t color,
+                               glm::mat4 transform)
+
+{
+    float half_full_size = full_size / 2.0f;
+    float corner0[] = { center[0] - half_full_size, center[1], center[2] - half_full_size };
+    float corner1[] = { center[0] - half_full_size, center[1], center[2] + half_full_size };
+    float corner2[] = { center[0] + half_full_size, center[1], center[2] + half_full_size };
+    float corner3[] = { center[0] + half_full_size, center[1], center[2] - half_full_size };
+
+    tracking_draw_transformed_line(tracking, corner0, corner1, color, transform);
+    tracking_draw_transformed_line(tracking, corner1, corner2, color, transform);
+    tracking_draw_transformed_line(tracking, corner2, corner3, color, transform);
+    tracking_draw_transformed_line(tracking, corner3, corner0, color, transform);
+
+    for (float off = cell_size; off < full_size; off += cell_size) {
+        float end0[] = { corner0[0], corner0[1], corner0[2] + off };
+        float end1[] = { corner3[0], corner3[1], corner3[2] + off };
+
+        tracking_draw_transformed_line(tracking, end0, end1, color, transform);
+    }
+    for (float off = cell_size; off < full_size; off += cell_size) {
+        float end0[] = { corner0[0] + off, corner0[1], corner0[2] };
+        float end1[] = { corner1[0] + off, corner1[1], corner1[2] };
+
+        tracking_draw_transformed_line(tracking, end0, end1, color, transform);
+    }
+}
+
 const gm_intrinsics *
 gm_tracking_get_video_camera_intrinsics(struct gm_tracking *_tracking)
 {
@@ -4324,23 +4358,13 @@ stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     float floor_y = state->naive_floor_y;
-    float size = 0.25f;
-    float center[] = { 0, floor_y, 2 };
-    uint32_t color = 0x00ffffff;
+    float full_size = 2;
+    float cell_size = 0.25f;
+    float center[] = { 0, floor_y, 2.5f };
     glm::mat4 ground_to_downsampled = glm::inverse(state->to_ground);
 
-    float corner0[] = { center[0] - size, center[1], center[2] - size };
-    float corner1[] = { center[0] - size, center[1], center[2] + size };
-    float corner2[] = { center[0] + size, center[1], center[2] + size };
-    float corner3[] = { center[0] + size, center[1], center[2] - size };
-    tracking_draw_transformed_line(tracking, corner0, corner1,
-                                   color, ground_to_downsampled);
-    tracking_draw_transformed_line(tracking, corner1, corner2,
-                                   color, ground_to_downsampled);
-    tracking_draw_transformed_line(tracking, corner2, corner3,
-                                   color, ground_to_downsampled);
-    tracking_draw_transformed_line(tracking, corner3, corner0,
-                                   color, ground_to_downsampled);
+    tracking_draw_transformed_grid(tracking, center, full_size, cell_size,
+                                   0x00ffffff, ground_to_downsampled);
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -4453,6 +4477,19 @@ stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    float floor_y = state->naive_floor_y;
+    float full_size = 2;
+    float cell_size = 0.25f;
+    float center[] = { 0, floor_y, 2.5f };
+    glm::mat4 ground_to_downsampled = glm::inverse(state->to_ground);
+
+    tracking_draw_transformed_grid(tracking, center, full_size, cell_size,
+                                   0x00ffffff, ground_to_downsampled);
+
+    center[1] += ctx->floor_threshold;
+    tracking_draw_transformed_grid(tracking, center, full_size, cell_size,
+                                   0x808080ff, ground_to_downsampled);
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
