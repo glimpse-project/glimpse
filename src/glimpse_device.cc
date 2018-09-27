@@ -2671,9 +2671,6 @@ on_avf_depth_cb(struct ios_av_session *session,
     dev->frame_time = get_time();
     dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
 
-    memset(&dev->frame_pose, 0, sizeof(struct gm_pose));
-    dev->frame_pose.type = GM_POSE_TO_GROUND;
-
     float frame_accel[3];
 
     /* We want to report our gravity vector in the coordinate space of our
@@ -2724,18 +2721,6 @@ on_avf_depth_cb(struct ios_av_session *session,
     dev->frame_gravity[0] = frame_accel[0];
     dev->frame_gravity[1] = frame_accel[1];
     dev->frame_gravity[2] = frame_accel[2];
-
-    glm::vec3 ground(0.f, -1.f, 0.f);
-    glm::vec3 current = glm::normalize(
-        glm::vec3(frame_accel[0], frame_accel[1], frame_accel[2]));
-    glm::vec3 axis = glm::normalize(glm::cross(current, ground));
-    float angle = acosf(glm::dot(ground, current));
-    glm::quat orientation = glm::angleAxis(angle, axis);
-
-    dev->frame_pose.orientation[0] = orientation.x;
-    dev->frame_pose.orientation[1] = orientation.y;
-    dev->frame_pose.orientation[2] = orientation.z;
-    dev->frame_pose.orientation[3] = orientation.w;
 
     dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
 
@@ -3214,6 +3199,7 @@ device_flush(struct gm_device *dev)
     dev->frame_paused = false;
     dev->frame_rotation = GM_ROTATION_0;
     dev->frame_gravity_valid = false;
+    dev->frame_pose.type = GM_POSE_INVALID;
 
     pthread_mutex_unlock(&dev->swap_buffers_lock);
 }

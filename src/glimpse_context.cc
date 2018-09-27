@@ -775,7 +775,9 @@ struct pipeline_scratch_state
     //struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
     //int n_tracking;
 
+    bool to_start_valid;
     glm::mat4 to_start;
+    bool to_ground_valid;
     glm::mat4 to_ground;
 
     struct gm_pose codebook_pose;
@@ -3883,7 +3885,7 @@ stage_ground_project_cb(struct gm_tracking_impl *tracking,
         tracking->ground_cloud = pcl::PointCloud<pcl::PointXYZL>::Ptr(
             new pcl::PointCloud<pcl::PointXYZL>);
     }
-    if (state->codebook_pose.type != GM_POSE_INVALID) {
+    if (state->to_ground_valid) {
         unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
 
         tracking->ground_cloud->width = tracking->downsampled_cloud->width;
@@ -3925,7 +3927,7 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     int seg_res = ctx->seg_res;
 
-    if (state->codebook_pose.type != GM_POSE_INVALID) {
+    if (state->to_ground_valid) {
         add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
                                                       tracking->downsampled_cloud,
                                                       state->to_ground);
@@ -4272,7 +4274,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        float aligned_y = (state->codebook_pose.type != GM_POSE_INVALID) ?
+        float aligned_y = tracking->ground_cloud->size() ?
             tracking->ground_cloud->points[idx].y :
             tracking->downsampled_cloud->points[idx].y;
         if (aligned_y < lowest_point) {
@@ -4399,7 +4401,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        float aligned_y = (state->codebook_pose.type != GM_POSE_INVALID) ?
+        float aligned_y = tracking->ground_cloud->size() ?
             tracking->ground_cloud->points[idx].y :
             tracking->downsampled_cloud->points[idx].y;
         if (aligned_y < lowest_point + ctx->floor_threshold) {
@@ -5151,16 +5153,47 @@ context_track_skeleton(struct gm_context *ctx,
     }
 
     state.to_start = glm::mat4(1.0);
+    state.to_start_valid = false;
     state.to_ground = glm::mat4(1.0);
+    state.to_ground_valid = false;
     switch (tracking->frame->pose.type) {
     case GM_POSE_INVALID:
+        if (tracking->frame->gravity_valid) {
+            struct gm_frame *frame = tracking->frame;
+
+            /* Note this gravity vector should already have been rotated,
+             * considering any 90degree rotations needed to account for the
+             * physical rotation of the camera (frame->camera_rotation)...
+             */
+            float *gravity = frame->gravity;
+
+            glm::vec3 down(0.f, -1.f, 0.f);
+            glm::vec3 norm_gravity = glm::normalize(
+                glm::vec3(gravity[0], gravity[1], gravity[2]));
+            glm::vec3 axis = glm::normalize(glm::cross(norm_gravity, down));
+            float angle = acosf(glm::dot(norm_gravity, down));
+            glm::quat orientation = glm::angleAxis(angle, axis);
+
+            struct gm_pose frame_pose = {};
+            frame_pose.type = GM_POSE_TO_GROUND;
+            frame_pose.orientation[0] = orientation.x;
+            frame_pose.orientation[1] = orientation.y;
+            frame_pose.orientation[2] = orientation.z;
+            frame_pose.orientation[3] = orientation.w;
+
+            state.to_ground = pose_to_matrix(tracking->frame->pose);
+            state.to_ground_valid = true;
+        }
         break;
     case GM_POSE_TO_START:
         state.to_start = pose_to_matrix(tracking->frame->pose);
+        state.to_start_valid = true;
         state.to_ground = state.to_start;
+        state.to_ground_valid = true;
         break;
     case GM_POSE_TO_GROUND:
         state.to_ground = pose_to_matrix(tracking->frame->pose);
+        state.to_ground_valid = true;
         break;
     }
 
