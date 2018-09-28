@@ -41,8 +41,9 @@
 #include "glimpse_log.h"
 
 #undef GM_LOG_CONTEXT
-#define GM_LOG_CONTEXT "rec2targ"
+#define GM_LOG_CONTEXT "rec-tool"
 
+#define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
 enum event_type
 {
@@ -63,6 +64,9 @@ typedef struct {
     struct gm_logger *log;
     struct gm_context *ctx;
 
+    int command_index;
+
+    char *recording_dir;
     struct gm_device *device;
     struct gm_ui_property *recording_frame_prop;
 
@@ -105,40 +109,257 @@ typedef struct {
     int last_tracking_frame_video_no;
     uint64_t last_tracking_timestamp;
 
-    /* Timestamp for the last frame written as a target, used to figure
-     * out what should be skipped over if data->time_step requested
-     */
-    uint64_t last_written_timestamp;
-
-    const char *out_dir;
-    FILE *index;
     int begin_frame;
     int end_frame;
     uint64_t time_step;
 
     bool finished;
+
+    // Command specific state...
+    union {
+        struct {
+            /* Timestamp for the last frame written as a target, used to figure
+             * out what should be skipped over if data->time_step requested
+             */
+            uint64_t last_written_timestamp;
+
+            const char *out_dir;
+            FILE *index;
+        } make_targets;
+    };
 } Data;
 
+
 static void
-print_usage(FILE* stream)
+make_target_sequence_print_usage(FILE* stream)
 {
-  fprintf(stream,
-"Usage: recording2target [OPTIONS] <recording directory> <output directory>\n"
-"Using a video/depth recording sequence, render a motion target sequence.\n"
+    fprintf(stream,
+"Usage: make_target_sequence [options...] <recording directory> <output directory>\n"
 "\n"
-"  -c, --config=FILE      Use this particular Glimpse device config\n"
-"  -b, --begin=NUMBER     Begin on n frame (default: 1)\n"
-"  -e, --end=NUMBER       End on this frame (default: unset)\n"
-"  -t, --time=NUMBER      Minimum number of seconds between frames (default: 0)\n"
-"  -v, --verbose          Verbose output\n"
-"  -h, --help             Display this help\n\n");
+"Converts tracked recording frames into a sequence of target poses\n"
+"\n"
+"  -h, --help             Display this help\n"
+"\n"
+    );
 }
+
+static bool
+make_target_sequence_argparse(Data *data, int argc, char **argv)
+{
+    optind = 0; // reset getopt parser state
+
+    const char *short_opts = "h";
+    const struct option long_opts[] = {
+        {"help",            no_argument,        0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, short_opts, long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'h':
+            make_target_sequence_print_usage(stdout);
+            return 0;
+        default:
+            make_target_sequence_print_usage(stderr);
+            return 1;
+        }
+    }
+
+    if (argc != 3) {
+        make_target_sequence_print_usage(stderr);
+        return false;
+    }
+
+    data->recording_dir = strdup(argv[1]);
+
+    data->make_targets.out_dir = argv[2];
+
+    return true;
+}
+
+static bool
+make_target_sequence_start(Data *data)
+{
+    // Check if the output directory exists, and if not, try to make it
+    struct stat file_props;
+    if (stat(data->make_targets.out_dir, &file_props) == 0) {
+        // If the file exists, make sure it's a directory
+        if (!S_ISDIR(file_props.st_mode)) {
+            gm_error(data->log,
+                     "Output directory '%s' exists but is not a directory",
+                     data->make_targets.out_dir);
+            return false;
+        }
+    } else {
+        // Create the directory
+        if (mkdir(data->make_targets.out_dir, 0755) != 0) {
+            gm_error(data->log, "Failed to create output directory");
+            return false;
+        }
+    }
+
+    // Open the index file
+    char index_name[1024];
+    snprintf(index_name, 1024, "%s/glimpse_target.index",
+             data->make_targets.out_dir);
+    if (!(data->make_targets.index = fopen(index_name, "w"))) {
+        gm_error(data->log, "Failed to open index file '%s'", index_name);
+        return false;
+    }
+
+    return true;
+}
+
+static bool
+append_tracking_target(Data *data,
+                       struct gm_tracking *tracking,
+                       int recording_frame_no)
+{
+    const struct gm_skeleton *skeleton = gm_tracking_get_skeleton(tracking);
+
+    char output_name[1024];
+    snprintf(output_name, 1024, "%s/%06d.json", data->make_targets.out_dir,
+             recording_frame_no);
+
+    if (gm_skeleton_save(skeleton, output_name)) {
+        // Add file to index
+        snprintf(output_name, 1024, "%06d.json\n", recording_frame_no);
+        fputs(output_name, data->make_targets.index);
+
+        data->make_targets.last_written_timestamp = data->last_tracking_timestamp;
+
+        return true;
+    }
+
+    return false;
+}
+
+static void
+make_target_sequence_tracking_ready(Data *data)
+{
+    int recording_frame_no = data->last_tracking_frame_depth_no;
+
+    uint64_t elapsed = UINT64_MAX;
+    if (data->make_targets.last_written_timestamp) {
+        elapsed = (data->last_tracking_timestamp -
+                   data->make_targets.last_written_timestamp);
+    }
+    if (elapsed < data->time_step) {
+        gm_debug(data->log, "Skipping unwanted recording frame %d, due to time step",
+                 recording_frame_no);
+        return;
+    }
+
+    gm_message(data->log, "Processing frame %d/%d",
+               recording_frame_no,
+               data->recording_frame_prop->int_state.max);
+
+    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
+    gm_assert(data->log, tracking != NULL,
+              "Spurious NULL tracking after _TRACKING_READY notification");
+
+    if (gm_tracking_was_successful(tracking))
+    {
+        append_tracking_target(data, tracking, recording_frame_no);
+    }
+    else
+    {
+        gm_message(data->log,
+                   "Skipping frame %d (failed to track)",
+                   recording_frame_no);
+    }
+
+    gm_tracking_unref(tracking);
+}
+
+static bool
+make_target_sequence_has_time_step_elapsed(Data *data)
+{
+    /* Note that we may pass more frames than necessary to gm_context for
+     * tracking due to the latency before ->last_written_timestamp is
+     * updated, but for large data->time_steps we can still avoid a lot of
+     * redundant tracking work by skipping unwanted frames at this point.
+     */
+    uint64_t elapsed = UINT64_MAX;
+    if (data->make_targets.last_written_timestamp) {
+        elapsed = (data->last_depth_frame->timestamp -
+                   data->make_targets.last_written_timestamp);
+    }
+
+    return (elapsed >= data->time_step);
+}
+
+static void
+make_target_sequence_end(Data *data)
+{
+    fclose(data->make_targets.index);
+    data->make_targets.index = NULL;
+}
+
+static struct command {
+    const char *name;
+    const char *desc;
+
+    /* Required:
+     * Parse any command-specific commandline arguments.
+     *
+     * Must also set data->recording_dir, which should be parsed as a tool
+     * argument, but expected by the common setup code.
+     */
+    bool (*argparse)(Data *data, int argc, char **argv);
+
+    /* Optional:
+     * Initialize any state before the mainloop starts
+     */
+    bool (*start)(Data *data);
+
+    /* Optional:
+     * Called whenever tracking results are ready (not necessarily
+     * successfully tracked).
+     */
+    void (*on_tracking_ready)(Data *data);
+
+    /* Optional:
+     * To handle the -t,--time commandline option each tool needs
+     * to be able to determine if more than data->time_step
+     * nanoseconds have elapsed since the tool successfully
+     * consumed a frame.
+     *
+     * This is called before passing a new frame to gm_context via
+     * gm_context_notify_frame, but if time_step time has not yet
+     * elapsed then the frame will be skipped. Some false positives
+     * may be ok (they will result in redundtly tracking a frame) if
+     * if simplifies the tool (the tool should also handle
+     * data->time_step checks in its on_tracking_ready callback).
+     *
+     * If NULL, then true is assumed.
+     */
+    bool (*has_time_step_elapsed)(Data *data);
+
+    /* Optional:
+     * Clean up state
+     */
+    void (*end)(Data *data);
+} commands[] = {
+    {
+        "make_target_sequence",
+        "Build a sequence of target poses from tracked frames",
+        make_target_sequence_argparse,
+        make_target_sequence_start,
+        make_target_sequence_tracking_ready,
+        make_target_sequence_has_time_step_elapsed,
+        make_target_sequence_end,
+    },
+};
+
 
 static bool
 check_complete(Data *data, int recording_frame_no)
 {
     if (recording_frame_no >= data->recording_frame_prop->int_state.max ||
-        (data->end_frame && (recording_frame_no >= data->end_frame))) {
+        (data->end_frame && (recording_frame_no >= data->end_frame)))
+    {
         data->finished = true;
     }
 
@@ -204,41 +425,38 @@ handle_device_frame_updates(Data *data)
             data->last_video_frame = gm_frame_ref(full_frame);
         }
 
-        /* Note that we may pass more frames than necessary to gm_context for
-         * tracking due to the latency before ->last_written_timestamp is
-         * updated, but for large data->time_steps we can still avoid a lot of
-         * redundant tracking work by skipping unwanted frames at this point.
-         */
-        uint64_t elapsed = UINT64_MAX;
-        if (data->last_written_timestamp) {
-            elapsed = (data->last_depth_frame->timestamp -
-                       data->last_written_timestamp);
-        }
-
         int end_frame = data->end_frame ? data->end_frame :
             data->recording_frame_prop->int_state.max;
 
         if (recording_frame_no >= data->begin_frame &&
-            recording_frame_no < end_frame &&
-            elapsed > data->time_step)
+            recording_frame_no < end_frame)
         {
-            gm_debug(data->log, "Sending recording frame to context (depth=%d, video=%d)",
-                     data->last_depth_frame_no,
-                     data->last_video_frame_no);
+            bool time_step_elapsed = true;
+            if (commands[data->command_index].has_time_step_elapsed)
+                time_step_elapsed = commands[data->command_index].has_time_step_elapsed(data);
 
-            if (gm_context_notify_frame(data->ctx, data->last_depth_frame)) {
-                data->context_needs_frame = false;
-                data->last_tracking_frame_depth_no = data->last_depth_frame_no;
-                data->last_tracking_frame_video_no = data->last_video_frame_no;
-                data->last_tracking_timestamp = data->last_depth_frame->timestamp;
+            if (time_step_elapsed) {
+                if (gm_context_notify_frame(data->ctx, data->last_depth_frame)) {
+                    gm_debug(data->log, "Sent recording frame to context (depth=%d, video=%d)",
+                             data->last_depth_frame_no,
+                             data->last_video_frame_no);
+
+                    data->context_needs_frame = false;
+                    data->last_tracking_frame_depth_no = data->last_depth_frame_no;
+                    data->last_tracking_frame_video_no = data->last_video_frame_no;
+                    data->last_tracking_timestamp = data->last_depth_frame->timestamp;
+                }
+            } else {
+                gm_debug(data->log, "Skipping recording frame %d (-t,--time step not elapsed)",
+                         recording_frame_no);
             }
 
             // We don't want to send duplicate frames to tracking, so discard now
             gm_frame_unref(data->last_depth_frame);
             data->last_depth_frame = NULL;
         } else {
-            gm_debug(data->log, "Skipping unwanted recording frame %d (begin = %d, end = %d, elapsed = %" PRIu64 "ns)",
-                     recording_frame_no, data->begin_frame, end_frame, elapsed);
+            gm_debug(data->log, "Skipping out-of-bounds recording frame %d (begin = %d, end = %d",
+                     recording_frame_no, data->begin_frame, end_frame);
 
             /* It's possible that the data->frame_time for sub sampling the
              * recording could take us past the data->end_frame of the
@@ -253,30 +471,6 @@ handle_device_frame_updates(Data *data)
     data->device_frame_ready = false;
 }
 
-static bool
-append_tracking_target(Data *data,
-                       struct gm_tracking *tracking,
-                       int recording_frame_no)
-{
-    const struct gm_skeleton *skeleton = gm_tracking_get_skeleton(tracking);
-
-    char output_name[1024];
-    snprintf(output_name, 1024, "%s/%06d.json", data->out_dir,
-             recording_frame_no);
-
-    if (gm_skeleton_save(skeleton, output_name)) {
-        // Add file to index
-        snprintf(output_name, 1024, "%06d.json\n", recording_frame_no);
-        fputs(output_name, data->index);
-
-        data->last_written_timestamp = data->last_tracking_timestamp;
-
-        return true;
-    }
-
-    return false;
-}
-
 static void
 handle_context_tracking_updates(Data *data)
 {
@@ -287,43 +481,14 @@ handle_context_tracking_updates(Data *data)
 
     data->tracking_ready = false;
 
-    int recording_frame_no = data->last_tracking_frame_depth_no;
-
-    uint64_t elapsed = UINT64_MAX;
-    if (data->last_written_timestamp) {
-        elapsed = (data->last_tracking_timestamp -
-                   data->last_written_timestamp);
+    if (commands[data->command_index].on_tracking_ready) {
+        commands[data->command_index].on_tracking_ready(data);
     }
-    if (elapsed < data->time_step) {
-        gm_debug(data->log, "Skipping unwanted recording frame %d, due to time step",
-                 recording_frame_no);
-        return;
-    }
-
-    gm_message(data->log, "Processing frame %d/%d",
-               recording_frame_no,
-               data->recording_frame_prop->int_state.max);
-
-    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
-    gm_assert(data->log, tracking != NULL,
-              "Spurious NULL tracking after _TRACKING_READY notification");
-
-    if (gm_tracking_was_successful(tracking))
-    {
-        append_tracking_target(data, tracking, recording_frame_no);
-    }
-    else
-    {
-        gm_message(data->log,
-                   "Skipping frame %d (failed to track)",
-                   recording_frame_no);
-    }
-
-    gm_tracking_unref(tracking);
 
     /* Note this check is done regardless of whether the last tracking
      * was successful
      */
+    int recording_frame_no = data->last_tracking_frame_depth_no;
     check_complete(data, recording_frame_no);
 
     /* We synchronize requesting device frames and waiting for tracking to
@@ -536,12 +701,41 @@ on_device_event_cb(struct gm_device_event *device_event,
     pthread_mutex_unlock(&data->event_queue_lock);
 }
 
+static void
+print_usage(FILE* stream)
+{
+  fprintf(stream,
+"Usage: recordings-tool [options...] <command> [command_options...]\n"
+"\n"
+"Runs various commands for processing a glimpse_viewer recording.\n"
+"\n"
+"  common options:\n"
+"\n"
+"    -b, --begin=NUMBER   Begin on n frame (default: 1)\n"
+"    -e, --end=NUMBER     End on this frame (default: unset)\n"
+"    -t, --time=NUMBER    Minimum number of seconds between frames (default: 0)\n"
+"    -v, --verbose        Verbose output\n"
+"    -h, --help           Display this help\n"
+"\n"
+"  commands:\n"
+"\n"
+);
+    for (int i = 0; i < ARRAY_LEN(commands); i++) {
+        fprintf(stream, "    %s - %s\n",
+                commands[i].name,
+                commands[i].desc);
+    }
+    fprintf(stream, "\n");
+}
+
 int
 main(int argc, char **argv)
 {
     bool verbose_output = false;
 
-    const char *short_opts = "c:b:e:t:vh";
+    // Leading + ensures parsing stops at first non-option (i.e.
+    // sub-command name)...
+    const char *short_opts = "+c:b:e:t:vh";
     const struct option long_opts[] = {
         {"config",          required_argument,  0, 'c'},
         {"begin",           required_argument,  0, 'b'},
@@ -587,20 +781,46 @@ main(int argc, char **argv)
         }
     }
 
-    if ((argc - optind) < 2) {
+    if (optind == argc) {
+        fprintf(stderr, "No command specified\n\n");
         print_usage(stderr);
         return 1;
     }
+
+    data.log = gm_logger_new(NULL, (void *)&verbose_output);
+
+    const char *command = argv[optind];
+    data.command_index = -1;
+
+    for (int i = 0; i < ARRAY_LEN(commands); i++) {
+        if (strcmp(commands[i].name, command) == 0) {
+            data.command_index = i;
+            gm_assert(data.log, commands[i].argparse != NULL,
+                      "%s tool missing argparse implementation",
+                      commands[i].name);
+            break;
+        }
+    }
+    if (data.command_index == -1) {
+        fprintf(stderr, "Unknown command %s\n\n", command);
+        print_usage(stderr);
+        return 1;
+    }
+
+    if (commands[data.command_index].argparse) {
+        if (!commands[data.command_index].argparse(&data,
+                                                   argc - optind,
+                                                   &argv[optind]))
+        {
+            return 1;
+        }
+    }
+
 
     if (data.end_frame && data.end_frame < data.begin_frame) {
         fprintf(stderr, "End frame should be >= begin frame\n\n");
         return 1;
     }
-
-    const char *record_dir = argv[optind];
-
-    data.out_dir = argv[optind + 1];
-    data.log = gm_logger_new(NULL, (void *)&verbose_output);
 
     const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
     char *assets_root = strdup(assets_root_env ? assets_root_env : "");
@@ -615,55 +835,32 @@ main(int argc, char **argv)
     data.ctx = gm_context_new(data.log, NULL);
     gm_context_set_event_callback(data.ctx, on_event_cb, &data);
 
-    gm_debug(data.log, "Opening device config");
-    if (config_filename) {
-        struct stat sb;
-
-        if (stat(config_filename, &sb) != 0) {
-            gm_error(data.log, "Failed to stat %s\n", config_filename);
-            return 1;
-        }
-
-        FILE *config_file = fopen(config_filename, "rb");
-        if (!config_file) {
-            gm_error(data.log, "Failed to open %s\n", config_filename);
-            return 1;
-        }
-
-        char *buf = (char *)malloc(sb.st_size);
-        if (fread(buf, sb.st_size, 1, config_file) != 1) {
-            gm_error(data.log, "Failed to read %s\n", config_filename);
-            return 1;
-        }
-        fclose(config_file);
-
+    char *open_err = NULL;
+    struct gm_asset *config_asset = gm_asset_open(data.log,
+                                                  "glimpse-config.json",
+                                                  GM_ASSET_MODE_BUFFER,
+                                                  &open_err);
+    if (config_asset) {
+        const char *buf = (const char *)gm_asset_get_buffer(config_asset);
         JSON_Value *json_config = json_parse_string(buf);
         gm_context_set_config(data.ctx, json_config);
         json_value_free(json_config);
-
-        free(buf);
+        gm_asset_close(config_asset);
     } else {
-        char *open_err = NULL;
-        struct gm_asset *config_asset = gm_asset_open(data.log,
-                                                      "glimpse-config.json",
-                                                      GM_ASSET_MODE_BUFFER,
-                                                      &open_err);
-        if (config_asset) {
-            const char *buf = (const char *)gm_asset_get_buffer(config_asset);
-            JSON_Value *json_config = json_parse_string(buf);
-            gm_context_set_config(data.ctx, json_config);
-            json_value_free(json_config);
-            gm_asset_close(config_asset);
-        } else {
-            gm_warn(data.log, "Failed to open glimpse-config.json: %s",
-                    open_err);
-            free(open_err);
+        gm_warn(data.log, "Failed to open glimpse-config.json: %s",
+                open_err);
+        free(open_err);
+    }
+
+    if (commands[data.command_index].start) {
+        if (!commands[data.command_index].start(&data)) {
+            return 1;
         }
     }
 
     struct gm_device_config config = {};
     config.type = GM_DEVICE_RECORDING;
-    config.recording.path = record_dir;
+    config.recording.path = data.recording_dir;
 
     /* This option ensures that only one recording frame will be read per
      * gm_device_request_frame call, which helps us be sure we can process all
@@ -671,37 +868,12 @@ main(int argc, char **argv)
      */
     config.recording.lockstep_io = true;
 
-    // Check if the output directory exists, and if not, try to make it
-    struct stat file_props;
-    if (stat(data.out_dir, &file_props) == 0) {
-        // If the file exists, make sure it's a directory
-        if (!S_ISDIR(file_props.st_mode)) {
-            gm_error(data.log,
-                     "Output directory '%s' exists but is not a directory",
-                     data.out_dir);
-            return 1;
-        }
-    } else {
-        // Create the directory
-        if (mkdir(data.out_dir, 0755) != 0) {
-            gm_error(data.log, "Failed to create output directory");
-            return 1;
-        }
-    }
-
-    // Open the index file
-    char index_name[1024];
-    snprintf(index_name, 1024, "%s/glimpse_target.index", data.out_dir);
-    if (!(data.index = fopen(index_name, "w"))) {
-        gm_error(data.log, "Failed to open index file '%s'", index_name);
-        return 1;
-    }
-
     gm_debug(data.log, "Opening device");
     data.device = gm_device_open(data.log, &config, NULL);
     gm_device_set_event_callback(data.device, on_device_event_cb, &data);
     gm_debug(data.log, "Committing device config");
     gm_device_commit_config(data.device, NULL);
+
 
     gm_debug(data.log, "Main Loop...");
     while (!data.finished) {
@@ -741,9 +913,12 @@ main(int argc, char **argv)
 
     gm_device_close(data.device);
 
-    fclose(data.index);
     delete data.events_front;
     delete data.events_back;
+
+    if (commands[data.command_index].end) {
+        commands[data.command_index].end(&data);
+    }
 
     gm_logger_destroy(data.log);
 
