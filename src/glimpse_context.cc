@@ -7353,18 +7353,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "naive_find_floor";
         stage.desc = "Find floor to attempt naive single-person segmentation";
 
-        ctx->floor_threshold = 0.1f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "floor_threshold";
-        prop.desc = "The threshold from the lowest points of a potential person "
-            "cluster to filter out when looking for the floor.";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->floor_threshold;
-        prop.float_state.min = 0.01f;
-        prop.float_state.max = 0.3f;
-        stage.properties.push_back(prop);
-
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
         pthread_mutex_init(&stage.properties_state.lock, NULL);
@@ -7377,6 +7365,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "naive_cluster";
         stage.desc = "Cluster based on assumptions about single-person tracking";
+
+        ctx->floor_threshold = 0.1f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "floor_threshold";
+        prop.desc = "The threshold from the lowest points of a potential person "
+            "cluster to filter out when looking for the floor.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->floor_threshold;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.3f;
+        stage.properties.push_back(prop);
 
         ctx->cluster_tolerance = 0.05f;
         prop = gm_ui_property();
