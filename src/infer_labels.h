@@ -31,12 +31,20 @@
 
 #define HUGE_DEPTH 1000.f
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 float* infer_labels(struct gm_logger* log,
                     RDTree** forest,
                     int n_trees,
                     float* depth_image,
                     int width,
                     int height,
-                    float* out_labels = NULL,
-                    bool use_threads = false,
-                    bool flip_label_mapping = false);
+                    float* out_labels,
+                    bool use_threads,
+                    bool flip_label_mapping);
+
+#ifdef __cplusplus
+}
+#endif

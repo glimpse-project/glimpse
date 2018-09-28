@@ -25,15 +25,17 @@
 
 #include <stdbool.h>
 #include <math.h>
+#include <pthread.h>
+
 #include <vector>
 #include <list>
 #include <forward_list>
 #include <thread>
-#include <pthread.h>
+#include <cmath>
 
-#include "half.hpp"
+#include "glimpse_log.h"
 
-#include "infer_joints.h"
+#include "joints_inferrer.h"
 #include "xalloc.h"
 #include "jip.h"
 
@@ -43,7 +45,7 @@
 #define ARRAY_LEN(ARRAY) (sizeof(ARRAY)/sizeof(ARRAY[0]))
 
 
-typedef struct {
+struct joint_labels_entry {
     int n_labels;
 
     /* XXX: There's a runtime check that we don't have joints mapped to
@@ -53,50 +55,29 @@ typedef struct {
      * some of the inner loops below.
      */
     uint8_t labels[2];
-} JointMapEntry;
+};
 
-/* We don't want to be making lots of function calls or dereferencing
- * lots of pointers while accessing the joint map within inner loops
- * so this lets us temporarily unpack the label mappings into a
- * tight array of JointMapEntries.
- */
-static inline void
-unpack_joint_map(JSON_Value *joint_map, JointMapEntry *map, int n_joints)
+struct joints_inferrer
 {
-    for (int i = 0; i < n_joints; i++)
-    {
-        JSON_Object *entry = json_array_get_object(json_array(joint_map), i);
-        JSON_Array *labels = json_object_get_array(entry, "labels");
-        int n_labels = json_array_get_count(labels);
+    struct gm_logger* log;
 
-        if (n_labels > (int)ARRAY_LEN(map[0].labels))
-        {
-            fprintf(stderr, "Didn't expect joint to be mapped to > 2 labels\n");
-            exit(1);
-        }
+    int n_joints;
+    std::vector<joint_labels_entry> map;
+};
 
-        map[i].n_labels = n_labels;
-        for (int n = 0; n < n_labels; n++)
-        {
-            map[i].labels[n] = json_array_get_number(labels, n);
-        }
-    }
-}
 
 float*
-calc_pixel_weights(float* depth_image, float* pr_table,
-                   int width, int height, int n_labels,
-                   JSON_Value* joint_map, float* weights)
+joints_inferrer_calc_pixel_weights(struct joints_inferrer *inferrer,
+                                   float* depth_image,
+                                   float* pr_table,
+                                   int width, int height,
+                                   int n_labels,
+                                   float* weights)
 {
-    int n_joints = json_array_get_count(json_array(joint_map));
+    int n_joints = inferrer->n_joints;
+    std::vector<joint_labels_entry> &map = inferrer->map;
 
-    JointMapEntry map[n_joints];
-    unpack_joint_map(joint_map, map, n_joints);
-
-    if (!weights)
-    {
-        weights = (float*)xmalloc(width * height * n_joints * sizeof(float));
-    }
+    gm_assert(inferrer->log, weights != NULL, "NULL weights destination buffer");
 
     for (int y = 0, weight_idx = 0, pixel_idx = 0; y < height; y++)
     {
@@ -130,13 +111,16 @@ compare_joints(LList* a, LList* b, void* userdata)
 }
 
 InferredJoints*
-infer_joints_fast(float* depth_image, float* pr_table, float* weights,
-                  int width, int height, int n_labels,
-                  JSON_Value* joint_map, float vfov, JIParam* params)
+joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
+                           float* depth_image,
+                           float* pr_table,
+                           float* weights,
+                           int width, int height, int n_labels,
+                           float vfov,
+                           JIParam* params)
 {
-    int n_joints = json_array_get_count(json_array(joint_map));
-    JointMapEntry map[n_joints];
-    unpack_joint_map(joint_map, map, n_joints);
+    int n_joints = inferrer->n_joints;
+    std::vector<joint_labels_entry> &map = inferrer->map;
 
     // Plan: For each scan-line, scan along and record clusters on 1 dimension.
     //       For each scanline segment, check to see if it intersects with any
@@ -329,17 +313,19 @@ infer_joints_fast(float* depth_image, float* pr_table, float* weights,
 }
 
 InferredJoints*
-infer_joints(float* depth_image, float* pr_table, float* weights,
-             int width, int height,
-             float bg_depth,
-             int n_labels,
-             JSON_Value* joint_map,
-             float vfov, JIParam* params)
+joints_inferrer_infer(struct joints_inferrer* inferrer,
+                      float* depth_image,
+                      float* pr_table,
+                      float* weights,
+                      int width,
+                      int height,
+                      float bg_depth,
+                      int n_labels,
+                      float vfov,
+                      JIParam* params)
 {
-    int n_joints = json_array_get_count(json_array(joint_map));
-
-    JointMapEntry map[n_joints];
-    unpack_joint_map(joint_map, map, n_joints);
+    int n_joints = inferrer->n_joints;
+    std::vector<joint_labels_entry> &map = inferrer->map;
 
     // Use mean-shift to find the inferred joint positions, set them back into
     // the body using the given offset, and return the results
@@ -515,14 +501,53 @@ infer_joints(float* depth_image, float* pr_table, float* weights,
 }
 
 void
-free_joints(InferredJoints* joints)
+joints_inferrer_free_joints(struct joints_inferrer* inferrer,
+                            InferredJoints* joints)
 {
-    for (int i = 0; i < joints->n_joints; i++)
-    {
+    for (int i = 0; i < joints->n_joints; i++) {
         llist_free(joints->joints[i], llist_free_cb, NULL);
     }
     xfree(joints->joints);
     xfree(joints);
 }
 
+struct joints_inferrer*
+joints_inferrer_new(struct gm_logger* log,
+                    JSON_Value* joint_map,
+                    char** err)
+{
+    struct joints_inferrer* inferrer = new joints_inferrer();
 
+    inferrer->log = log;
+
+    int n_joints = json_array_get_count(json_array(joint_map));
+    inferrer->n_joints = n_joints;
+
+    std::vector<joint_labels_entry> &map = inferrer->map;
+    map.resize(n_joints);
+
+    for (int i = 0; i < n_joints; i++) {
+        JSON_Object* entry = json_array_get_object(json_array(joint_map), i);
+        JSON_Array* labels = json_object_get_array(entry, "labels");
+        int n_labels = json_array_get_count(labels);
+
+        if (n_labels > (int)ARRAY_LEN(map[0].labels)) {
+            gm_throw(log, err, "Didn't expect joint to be mapped to > 2 labels\n");
+            delete inferrer;
+            return NULL;
+        }
+
+        map[i].n_labels = n_labels;
+        for (int n = 0; n < n_labels; n++) {
+            map[i].labels[n] = json_array_get_number(labels, n);
+        }
+    }
+
+    return inferrer;
+}
+
+void
+joints_inferrer_destroy(struct joints_inferrer* inferrer)
+{
+    delete inferrer;
+}

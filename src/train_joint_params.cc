@@ -34,11 +34,12 @@
 
 #include <cmath>
 #include <atomic>
+#include <vector>
 
 #include "xalloc.h"
 #include "rdt_tree.h"
 #include "infer_labels.h"
-#include "infer_joints.h"
+#include "joints_inferrer.h"
 #include "parson.h"
 
 #include "glimpse_log.h"
@@ -70,6 +71,8 @@ typedef struct {
 
     int      n_joints;      // Number of joints
     JSON_Value* joint_map;  // Map between joints and labels
+    struct joints_inferrer* joints_inferrer;
+
     float*   joints;        // List of joint positions for each image
 
     int      n_bandwidths;  // Number of bandwidth values
@@ -192,6 +195,10 @@ thread_body(void* userdata)
     int i_end = std::min(ctx->n_images,
                          (data->thread == ctx->n_threads - 1) ?
                          ctx->n_images : i_start + images_per_thread);
+
+    std::vector<float> pr_table(ctx->width * ctx->height * n_labels);
+    std::vector<float> weights(ctx->width * ctx->height * n_labels);
+
     for (int i = i_start, idx = ctx->width * ctx->height * i_start;
          i < i_end; i++, idx += ctx->width * ctx->height)
     {
@@ -206,17 +213,21 @@ thread_body(void* userdata)
 
         float *depth_image = &ctx->depth_images[idx];
 
-        // Calculate label probabilities
-        float *pr_table = infer_labels(ctx->log,
-                                       ctx->forest, ctx->n_trees,
-                                       depth_image,
-                                       ctx->width, ctx->height);
+        infer_labels(ctx->log,
+                     ctx->forest,
+                     ctx->n_trees,
+                     depth_image,
+                     ctx->width, ctx->height,
+                     pr_table.data(),
+                     false, // don't use multi-threaded inference
+                     false); // don't combine horizontal flipped results
 
-        // Calculate pixel weights
-        float *weights = calc_pixel_weights(&ctx->depth_images[idx],
-                                            pr_table,
-                                            ctx->width, ctx->height,
-                                            n_labels, ctx->joint_map);
+        joints_inferrer_calc_pixel_weights(ctx->joints_inferrer,
+                                           &ctx->depth_images[idx],
+                                           pr_table.data(),
+                                           ctx->width, ctx->height,
+                                           n_labels,
+                                           weights.data());
 
         // For each combination this thread is processing, infer the joint
         // positions for this depth image.
@@ -239,21 +250,27 @@ thread_body(void* userdata)
 
             if (ctx->fast) {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    infer_joints_fast(depth_image, pr_table, weights,
-                                      ctx->width, ctx->height,
-                                      n_labels, ctx->joint_map,
-                                      ctx->forest[0]->header.fov, params);
+                    joints_inferrer_infer_fast(ctx->joints_inferrer,
+                                               depth_image,
+                                               pr_table.data(),
+                                               weights.data(),
+                                               ctx->width, ctx->height,
+                                               n_labels,
+                                               ctx->forest[0]->header.fov,
+                                               params);
             } else {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    infer_joints(depth_image, pr_table, weights,
-                                 ctx->width, ctx->height,
-                                 bg_depth, n_labels, ctx->joint_map,
-                                 ctx->forest[0]->header.fov, params);
+                    joints_inferrer_infer(ctx->joints_inferrer,
+                                          depth_image,
+                                          pr_table.data(),
+                                          weights.data(),
+                                          ctx->width, ctx->height,
+                                          bg_depth,
+                                          n_labels,
+                                          ctx->forest[0]->header.fov,
+                                          params);
             }
         }
-
-        free(weights);
-        free(pr_table);
 
         ctx->progress++;
     }
@@ -325,7 +342,7 @@ thread_body(void* userdata)
             }
 
             // Free joint positions
-            free_joints(result);
+            joints_inferrer_free_joints(ctx->joints_inferrer, result);
         }
 
         // See if this combination is better than the current best for any
@@ -606,6 +623,10 @@ main(int argc, char** argv)
     // have more joints defined than labels.
     gm_assert(ctx.log, ctx.n_joints < ctx.forest[0]->header.n_labels,
               "More joints defined than labels");
+
+    ctx.joints_inferrer = joints_inferrer_new(ctx.log,
+                                              ctx.joint_map,
+                                              NULL); // abort on error
 
     printf("Generating test parameters...\n");
     if (ctx.fast) {

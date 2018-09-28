@@ -168,7 +168,10 @@ infer_labels(struct gm_logger* log,
 {
     int n_labels = (int)forest[0]->header.n_labels;
     size_t output_size = width * height * n_labels * sizeof(float);
-    float* output_pr = out_labels ? out_labels : (float*)xmalloc(output_size);
+    float* output_pr = out_labels;
+
+    gm_assert(log, output_pr != NULL, "NULL output buffer for label probabilities");
+
     memset(output_pr, 0, output_size);
 
     void* (*infer_labels_callback)(void* userdata);

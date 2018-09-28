@@ -30,8 +30,10 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
-#include <cmath>
 #include <getopt.h>
+
+#include <cmath>
+#include <vector>
 
 #include <png.h>
 
@@ -198,9 +200,16 @@ main(int argc, char **argv)
         }
     }
 
-    float* output_pr = infer_labels(log,
-                                    forest, n_trees, depth_image,
-                                    width, height);
+    std::vector<float> output_pr(width * height * n_labels);
+
+    infer_labels(log,
+                 forest,
+                 n_trees,
+                 depth_image,
+                 width, height,
+                 output_pr.data(), // dest
+                 false, // single threaded
+                 false); // don't combine flipped results
 
     // Write out png of most likely labels
     png_bytep out_labels = (png_bytep)xcalloc(1, width * height);
@@ -233,7 +242,6 @@ main(int argc, char **argv)
         rdt_tree_destroy(forest[i]);
     }
     xfree(out_labels);
-    xfree(output_pr);
     xfree(depth_image);
 
     return 0;

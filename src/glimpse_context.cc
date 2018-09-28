@@ -78,7 +78,7 @@
 #include "xalloc.h"
 #include "wrapper_image.h"
 #include "infer_labels.h"
-#include "infer_joints.h"
+#include "joints_inferrer.h"
 #include "rdt_tree.h"
 #include "jip.h"
 #include "image_utils.h"
@@ -574,16 +574,16 @@ struct gm_context
     struct gm_mem_pool *prediction_pool;
 
     int n_labels;
-
     JSON_Value *label_map;
+
+    int n_joints;
     JSON_Value *joint_map;
+    JIParams *joint_params;
+    struct joint_info *joint_stats;
     std::vector<const char *> joint_blender_names; // (pointers into joint_map data)
     std::vector<const char *> joint_names;
     std::vector<enum gm_joint_semantic> joint_semantics;
-
-    JIParams *joint_params;
-    struct joint_info *joint_stats;
-    int n_joints;
+    struct joints_inferrer *joints_inferrer;
 
     bool apply_depth_distortion;
 
@@ -2025,6 +2025,7 @@ tracking_state_free(struct gm_mem_pool *pool,
                     void *user_data)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+    struct gm_context *ctx = tracking->ctx;
 
     free(tracking->depth);
 
@@ -2035,7 +2036,8 @@ tracking_state_free(struct gm_mem_pool *pool,
     }
 
     if (tracking->joints) {
-        free_joints(tracking->joints);
+        joints_inferrer_free_joints(ctx->joints_inferrer,
+                                    tracking->joints);
     }
 
     delete tracking;
@@ -2062,16 +2064,18 @@ static void
 tracking_state_recycle(struct gm_tracking *self)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
+    struct gm_context *ctx = tracking->ctx;
     struct gm_mem_pool *pool = tracking->pool;
 
-    gm_assert(tracking->ctx->log, atomic_load(&tracking->base.ref) == 0,
+    gm_assert(ctx->log, atomic_load(&tracking->base.ref) == 0,
               "Unbalanced tracking unref");
 
     gm_frame_unref(tracking->frame);
     tracking->frame = NULL;
 
     if (tracking->joints) {
-        free_joints(tracking->joints);
+        joints_inferrer_free_joints(ctx->joints_inferrer,
+                                    tracking->joints);
         tracking->joints = NULL;
     }
 
@@ -4760,12 +4764,12 @@ stage_joint_weights_cb(struct gm_tracking_impl *tracking,
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
 
-    calc_pixel_weights(state->depth_image,
-                       ctx->label_probs_backbuffer.data(),
-                       width, height,
-                       ctx->n_labels,
-                       ctx->joint_map,
-                       state->weights);
+    joints_inferrer_calc_pixel_weights(ctx->joints_inferrer,
+                                       state->depth_image,
+                                       ctx->label_probs_backbuffer.data(),
+                                       width, height,
+                                       ctx->n_labels,
+                                       state->weights);
 }
 
 static void
@@ -4796,25 +4800,25 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
 
     if (ctx->fast_clustering) {
         state->joints_candidate =
-                infer_joints_fast(state->depth_image,
-                                  ctx->label_probs_backbuffer.data(),
-                                  state->weights,
-                                  width, height,
-                                  ctx->n_labels,
-                                  ctx->joint_map,
-                                  pcl::rad2deg(ctx->decision_trees[0]->header.fov),
-                                  ctx->joint_params->joint_params);
+                joints_inferrer_infer_fast(ctx->joints_inferrer,
+                                           state->depth_image,
+                                           ctx->label_probs_backbuffer.data(),
+                                           state->weights,
+                                           width, height,
+                                           ctx->n_labels,
+                                           pcl::rad2deg(ctx->decision_trees[0]->header.fov),
+                                           ctx->joint_params->joint_params);
     } else {
         state->joints_candidate =
-                infer_joints(state->depth_image,
-                             ctx->label_probs_backbuffer.data(),
-                             state->weights,
-                             width, height,
-                             ctx->decision_trees[0]->header.bg_depth,
-                             ctx->n_labels,
-                             ctx->joint_map,
-                             pcl::rad2deg(ctx->decision_trees[0]->header.fov),
-                             ctx->joint_params->joint_params);
+                joints_inferrer_infer(ctx->joints_inferrer,
+                                      state->depth_image,
+                                      ctx->label_probs_backbuffer.data(),
+                                      state->weights,
+                                      width, height,
+                                      ctx->decision_trees[0]->header.bg_depth,
+                                      ctx->n_labels,
+                                      pcl::rad2deg(ctx->decision_trees[0]->header.fov),
+                                      ctx->joint_params->joint_params);
     }
 }
 
@@ -5409,7 +5413,8 @@ context_track_skeleton(struct gm_context *ctx,
         }
 
         if (state.joints_candidate) {
-            free_joints(state.joints_candidate);
+            joints_inferrer_free_joints(ctx->joints_inferrer,
+                                        state.joints_candidate);
             state.joints_candidate = NULL;
         }
     }
@@ -6504,15 +6509,9 @@ gm_context_destroy(struct gm_context *ctx)
         rdt_tree_destroy(ctx->decision_trees[i]);
     xfree(ctx->decision_trees);
 
-    if (ctx->joint_params)
-        jip_free(ctx->joint_params);
-
-    if (ctx->joint_map) {
-        json_value_free(ctx->joint_map);
-        ctx->joint_map = NULL;
-        ctx->joint_blender_names.resize(0);
-        ctx->joint_names.resize(0);
-        ctx->joint_semantics.resize(0);
+    if (ctx->joints_inferrer) {
+        joints_inferrer_destroy(ctx->joints_inferrer);
+        ctx->joints_inferrer = NULL;
     }
 
     if (ctx->joint_stats) {
@@ -6521,6 +6520,19 @@ gm_context_destroy(struct gm_context *ctx)
             xfree(ctx->joint_stats[i].dist);
         }
         xfree(ctx->joint_stats);
+    }
+
+    if (ctx->joint_params) {
+        jip_free(ctx->joint_params);
+        ctx->joint_params = NULL;
+    }
+
+    if (ctx->joint_map) {
+        json_value_free(ctx->joint_map);
+        ctx->joint_map = NULL;
+        ctx->joint_blender_names.resize(0);
+        ctx->joint_names.resize(0);
+        ctx->joint_semantics.resize(0);
     }
 
     if (ctx->label_map) {
@@ -6922,6 +6934,13 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         // We can continue without the joint stats asset, just results may be
         // poorer quality.
+    }
+
+    ctx->joints_inferrer = joints_inferrer_new(ctx->log,
+                                               ctx->joint_map, err);
+    if (!ctx->joints_inferrer) {
+        gm_context_destroy(ctx);
+        return NULL;
     }
 
     ctx->depth_color_stops_range = 5; // meters
