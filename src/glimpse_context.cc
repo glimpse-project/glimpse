@@ -254,19 +254,17 @@ struct seg_codeword
                      // into this codeword
 };
 
-// FIXME: We *really* need to change all of these to better human readable /
-// self-documenting names...
 // Depth pixel classification for segmentation
-enum seg_class
+enum codebook_class
 {
-    BG,       // Background
-    FL,       // Flat
-    FLK,      // Flickering
-    FL_FLK,   // Flickering and flat
-    TB,       // The bag (uninteresting foreground object)
-    FG,       // Foreground
-    CAN,      // Tracking candidate that didn't track
-    TRK,      // Tracking
+    CODEBOOK_CLASS_BACKGROUND,
+    CODEBOOK_CLASS_FLAT,
+    CODEBOOK_CLASS_FLICKERING,
+    CODEBOOK_CLASS_FLAT_AND_FLICKERING,
+    CODEBOOK_CLASS_FOREGROUND_OBJ_TO_IGNORE, // E.g. a bag / chair
+    CODEBOOK_CLASS_FOREGROUND,
+    CODEBOOK_CLASS_FAILED_CANDIDATE,
+    CODEBOOK_CLASS_TRACKED,
 };
 
 struct joint_dist
@@ -1802,10 +1800,10 @@ class LabelComparator: public pcl::Comparator<PointT>
 
     virtual bool
     compare (int idx1, int idx2) const {
-        if ((input_->points[idx1].label == FLK ||
-             input_->points[idx1].label == FG) &&
-            (input_->points[idx2].label == FLK ||
-             input_->points[idx2].label == FG)) {
+        if ((input_->points[idx1].label == CODEBOOK_CLASS_FLICKERING ||
+             input_->points[idx1].label == CODEBOOK_CLASS_FOREGROUND) &&
+            (input_->points[idx2].label == CODEBOOK_CLASS_FLICKERING ||
+             input_->points[idx2].label == CODEBOOK_CLASS_FOREGROUND)) {
             return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
                 depth_threshold_;
         }
@@ -2296,51 +2294,60 @@ tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
 }
 
 static void
-depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
+depth_classification_to_rgb(enum codebook_class label, uint8_t *rgb_out)
 {
     switch(label) {
-    case BG:
+    case CODEBOOK_CLASS_BACKGROUND:
+        // Red
+        rgb_out[0] = 0xff;
+        rgb_out[1] = 0x00;
+        rgb_out[2] = 0x00;
+        break;
+    case CODEBOOK_CLASS_FLAT:
+        // Dark Green
         rgb_out[0] = 0x00;
-        rgb_out[1] = 0x00;
+        rgb_out[1] = 0x80;
         rgb_out[2] = 0x00;
         break;
-    case FL:
-        rgb_out[0] = 0xC0;
-        rgb_out[1] = 0xC0;
-        rgb_out[2] = 0xC0;
+    case CODEBOOK_CLASS_FLICKERING:
+        // Cyan
+        rgb_out[0] = 0x00;
+        rgb_out[1] = 0xff;
+        rgb_out[2] = 0xff;
         break;
-    case FLK:
-        rgb_out[0] = 0xFF;
-        rgb_out[1] = 0x00;
-        rgb_out[2] = 0x00;
-        break;
-    case FL_FLK:
+    case CODEBOOK_CLASS_FLAT_AND_FLICKERING:
+        // Orange
         rgb_out[0] = 0xFF;
         rgb_out[1] = 0xA0;
         rgb_out[2] = 0x00;
         break;
-    case TB:
+    case CODEBOOK_CLASS_FOREGROUND_OBJ_TO_IGNORE:
+        // Blue
         rgb_out[0] = 0x00;
         rgb_out[1] = 0x00;
         rgb_out[2] = 0xFF;
         break;
-    case FG:
+    case CODEBOOK_CLASS_FOREGROUND:
+        // White
         rgb_out[0] = 0xFF;
         rgb_out[1] = 0xFF;
         rgb_out[2] = 0xFF;
         break;
-    case CAN:
+    case CODEBOOK_CLASS_FAILED_CANDIDATE:
+        // Yellow
         rgb_out[0] = 0xFF;
         rgb_out[1] = 0xFF;
         rgb_out[2] = 0x00;
         break;
-    case TRK:
+    case CODEBOOK_CLASS_TRACKED:
+        // Green
         rgb_out[0] = 0x00;
         rgb_out[1] = 0xFF;
         rgb_out[2] = 0x00;
         break;
     case -1:
         // Invalid/unhandled value
+        // Pink / Peach
         rgb_out[0] = 0xFF;
         rgb_out[1] = 0x80;
         rgb_out[2] = 0x80;
@@ -2348,6 +2355,7 @@ depth_classification_to_rgb(enum seg_class label, uint8_t *rgb_out)
 
     default:
         // unhandled value
+        // Magenta
         rgb_out[0] = 0xFF;
         rgb_out[1] = 0x00;
         rgb_out[2] = 0xFF;
@@ -2374,7 +2382,7 @@ tracking_create_rgb_depth_classification(struct gm_tracking *_tracking,
     }
 
     foreach_xy_off(*width, *height) {
-        depth_classification_to_rgb((enum seg_class)tracking->downsampled_cloud->points[off].label,
+        depth_classification_to_rgb((enum codebook_class)tracking->downsampled_cloud->points[off].label,
                                     (*output) + off * 3);
     }
 
@@ -3358,8 +3366,8 @@ colour_debug_cloud(struct gm_context *ctx,
     case DEBUG_CLOUD_MODE_CODEBOOK_LABELS:
         if (state->codebook_classified && indices.size()) {
             for (unsigned i = 0; i < indices.size(); i++) {
-                enum seg_class label =
-                    (enum seg_class)indexed_pcl_cloud->points[indices[i]].label;
+                enum codebook_class label =
+                    (enum codebook_class)indexed_pcl_cloud->points[indices[i]].label;
                 uint8_t rgb[3];
                 depth_classification_to_rgb(label, rgb);
                 debug_cloud[i].rgba = (((uint32_t)rgb[0])<<24 |
@@ -3989,7 +3997,7 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
         if (std::isnan(point.z)) {
             // We'll never cluster a nan value, so we can immediately
             // classify it as background.
-            downsampled_points[depth_off].label = BG;
+            downsampled_points[depth_off].label = CODEBOOK_CLASS_BACKGROUND;
             continue;
         }
 
@@ -4038,9 +4046,9 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             100000000.f;
 
         if (!codeword) {
-            downsampled_points[depth_off].label = FG;
+            downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND;
         } else if (codeword->n == bg_codeword->n) {
-            downsampled_points[depth_off].label = BG;
+            downsampled_points[depth_off].label = CODEBOOK_CLASS_BACKGROUND;
         } else {
             bool flat = false, flickering = false;
             float mean_diff = fabsf(codeword->m - bg_codeword->m);
@@ -4054,14 +4062,15 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             }
             if (flat || flickering) {
                 downsampled_points[depth_off].label =
-                    (flat && flickering) ? FL_FLK : (flat ?  FL : FLK);
+                    (flat && flickering) ? CODEBOOK_CLASS_FLAT_AND_FLICKERING :
+                    (flat ? CODEBOOK_CLASS_FLAT : CODEBOOK_CLASS_FLICKERING);
             } else {
                 if (codeword->n > alpha &&
                     ((codeword->tl - codeword->ts) / frame_time) /
                     (float)codeword->n >= psi) {
-                    downsampled_points[depth_off].label = TB;
+                    downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND_OBJ_TO_IGNORE;
                 } else {
-                    downsampled_points[depth_off].label = FG;
+                    downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND;
                 }
             }
         }
@@ -4857,7 +4866,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
         // close together. (Considering this it may even make sense for us
         // to merge codewords that get too close).
         //
-        if (point.label == TRK) {
+        if (point.label == CODEBOOK_CLASS_TRACKED) {
             for (int i = 0; i < (int)codewords.size(); ) {
                 struct seg_codeword &candidate = codewords[i];
 
@@ -5519,12 +5528,13 @@ context_track_skeleton(struct gm_context *ctx,
     //       consist of this entire cloud.
     // XXX: should we only do this if motion_detection enabled?
     pcl::PointIndices &best_person = state.persons[state.best_person];
-    int tracked_label = valid_skeleton ? TRK : CAN;
+    int tracked_label = valid_skeleton ? CODEBOOK_CLASS_TRACKED :
+        CODEBOOK_CLASS_FAILED_CANDIDATE;
     for (auto &idx : best_person.indices) {
         tracking->downsampled_cloud->points[idx].label = tracked_label;
     }
-#warning "XXX: Seems like a bug that we set a 'CAN' (candidate that failed to track) label but skip update_codebook in this case"
-#warning "XXX: Should we set the 'CAN' label on all the candidates we found?"
+#warning "XXX: Seems like a bug that we set a 'CODEBOOK_CLASS_FAILED_CANDIDATE' (candidate that failed to track) label but skip update_codebook in this case"
+#warning "XXX: Should we set the 'CODEBOOK_CLASS_FAILED_CANDIDATE' label on all the candidates we found?"
 
     if (!valid_skeleton) {
         pipeline_scratch_state_clear(&state);
