@@ -246,12 +246,16 @@ struct color_stop
 // Depth pixel codewords for segmentation
 struct seg_codeword
 {
-    float m;         // The mean value
-    int n;           // The number of depth values in this codeword
-    uint64_t ts;     // The frame timestamp this codeword was created on
-    uint64_t tl;     // The last frame timestamp this codeword was used
-    int nc;          // The number of times depth values consecutively fell
-                     // into this codeword
+    float mean;
+
+    // The number of values ->mean is based on; for maintaining
+    // a rolling average...
+    int n;
+
+    uint64_t create_timestamp;
+    uint64_t last_update_timestamp;
+
+    int consecutive_update_count;
 };
 
 // Depth pixel classification for segmentation
@@ -3963,7 +3967,7 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
         for (unsigned i = 0; i < codewords.size();) {
             struct seg_codeword &codeword = codewords[i];
 
-            if ((frame_timestamp - codeword.tl) >= seg_timeout_ns)
+            if ((frame_timestamp - codeword.last_update_timestamp) >= seg_timeout_ns)
             {
                 std::swap(codeword, codewords.back());
                 codewords.pop_back();
@@ -4001,10 +4005,11 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        int off = project_point_into_codebook(
-            &point, to_start, start_to_codebook,
-            &tracking->depth_camera_intrinsics, seg_res);
-
+        int off = project_point_into_codebook(&point,
+                                              to_start,
+                                              start_to_codebook,
+                                              &tracking->depth_camera_intrinsics,
+                                              seg_res);
         // Falls outside of codebook so we can't classify...
         if (off < 0)
             continue;
@@ -4021,7 +4026,7 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
         std::vector<struct seg_codeword> &codewords = seg_codebook[off];
         for (auto &candidate : codewords) {
             /* The codewords are sorted from closest to farthest */
-            float dist = fabsf(depth - candidate.m);
+            float dist = fabsf(depth - candidate.mean);
             if (dist < best_codeword_distance) {
                 codeword = &candidate;
                 best_codeword_distance = dist;
@@ -4051,13 +4056,14 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             downsampled_points[depth_off].label = CODEBOOK_CLASS_BACKGROUND;
         } else {
             bool flat = false, flickering = false;
-            float mean_diff = fabsf(codeword->m - bg_codeword->m);
+            float mean_diff = fabsf(codeword->mean - bg_codeword->mean);
             if ((tb < mean_diff) && (mean_diff <= tf)) {
                 flat = true;
             }
-            if ((b * codeword->nc) > codeword->n &&
-                (int)(((frame_timestamp - codeword->ts) / frame_time) / gamma) <=
-                codeword->nc) {
+            if ((b * codeword->consecutive_update_count) > codeword->n &&
+                (int)(((frame_timestamp - codeword->create_timestamp) / frame_time) / gamma) <=
+                codeword->consecutive_update_count)
+            {
                 flickering = true;
             }
             if (flat || flickering) {
@@ -4066,8 +4072,9 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
                     (flat ? CODEBOOK_CLASS_FLAT : CODEBOOK_CLASS_FLICKERING);
             } else {
                 if (codeword->n > alpha &&
-                    ((codeword->tl - codeword->ts) / frame_time) /
-                    (float)codeword->n >= psi) {
+                    ((codeword->last_update_timestamp - codeword->create_timestamp) / frame_time) /
+                    (float)codeword->n >= psi)
+                {
                     downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND_OBJ_TO_IGNORE;
                 } else {
                     downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND;
@@ -4870,7 +4877,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             for (int i = 0; i < (int)codewords.size(); ) {
                 struct seg_codeword &candidate = codewords[i];
 
-                float dist = fabsf(depth - candidate.m);
+                float dist = fabsf(depth - candidate.mean);
 
                 /* XXX: It would probably be reasonable to use a larger
                  * threshold for clearing codewords that clash with tracked
@@ -4897,7 +4904,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             struct seg_codeword &candidate = codewords[i];
 
             /* The codewords are sorted from closest to farthest */
-            float dist = fabsf(depth - candidate.m);
+            float dist = fabsf(depth - candidate.mean);
             if (dist < best_codeword_distance) {
                 codeword = &candidate;
                 best_codeword_distance = dist;
@@ -4912,24 +4919,20 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 
         uint64_t frame_time = tracking->frame->timestamp;
 
-        // Create a new codeword if one didn't fit
         if (!codeword) {
-            // FIXME: rename these members;, we currently have to spell out what
-            // each member is otherwise it's unreadable what any of this means...
             struct seg_codeword new_codeword = {};
-            new_codeword.m = depth; // mean depth
-            new_codeword.n = 1; // The number of depth values in this codeword
-            new_codeword.ts = frame_time; // The frame timestamp this codeword was created on
-            new_codeword.tl = frame_time; // The last frame timestamp this codeword was used
-            new_codeword.nc = 0; // The number of times depth values consecutively fell
-                                 // into this codeword
+            new_codeword.mean = depth;
+            new_codeword.n = 1;
+            new_codeword.create_timestamp = frame_time;
+            new_codeword.last_update_timestamp = frame_time;
+            new_codeword.consecutive_update_count = 0;
 
             // We insert sorted so that our matching logic can bail as soon
             // as it sees the distance increasing while looking for the
             // nearest match...
             bool inserted = false;
             for (int i = 0; i < codewords.size(); i++) {
-                if (codewords[i].m > depth) {
+                if (codewords[i].mean > depth) {
                     codewords.insert(codewords.begin() + i, new_codeword);
                     inserted = true;
                     break;
@@ -4945,14 +4948,14 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             // the dampening effect that large n values have on the influence
             // of newer depth values...
             float effective_n = (float)std::min(ctx->seg_N, codeword->n);
-            codeword->m = (((effective_n * codeword->m) + depth) /
-                           (effective_n + 1.f));
+            codeword->mean = (((effective_n * codeword->mean) + depth) /
+                              (effective_n + 1.f));
 
             codeword->n++;
 
             /* XXX: I don't understand why this isn't:
              *
-             * if (codeword->tl == ctx->last_codebook_update_time)
+             * if (codeword->last_update_timestamp == ctx->last_codebook_update_time)
              *     codeword->nc++;
              *
              * But notably, trying that seems to break things. Surely
@@ -4960,16 +4963,14 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
              * of a codeword if the codeword was NOT updated during
              * the last update?
              */
-#warning "XXX: check/understand the logic for updating codeword->nc"
-            // NB: ->nc is (afaiu) the count of consecutive frames...
+#warning "XXX: check/understand the logic for updating codeword->consecutive_update_count"
             if (!ctx->n_tracking ||
-                codeword->tl != ctx->last_codebook_update_time)
+                codeword->last_update_timestamp != ctx->last_codebook_update_time)
             {
-                codeword->nc++;
+                codeword->consecutive_update_count++;
             }
 
-            // NB: ->tl is the last frame timestamp this codeword was used...
-            codeword->tl = frame_time;
+            codeword->last_update_timestamp = frame_time;
         }
     }
 
