@@ -25,6 +25,7 @@
 
 #include <stdbool.h>
 #include <math.h>
+#include <string.h>
 #include <pthread.h>
 
 #include <vector>
