@@ -770,6 +770,8 @@ struct pipeline_scratch_state
 {
     bool paused;
 
+    int seg_res;
+
     bool done_edge_detect;
 
     /* The reason we copy the tracking history here at the start of tracking is
@@ -3507,7 +3509,7 @@ stage_downsample_cb(struct gm_tracking_impl *tracking,
     // version of the depth buffer. This is significantly cheaper than using a
     // voxel grid, which would produce better results but take a lot longer
     // doing so and give us less useful data structures.
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
     if (seg_res == 1) {
         tracking->downsampled_cloud = tracking->depth_cloud;
     } else {
@@ -3547,7 +3549,7 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
                           struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
@@ -3740,7 +3742,7 @@ stage_edge_detect_debug_cb(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
@@ -3865,7 +3867,7 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
                               struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     if (state->to_ground_valid) {
         add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
@@ -3922,7 +3924,7 @@ stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     glm::mat4 to_start = state->to_start;
     glm::mat4 start_to_codebook = state->start_to_codebook;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_of_codebook_space(
         ctx, tracking, tracking->downsampled_cloud, to_start,
@@ -3949,7 +3951,7 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     glm::mat4 to_start = state->to_start;
     glm::mat4 start_to_codebook = state->start_to_codebook;
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
     uint64_t frame_timestamp = tracking->frame->timestamp;
     uint64_t codeword_timeout_ns = ctx->codeword_timeout * 1e9;
 
@@ -4132,7 +4134,7 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
                                  struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
@@ -4312,7 +4314,7 @@ stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
                                   struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
@@ -4433,7 +4435,7 @@ stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
                              struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
@@ -4487,7 +4489,7 @@ stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
                                 struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -4574,7 +4576,7 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
                               struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     add_debug_cloud_person_masks_except(tracking, state,
                                         -1); // no exception
@@ -4594,7 +4596,7 @@ stage_project_clusters_cb(struct gm_tracking_impl *tracking,
                          struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     int width = tracking->training_camera_intrinsics.width;
     int height = tracking->training_camera_intrinsics.height;
@@ -4871,9 +4873,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    // XXX: should copy to state to shield from async seg_res changes via
-    // glimpse_viewer in the middle of tracking
-    int seg_res = ctx->seg_res;
+    int seg_res = state->seg_res;
 
     glm::mat4 to_start = state->to_start;
     glm::mat4 to_codebook = state->start_to_codebook;
@@ -5163,6 +5163,10 @@ context_track_skeleton(struct gm_context *ctx,
 
     state.paused = tracking->frame->paused;
     tracking->paused = state.paused;
+
+    // Insulate the full tracking pipeline from any async property changes
+    // to ctx->seg_res...
+    state.seg_res = ctx->seg_res;
 
     for (int i = 0; i < tracking->stage_data.size(); i++) {
         tracking->stage_data[i].frame_duration_ns = 0;
