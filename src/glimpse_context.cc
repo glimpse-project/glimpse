@@ -255,7 +255,7 @@ struct seg_codeword
     uint64_t create_timestamp;
     uint64_t last_update_timestamp;
 
-    int consecutive_update_count;
+    int n_consecutive_update_runs;
 };
 
 // Depth pixel classification for segmentation
@@ -608,16 +608,14 @@ struct gm_context
 
     bool motion_detection;
 
-    // FIXME: We *really* need to change all of these to better human readable /
-    // self-documenting names...
-    float seg_tb; // Segmentation bucket threshold
-    float seg_tf; // Segmentation flickering threshold
-    int seg_N; // Segmentation max existing mean weight
-    int seg_b; // Segmentation flickering frame consecutiveness threshold
-    int seg_gamma; // Segmentation max flickering frame occurrence
-    int seg_alpha; // Segmentation frame-time for uninteresting objects
-    float seg_psi; // Segmentation ratio for uninteresting object matches
-    float seg_timeout; // Unused segmentation codeword recycle timeout
+    float codebook_bg_threshold;
+    float codebook_flat_threshold;
+    int codeword_mean_n_max;
+    int codeword_flicker_max_run_len;
+    int codeword_flicker_max_quiet_frames;
+    int codeword_obj_min_n;
+    float codeword_obj_max_frame_to_n_ratio;
+    float codeword_timeout;
 
     int inf_res;
     bool use_threads;
@@ -3953,13 +3951,18 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     int seg_res = ctx->seg_res;
     uint64_t frame_timestamp = tracking->frame->timestamp;
-    uint64_t seg_timeout_ns = ctx->seg_timeout * 1e9;
+    uint64_t codeword_timeout_ns = ctx->codeword_timeout * 1e9;
 
     seg_codebook_bg.resize(downsampled_cloud_size);
 
     // Retire old codewords and then ranked by codeword.n (the number of times
-    // points have matched it consecutively) pick the codeword with the highest
-    // number of consecutive matches as our default background codeword.
+    // points have matched it) pick the codeword with the highest number of
+    // matches as our canonical background codeword.
+    //
+    // Note: if we find multiple codewords with the same ->n count then as a
+    // tie breaker we pick the codeword with the farthest mean depth as the
+    // canonical background.
+    //
     for (unsigned off = 0; off < seg_codebook.size(); off++) {
         std::vector<struct seg_codeword> &codewords = seg_codebook[off];
         seg_codebook_bg[off] = NULL;
@@ -3967,13 +3970,19 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
         for (unsigned i = 0; i < codewords.size();) {
             struct seg_codeword &codeword = codewords[i];
 
-            if ((frame_timestamp - codeword.last_update_timestamp) >= seg_timeout_ns)
+            if ((frame_timestamp - codeword.last_update_timestamp) >= codeword_timeout_ns)
             {
+                /* XXX: beware about invalidating codeword pointers if we
+                 * start erasing from the middle and shuffling data around!
+                 */
+#warning "FIXME: maintain codeword ordering when retiring codewords that time out"
                 std::swap(codeword, codewords.back());
                 codewords.pop_back();
             } else {
                 if (!ctx->seg_codebook_bg[off] ||
-                    codeword.n > seg_codebook_bg[off]->n)
+                    codeword.n > seg_codebook_bg[off]->n ||
+                    (codeword.n == seg_codebook_bg[off]->n &&
+                     codeword.mean > seg_codebook_bg[off]->mean))
                 {
                     seg_codebook_bg[off] = &codeword;
                 }
@@ -3985,16 +3994,22 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     pcl::PointCloud<pcl::PointXYZL>::VectorType &downsampled_points =
         tracking->downsampled_cloud->points;
 
-    // FIXME: choose better human readable / self-documenting names
-    const float tb = ctx->seg_tb; // Segmentation bucket threshold
-    const float tf = ctx->seg_tf; // Segmentation flickering threshold
-    const int b = ctx->seg_b; // Segmentation flickering frame consecutiveness threshold
-    const int gamma = (float)ctx->seg_gamma;
-    const int alpha = ctx->seg_alpha;
-    const float psi = ctx->seg_psi;
+    const float codebook_bg_threshold = ctx->codebook_bg_threshold;
+    const float codebook_flat_threshold = ctx->codebook_flat_threshold;
+    const int codeword_flicker_max_run_len = ctx->codeword_flicker_max_run_len;
+    const int codeword_flicker_max_quiet_frames = (float)ctx->codeword_flicker_max_quiet_frames;
+    const int codeword_obj_min_n = ctx->codeword_obj_min_n;
+    const float codeword_obj_max_frame_to_n_ratio = ctx->codeword_obj_max_frame_to_n_ratio;
 
-    // Do classification of depth buffer
-    for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off)
+    // XXX: It's very fragile that we are using the most recent frame duration
+    // (or a guess/constant) to extrapolate frame counts from time durations
+    // below.
+    // FIXME: We should look at avoiding this...
+    const float example_frame_time = ctx->n_tracking ?
+        (float)(frame_timestamp - ctx->tracking_history[0]->frame->timestamp) :
+        100000000.f;
+
+    for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; depth_off++)
     {
         pcl::PointXYZL point = downsampled_points[depth_off];
 
@@ -4036,50 +4051,76 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             }
         }
 
-        // NB: tb = Segmentation bucket threshold
-        if (best_codeword_distance > tb) {
+        if (best_codeword_distance > codebook_bg_threshold)
             codeword = NULL;
-        }
 
         gm_assert(ctx->log,
                   bg_codeword || (!bg_codeword && !codeword),
                   "If no default background codeword, we shouldn't match any codeword based on mean distance");
 
-        // Classify this depth value
-        const float frame_time = ctx->n_tracking ?
-            (float)(frame_timestamp - ctx->tracking_history[0]->frame->timestamp) :
-            100000000.f;
-
         if (!codeword) {
             downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND;
-        } else if (codeword->n == bg_codeword->n) {
+            continue;
+        }
+
+        if (codeword == bg_codeword) {
             downsampled_points[depth_off].label = CODEBOOK_CLASS_BACKGROUND;
+            continue;
+        }
+
+        float dist_from_background = fabsf(codeword->mean - bg_codeword->mean);
+
+        if (dist_from_background < codebook_bg_threshold) {
+            downsampled_points[depth_off].label = CODEBOOK_CLASS_BACKGROUND;
+            continue;
+        }
+
+        bool flat = false;
+        bool flickering = false;
+
+        /* Note: from the _BACKGROUND check above we already know that
+         * dist_from_background is > codebook_bg_threshold
+         */
+        if (dist_from_background <= codebook_flat_threshold) {
+            flat = true;
+        }
+
+        // 'Flickering' is defined based on two conditions:
+        //
+        //  1) the codeword doesn't (on average) see runs of more than
+        //     ->codeword_flicker_max_run_len consecutive updates
+        //  2) (on average) consecutive runs are occurring at a frequency
+        //     higher than ->codeword_min_flicker_freq_hz
+        //
+        bool requirement_one = (codeword_flicker_max_run_len *
+                                codeword->n_consecutive_update_runs) > codeword->n;
+
+        // XXX: deriving a frame count from (codeword_lifetime / example_frame_duration)
+        // seems extremely fragile...
+        int n_frames_since_create =
+            ((frame_timestamp - codeword->create_timestamp) / example_frame_time);
+        bool requirement_two =
+            ((int)(n_frames_since_create / codeword_flicker_max_quiet_frames) <=
+             codeword->n_consecutive_update_runs);
+        if (requirement_one && requirement_two)
+            flickering = true;
+
+        if (flat || flickering) {
+            downsampled_points[depth_off].label =
+                (flat && flickering) ? CODEBOOK_CLASS_FLAT_AND_FLICKERING :
+                (flat ? CODEBOOK_CLASS_FLAT : CODEBOOK_CLASS_FLICKERING);
+            continue;
+        }
+
+        // XXX: deriving a frame count like this seems extremely fragile...
+        int n_update_frames = ((codeword->last_update_timestamp -
+                                codeword->create_timestamp) / example_frame_time);
+        if (codeword->n > codeword_obj_min_n &&
+            n_update_frames / (float)codeword->n >= codeword_obj_max_frame_to_n_ratio)
+        {
+            downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND_OBJ_TO_IGNORE;
         } else {
-            bool flat = false, flickering = false;
-            float mean_diff = fabsf(codeword->mean - bg_codeword->mean);
-            if ((tb < mean_diff) && (mean_diff <= tf)) {
-                flat = true;
-            }
-            if ((b * codeword->consecutive_update_count) > codeword->n &&
-                (int)(((frame_timestamp - codeword->create_timestamp) / frame_time) / gamma) <=
-                codeword->consecutive_update_count)
-            {
-                flickering = true;
-            }
-            if (flat || flickering) {
-                downsampled_points[depth_off].label =
-                    (flat && flickering) ? CODEBOOK_CLASS_FLAT_AND_FLICKERING :
-                    (flat ? CODEBOOK_CLASS_FLAT : CODEBOOK_CLASS_FLICKERING);
-            } else {
-                if (codeword->n > alpha &&
-                    ((codeword->last_update_timestamp - codeword->create_timestamp) / frame_time) /
-                    (float)codeword->n >= psi)
-                {
-                    downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND_OBJ_TO_IGNORE;
-                } else {
-                    downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND;
-                }
-            }
+            downsampled_points[depth_off].label = CODEBOOK_CLASS_FOREGROUND;
         }
     }
 
@@ -4887,7 +4928,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
                  * Note: we don't typically expect many codewords so don't
                  * expect array removal to really be a significant cost
                  */
-                if (dist < ctx->seg_tb) {
+                if (dist < ctx->codebook_bg_threshold) {
                     codewords.erase(codewords.begin() + i);
                 } else
                     i++;
@@ -4913,8 +4954,8 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
                 break;
             }
         }
-        // NB: ->seg_tb = Segmentation bucket threshold
-        if (best_codeword_distance > ctx->seg_tb)
+        // NB: ->codebook_bg_threshold = Segmentation bucket threshold
+        if (best_codeword_distance > ctx->codebook_bg_threshold)
             codeword = NULL;
 
         uint64_t frame_time = tracking->frame->timestamp;
@@ -4925,7 +4966,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             new_codeword.n = 1;
             new_codeword.create_timestamp = frame_time;
             new_codeword.last_update_timestamp = frame_time;
-            new_codeword.consecutive_update_count = 0;
+            new_codeword.n_consecutive_update_runs = 0;
 
             // We insert sorted so that our matching logic can bail as soon
             // as it sees the distance increasing while looking for the
@@ -4941,34 +4982,29 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             if (!inserted)
                 codewords.push_back(new_codeword);
         } else {
-            // NB: seg_N = Segmentation max existing mean weight
+            // NB: codeword_mean_n_max = Segmentation max existing mean weight
             // ->n is the number of depth values that the mean is based on
             //
             // We clamp the 'n' value used to update the mean so that we limit
             // the dampening effect that large n values have on the influence
             // of newer depth values...
-            float effective_n = (float)std::min(ctx->seg_N, codeword->n);
+            float effective_n = (float)std::min(ctx->codeword_mean_n_max, codeword->n);
             codeword->mean = (((effective_n * codeword->mean) + depth) /
                               (effective_n + 1.f));
-
             codeword->n++;
 
-            /* XXX: I don't understand why this isn't:
+            /* Here we are counting the breaks in (or start of) consecutive
+             * updates to a codeword.
              *
-             * if (codeword->last_update_timestamp == ctx->last_codebook_update_time)
-             *     codeword->nc++;
+             * E.g. over 10 frames if a point matches the same codeword
+             * on frames 1,2 - 4,5,6 - and 8 then there are three consecutive
+             * update runs...
              *
-             * But notably, trying that seems to break things. Surely
-             * this is incrementing for each NON-consecutive update
-             * of a codeword if the codeword was NOT updated during
-             * the last update?
+             * 'consecutive' is bit of a misnomer since we count 'runs' of one
+             * update.
              */
-#warning "XXX: check/understand the logic for updating codeword->consecutive_update_count"
-            if (!ctx->n_tracking ||
-                codeword->last_update_timestamp != ctx->last_codebook_update_time)
-            {
-                codeword->consecutive_update_count++;
-            }
+            if (codeword->last_update_timestamp != ctx->last_codebook_update_time)
+                codeword->n_consecutive_update_runs++;
 
             codeword->last_update_timestamp = frame_time;
         }
@@ -7552,90 +7588,90 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    tracking_create_rgb_depth_classification,
                                });
 
-        ctx->seg_tb = 0.05f;
+        ctx->codebook_bg_threshold = 0.05f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_tb";
-        prop.desc = "Segmentation bucket threshold";
+        prop.name = "codebook_bg_threshold";
+        prop.desc = "Threshold distance from back-most depth values to be classed as 'background'";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->seg_tb;
+        prop.float_state.ptr = &ctx->codebook_bg_threshold;
         prop.float_state.min = 0.001f;
-        prop.float_state.max = 0.1f;
+        prop.float_state.max = 0.3f;
         stage.properties.push_back(prop);
 
-        ctx->seg_tf = 0.2f;
+        ctx->codebook_flat_threshold = 0.2f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_tf";
-        prop.desc = "Segmentation flickering threshold";
+        prop.name = "codebook_flat_threshold";
+        prop.desc = "Threshold distance from back-most depth values to classes as 'flat' if not 'background'";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->seg_tf;
+        prop.float_state.ptr = &ctx->codebook_flat_threshold;
         prop.float_state.min = 0.05f;
         prop.float_state.max = 0.5f;
         stage.properties.push_back(prop);
 
-        ctx->seg_N = 100;
+        ctx->codeword_mean_n_max = 100;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_N";
-        prop.desc = "Segmentation max existing mean weight";
+        prop.name = "codeword_mean_n_max";
+        prop.desc = "When updating rolling average depth of codeword, n is clamped to max so new values don't loose all influence";
         prop.type = GM_PROPERTY_INT;
-        prop.int_state.ptr = &ctx->seg_N;
+        prop.int_state.ptr = &ctx->codeword_mean_n_max;
         prop.int_state.min = 10;
         prop.int_state.max = 500;
         stage.properties.push_back(prop);
 
-        ctx->seg_b = 3;
+        ctx->codeword_flicker_max_run_len = 3;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_b";
-        prop.desc = "Segmentation flickering frame consecutiveness threshold";
+        prop.name = "codeword_flicker_max_run_len";
+        prop.desc = "The maximum number of consecutive updates a codeword can see (averaged out) to still be considered as 'flickering'";
         prop.type = GM_PROPERTY_INT;
-        prop.int_state.ptr = &ctx->seg_b;
+        prop.int_state.ptr = &ctx->codeword_flicker_max_run_len;
         prop.int_state.min = 1;
         prop.int_state.max = 10;
         stage.properties.push_back(prop);
 
-        ctx->seg_gamma = 100;
+        ctx->codeword_flicker_max_quiet_frames = 100;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_gamma";
-        prop.desc = "Segmentation max flickering frame occurence";
+        prop.name = "codeword_flicker_max_quiet_frames";
+        prop.desc = "The maximum number of frames that can elapse before a (short) update sequence is seen for a codeword to possibly be considered 'flickering'";
         prop.type = GM_PROPERTY_INT;
-        prop.int_state.ptr = &ctx->seg_gamma;
+        prop.int_state.ptr = &ctx->codeword_flicker_max_quiet_frames;
         prop.int_state.min = 10;
         prop.int_state.max = 500;
         stage.properties.push_back(prop);
 
-        ctx->seg_alpha = 200;
+        ctx->codeword_obj_min_n = 200;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_alpha";
-        prop.desc = "Segmentation frame-time for uninteresting objects";
+        prop.name = "codeword_obj_min_n";
+        prop.desc = "The minimum number of matches/updates before a codeword might be classed as an (ignored) foreground object";
         prop.type = GM_PROPERTY_INT;
-        prop.int_state.ptr = &ctx->seg_alpha;
+        prop.int_state.ptr = &ctx->codeword_obj_min_n;
         prop.int_state.min = 10;
         prop.int_state.max = 500;
         stage.properties.push_back(prop);
 
-        ctx->seg_psi = 0.8f;
+        ctx->codeword_obj_max_frame_to_n_ratio = 0.8f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_psi";
-        prop.desc = "Segmentation ratio for uninteresting object matches";
+        prop.name = "codeword_obj_max_frame_to_n_ratio";
+        prop.desc = "The maximum ratio of frames per n codeword updates for a codeword to possibly be classed as an (ignored) foreground object";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->seg_psi;
+        prop.float_state.ptr = &ctx->codeword_obj_max_frame_to_n_ratio;
         prop.float_state.min = 0.f;
         prop.float_state.max = 1.f;
         stage.properties.push_back(prop);
 
-        ctx->seg_timeout = 3.0f;
+        ctx->codeword_timeout = 3.0f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "seg_timeout";
-        prop.desc = "Unused segmentation codeword recycle timeout";
+        prop.name = "codeword_timeout";
+        prop.desc = "Codewords that don't match any points after this timeout will be removed";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->seg_timeout;
+        prop.float_state.ptr = &ctx->codeword_timeout;
         prop.float_state.min = 0.2f;
         prop.float_state.max = 10.f;
         stage.properties.push_back(prop);
