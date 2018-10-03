@@ -182,6 +182,11 @@ enum debug_cloud_mode {
     N_DEBUG_CLOUD_MODES
 };
 
+enum {
+    CODEBOOK_DEBUG_VIEW_POINT_CLOUD,
+    CODEBOOK_DEBUG_VIEW_CODEBOOK,
+};
+
 enum tracking_stage {
     TRACKING_STAGE_START,
     TRACKING_STAGE_GAP_FILLED,
@@ -192,6 +197,7 @@ enum tracking_stage {
     TRACKING_STAGE_NAIVE_FLOOR,
     TRACKING_STAGE_NAIVE_CLUSTER,
 
+    TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND,
     TRACKING_STAGE_CODEBOOK_SPACE,
     TRACKING_STAGE_CODEBOOK_CLASSIFY,
     TRACKING_STAGE_CODEBOOK_CLUSTER,
@@ -572,6 +578,8 @@ struct gm_context
     int debug_pipeline_stage;
     int debug_cloud_mode;
 
+    int codebook_debug_view;
+
     pthread_mutex_t skel_track_cond_mutex;
     pthread_cond_t skel_track_cond;
 
@@ -649,6 +657,7 @@ struct gm_context
 
     std::vector<struct gm_ui_enumerant> cloud_stage_enumerants;
     std::vector<struct gm_ui_enumerant> cloud_mode_enumerants;
+    std::vector<struct gm_ui_enumerant> codebook_debug_view_enumerants;
     std::vector<struct gm_ui_enumerant> label_enumerants;
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
@@ -3205,6 +3214,7 @@ add_debug_cloud_xyz_from_dense_depth_buf(struct gm_context *ctx,
 
     foreach_xy_off(width, height) {
         struct gm_point_rgba point;
+        point.rgba = 0xffffffff;
 
         point.z = depth[off];
 
@@ -3219,6 +3229,46 @@ add_debug_cloud_xyz_from_dense_depth_buf(struct gm_context *ctx,
         point.y = -((y - cy) * point.z * inv_fy);
 
         debug_cloud.push_back(point);
+    }
+}
+
+static void
+add_debug_cloud_xyz_from_codebook(struct gm_context *ctx,
+                                  struct gm_tracking_impl *tracking,
+                                  std::vector<std::vector<struct seg_codeword>> &seg_codebook,
+                                  struct gm_intrinsics *intrinsics)
+{
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+    int width = intrinsics->width;
+    int height = intrinsics->height;
+
+    const float fx = intrinsics->fx;
+    const float fy = intrinsics->fy;
+    const float inv_fx = 1.0f / fx;
+    const float inv_fy = 1.0f / fy;
+    const float cx = intrinsics->cx;
+    const float cy = intrinsics->cy;
+
+    foreach_xy_off(width, height) {
+        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
+        struct gm_point_rgba point;
+
+        point.rgba = 0xffffffff;
+
+        for (unsigned i = 0; i < codewords.size(); i++) {
+            struct seg_codeword &codeword = codewords[i];
+
+            point.z = codeword.mean;
+
+            point.x = (x - cx) * point.z * inv_fx;
+
+            /* NB: 2D depth coords have y=0 at the top, and we want +Y to
+             * extend upwards...
+             */
+            point.y = -((y - cy) * point.z * inv_fy);
+
+            debug_cloud.push_back(point);
+        }
     }
 }
 
@@ -3918,6 +3968,87 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
 }
 
 static void
+stage_codebook_resolve_background_cb(struct gm_tracking_impl *tracking,
+                                     struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+        *state->seg_codebook;
+    std::vector<struct seg_codeword *> &seg_codebook_bg = ctx->seg_codebook_bg;
+    uint64_t frame_timestamp = tracking->frame->timestamp;
+    uint64_t codeword_timeout_ns = ctx->codeword_timeout * 1e9;
+    unsigned codebook_size = tracking->downsampled_cloud->points.size();
+
+    seg_codebook_bg.resize(codebook_size);
+
+    // Retire old codewords and then ranked by codeword.n (the number of times
+    // points have matched it) pick the codeword with the highest number of
+    // matches as our canonical background codeword.
+    //
+    // Note: if we find multiple codewords with the same ->n count then as a
+    // tie breaker we pick the codeword with the farthest mean depth as the
+    // canonical background.
+    //
+    for (unsigned off = 0; off < codebook_size; off++) {
+        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
+
+        for (unsigned i = 0; i < codewords.size();) {
+            struct seg_codeword &codeword = codewords[i];
+
+            if ((frame_timestamp - codeword.last_update_timestamp) >= codeword_timeout_ns)
+                codewords.erase(codewords.begin() + i);
+            else
+                i++;
+        }
+
+        // Note: we use a separate loop for finding the background codeword
+        // because we don't want removals to invalidate our background
+        // codeword pointers
+        //
+        seg_codebook_bg[off] = NULL;
+        for (unsigned i = 0; i < codewords.size(); i++) {
+            struct seg_codeword &codeword = codewords[i];
+
+            if (!ctx->seg_codebook_bg[off] ||
+                codeword.n > seg_codebook_bg[off]->n ||
+                (codeword.n == seg_codebook_bg[off]->n &&
+                 codeword.mean > seg_codebook_bg[off]->mean))
+            {
+                seg_codebook_bg[off] = &codeword;
+            }
+        }
+    }
+}
+
+static void
+stage_codebook_resolve_background_debug_cb(struct gm_tracking_impl *tracking,
+                                           struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int seg_res = state->seg_res;
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
+
+    if (ctx->codebook_debug_view == CODEBOOK_DEBUG_VIEW_POINT_CLOUD) {
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
+
+        colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+    } else {
+        add_debug_cloud_xyz_from_codebook(ctx,
+                                          tracking,
+                                          *state->seg_codebook,
+                                          &tracking->debug_cloud_intrinsics);
+        colour_debug_cloud(ctx, state, tracking, NULL);
+    }
+}
+
+static void
 stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
                                 struct pipeline_scratch_state *state)
 {
@@ -3953,45 +4084,6 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     int seg_res = state->seg_res;
     uint64_t frame_timestamp = tracking->frame->timestamp;
-    uint64_t codeword_timeout_ns = ctx->codeword_timeout * 1e9;
-
-    seg_codebook_bg.resize(downsampled_cloud_size);
-
-    // Retire old codewords and then ranked by codeword.n (the number of times
-    // points have matched it) pick the codeword with the highest number of
-    // matches as our canonical background codeword.
-    //
-    // Note: if we find multiple codewords with the same ->n count then as a
-    // tie breaker we pick the codeword with the farthest mean depth as the
-    // canonical background.
-    //
-    for (unsigned off = 0; off < seg_codebook.size(); off++) {
-        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
-        seg_codebook_bg[off] = NULL;
-
-        for (unsigned i = 0; i < codewords.size();) {
-            struct seg_codeword &codeword = codewords[i];
-
-            if ((frame_timestamp - codeword.last_update_timestamp) >= codeword_timeout_ns)
-            {
-                /* XXX: beware about invalidating codeword pointers if we
-                 * start erasing from the middle and shuffling data around!
-                 */
-#warning "FIXME: maintain codeword ordering when retiring codewords that time out"
-                std::swap(codeword, codewords.back());
-                codewords.pop_back();
-            } else {
-                if (!ctx->seg_codebook_bg[off] ||
-                    codeword.n > seg_codebook_bg[off]->n ||
-                    (codeword.n == seg_codebook_bg[off]->n &&
-                     codeword.mean > seg_codebook_bg[off]->mean))
-                {
-                    seg_codebook_bg[off] = &codeword;
-                }
-                i++;
-            }
-        }
-    }
 
     pcl::PointCloud<pcl::PointXYZL>::VectorType &downsampled_points =
         tracking->downsampled_cloud->points;
@@ -4147,6 +4239,43 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.fy /= seg_res;
 
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+}
+
+static void
+stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
+                          struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
+
+    LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
+        new LabelComparator<pcl::PointXYZL>);
+    label_cluster->setInputCloud(tracking->downsampled_cloud);
+    label_cluster->setDepthThreshold(ctx->cluster_tolerance);
+
+    tracking->cluster_labels =
+        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
+    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
+        depth_connector(label_cluster);
+    depth_connector.setInputCloud(tracking->downsampled_cloud);
+    depth_connector.segment(*tracking->cluster_labels, cluster_indices);
+}
+
+static void
+stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
+                                struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int seg_res = state->seg_res;
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -4453,43 +4582,6 @@ stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
     center[1] += ctx->floor_threshold;
     tracking_draw_transformed_grid(tracking, center, full_size, cell_size,
                                    0x808080ff, ground_to_downsampled);
-
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
-}
-
-static void
-stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
-                          struct pipeline_scratch_state *state)
-{
-    struct gm_context *ctx = tracking->ctx;
-
-    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
-
-    LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
-        new LabelComparator<pcl::PointXYZL>);
-    label_cluster->setInputCloud(tracking->downsampled_cloud);
-    label_cluster->setDepthThreshold(ctx->cluster_tolerance);
-
-    tracking->cluster_labels =
-        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
-    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
-        depth_connector(label_cluster);
-    depth_connector.setInputCloud(tracking->downsampled_cloud);
-    depth_connector.segment(*tracking->cluster_labels, cluster_indices);
-}
-
-static void
-stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
-                                struct pipeline_scratch_state *state)
-{
-    struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
     tracking->debug_cloud_intrinsics.width /= seg_res;
@@ -5376,6 +5468,12 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     if (motion_detection) {
+        run_stage(tracking,
+                  TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND,
+                  stage_codebook_resolve_background_cb,
+                  stage_codebook_resolve_background_debug_cb,
+                  &state);
+
         // This is only a logical debug stage, since the projection
         // is actually combined with the classification
         run_stage(tracking,
@@ -7457,19 +7555,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     {
-        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_SPACE;
-        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
-
-        stage.stage_id = stage_id;
-        stage.name = "codebook_align";
-        stage.desc = "Project into stable 'codebook' space for motion analysis";
-
-        stage.properties_state.n_properties = stage.properties.size();
-        stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
-    }
-
-    {
         enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_FLOOR;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
@@ -7578,6 +7663,56 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.min = 0.5f;
         prop.float_state.max = 3.0f;
         stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "codebook_resolve_bg";
+        stage.desc = "Determine canonical background codewords plus prune old codewords";
+
+        ctx->codebook_debug_view = CODEBOOK_DEBUG_VIEW_POINT_CLOUD;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_debug_view";
+        prop.desc = "Whether to visualize the codebook or the point cloud being processed";
+        prop.type = GM_PROPERTY_ENUM;
+        prop.enum_state.ptr = &ctx->codebook_debug_view;
+
+        enumerant = gm_ui_enumerant();
+        enumerant.name = "point_cloud";
+        enumerant.desc = "Visualize the point cloud being processed";
+        enumerant.val = CODEBOOK_DEBUG_VIEW_POINT_CLOUD;
+        ctx->codebook_debug_view_enumerants.push_back(enumerant);
+
+        enumerant = gm_ui_enumerant();
+        enumerant.name = "codebook";
+        enumerant.desc = "Visualize the codebook";
+        enumerant.val = CODEBOOK_DEBUG_VIEW_CODEBOOK;
+        ctx->codebook_debug_view_enumerants.push_back(enumerant);
+
+        prop.enum_state.n_enumerants = ctx->codebook_debug_view_enumerants.size();
+        prop.enum_state.enumerants = ctx->codebook_debug_view_enumerants.data();
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_SPACE;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "codebook_align";
+        stage.desc = "Project into stable 'codebook' space for motion analysis";
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -8013,6 +8148,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "update_codebook";
         stage.desc = "Update the codebook state ready for processing motion of future frames";
+
+        // XXX: this an alias of a property set up earlier...
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_debug_view";
+        prop.desc = "Whether to visualize the codebook or the point cloud being processed";
+        prop.type = GM_PROPERTY_ENUM;
+        prop.enum_state.ptr = &ctx->codebook_debug_view;
+
+        prop.enum_state.n_enumerants = ctx->codebook_debug_view_enumerants.size();
+        prop.enum_state.enumerants = ctx->codebook_debug_view_enumerants.data();
+        stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
