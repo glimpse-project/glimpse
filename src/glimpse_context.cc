@@ -5435,7 +5435,7 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     if (state.persons.size() == 0) {
-        if (ctx->motion_detection) {
+        if (motion_detection) {
             run_stage(tracking,
                       TRACKING_STAGE_UPDATE_CODEBOOK,
                       stage_update_codebook_cb,
@@ -5574,10 +5574,16 @@ context_track_skeleton(struct gm_context *ctx,
     for (auto &idx : best_person.indices) {
         tracking->downsampled_cloud->points[idx].label = tracked_label;
     }
-#warning "XXX: Seems like a bug that we set a 'CODEBOOK_CLASS_FAILED_CANDIDATE' (candidate that failed to track) label but skip update_codebook in this case"
-#warning "XXX: Should we set the 'CODEBOOK_CLASS_FAILED_CANDIDATE' label on all the candidates we found?"
+#warning "XXX: Should we set the 'CODEBOOK_CLASS_FAILED_CANDIDATE' label on all the candidates we found - not just the 'best' failure?"
 
     if (!valid_skeleton) {
+        if (motion_detection) {
+            run_stage(tracking,
+                      TRACKING_STAGE_UPDATE_CODEBOOK,
+                      stage_update_codebook_cb,
+                      NULL,
+                      &state);
+        }
         pipeline_scratch_state_clear(&state);
         gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
         return false;
