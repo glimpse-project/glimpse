@@ -615,6 +615,7 @@ struct gm_context
     float cluster_max_depth;
 
     bool motion_detection;
+    bool naive_seg_fallback;
 
     float codebook_bg_threshold;
     float codebook_flat_threshold;
@@ -5257,8 +5258,9 @@ context_track_skeleton(struct gm_context *ctx,
     tracking->paused = state.paused;
 
     // Insulate the full tracking pipeline from any async property changes
-    // to ctx->seg_res...
     state.seg_res = ctx->seg_res;
+    bool motion_detection = ctx->motion_detection;
+    bool naive_seg_fallback = ctx->naive_seg_fallback;
 
     for (int i = 0; i < tracking->stage_data.size(); i++) {
         tracking->stage_data[i].frame_duration_ns = 0;
@@ -5317,6 +5319,7 @@ context_track_skeleton(struct gm_context *ctx,
               stage_downsample_cb,
               stage_downsample_debug_cb,
               &state);
+    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
 
     /* Note: we also run this stage when ctx->delete_edges == false
      * if selected for debugging, just so we can visualize what
@@ -5332,9 +5335,6 @@ context_track_skeleton(struct gm_context *ctx,
                   stage_edge_detect_debug_cb,
                   &state);
     }
-
-    unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
-    bool motion_detection = ctx->motion_detection;
 
     bool reset_codebook = false;
     if (ctx->seg_codebook.size() != downsampled_cloud_size ||
@@ -5429,38 +5429,6 @@ context_track_skeleton(struct gm_context *ctx,
         break;
     }
 
-    if (reset_codebook) {
-        if (state.paused)
-            state.seg_codebook = &ctx->pause_frame_seg_codebook;
-        else
-            state.seg_codebook = &ctx->seg_codebook;
-
-        state.seg_codebook->clear();
-        state.seg_codebook->resize(downsampled_cloud_size);
-        state.codebook_pose = tracking->frame->pose;
-        state.start_to_codebook = glm::inverse(state.to_start);
-
-        // Don't modify context state for paused frames
-        if (!state.paused) {
-            ctx->codebook_pose = state.codebook_pose;
-            ctx->start_to_codebook = state.start_to_codebook;
-        }
-
-        if (tracking->frame->pose.type != GM_POSE_TO_START)
-            gm_debug(ctx->log, "No tracking pose");
-    } else {
-        if (state.paused) {
-            // Relying on C++ assignment operator magic to do a deep copy of
-            // the codebook here...
-            ctx->pause_frame_seg_codebook = ctx->seg_codebook;
-            state.seg_codebook = &ctx->pause_frame_seg_codebook;
-        } else
-            state.seg_codebook = &ctx->seg_codebook;
-
-        state.codebook_pose = ctx->codebook_pose;
-        state.start_to_codebook = ctx->start_to_codebook;
-    }
-
     run_stage(tracking,
               TRACKING_STAGE_GROUND_SPACE,
               stage_ground_project_cb,
@@ -5468,44 +5436,73 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     if (motion_detection) {
-        run_stage(tracking,
-                  TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND,
-                  stage_codebook_resolve_background_cb,
-                  stage_codebook_resolve_background_debug_cb,
-                  &state);
+        if (reset_codebook) {
+            if (state.paused)
+                state.seg_codebook = &ctx->pause_frame_seg_codebook;
+            else
+                state.seg_codebook = &ctx->seg_codebook;
 
-        // This is only a logical debug stage, since the projection
-        // is actually combined with the classification
-        run_stage(tracking,
-                  TRACKING_STAGE_CODEBOOK_SPACE,
-                  NULL, // no real work to do
-                  stage_codebook_project_debug_cb,
-                  &state);
+            state.seg_codebook->clear();
+            state.seg_codebook->resize(downsampled_cloud_size);
+            state.codebook_pose = tracking->frame->pose;
+            state.start_to_codebook = glm::inverse(state.to_start);
 
-        run_stage(tracking,
-                  TRACKING_STAGE_CODEBOOK_CLASSIFY,
-                  stage_codebook_classify_cb,
-                  stage_codebook_classify_debug_cb,
-                  &state);
+            // Don't modify context state for paused frames
+            if (!state.paused) {
+                ctx->codebook_pose = state.codebook_pose;
+                ctx->start_to_codebook = state.start_to_codebook;
+            }
+
+            if (tracking->frame->pose.type != GM_POSE_TO_START)
+                gm_debug(ctx->log, "No tracking pose");
+        } else {
+            if (state.paused) {
+                // Relying on C++ assignment operator magic to do a deep copy of
+                // the codebook here...
+                ctx->pause_frame_seg_codebook = ctx->seg_codebook;
+                state.seg_codebook = &ctx->pause_frame_seg_codebook;
+            } else
+                state.seg_codebook = &ctx->seg_codebook;
+
+            state.codebook_pose = ctx->codebook_pose;
+            state.start_to_codebook = ctx->start_to_codebook;
+
+            run_stage(tracking,
+                      TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND,
+                      stage_codebook_resolve_background_cb,
+                      stage_codebook_resolve_background_debug_cb,
+                      &state);
+
+            // This is only a logical debug stage, since the projection
+            // is actually combined with the classification
+            run_stage(tracking,
+                      TRACKING_STAGE_CODEBOOK_SPACE,
+                      NULL, // no real work to do
+                      stage_codebook_project_debug_cb,
+                      &state);
+
+            run_stage(tracking,
+                      TRACKING_STAGE_CODEBOOK_CLASSIFY,
+                      stage_codebook_classify_cb,
+                      stage_codebook_classify_debug_cb,
+                      &state);
+
+            run_stage(tracking,
+                      TRACKING_STAGE_CODEBOOK_CLUSTER,
+                      stage_codebook_cluster_cb,
+                      stage_codebook_cluster_debug_cb,
+                      &state);
+
+            run_stage(tracking,
+                      TRACKING_STAGE_FILTER_CLUSTERS,
+                      stage_filter_clusters_cb,
+                      stage_filter_clusters_debug_cb,
+                      &state);
+        }
     }
 
-
-    if (!motion_detection ||
-        !ctx->latest_tracking ||
-        !ctx->latest_tracking->success ||
-        reset_codebook)
-    {
-        if (!motion_detection) {
-            gm_debug(ctx->log, "Running naive segmentation while motion based segmentation disabled");
-        }
-        if (ctx->latest_tracking == NULL ||
-            ctx->latest_tracking->success == false)
-        {
-            gm_debug(ctx->log, "Running naive segmentation since last tracking attempt failed");
-        }
-        if (reset_codebook) {
-            gm_debug(ctx->log, "Running naive segmentation since motion analysis codebook has been reset");
-        }
+    if (naive_seg_fallback && state.persons.size() == 0) {
+        gm_debug(ctx->log, "Running naive segmentation");
 
         run_stage(tracking,
                   TRACKING_STAGE_NAIVE_FLOOR,
@@ -5518,19 +5515,13 @@ context_track_skeleton(struct gm_context *ctx,
                   stage_naive_cluster_cb,
                   stage_naive_cluster_debug_cb,
                   &state);
-    } else {
+
         run_stage(tracking,
-                  TRACKING_STAGE_CODEBOOK_CLUSTER,
-                  stage_codebook_cluster_cb,
-                  stage_codebook_cluster_debug_cb,
+                  TRACKING_STAGE_FILTER_CLUSTERS,
+                  stage_filter_clusters_cb,
+                  stage_filter_clusters_debug_cb,
                   &state);
     }
-
-    run_stage(tracking,
-              TRACKING_STAGE_FILTER_CLUSTERS,
-              stage_filter_clusters_cb,
-              stage_filter_clusters_debug_cb,
-              &state);
 
     if (state.persons.size() == 0) {
         if (motion_detection) {
@@ -7180,6 +7171,15 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.desc = "Enable motion-based human segmentation";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->motion_detection;
+    ctx->properties.push_back(prop);
+
+    ctx->naive_seg_fallback = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "naive_seg_fallback";
+    prop.desc = "Enable a naive segmentation fallback, based on assuming the camera is pointing directly at a person";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->naive_seg_fallback;
     ctx->properties.push_back(prop);
 
     ctx->joint_refinement = true;
