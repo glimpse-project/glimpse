@@ -228,6 +228,7 @@ struct _Data
 
     float view_zoom;
     glm::vec3 focal_point;
+    glm::vec3 camera_pos_xyz;
     float camera_rot_yx[2];
 
     JSON_Value *joint_map;
@@ -1885,6 +1886,7 @@ draw_tracking_scene_to_texture(Data *data,
         mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
         mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
         mvp = glm::translate(mvp, -data->focal_point);
+        mvp = glm::translate(mvp, data->camera_pos_xyz);
 
         glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
@@ -1967,11 +1969,19 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
 
     // Handle input for cloud visualisation
     if (ImGui::IsWindowHovered()) {
-        if (ImGui::IsMouseDragging()) {
-            ImVec2 drag_delta = ImGui::GetMouseDragDelta();
+        if (ImGui::IsMouseDragging(0)) {
+            ImVec2 drag_delta = ImGui::GetMouseDragDelta(0);
             data->camera_rot_yx[0] += (drag_delta.x * M_PI / 180.f) * 0.2f;
             data->camera_rot_yx[1] += (drag_delta.y * M_PI / 180.f) * 0.2f;
-            ImGui::ResetMouseDragDelta();
+            ImGui::ResetMouseDragDelta(0);
+        } else if (ImGui::IsMouseDragging(1)) {
+            ImVec2 drag_delta = ImGui::GetMouseDragDelta(1);
+            data->camera_pos_xyz.x += drag_delta.x * 0.01f;
+            data->camera_pos_xyz.y -= drag_delta.y * 0.01f;
+            ImGui::ResetMouseDragDelta(1);
+        } else {
+            ImGuiIO& io = ImGui::GetIO();
+            data->camera_pos_xyz.z += 0.05f * io.MouseWheel;
         }
     }
 
@@ -1987,6 +1997,7 @@ reset_view(Data *data)
     data->focal_point = glm::vec3(0.0, 0.0, 2.5);
     data->camera_rot_yx[0] = 0;
     data->camera_rot_yx[1] = 0;
+    data->camera_pos_xyz = glm::vec3(0.f, 0.f, 0.f);
 }
 
 static void
