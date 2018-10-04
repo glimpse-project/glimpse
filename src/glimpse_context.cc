@@ -3554,7 +3554,7 @@ static void
 stage_downsample_cb(struct gm_tracking_impl *tracking,
                     struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
+    //struct gm_context *ctx = tracking->ctx;
 
     // Person detection can happen in a sparser cloud made from a downscaled
     // version of the depth buffer. This is significantly cheaper than using a
@@ -3858,11 +3858,15 @@ stage_edge_detect_debug_cb(struct gm_tracking_impl *tracking,
         tracking_draw_line(tracking,
                            0, 0, 0,
                            eye.x, eye.y, eye.z,
-                           0xff0000ff);
+                           0xffffffff);
         tracking_draw_line(tracking,
                            0, 0, 0,
                            grad_l.x, grad_l.y, grad_l.z,
                            0xff0000ff);
+        tracking_draw_line(tracking,
+                           0, 0, 0,
+                           grad_r.x, grad_r.y, grad_r.z,
+                           0x00ff00ff);
     }
 }
 
@@ -3870,7 +3874,7 @@ static void
 stage_ground_project_cb(struct gm_tracking_impl *tracking,
                         struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
+    //struct gm_context *ctx = tracking->ctx;
     glm::mat4 to_ground = state->to_ground;
 
     // Transform the cloud into ground-aligned space if we have a valid pose
@@ -4267,7 +4271,7 @@ static void
 stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
                                 struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
+    //struct gm_context *ctx = tracking->ctx;
     int seg_res = state->seg_res;
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
@@ -5247,9 +5251,6 @@ static bool
 context_track_skeleton(struct gm_context *ctx,
                        struct gm_tracking_impl *tracking)
 {
-    uint64_t start, end, duration;
-    enum tracking_stage debug_stage_id =
-        (enum tracking_stage)ctx->debug_pipeline_stage;
     struct pipeline_scratch_state state = {};
 
     tracking->success = false;
@@ -6513,7 +6514,6 @@ detector_thread_cb(void *data)
             const int max_hist_len = 30;
 
             struct gm_pipeline_stage &stage = ctx->stages[i];
-            struct gm_pipeline_stage_data &stage_data = tracking->stage_data[i];
 
             uint64_t frame_duration_ns = 0;
 
