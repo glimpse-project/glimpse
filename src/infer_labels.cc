@@ -52,6 +52,9 @@ static void*
 infer_label_probs_cb(void* userdata)
 {
     InferThreadData* data = (InferThreadData*)userdata;
+    int n_threads = data->n_threads;
+    int thread_id = data->thread;
+
     float* depth_image = (float*)data->depth_image;
     int n_labels = data->forest[0]->header.n_labels;
 
@@ -61,46 +64,49 @@ infer_label_probs_cb(void* userdata)
     int width = data->width;
     int height = data->height;
 
-    // Accumulate probability map
-    for (int off = data->thread;
-         off < width * height;
-         off += data->n_threads)
+    bool flip = data->flip;
+
+    uint8_t* flip_map = data->forest[0]->header.flip_map;
+
+    Node* tree_nodes[data->n_trees];
+    float* tree_pr_tables[data->n_trees];
+    for (int i = 0; i < data->n_trees; ++i)
     {
-        int y = off / data->width;
-        int x = off % data->width;
+        RDTree* tree = data->forest[i];
+        tree_nodes[i] = tree->nodes;
+        tree_pr_tables[i] = tree->label_pr_tables;
+    }
 
-        int out_pr_idx = off * n_labels;
-        float depth = depth_image[off];
-
-        if (depth >= bg_depth) {
-            (data->output + out_pr_idx)[bg_label] += 1.f;
+    for (int y = 0; y < height; y++) {
+        if (y % n_threads != thread_id)
             continue;
-        }
 
-        Int2D pixel = { x, y };
-        for (int i = 0; i < data->n_trees; ++i)
-        {
-            RDTree* tree = data->forest[i];
-            uint8_t* flip_map = tree->header.flip_map;
+        for (int x = 0; x < width; x++) {
 
-            for (int j = 0; j < (data->flip ? 2 : 1); ++j) {
+            int off = y * width + x;
+
+            int out_pr_idx = off * n_labels;
+            float depth = depth_image[off];
+
+            if (depth >= bg_depth) {
+                (data->output + out_pr_idx)[bg_label] += 1.f;
+                continue;
+            }
+
+            Int2D pixel = { x, y };
+            for (int i = 0; i < data->n_trees; ++i)
+            {
+                Node *nodes = tree_nodes[i];
+                float* pr_tables = tree_pr_tables[i];
+                Node node = nodes[0];
                 int id = 0;
-                Node node = tree->nodes[0];
-                bool flip = (j == 1);
 
                 while (node.label_pr_idx == 0) {
                     Int2D u, v;
-                    if (flip) {
-                        u = (Int2D){ (int)(pixel[0] - node.uv[0] / depth),
-                                     (int)(pixel[1] + node.uv[1] / depth) };
-                        v = (Int2D){ (int)(pixel[0] - node.uv[2] / depth),
-                                     (int)(pixel[1] + node.uv[3] / depth) };
-                    } else {
-                        u = (Int2D){ (int)(pixel[0] + node.uv[0] / depth),
-                                     (int)(pixel[1] + node.uv[1] / depth) };
-                        v = (Int2D){ (int)(pixel[0] + node.uv[2] / depth),
-                                     (int)(pixel[1] + node.uv[3] / depth) };
-                    }
+                    u = (Int2D){ (int)(pixel[0] + node.uv[0] / depth),
+                        (int)(pixel[1] + node.uv[1] / depth) };
+                    v = (Int2D){ (int)(pixel[0] + node.uv[2] / depth),
+                        (int)(pixel[1] + node.uv[3] / depth) };
 
                     float upixel = (u[0] >= 0 && u[0] < (int)width &&
                                     u[1] >= 0 && u[1] < (int)height) ?
@@ -120,31 +126,66 @@ infer_label_probs_cb(void* userdata)
                      */
                     id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
 
-                    node = tree->nodes[id];
+                    node = nodes[id];
                 }
 
                 /* NB: node->label_pr_idx is a base-one index since index zero
                  * is reserved to indicate that the node is not a leaf node
                  */
-                float* pr_table =
-                    &tree->label_pr_tables[(node.label_pr_idx - 1) * n_labels];
+                float* pr_table = &pr_tables[(node.label_pr_idx - 1) * n_labels];
                 float* out_pr_table = &data->output[out_pr_idx];
+                for (int n = 0; n < n_labels; ++n) {
+                    out_pr_table[n] += pr_table[n];
+                }
+
                 if (flip) {
+                    int id = 0;
+                    Node node = nodes[0];
+
+                    while (node.label_pr_idx == 0) {
+                        Int2D u, v;
+                        u = (Int2D){ (int)(pixel[0] - node.uv[0] / depth),
+                            (int)(pixel[1] + node.uv[1] / depth) };
+                        v = (Int2D){ (int)(pixel[0] - node.uv[2] / depth),
+                            (int)(pixel[1] + node.uv[3] / depth) };
+
+                        float upixel = (u[0] >= 0 && u[0] < (int)width &&
+                                        u[1] >= 0 && u[1] < (int)height) ?
+                            (float)depth_image[((u[1] * width) + u[0])] : bg_depth;
+                        float vpixel = (v[0] >= 0 && v[0] < (int)width &&
+                                        v[1] >= 0 && v[1] < (int)height) ?
+                            (float)depth_image[((v[1] * width) + v[0])] : bg_depth;
+
+                        float gradient = upixel - vpixel;
+
+                        /* NB: The nodes are arranged in breadth-first, left then
+                         * right child order with the root node at index zero.
+                         *
+                         * In this case if you have an index for any particular node
+                         * ('id' here) then 2 * id + 1 is the index for the left
+                         * child and 2 * id + 2 is the index for the right child...
+                         */
+                        id = (gradient < node.t) ? 2 * id + 1 : 2 * id + 2;
+
+                        node = nodes[id];
+                    }
+
+                    /* NB: node->label_pr_idx is a base-one index since index zero
+                     * is reserved to indicate that the node is not a leaf node
+                     */
+                    float* pr_table = &pr_tables[(node.label_pr_idx - 1) * n_labels];
+                    float* out_pr_table = &data->output[out_pr_idx];
                     for (int n = 0; n < n_labels; ++n) {
                         out_pr_table[flip_map[n]] += pr_table[n];
                     }
-                } else {
-                    for (int n = 0; n < n_labels; ++n) {
-                        out_pr_table[n] += pr_table[n];
-                    }
                 }
             }
-        }
 
-        float divider = (float)
-            (data->flip ? data->n_trees * 2 : data->n_trees);
-        for (int n = 0; n < n_labels; ++n) {
-            (data->output + out_pr_idx)[n] /= divider;
+            float divider = (float)
+                (flip ? data->n_trees * 2 : data->n_trees);
+            for (int n = 0; n < n_labels; ++n) {
+                (data->output + out_pr_idx)[n] /= divider;
+            }
         }
     }
 
