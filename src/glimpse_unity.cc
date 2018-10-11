@@ -32,6 +32,7 @@
 
 #include <IUnityInterface.h>
 #include <IUnityGraphics.h>
+#include <IUnityRenderingExtensions.h>
 
 #include <epoxy/gl.h>
 
@@ -147,6 +148,11 @@ struct glimpse_data
      * gm_frame before uploading to a texture for display.
      */
     struct gm_frame *visible_frame;
+
+    /* When we pass the video frame to Unity, we take a reference on the latest
+     * gm_frame.
+     */
+    struct gm_frame *texture_frame;
 
     /* Set when gm_context sends a _REQUEST_FRAME event */
     bool context_needs_frame;
@@ -1038,6 +1044,7 @@ on_render_event_cb(int event)
             break;
         }
     }
+    // FIXME: We can't use data->log here if data is NULL...
     gm_assert(data->log, data != NULL,
               "Failed to find plugin data by event ID = %d",
               event);
@@ -1088,6 +1095,180 @@ on_render_event_cb(int event)
 
     pthread_mutex_unlock(&life_cycle_lock);
 #endif // USE_GLES
+}
+
+static bool
+gm_format_verify(enum gm_format glimpse_format,
+                 enum UnityRenderingExtTextureFormat unity_format)
+{
+    switch(glimpse_format) {
+    case GM_FORMAT_LUMINANCE_U8:
+        switch(unity_format) {
+        case kUnityRenderingExtFormatR8_SRGB:
+        case kUnityRenderingExtFormatR8_UNorm:
+        case kUnityRenderingExtFormatR8_SNorm:
+        case kUnityRenderingExtFormatR8_UInt:
+        case kUnityRenderingExtFormatR8_SInt:
+            return true;
+        default:
+            return false;
+        }
+
+    case GM_FORMAT_RGB_U8:
+        switch(unity_format) {
+        case kUnityRenderingExtFormatR8G8B8_SRGB:
+        case kUnityRenderingExtFormatR8G8B8_UNorm:
+        case kUnityRenderingExtFormatR8G8B8_SNorm:
+        case kUnityRenderingExtFormatR8G8B8_UInt:
+        case kUnityRenderingExtFormatR8G8B8_SInt:
+            return true;
+        default:
+            return false;
+        }
+
+    case GM_FORMAT_BGR_U8:
+        switch(unity_format) {
+        case kUnityRenderingExtFormatB8G8R8_SRGB:
+        case kUnityRenderingExtFormatB8G8R8_UNorm:
+        case kUnityRenderingExtFormatB8G8R8_SNorm:
+        case kUnityRenderingExtFormatB8G8R8_UInt:
+        case kUnityRenderingExtFormatB8G8R8_SInt:
+            return true;
+        default:
+            return false;
+        }
+
+    case GM_FORMAT_RGBX_U8:
+    case GM_FORMAT_RGBA_U8:
+        switch(unity_format) {
+        case kUnityRenderingExtFormatR8G8B8A8_SRGB:
+        case kUnityRenderingExtFormatR8G8B8A8_UNorm:
+        case kUnityRenderingExtFormatR8G8B8A8_SNorm:
+        case kUnityRenderingExtFormatR8G8B8A8_UInt:
+        case kUnityRenderingExtFormatR8G8B8A8_SInt:
+            return true;
+        default:
+            return false;
+        }
+
+    case GM_FORMAT_BGRX_U8:
+    case GM_FORMAT_BGRA_U8:
+        switch(unity_format) {
+        case kUnityRenderingExtFormatB8G8R8A8_SRGB:
+        case kUnityRenderingExtFormatB8G8R8A8_UNorm:
+        case kUnityRenderingExtFormatB8G8R8A8_SNorm:
+        case kUnityRenderingExtFormatB8G8R8A8_UInt:
+        case kUnityRenderingExtFormatB8G8R8A8_SInt:
+            return true;
+        default:
+            return false;
+        }
+
+    case GM_FORMAT_UNKNOWN:
+    case GM_FORMAT_Z_U16_MM:
+    case GM_FORMAT_Z_F32_M:
+    case GM_FORMAT_Z_F16_M:
+    case GM_FORMAT_POINTS_XYZC_F32_M:
+        return (unity_format == kUnityRenderingExtFormatNone);
+    }
+
+    return false;
+}
+
+static void texture_update_callback(int eventType, void *userdata)
+{
+    auto event = static_cast<UnityRenderingExtEventType>(eventType);
+
+    if (event != kUnityRenderingExtEventUpdateTextureBegin) {
+        return;
+    }
+
+    auto params = reinterpret_cast<UnityRenderingExtTextureUpdateParams*>(userdata);
+    struct glimpse_data *data = NULL;
+    for (int i = 0; i < all_plugin_data.size(); ++i) {
+        if (all_plugin_data[i]->render_event_id == (int)params->userData) {
+            data = all_plugin_data[i];
+            break;
+        }
+    }
+
+    if (!data || data->last_video_frame == data->texture_frame) {
+        return;
+    }
+
+    pthread_mutex_lock(&data->swap_frames_lock);
+    struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
+    gm_frame_add_breadcrumb(new_frame, "texture update callback");
+
+    const struct gm_intrinsics *video_intrinsics =
+        &new_frame->video_intrinsics;
+    int video_width = video_intrinsics->width;
+    int video_height = video_intrinsics->height;
+
+    bool format_valid = gm_format_verify(new_frame->video_format,
+                                         params->format);
+    if (!format_valid ||
+        (int)params->width != video_width ||
+        (int)params->height != video_height) {
+        if (!format_valid) {
+            gm_debug(data->log,
+                     "texture_update_callback: Texture format mismatch");
+        } else {
+            gm_debug(data->log,
+                     "texture_update_callback_v2: Texture size mismatch "
+                     "(%dx%d != %dx%d)",
+                     (int)params->width, (int)params->height,
+                     video_width, video_height);
+        }
+        gm_frame_add_breadcrumb(new_frame,
+                                "texture update cb size mismatch discard");
+        gm_frame_unref(new_frame);
+        pthread_mutex_unlock(&data->swap_frames_lock);
+        return;
+    }
+
+    if (data->texture_frame) {
+        gm_frame_add_breadcrumb(data->texture_frame,
+                                "texture update cb discard");
+        gm_frame_unref(data->texture_frame);
+    }
+    data->texture_frame = new_frame;
+    params->texData = new_frame->video->data;
+
+    pthread_mutex_unlock(&data->swap_frames_lock);
+}
+
+extern "C" UnityRenderingEventAndData UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_video_texture_update_callback(void)
+{
+    return texture_update_callback;
+}
+
+extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_video_texture_format(intptr_t plugin_handle,
+                                  int *out_width, int *out_height,
+                                  enum gm_format *out_format)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data || !data->last_video_frame) {
+        return false;
+    }
+
+    pthread_mutex_lock(&data->swap_frames_lock);
+    if (!data->last_video_frame) {
+        pthread_mutex_unlock(&data->swap_frames_lock);
+        return false;
+    }
+
+    const struct gm_intrinsics *video_intrinsics =
+        &data->last_video_frame->video_intrinsics;
+    *out_width = video_intrinsics->width;
+    *out_height = video_intrinsics->height;
+    *out_format = data->last_video_frame->video_format;
+
+    pthread_mutex_unlock(&data->swap_frames_lock);
+
+    return true;
 }
 
 extern "C" UnityRenderingEvent UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1200,6 +1381,10 @@ gm_unity_terminate(intptr_t plugin_handle)
     if (data->visible_frame) {
         gm_frame_unref(data->visible_frame);
         data->visible_frame = NULL;
+    }
+    if (data->texture_frame) {
+        gm_frame_unref(data->texture_frame);
+        data->texture_frame = NULL;
     }
     if (data->last_depth_frame) {
         gm_frame_unref(data->last_depth_frame);
