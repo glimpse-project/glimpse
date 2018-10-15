@@ -36,6 +36,7 @@
 
 #include <epoxy/gl.h>
 
+#include <queue>
 #include <vector>
 
 #include <glm/glm.hpp>
@@ -193,6 +194,9 @@ struct glimpse_data
     std::vector<GLuint> ar_video_queue;
     int ar_video_queue_len;
     int ar_video_queue_pos;
+
+    std::queue<struct gm_frame *> video_tex_queue;
+    int video_frame_delay;
 };
 
 #ifdef __ANDROID__
@@ -846,7 +850,7 @@ render_ar_video_background(struct glimpse_data *data)
     if (new_frame) {
         gm_info(data->log, "XXX %d: YES, new_frame", local_call_count);
         if (data->ar_video_queue_len == 0)
-            update_ar_video_queue_len(data, 6); // XXX should be configurable
+            update_ar_video_queue_len(data, data->video_frame_delay);
 
         if (data->device_type != GM_DEVICE_TANGO) {
                 const struct gm_intrinsics *video_intrinsics =
@@ -1227,15 +1231,30 @@ static void texture_update_callback(int eventType, void *userdata)
         return;
     }
 
-    if (data->texture_frame) {
-        gm_frame_add_breadcrumb(data->texture_frame,
+    data->video_tex_queue.push(new_frame);
+    while (data->video_tex_queue.size() > data->video_frame_delay + 1) {
+        struct gm_frame *discard_frame = data->video_tex_queue.front();
+        data->video_tex_queue.pop();
+        gm_frame_add_breadcrumb(discard_frame,
                                 "texture update cb discard");
-        gm_frame_unref(data->texture_frame);
+        gm_frame_unref(discard_frame);
     }
-    data->texture_frame = new_frame;
-    params->texData = new_frame->video->data;
+
+    data->texture_frame = data->video_tex_queue.back();
+    params->texData = data->video_tex_queue.front()->video->data;
 
     pthread_mutex_unlock(&data->swap_frames_lock);
+}
+
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_set_video_frame_delay(intptr_t plugin_handle, int delay)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data || delay < 0) {
+        return;
+    }
+
+    data->video_frame_delay = delay;
 }
 
 extern "C" UnityRenderingEventAndData UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1382,9 +1401,9 @@ gm_unity_terminate(intptr_t plugin_handle)
         gm_frame_unref(data->visible_frame);
         data->visible_frame = NULL;
     }
-    if (data->texture_frame) {
-        gm_frame_unref(data->texture_frame);
-        data->texture_frame = NULL;
+    while (data->video_tex_queue.size()) {
+        gm_frame_unref(data->video_tex_queue.front());
+        data->video_tex_queue.pop();
     }
     if (data->last_depth_frame) {
         gm_frame_unref(data->last_depth_frame);
