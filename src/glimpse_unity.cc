@@ -2238,6 +2238,17 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
     }
 }
 
+extern "C" enum gm_rotation UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_video_rotation(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data || !data->last_video_frame) {
+        return GM_ROTATION_0;
+    }
+
+    return data->last_video_frame->camera_rotation;
+}
+
 extern "C" bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_run(intptr_t plugin_handle)
 {
