@@ -38,40 +38,25 @@ gm_target_new(struct gm_context *ctx,
               struct gm_logger *logger);
 
 struct gm_target *
-gm_target_new_from_index(struct gm_context *ctx,
-                         struct gm_logger *logger,
-                         const char *index_asset_name,
-                         char **err);
+gm_target_new_from_file(struct gm_context *ctx,
+                        struct gm_logger *logger,
+                        const char *index_asset_name,
+                        char **err);
 
-void
-gm_target_insert_frame(struct gm_target *target,
-                       struct gm_skeleton *skeleton,
-                       unsigned int index);
-
-void
-gm_target_remove_frame(struct gm_target *target,
-                       unsigned int index);
-
-unsigned int
+int
 gm_target_get_n_frames(struct gm_target *target);
 
 unsigned int
 gm_target_get_frame(struct gm_target *target);
 
 void
-gm_target_set_frame(struct gm_target *target,
-                    unsigned int frame);
+gm_target_set_frame(struct gm_target *target, int frame);
 
-const struct gm_skeleton *
+struct gm_skeleton *
 gm_target_get_skeleton(struct gm_target *target);
 
-float
-gm_target_get_cumulative_error(struct gm_target *target,
-                               const struct gm_skeleton *skeleton);
-
-float
-gm_target_get_error(struct gm_target *target,
-                    const struct gm_bone *bone);
+int
+gm_target_get_anchor_joint(struct gm_target *target);
 
 void
 gm_target_free(struct gm_target *target);

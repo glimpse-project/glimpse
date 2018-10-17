@@ -558,7 +558,7 @@ gm_context_get_skeleton_distance(struct gm_context *ctx,
 uint64_t
 gm_prediction_get_timestamp(struct gm_prediction *prediction);
 
-const struct gm_skeleton *
+struct gm_skeleton *
 gm_prediction_get_skeleton(struct gm_prediction *prediction);
 
 const struct gm_intrinsics *
@@ -644,14 +644,10 @@ gm_skeleton_new(struct gm_context *ctx,
                 struct gm_joint *joints);
 
 struct gm_skeleton *
-gm_skeleton_new_from_json(struct gm_context *ctx,
-                          const char *asset_name);
-
-struct gm_skeleton *
 gm_skeleton_resize(struct gm_context *ctx,
-                   const struct gm_skeleton *skeleton,
-                   const struct gm_skeleton *ref_skeleton,
-                   int parent_joint);
+                   struct gm_skeleton *skeleton,
+                   struct gm_skeleton *ref_skeleton,
+                   int anchor_joint);
 
 int
 gm_skeleton_get_n_joints(const struct gm_skeleton *skeleton);
@@ -663,22 +659,8 @@ const struct gm_bone *
 gm_skeleton_get_bone(const struct gm_skeleton *skeleton,
                      int bone);
 
-const struct gm_bone *
-gm_skeleton_find_bone(const struct gm_skeleton *skeleton,
-                      int head,
-                      int tail);
-
 const struct gm_joint *
 gm_skeleton_get_joint(const struct gm_skeleton *skeleton, int joint);
-
-float
-gm_skeleton_compare_angle(const struct gm_skeleton *a,
-                          const struct gm_skeleton *b,
-                          const struct gm_bone *bone);
-
-float
-gm_skeleton_angle_diff_cumulative(const struct gm_skeleton *a,
-                                  const struct gm_skeleton *b);
 
 bool
 gm_skeleton_save(const struct gm_skeleton *skeleton,
@@ -688,16 +670,20 @@ void
 gm_skeleton_free(struct gm_skeleton *skeleton);
 
 int
-gm_bone_get_head(const struct gm_bone *bone);
+gm_bone_get_head(struct gm_context *ctx,
+                 const struct gm_bone *bone);
 
 int
-gm_bone_get_tail(const struct gm_bone *bone);
+gm_bone_get_tail(struct gm_context *ctx,
+                 const struct gm_bone *bone);
 
 float
-gm_bone_get_length(const struct gm_bone *bone);
+gm_bone_get_length(struct gm_context *ctx,
+                   const struct gm_bone *bone);
 
 void
-gm_bone_get_angle(const struct gm_bone *bone,
+gm_bone_get_angle(struct gm_context *ctx,
+                  const struct gm_bone *bone,
                   float *out_xyzw);
 
 #ifdef __cplusplus

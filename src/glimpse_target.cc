@@ -27,14 +27,22 @@
 
 #include <glm/gtc/quaternion.hpp>
 
+#include "parson.h"
+
 #include "glimpse_target.h"
 #include "glimpse_assets.h"
+
+struct gm_target_frame {
+    uint64_t timestamp;
+    int anchor_joint;
+    struct gm_skeleton *skeleton;
+};
 
 struct gm_target {
     struct gm_context *ctx;
     struct gm_logger *log;
 
-    std::vector<struct gm_skeleton *> frames;
+    std::vector<struct gm_target_frame> frames;
     int frame;
 };
 
@@ -50,94 +58,115 @@ gm_target_new(struct gm_context *ctx,
 }
 
 struct gm_target *
-gm_target_new_from_index(struct gm_context *ctx,
-                         struct gm_logger *log,
-                         const char *index_asset_name,
-                         char **err)
+gm_target_new_from_file(struct gm_context *ctx,
+                        struct gm_logger *log,
+                        const char *target_sequence_name,
+                        char **err)
 {
     // Load the JSON file index
-    struct gm_asset *index_asset =
-        gm_asset_open(log, index_asset_name, GM_ASSET_MODE_BUFFER, err);
-    if (!index_asset) {
+    struct gm_asset *target_sequence_asset =
+        gm_asset_open(log, target_sequence_name, GM_ASSET_MODE_BUFFER, err);
+    if (!target_sequence_asset) {
         return NULL;
     }
 
-    const char *buf = (const char *)gm_asset_get_buffer(index_asset);
+    const char *buf = (const char *)gm_asset_get_buffer(target_sequence_asset);
     if (!buf) {
         gm_throw(log, err, "Error retrieving buffer from asset '%s'",
-                 index_asset_name);
-        gm_asset_close(index_asset);
+                 target_sequence_name);
+        gm_asset_close(target_sequence_asset);
+        return NULL;
+    }
+    int len = gm_asset_get_length(target_sequence_asset);
+
+    /* unfortunately parson doesn't support parsing from a buffer with
+     * a given length and expects a NUL terminated string...
+     */
+    char *js_string = (char *)xmalloc(len + 1);
+
+    memcpy(js_string, buf, len);
+    js_string[len] = '\0';
+
+    JSON_Value *target_sequence_value = json_parse_string(js_string);
+
+    xfree(js_string);
+    js_string = NULL;
+    gm_asset_close(target_sequence_asset);
+    target_sequence_asset = NULL;
+
+    if (!target_sequence_value) {
+        gm_throw(log, err, "Failed to parse target sequence %s",
+                 target_sequence_name);
         return NULL;
     }
 
     struct gm_target *self = gm_target_new(ctx, log);
 
-    char file[1024];
-    char *end_of_base = (char *)strrchr(index_asset_name, '/');
-    if (end_of_base) {
-        strncpy(file, index_asset_name, end_of_base - index_asset_name);
-        end_of_base = &file[end_of_base - index_asset_name] + 1;
-        *(end_of_base-1) = '/';
-    } else {
-        end_of_base = file;
-    }
+    int context_n_joints = gm_context_get_n_joints(ctx);
 
-    const char *end = buf;
-    while ((end = strchr(buf, '\n'))) {
-        if (end - buf > 1) {
-            strncpy(end_of_base, buf, end - buf);
-            end_of_base[end - buf] = '\0';
+    JSON_Array *frames_js = json_object_get_array(json_object(target_sequence_value),
+                                               "frames");
+    int n_frames = json_array_get_count(frames_js);
+    for (int i = 0; i < n_frames; i++) {
+        struct gm_target_frame frame = {};
+        JSON_Object *frame_js = json_array_get_object(frames_js, i);
+        JSON_Array *joints_js = json_object_get_array(frame_js, "joints");
 
-            struct gm_skeleton *skeleton = gm_skeleton_new_from_json(ctx, file);
-            if (skeleton) {
-                self->frames.push_back(skeleton);
-            } else {
-                gm_warn(log, "Error opening skeleton asset '%s'", file);
-            }
+        frame.timestamp = json_object_get_number(frame_js, "timestamp");
+        frame.anchor_joint = json_object_get_number(frame_js, "anchor_joint");
+
+        int n_joints = json_array_get_count(joints_js);
+        if (n_joints != context_n_joints) {
+            gm_throw(log, err, "Target sequence %s frame %d had %d joints, but expected %d joints",
+                     target_sequence_name, i, n_joints, context_n_joints);
+            gm_target_free(self);
+            json_value_free(target_sequence_value);
+            return NULL;
         }
-        buf = end + 1;
+
+        struct gm_joint joints[n_joints];
+        for (int j = 0; j < n_joints; j++) {
+            JSON_Object *joint = json_array_get_object(joints_js, j);
+            joints[j].valid = true;
+            joints[j].x = json_object_get_number(joint, "x");
+            joints[j].y = json_object_get_number(joint, "y");
+            joints[j].z = json_object_get_number(joint, "z");
+        }
+
+        frame.skeleton = gm_skeleton_new(ctx, joints);
+        self->frames.push_back(frame);
     }
 
-    gm_asset_close(index_asset);
+    json_value_free(target_sequence_value);
+    target_sequence_value = NULL;
 
     return self;
 }
 
-void
-gm_target_insert_frame(struct gm_target *target,
-                       struct gm_skeleton *skeleton,
-                       unsigned int index)
-{
-    target->frames.insert(target->frames.begin() + index, skeleton);
-}
-
-void
-gm_target_remove_frame(struct gm_target *target,
-                       unsigned int index)
-{
-    if (index >= target->frames.size()) {
-        gm_warn(target->log, "Tried to remove non-existent frame %u", index);
-        return;
-    }
-
-    gm_skeleton_free(target->frames[index]);
-    target->frames.erase(target->frames.begin() + index);
-}
-
-unsigned int
+int
 gm_target_get_n_frames(struct gm_target *target)
 {
     return (unsigned int)target->frames.size();
 }
 
-const struct gm_skeleton *
+struct gm_skeleton *
 gm_target_get_skeleton(struct gm_target *target)
 {
     if (target->frame >= target->frames.size()) {
         return NULL;
     }
 
-    return target->frames[target->frame];
+    return target->frames[target->frame].skeleton;
+}
+
+int
+gm_target_get_anchor_joint(struct gm_target *target)
+{
+    if (target->frame >= target->frames.size()) {
+        return 0;
+    }
+
+    return target->frames[target->frame].anchor_joint;
 }
 
 unsigned int
@@ -147,62 +176,21 @@ gm_target_get_frame(struct gm_target *target)
 }
 
 void
-gm_target_set_frame(struct gm_target *target, unsigned int frame)
+gm_target_set_frame(struct gm_target *target, int frame)
 {
-    if (frame < target->frames.size()) {
-        target->frame = frame;
-    }
-}
+    if (frame >= target->frames.size())
+        frame = target->frames.size() - 1;
+    if (frame < 0)
+        frame = 0;
 
-float
-gm_target_get_cumulative_error(struct gm_target *target,
-                               const struct gm_skeleton *skeleton)
-{
-    float err = 0.f;
-    int n_bones = gm_skeleton_get_n_bones(skeleton);
-    for (int i = 0; i < n_bones; ++i) {
-        err += gm_target_get_error(target,
-                                   gm_skeleton_get_bone(skeleton, i));
-    }
-    return err / (float)n_bones;
-}
-
-float
-gm_target_get_error(struct gm_target *target,
-                    const struct gm_bone *bone)
-{
-    if (target->frame >= target->frames.size()) {
-        return 1.f;
-    }
-
-    const struct gm_bone *ref_bone =
-        gm_skeleton_find_bone(target->frames[target->frame],
-                              gm_bone_get_head(bone),
-                              gm_bone_get_tail(bone));
-    if (!ref_bone) {
-        return 1.f;
-    }
-
-    float xyzw[4];
-    gm_bone_get_angle(bone, xyzw);
-    glm::quat bone_angle(xyzw[3], xyzw[0], xyzw[1], xyzw[2]);
-    gm_bone_get_angle(ref_bone, xyzw);
-    glm::quat ref_bone_angle(xyzw[3], xyzw[0], xyzw[1], xyzw[2]);
-
-    float angle = glm::degrees(glm::angle(
-        glm::normalize(bone_angle) *
-        glm::inverse(glm::normalize(ref_bone_angle))));
-    while (angle > 180.f) angle -= 360.f;
-
-    return std::min(90.f, fabsf(angle)) / 90.f;
+    target->frame = frame;
 }
 
 void
 gm_target_free(struct gm_target *target)
 {
-    for (std::vector<struct gm_skeleton *>::iterator it = target->frames.begin();
-         it != target->frames.end(); ++it) {
-        gm_skeleton_free(*it);
+    for (int i = 0; i < target->frames.size(); i++) {
+        gm_skeleton_free(target->frames[i].skeleton);
     }
     delete target;
 }

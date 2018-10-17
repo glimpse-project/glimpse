@@ -124,7 +124,8 @@ typedef struct {
             uint64_t last_written_timestamp;
 
             const char *out_dir;
-            FILE *index;
+            JSON_Value *targets;
+            JSON_Value *frames;
         } make_targets;
     };
 } Data;
@@ -199,14 +200,10 @@ make_target_sequence_start(Data *data)
         }
     }
 
-    // Open the index file
-    char index_name[1024];
-    snprintf(index_name, 1024, "%s/glimpse_target.index",
-             data->make_targets.out_dir);
-    if (!(data->make_targets.index = fopen(index_name, "w"))) {
-        gm_error(data->log, "Failed to open index file '%s'", index_name);
-        return false;
-    }
+    data->make_targets.targets = json_value_init_object();
+    data->make_targets.frames = json_value_init_array();
+    json_object_set_value(json_object(data->make_targets.targets),
+                          "frame", data->make_targets.frames);
 
     return true;
 }
@@ -218,21 +215,32 @@ append_tracking_target(Data *data,
 {
     const struct gm_skeleton *skeleton = gm_tracking_get_skeleton(tracking);
 
-    char output_name[1024];
-    snprintf(output_name, 1024, "%s/%06d.json", data->make_targets.out_dir,
-             recording_frame_no);
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
 
-    if (gm_skeleton_save(skeleton, output_name)) {
-        // Add file to index
-        snprintf(output_name, 1024, "%06d.json\n", recording_frame_no);
-        fputs(output_name, data->make_targets.index);
-
-        data->make_targets.last_written_timestamp = data->last_tracking_timestamp;
-
-        return true;
+    for (int i = 0; i < n_joints; i++) {
+        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+        if (!joint || !joint->valid)
+            return false;
     }
 
-    return false;
+    JSON_Value *frame = json_value_init_object();
+    JSON_Value *joints = json_value_init_array();
+    json_object_set_value(json_object(frame), "joints", joints);
+
+    for (int i = 0; i < n_joints; i++) {
+        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+        JSON_Value *joint_js = json_value_init_object();
+        json_object_set_number(json_object(joint_js), "x", joint->x);
+        json_object_set_number(json_object(joint_js), "y", joint->y);
+        json_object_set_number(json_object(joint_js), "z", joint->z);
+        json_array_append_value(json_array(joints), joint_js);
+    }
+
+    json_array_append_value(json_array(data->make_targets.frames), frame);
+
+    data->make_targets.last_written_timestamp = data->last_tracking_timestamp;
+
+    return true;
 }
 
 static void
@@ -293,8 +301,11 @@ make_target_sequence_has_time_step_elapsed(Data *data)
 static void
 make_target_sequence_end(Data *data)
 {
-    fclose(data->make_targets.index);
-    data->make_targets.index = NULL;
+    char out_name[1024];
+    snprintf(out_name, 1024, "%s/glimpse_target.json",
+             data->make_targets.out_dir);
+
+    json_serialize_to_file_pretty(data->make_targets.targets, out_name);
 }
 
 static struct command {

@@ -1992,24 +1992,24 @@ extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_skeleton_resize(intptr_t plugin_handle,
                          intptr_t skeleton_handle,
                          intptr_t ref_skeleton_handle,
-                         int parent_joint)
+                         int anchor_joint)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
         return NULL;
     }
-    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
         return NULL;
     }
-    const struct gm_skeleton *ref_skeleton = (struct gm_skeleton *)ref_skeleton_handle;
+    struct gm_skeleton *ref_skeleton = (struct gm_skeleton *)ref_skeleton_handle;
     if (!ref_skeleton) {
         gm_error(data->log, "NULL skeleton handle");
         return NULL;
     }
 
-    return (intptr_t)gm_skeleton_resize(data->ctx, skeleton, ref_skeleton, parent_joint);
+    return (intptr_t)gm_skeleton_resize(data->ctx, skeleton, ref_skeleton, anchor_joint);
 }
 
 /* It's assumed that GlimpseRuntime knows when it has ownership of a skeleton
@@ -2034,38 +2034,38 @@ gm_unity_skeleton_free(intptr_t plugin_handle, intptr_t skeleton_handle)
     gm_skeleton_free(skeleton);
 }
 
-extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_head(intptr_t plugin_handle, intptr_t bone_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
-        return NULL;
+        return -1;
     }
 
     const struct gm_bone *bone = (struct gm_bone *)bone_handle;
     if (!bone) {
         gm_error(data->log, "NULL bone handle");
-        return NULL;
+        return -1;
     }
 
-    return (intptr_t)gm_bone_get_head(bone);
+    return gm_bone_get_head(data->ctx, bone);
 }
 
-extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_tail(intptr_t plugin_handle, intptr_t bone_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
-        return NULL;
+        return -1;
     }
 
     const struct gm_bone *bone = (struct gm_bone *)bone_handle;
     if (!bone) {
         gm_error(data->log, "NULL bone handle");
-        return NULL;
+        return -1;
     }
 
-    return (intptr_t)gm_bone_get_tail(bone);
+    return gm_bone_get_tail(data->ctx, bone);
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -2084,7 +2084,7 @@ gm_unity_target_sequence_open(intptr_t plugin_handle,
 
     char path_tmp[PATH_MAX];
     xsnprintf(path_tmp, sizeof(path_tmp),
-              "Targets/%s/glimpse_target.index",
+              "Targets/%s/glimpse_target.json",
               sequence_name);
 
     gm_debug(data->log, "gm_unity_target_sequence_open(), opening %s",
@@ -2092,10 +2092,10 @@ gm_unity_target_sequence_open(intptr_t plugin_handle,
 
     char *catch_err = NULL;
     struct gm_target *target =
-        gm_target_new_from_index(data->ctx,
-                                 data->log,
-                                 path_tmp,
-                                 &catch_err);
+        gm_target_new_from_file(data->ctx,
+                                data->log,
+                                path_tmp,
+                                &catch_err);
     if (!target) {
         gm_error(data->log, "Failed to open target sequence %s: %s",
                  path_tmp, catch_err);
@@ -2176,10 +2176,9 @@ gm_unity_target_sequence_get_skeleton(intptr_t plugin_handle,
     return (intptr_t)gm_target_get_skeleton(sequence);
 }
 
-extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_target_sequence_get_bone_error(intptr_t plugin_handle,
-                                        intptr_t target_sequence,
-                                        intptr_t bone_handle)
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_get_anchor_joint(intptr_t plugin_handle,
+                                          intptr_t target_sequence)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -2191,13 +2190,7 @@ gm_unity_target_sequence_get_bone_error(intptr_t plugin_handle,
         return 0;
     }
 
-    const struct gm_bone *bone = (const struct gm_bone *)bone_handle;
-    if (!bone) {
-        gm_error(data->log, "NULL bone handle");
-        return 0;
-    }
-
-    return (intptr_t)gm_target_get_error(sequence, bone);
+    return gm_target_get_anchor_joint(sequence);
 }
 
 static glm::mat4
