@@ -327,6 +327,7 @@ struct _Data
     bool target_progress;
     bool target_resize;
     GLSkeleton target_skel_gl;
+    bool puppet_target;
 
     int selected_target;
     std::vector<char *> targets;
@@ -583,7 +584,7 @@ index_targets(Data *data)
 
     char *index_err = NULL;
     index_files(data,
-                "glimpse_target.index",
+                "glimpse_target.json",
                 glimpse_targets_path,
                 "",
                 data->targets,
@@ -863,20 +864,23 @@ get_oldest_ar_video_tex(Data *data)
 
 static void
 update_target_skeleton_wireframe_gl_bos(Data *data,
-                                        const struct gm_skeleton *ref_skeleton)
+                                        struct gm_skeleton *ref_skeleton)
 {
     if (!data->target ||
-        gm_target_get_n_frames(data->target) == 0) {
+        gm_target_get_n_frames(data->target) == 0)
+    {
         return;
     }
 
-    const struct gm_skeleton *skeleton = gm_target_get_skeleton(data->target);
+    struct gm_skeleton *skeleton = gm_target_get_skeleton(data->target);
     struct gm_skeleton *resized_skeleton = NULL;
     if (ref_skeleton && data->target_resize) {
         resized_skeleton = gm_skeleton_resize(data->ctx,
-                                              skeleton, ref_skeleton, 0);
+                                              skeleton,
+                                              ref_skeleton,
+                                              1); // anchor by neck
         if (resized_skeleton)
-            skeleton = (const struct gm_skeleton *)resized_skeleton;
+            skeleton = (struct gm_skeleton *)resized_skeleton;
     }
 
     data->target_skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
@@ -906,8 +910,8 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
     XYZRGBA colored_bones[data->target_skel_gl.n_bones * 2];
     for (int b = 0; b < data->target_skel_gl.n_bones; ++b) {
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
-        colored_bones[b*2] = colored_joints[gm_bone_get_head(bone)];
-        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(bone)];
+        colored_bones[b*2] = colored_joints[gm_bone_get_head(data->ctx, bone)];
+        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(data->ctx, bone)];
     }
 
     glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.bones_bo);
@@ -937,7 +941,7 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
     if (!prediction) {
         return false;
     }
-    const struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
+    struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
 
     // TODO: Take confidence into account to decide whether or not to show
     //       a particular joint position.
@@ -970,20 +974,8 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
     XYZRGBA colored_bones[data->skel_gl.n_bones * 2];
     for (int b = 0; b < data->skel_gl.n_bones; ++b) {
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
-        colored_bones[b*2] = colored_joints[gm_bone_get_head(bone)];
-        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(bone)];
-
-        if (!data->target) {
-            continue;
-        }
-
-        // Colourise bone depending on how close it is to the test target
-        float intensity = gm_target_get_error(data->target, bone);
-        uint8_t red = (uint8_t)(intensity * 255.f);
-        uint8_t green = (uint8_t)((1.f-intensity) * 255.f);
-        colored_bones[b*2].rgba =
-            (0xFF)|(green<<16)|(red<<24);
-        colored_bones[b*2+1].rgba = colored_bones[b*2].rgba;
+        colored_bones[b*2] = colored_joints[gm_bone_get_head(data->ctx, bone)];
+        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(data->ctx, bone)];
     }
     glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.bones_bo);
     glBufferData(GL_ARRAY_BUFFER,
@@ -993,20 +985,8 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
     // Clean-up
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    // Update target skeleton
-    if (data->target) {
-        if (data->target_progress &&
-            gm_target_get_cumulative_error(data->target, skeleton) <=
-            data->target_error) {
-            unsigned int frame = gm_target_get_frame(data->target);
-            if (frame < gm_target_get_n_frames(data->target) - 1) {
-                gm_target_set_frame(data->target, frame + 1);
-            } else {
-                gm_target_set_frame(data->target, 0);
-            }
-        }
+    if (data->target)
         update_target_skeleton_wireframe_gl_bos(data, skeleton);
-    }
 
     gm_prediction_unref(prediction);
 
@@ -1095,8 +1075,12 @@ draw_target_controls(Data *data)
             gm_target_set_frame(data->target, 0);
         }
     }
+    ImGui::TextDisabled("Frame %d of %d",
+                        gm_target_get_frame(data->target),
+                        gm_target_get_n_frames(data->target));
 
     ImGui::Checkbox("Resize target skeleton", &data->target_resize);
+    ImGui::Checkbox("Puppet view", &data->puppet_target);
 }
 
 static void
@@ -1932,9 +1916,13 @@ draw_tracking_scene_to_texture(Data *data,
                                              gm_tracking_get_timestamp(data->latest_tracking)))
         {
             if (data->target) {
-                glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
-                mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
-                draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
+                if (data->puppet_target) {
+                    glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
+                    mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
+                    draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
+                } else {
+                    draw_skeleton_wireframe(data, &data->target_skel_gl, mvp, pt_size);
+                }
             }
             draw_skeleton_wireframe(data, &data->skel_gl, mvp, pt_size);
         }

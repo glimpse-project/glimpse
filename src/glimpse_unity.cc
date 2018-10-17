@@ -1998,12 +1998,12 @@ gm_unity_skeleton_resize(intptr_t plugin_handle,
     if (!data) {
         return NULL;
     }
-    const struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
+    struct gm_skeleton *skeleton = (struct gm_skeleton *)skeleton_handle;
     if (!skeleton) {
         gm_error(data->log, "NULL skeleton handle");
         return NULL;
     }
-    const struct gm_skeleton *ref_skeleton = (struct gm_skeleton *)ref_skeleton_handle;
+    struct gm_skeleton *ref_skeleton = (struct gm_skeleton *)ref_skeleton_handle;
     if (!ref_skeleton) {
         gm_error(data->log, "NULL skeleton handle");
         return NULL;
@@ -2034,38 +2034,38 @@ gm_unity_skeleton_free(intptr_t plugin_handle, intptr_t skeleton_handle)
     gm_skeleton_free(skeleton);
 }
 
-extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_head(intptr_t plugin_handle, intptr_t bone_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
-        return NULL;
+        return -1;
     }
 
     const struct gm_bone *bone = (struct gm_bone *)bone_handle;
     if (!bone) {
         gm_error(data->log, "NULL bone handle");
-        return NULL;
+        return -1;
     }
 
-    return (intptr_t)gm_bone_get_head(bone);
+    return gm_bone_get_head(data->ctx, bone);
 }
 
-extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_tail(intptr_t plugin_handle, intptr_t bone_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
-        return NULL;
+        return -1;
     }
 
     const struct gm_bone *bone = (struct gm_bone *)bone_handle;
     if (!bone) {
         gm_error(data->log, "NULL bone handle");
-        return NULL;
+        return -1;
     }
 
-    return (intptr_t)gm_bone_get_tail(bone);
+    return gm_bone_get_tail(data->ctx, bone);
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -2174,30 +2174,6 @@ gm_unity_target_sequence_get_skeleton(intptr_t plugin_handle,
     }
 
     return (intptr_t)gm_target_get_skeleton(sequence);
-}
-
-extern "C" float UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_target_sequence_get_bone_error(intptr_t plugin_handle,
-                                        intptr_t target_sequence,
-                                        intptr_t bone_handle)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data) {
-        return 0;
-    }
-    struct gm_target *sequence = (struct gm_target *)target_sequence;
-    if (!sequence) {
-        gm_error(data->log, "NULL sequence handle");
-        return 0;
-    }
-
-    const struct gm_bone *bone = (const struct gm_bone *)bone_handle;
-    if (!bone) {
-        gm_error(data->log, "NULL bone handle");
-        return 0;
-    }
-
-    return (intptr_t)gm_target_get_error(sequence, bone);
 }
 
 static glm::mat4

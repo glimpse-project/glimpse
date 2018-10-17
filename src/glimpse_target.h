@@ -62,16 +62,8 @@ void
 gm_target_set_frame(struct gm_target *target,
                     unsigned int frame);
 
-const struct gm_skeleton *
+struct gm_skeleton *
 gm_target_get_skeleton(struct gm_target *target);
-
-float
-gm_target_get_cumulative_error(struct gm_target *target,
-                               const struct gm_skeleton *skeleton);
-
-float
-gm_target_get_error(struct gm_target *target,
-                    const struct gm_bone *bone);
 
 void
 gm_target_free(struct gm_target *target);
