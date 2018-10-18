@@ -2194,16 +2194,14 @@ gm_unity_target_sequence_get_bone_error(intptr_t plugin_handle,
 
 static glm::mat4
 intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
+                             float width, float height,
                              float near, float far)
 {
-  float width = intrinsics->width;
-  float height = intrinsics->height;
-
   float scalex = near / intrinsics->fx;
   float scaley = near / intrinsics->fy;
 
-  float offsetx = (intrinsics->cx - width / 2.0) * scalex;
-  float offsety = (intrinsics->cy - height / 2.0) * scaley;
+  float offsetx = (intrinsics->cx - intrinsics->width / 2.0) * scalex;
+  float offsety = (intrinsics->cy - intrinsics->height / 2.0) * scaley;
 
   return glm::frustum(scalex * -width / 2.0f - offsetx,
                       scalex * width / 2.0f - offsetx,
@@ -2212,8 +2210,23 @@ intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
 }
 
 extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
+gm_unity_get_video_projection(intptr_t plugin_handle,
+                              float width, float height, bool fill,
+                              float *out_mat4)
 {
+    // width, height and fill input parameters are used to alter the frustum
+    // so that rendering at the given resolution won't be distorted.
+    // If either width/height are <= 0, they're ignored and the frustum will be
+    // set as if the render area's aspect ratio is the same as the video
+    // (i.e. stretched).
+    // When width and height are > 0, they're used to determine the aspect
+    // ratio and alter the view frustum accordingly.
+    // When fill is true, the frustum will be set so that the entire render
+    // area would be covered by the centered video. When false, the frustum
+    // will be set so that the entire video would be visible, with evenly-
+    // spaced borders on either the top/bottom or left/right, depending on
+    // the aspect ratio difference.
+
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
         return false;
@@ -2229,8 +2242,30 @@ gm_unity_get_video_projection(intptr_t plugin_handle, float *out_mat4)
                                      &rotated_intrinsics,
                                      rotation);
 
+        float vid_width = rotated_intrinsics.width;
+        float vid_height = rotated_intrinsics.height;
+
+        if (width <= 0.f || height <= 0.f) {
+            width = vid_width;
+            height = vid_height;
+        } else {
+            float aspect = width / (float)height;
+            float vid_aspect = vid_width / (float)vid_height;
+
+            if ((fill && aspect >= vid_aspect) ||
+                (!fill && aspect < vid_aspect))
+            {
+                width = vid_width;
+                height = width / aspect;
+            } else {
+                height = vid_height;
+                width = aspect * height;
+            }
+        }
+
         memcpy(out_mat4,
-               glm::value_ptr(intrinsics_to_project_matrix(&rotated_intrinsics, 0.1, 100)),
+               glm::value_ptr(intrinsics_to_project_matrix(&rotated_intrinsics,
+                                                           width, height, 0.1, 100)),
                sizeof(float) * 16);
         return true;
     } else {
