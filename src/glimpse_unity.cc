@@ -1470,7 +1470,15 @@ gm_unity_init(char *config_json, bool force_null_device)
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
 #if TARGET_OS_IOS == 1
-    char *assets_root = ios_util_get_documents_path();
+    char *assets_root;
+    const char *assets_path_override =
+        json_object_get_string(data->config, "assetsPath");
+    if (assets_path_override && strlen(assets_path_override) != 0 &&
+        access(assets_path_override, F_OK) != -1) {
+        assets_root = strdup(assets_path_override);
+    } else {
+        assets_root = ios_util_get_documents_path();
+    }
     char log_filename_tmp[PATH_MAX];
     snprintf(log_filename_tmp, sizeof(log_filename_tmp),
              "%s/glimpse.log", assets_root);
