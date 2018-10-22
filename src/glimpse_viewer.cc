@@ -1076,9 +1076,15 @@ draw_target_controls(Data *data)
             gm_target_set_frame(data->target, 0);
         }
     }
-    ImGui::TextDisabled("Frame %d of %d",
-                        gm_target_get_frame(data->target),
-                        gm_target_get_n_frames(data->target));
+
+    int n_frames = gm_target_get_n_frames(data->target);
+    int current_frame = gm_target_get_frame(data->target);
+    int current_val = current_frame;
+    ImGui::SliderInt("Frame", &current_val, 0, n_frames - 1);
+    if (current_val != current_frame)
+        gm_target_set_frame(data->target, current_val);
+
+    ImGui::TextDisabled("Frame %d of %d", current_val, n_frames);
 
     ImGui::Checkbox("Resize target skeleton", &data->target_resize);
     ImGui::Checkbox("Puppet view", &data->puppet_target);
