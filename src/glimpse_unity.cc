@@ -2193,6 +2193,23 @@ gm_unity_target_sequence_get_anchor_joint(intptr_t plugin_handle,
     return gm_target_get_anchor_joint(sequence);
 }
 
+extern "C" uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_target_sequence_get_timestamp(intptr_t plugin_handle,
+                                       intptr_t target_sequence)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+    struct gm_target *sequence = (struct gm_target *)target_sequence;
+    if (!sequence) {
+        gm_error(data->log, "NULL sequence handle");
+        return 0;
+    }
+
+    return gm_target_get_timestamp(sequence);
+}
+
 static glm::mat4
 intrinsics_to_project_matrix(struct gm_intrinsics *intrinsics,
                              float width, float height,

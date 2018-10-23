@@ -169,7 +169,17 @@ gm_target_get_anchor_joint(struct gm_target *target)
     return target->frames[target->frame].anchor_joint;
 }
 
-unsigned int
+uint64_t
+gm_target_get_timestamp(struct gm_target *target)
+{
+    if (target->frame >= target->frames.size()) {
+        return 0;
+    }
+
+    return target->frames[target->frame].timestamp;
+}
+
+int
 gm_target_get_frame(struct gm_target *target)
 {
     return target->frame;

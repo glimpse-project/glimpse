@@ -46,7 +46,7 @@ gm_target_new_from_file(struct gm_context *ctx,
 int
 gm_target_get_n_frames(struct gm_target *target);
 
-unsigned int
+int
 gm_target_get_frame(struct gm_target *target);
 
 void
@@ -57,6 +57,9 @@ gm_target_get_skeleton(struct gm_target *target);
 
 int
 gm_target_get_anchor_joint(struct gm_target *target);
+
+uint64_t
+gm_target_get_timestamp(struct gm_target *target);
 
 void
 gm_target_free(struct gm_target *target);
