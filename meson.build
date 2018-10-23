@@ -427,8 +427,8 @@ executable('test_rdt',
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
-executable('train_joint_dist',
-           [ 'src/train_joint_dist.cc',
+executable('annotate_bone_map',
+           [ 'src/annotate_bone_map.cc',
              'src/glimpse_log.c',
              'src/glimpse_data.cc',
              'src/image_utils.cc',
