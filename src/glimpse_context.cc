@@ -293,13 +293,6 @@ struct joint_dist
     float max;
 };
 
-struct joint_info
-{
-    int n_connections;
-    int *connections;
-    struct joint_dist *dist;
-};
-
 #define MAX_BONE_CHILDREN 4
 
 struct gm_bone_info
@@ -312,6 +305,10 @@ struct gm_bone_info
 
     int head; // joint index
     int tail; // joint index
+
+    float min_length;
+    float mean_length;
+    float max_length;
 };
 
 struct gm_bone
@@ -623,7 +620,6 @@ struct gm_context
     int n_joints;
     JSON_Value *joint_map;
     JIParams *joint_params;
-    struct joint_info *joint_stats;
     std::vector<const char *> joint_blender_names; // (pointers into joint_map data)
     std::vector<const char *> joint_names;
     std::vector<enum gm_joint_semantic> joint_semantics;
@@ -1396,20 +1392,13 @@ calc_skeleton_distance(struct gm_context *ctx,
 
     for (int b = 0; b < n_bones; ++b) {
         struct gm_bone_info &bone_info = ctx->bone_info[b];
-        int head = bone_info.head;
-        int tail = bone_info.tail;
         struct gm_bone &bone = skeleton->bones[b];
         float length = bone.length;
 
-        // XXX: Instead of having an n_joints x n_joints sized matrix of
-        // min,mean,max distance stats we should probably just train and load
-        // per-bone stats...
-        const struct joint_dist &joint_dist = ctx->joint_stats[head].dist[tail];
-
-        if (length < joint_dist.min) {
-            distance += powf(joint_dist.min - length, 2.f);
-        } else if (length > joint_dist.max) {
-            distance += powf(length - joint_dist.max, 2.f);
+        if (length < bone_info.min_length) {
+            distance += powf(bone_info.min_length - length, 2.f);
+        } else if (length > bone_info.max_length) {
+            distance += powf(length - bone_info.max_length, 2.f);
         }
     }
     return distance;
@@ -1450,7 +1439,7 @@ static void
 refine_skeleton(struct gm_tracking_impl *tracking)
 {
     struct gm_context *ctx = tracking->ctx;
-    if (!ctx->joint_stats || !ctx->joint_refinement || !ctx->n_tracking) {
+    if (!ctx->joint_refinement || !ctx->n_tracking) {
         return;
     }
 
@@ -1527,13 +1516,22 @@ sanitise_skeleton(struct gm_context *ctx,
         prev[0]->frame->timestamp, timestamp,
         ctx->max_prediction_delta, ctx->prediction_decay);
 
-    // We process the skeleton with regards to the 'parent' bone. At the
+    // We process the skeleton with regards to the 'parent' joint. At the
     // parent, we just have absolute position to look at, so we make sure it
     // hasn't moved too far too quickly and use the last good position if it
     // has.
-    for (int i = 0; i <= ctx->joint_stats[parent_head].n_connections; ++i) {
-        int joint = i ?
-            ctx->joint_stats[parent_head].connections[i-1] : parent_head;
+    for (int b = 0; b <= ctx->n_bones; ++b) {
+        // When b == 0, look at the parent joint, when b > 0, look at the
+        // tails of the bones that have the parent head.
+        int joint = parent_head;
+        if (b) {
+            struct gm_bone_info &bone = ctx->bone_info[b - 1];
+            if (bone.head != parent_head) {
+                continue;
+            }
+            joint = bone.tail;
+        }
+
         struct gm_joint &parent_joint = skeleton.joints[joint];
         struct gm_joint &prev_joint = prev[0]->skeleton.joints[joint];
 
@@ -6841,14 +6839,6 @@ gm_context_destroy(struct gm_context *ctx)
         ctx->joints_inferrer = NULL;
     }
 
-    if (ctx->joint_stats) {
-        for (int i = 0; i < ctx->n_joints; i++) {
-            xfree(ctx->joint_stats[i].connections);
-            xfree(ctx->joint_stats[i].dist);
-        }
-        xfree(ctx->joint_stats);
-    }
-
     if (ctx->joint_params) {
         jip_free(ctx->joint_params);
         ctx->joint_params = NULL;
@@ -6912,6 +6902,10 @@ parse_bone_info(struct gm_context *ctx,
 
         parent_info.children[parent_info.n_children++] = info.idx;
     }
+
+    info.min_length = (float)json_object_get_number(bone, "min_length");
+    info.mean_length = (float)json_object_get_number(bone, "mean_length");
+    info.max_length = (float)json_object_get_number(bone, "max_length");
 
     ctx->bone_info.push_back(info);
 
@@ -7290,68 +7284,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         gm_context_destroy(ctx);
         return NULL;
     }
-
-    // Load joint statistics for improving the quality of predicted joint
-    // positions.
-    //
-    // XXX: This state currently also conflates topology information,
-    // tracking the connections of each joint to other joints - this
-    // should probably be separated
-    //
-    ctx->joint_stats = (struct joint_info *)
-        xcalloc(ctx->n_joints, sizeof(struct joint_info));
-    for (int i = 0; i < ctx->n_joints; i++) {
-        ctx->joint_stats[i].connections = (int *)
-            xmalloc(ctx->n_joints * sizeof(int));
-        ctx->joint_stats[i].dist = (struct joint_dist *)
-            xmalloc(ctx->n_joints * sizeof(struct joint_dist));
-    }
-
-    struct gm_asset *joint_stats_asset =
-        gm_asset_open(logger,
-                      "joint-dist.json", GM_ASSET_MODE_BUFFER, &open_err);
-    if (joint_stats_asset) {
-        const void *buf = gm_asset_get_buffer(joint_stats_asset);
-        JSON_Value *json = json_parse_string((char *)buf);
-
-        assert((int)json_array_get_count(json_array(json)) == ctx->n_joints);
-        for (int i = 0; i < ctx->n_joints; i++) {
-            JSON_Array *stats = json_array_get_array(json_array(json), i);
-            assert((int)json_array_get_count(stats) == ctx->n_joints);
-
-            for (int j = 0; j < ctx->n_joints; j++) {
-                JSON_Object *stat = json_array_get_object(stats, j);
-                ctx->joint_stats[i].dist[j].min = (float)
-                    json_object_get_number(stat, "min");
-                ctx->joint_stats[i].dist[j].mean = (float)
-                    json_object_get_number(stat, "mean");
-                ctx->joint_stats[i].dist[j].max = (float)
-                    json_object_get_number(stat, "max");
-            }
-        }
-
-        gm_asset_close(joint_stats_asset);
-        json_value_free(json);
-    } else {
-        gm_throw(logger, err, "Failed to open joint-dist.json: %s", open_err);
-        free(open_err);
-
-        // We can continue without the joint stats asset, just results may be
-        // poorer quality.
-    }
-
-
-    for (int i = 0; i < ctx->n_bones; i++) {
-        struct gm_bone_info &bone_info = ctx->bone_info[i];
-        struct joint_info *joint_info = ctx->joint_stats;
-
-        int head = bone_info.head;
-        int tail = bone_info.tail;
-
-        joint_info[head].connections[joint_info[head].n_connections++] = tail;
-        joint_info[tail].connections[joint_info[tail].n_connections++] = head;
-    }
-
 
     ctx->joints_inferrer = joints_inferrer_new(ctx->log,
                                                ctx->joint_map, err);
