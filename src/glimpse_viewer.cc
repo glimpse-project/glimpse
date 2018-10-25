@@ -884,22 +884,19 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
             skeleton = (struct gm_skeleton *)resized_skeleton;
     }
 
-    data->target_skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
+    data->target_skel_gl.n_joints = 0;
 
     XYZRGBA colored_joints[data->target_skel_gl.n_joints];
-    for (int i = 0; i < data->target_skel_gl.n_joints; i++) {
+    for (int i = 0; i < n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
         if (joint) {
-            colored_joints[i].x = joint->x;
-            colored_joints[i].y = joint->y;
-            colored_joints[i].z = joint->z;
-            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
-        } else {
-            /* TODO: do something smarter... */
-            colored_joints[i].x = 0;
-            colored_joints[i].y = 0;
-            colored_joints[i].z = 0;
-            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+            int pos = data->target_skel_gl.n_joints;
+            colored_joints[pos].x = joint->x;
+            colored_joints[pos].y = joint->y;
+            colored_joints[pos].z = joint->z;
+            colored_joints[pos].rgba = LOOP_INDEX(joint_palette, i);
+            data->target_skel_gl.n_joints++;
         }
     }
     glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.joints_bo);
@@ -907,14 +904,28 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
                  sizeof(XYZRGBA) * data->target_skel_gl.n_joints,
                  colored_joints, GL_DYNAMIC_DRAW);
 
-    data->target_skel_gl.n_bones = gm_skeleton_get_n_bones(skeleton);
-    XYZRGBA colored_bones[data->target_skel_gl.n_bones * 2];
-    for (int b = 0; b < data->target_skel_gl.n_bones; ++b) {
+    int n_bones = gm_skeleton_get_n_bones(skeleton);
+    data->target_skel_gl.n_bones = 0;
+    XYZRGBA colored_bones[n_bones * 2];
+    for (int b = 0; b < n_bones; ++b) {
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
-        colored_bones[b*2] = colored_joints[gm_bone_get_head(data->ctx, bone)];
-        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(data->ctx, bone)];
+        if (bone) {
+            int head_idx = gm_bone_get_head(data->ctx, bone);
+            const struct gm_joint *head = gm_skeleton_get_joint(skeleton, head_idx);
+            int tail_idx = gm_bone_get_tail(data->ctx, bone);
+            const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
+            int pos = data->target_skel_gl.n_bones;
+            XYZRGBA head_rgba = {
+                head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
+            };
+            XYZRGBA tail_rgba = {
+                tail->x, tail->y, tail->z, LOOP_INDEX(joint_palette, tail_idx)
+            };
+            colored_bones[pos*2] = head_rgba;
+            colored_bones[pos*2+1] = tail_rgba;
+            data->target_skel_gl.n_bones++;
+        }
     }
-
     glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.bones_bo);
     glBufferData(GL_ARRAY_BUFFER,
                  sizeof(XYZRGBA) * data->target_skel_gl.n_bones * 2,
@@ -944,25 +955,20 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
     }
     struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
 
-    // TODO: Take confidence into account to decide whether or not to show
-    //       a particular joint position.
-    data->skel_gl.n_joints = gm_skeleton_get_n_joints(skeleton);
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
+    data->skel_gl.n_joints = 0;
 
     // Reformat and copy over joint data
-    XYZRGBA colored_joints[data->skel_gl.n_joints];
-    for (int i = 0; i < data->skel_gl.n_joints; i++) {
+    XYZRGBA colored_joints[n_joints];
+    for (int i = 0; i < n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
         if (joint) {
-            colored_joints[i].x = joint->x;
-            colored_joints[i].y = joint->y;
-            colored_joints[i].z = joint->z;
-            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
-        } else {
-            /* TODO: do something smarter... */
-            colored_joints[i].x = 0;
-            colored_joints[i].y = 0;
-            colored_joints[i].z = 0;
-            colored_joints[i].rgba = LOOP_INDEX(joint_palette, i);
+            int pos = data->skel_gl.n_joints;
+            colored_joints[pos].x = joint->x;
+            colored_joints[pos].y = joint->y;
+            colored_joints[pos].z = joint->z;
+            colored_joints[pos].rgba = LOOP_INDEX(joint_palette, i);
+            data->skel_gl.n_joints++;
         }
     }
     glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.joints_bo);
@@ -970,13 +976,27 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
                  sizeof(XYZRGBA) * data->skel_gl.n_joints,
                  colored_joints, GL_DYNAMIC_DRAW);
 
-    // Reformat and copy over bone data
-    data->skel_gl.n_bones = gm_skeleton_get_n_bones(skeleton);
-    XYZRGBA colored_bones[data->skel_gl.n_bones * 2];
-    for (int b = 0; b < data->skel_gl.n_bones; ++b) {
+    int n_bones = gm_skeleton_get_n_bones(skeleton);
+    data->skel_gl.n_bones = 0;
+    XYZRGBA colored_bones[n_bones * 2];
+    for (int b = 0; b < n_bones; ++b) {
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
-        colored_bones[b*2] = colored_joints[gm_bone_get_head(data->ctx, bone)];
-        colored_bones[b*2+1] = colored_joints[gm_bone_get_tail(data->ctx, bone)];
+        if (bone) {
+            int head_idx = gm_bone_get_head(data->ctx, bone);
+            const struct gm_joint *head = gm_skeleton_get_joint(skeleton, head_idx);
+            int tail_idx = gm_bone_get_tail(data->ctx, bone);
+            const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
+            int pos = data->skel_gl.n_bones;
+            XYZRGBA head_rgba = {
+                head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
+            };
+            XYZRGBA tail_rgba = {
+                tail->x, tail->y, tail->z, LOOP_INDEX(joint_palette, tail_idx)
+            };
+            colored_bones[pos*2] = head_rgba;
+            colored_bones[pos*2+1] = tail_rgba;
+            data->skel_gl.n_bones++;
+        }
     }
     glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.bones_bo);
     glBufferData(GL_ARRAY_BUFFER,

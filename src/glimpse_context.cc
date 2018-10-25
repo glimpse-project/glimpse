@@ -315,6 +315,8 @@ struct gm_bone
 {
     int idx; // For indexing into ctx->bone_info[]
 
+    bool valid;
+
     // Cached distance between bone's head and tail joints
     // (see update_bones())
     float length;
@@ -1331,20 +1333,31 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
 
     for (int i = 0; i < n_bones; i++) {
         struct gm_bone_info &bone_info = ctx->bone_info[i];
+        struct gm_bone &bone = skeleton.bones[i];
+        bone.idx = i;
+        bone.valid = false;
+
         struct gm_joint &head = skeleton.joints[bone_info.head];
         struct gm_joint &tail = skeleton.joints[bone_info.tail];
-        float dist = distance_between(&tail.x, &head.x);
+        if (!head.valid || !tail.valid) {
+            bone.length = 0;
+            bone.angle = glm::quat();
+            continue;
+        }
 
-        struct gm_bone &bone = skeleton.bones[i];
-
-        bone.idx = i;
-        bone.length = dist;
+        bone.length = distance_between(&tail.x, &head.x);
 
         int bone_parent_idx = bone_info.parent;
         if (bone_parent_idx >= 0) {
             struct gm_bone_info &parent_info = ctx->bone_info[bone_parent_idx];
             struct gm_joint &parent_head = skeleton.joints[parent_info.head];
             struct gm_joint &parent_tail = skeleton.joints[parent_info.tail];
+
+            if (!parent_head.valid || !parent_tail.valid) {
+                bone.length = 0;
+                bone.angle = glm::quat();
+                continue;
+            }
 
             glm::vec3 bone_vec = glm::normalize(
                 glm::vec3(tail.x - head.x,
@@ -1353,8 +1366,8 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
 
             gm_assert(ctx->log,
                       (parent_tail.x == head.x &&
-                      parent_tail.y == head.y &&
-                      parent_tail.z == head.z),
+                       parent_tail.y == head.y &&
+                       parent_tail.z == head.z),
                       "Expected bone[%d] head to == parent bone[%d] tail: head=(%f,%f,%f), parent tail=(%f,%f,%f)",
                       i, bone_parent_idx,
                       head.x, head.y, head.z,
@@ -1383,6 +1396,8 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
         } else {
             bone.angle = glm::quat();
         }
+
+        bone.valid = true;
     }
 }
 
@@ -9611,7 +9626,10 @@ gm_skeleton_get_n_bones(const struct gm_skeleton *skeleton)
 const struct gm_bone *
 gm_skeleton_get_bone(const struct gm_skeleton *skeleton, int bone)
 {
-    return &skeleton->bones[bone];
+    if (skeleton->bones[bone].valid)
+        return &skeleton->bones[bone];
+    else
+        return NULL;
 }
 
 const struct gm_joint *
