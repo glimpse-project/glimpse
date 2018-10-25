@@ -197,6 +197,7 @@ enum tracking_stage {
     TRACKING_STAGE_NAIVE_FLOOR,
     TRACKING_STAGE_NAIVE_CLUSTER,
 
+    TRACKING_STAGE_CODEBOOK_RETIRE_WORDS,
     TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND,
     TRACKING_STAGE_CODEBOOK_SPACE,
     TRACKING_STAGE_CODEBOOK_CLASSIFY,
@@ -268,7 +269,9 @@ struct seg_codeword
     int n;
 
     uint64_t create_timestamp;
+    uint64_t create_frame_counter;
     uint64_t last_update_timestamp;
+    uint64_t last_update_frame_count;
 
     int n_consecutive_update_runs;
 };
@@ -537,6 +540,9 @@ struct gm_context
     RDTree **decision_trees;
     int n_decision_trees;
 
+    // Incremented for each tracking iteration
+    uint64_t frame_counter;
+
     size_t grey_width;
     size_t grey_height;
     //size_t yuv_size;
@@ -650,15 +656,21 @@ struct gm_context
     bool motion_detection;
     bool naive_seg_fallback;
 
+    bool codebook_frozen;
+    float codebook_foreground_scrub_timeout;
+    uint64_t codebook_last_foreground_scrub_timestamp;
+    float codebook_clear_timeout;
+    uint64_t codebook_last_clear_timestamp;
+    float codeword_timeout;
     float codebook_bg_threshold;
     float codebook_flat_threshold;
     float codebook_clear_tracked_threshold;
+    float codebook_keep_back_most_threshold;
     int codeword_mean_n_max;
     int codeword_flicker_max_run_len;
     int codeword_flicker_max_quiet_frames;
     int codeword_obj_min_n;
     float codeword_obj_max_frame_to_n_ratio;
-    float codeword_timeout;
     int debug_codebook_layer;
 
     int inf_res;
@@ -742,6 +754,7 @@ struct gm_context
     pthread_mutex_t tracking_swap_mutex;
     struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
     int n_tracking;
+    uint64_t last_tracking_success_timestamp;
 
     /* Whether we succeed or fail to track a frame we store the resulting
      * tracking object here after processing a frame. latest_tracking->success
@@ -769,6 +782,7 @@ struct gm_context
     glm::mat4 start_to_codebook;
     std::vector<std::vector<struct seg_codeword>> seg_codebook;
     uint64_t last_codebook_update_time;
+    uint64_t last_codebook_update_frame_counter;
 
     /* If we're processing a paused frame then we will start by making a full
      * copy of the codebook into here so that we can make temporary updates
@@ -821,6 +835,8 @@ struct pipeline_scratch_state
 {
     bool paused;
 
+    uint64_t frame_counter;
+
     int seg_res;
 
     bool done_edge_detect;
@@ -844,6 +860,8 @@ struct pipeline_scratch_state
 
     // naive or codebook segmentation/clustering
     std::vector<pcl::PointIndices> cluster_indices;
+
+    bool codebook_frozen;
 
     // true after updating point labels with motion-based classification
     bool codebook_classified;
@@ -4044,27 +4062,83 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
 }
 
 static void
-stage_codebook_resolve_background_cb(struct gm_tracking_impl *tracking,
-                                     struct pipeline_scratch_state *state)
+stage_codebook_retire_cb(struct gm_tracking_impl *tracking,
+                         struct pipeline_scratch_state *state)
 {
+    if (state->codebook_frozen)
+        return;
+
     struct gm_context *ctx = tracking->ctx;
+
     std::vector<std::vector<struct seg_codeword>> &seg_codebook =
         *state->seg_codebook;
-    std::vector<struct seg_codeword *> &seg_codebook_bg = ctx->seg_codebook_bg;
-    uint64_t frame_timestamp = tracking->frame->timestamp;
-    uint64_t codeword_timeout_ns = ctx->codeword_timeout * 1e9;
     unsigned codebook_size = tracking->downsampled_cloud->points.size();
 
-    seg_codebook_bg.resize(codebook_size);
+    uint64_t frame_timestamp = tracking->frame->timestamp;
 
-    // Retire old codewords and then ranked by codeword.n (the number of times
-    // points have matched it) pick the codeword with the highest number of
-    // matches as our canonical background codeword.
-    //
-    // Note: if we find multiple codewords with the same ->n count then as a
-    // tie breaker we pick the codeword with the farthest mean depth as the
-    // canonical background.
-    //
+    uint64_t foreground_scrub_timeout =
+        (double)ctx->codebook_foreground_scrub_timeout * 1e9;
+
+    uint64_t clear_timeout =
+        (double)ctx->codebook_clear_timeout * 1e9;
+
+    uint64_t since_tracked_duration =
+        frame_timestamp - ctx->last_tracking_success_timestamp;
+
+    if (!ctx->latest_tracking || !ctx->latest_tracking->success)
+    {
+        if (frame_timestamp - ctx->codebook_last_clear_timestamp > clear_timeout &&
+            since_tracked_duration > clear_timeout)
+        {
+            state->seg_codebook->clear();
+            state->seg_codebook->resize(codebook_size);
+            if (!state->paused)
+                ctx->codebook_last_clear_timestamp = frame_timestamp;
+        } else if (frame_timestamp - ctx->codebook_last_foreground_scrub_timestamp > foreground_scrub_timeout &&
+                   since_tracked_duration > foreground_scrub_timeout)
+        {
+            // Considering that the codebook may be polluted at this point by a
+            // human failing to track we try to remove all but the
+            // furthest-away codewords. This is in the hope that if there was
+            // an untracked human in the codebook that at some point we saw
+            // background behind them.
+
+            std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+                *state->seg_codebook;
+
+            float keep_back_most_threshold = ctx->codebook_keep_back_most_threshold;
+            unsigned codebook_size = seg_codebook.size();
+
+            for (unsigned off = 0; off < codebook_size; off++) {
+                std::vector<struct seg_codeword> &codewords = seg_codebook[off];
+
+                if (!codewords.size())
+                    continue;
+
+                // NB: the codebook is sorted from nearest to farthest
+                int n_codewords = (int)codewords.size();
+                float back_most = codewords[n_codewords-1].mean;
+
+                for (int i = n_codewords - 1; i >= 0; i--) {
+                    if (fabsf(codewords[i].mean - back_most) > keep_back_most_threshold)
+                    {
+                        int j = 0;
+                        for (i++; i < n_codewords; i++) {
+                            codewords[j++] = codewords[i];
+                        }
+                        codewords.resize(j);
+                        break;
+                    }
+                }
+            }
+
+            if (!state->paused)
+                ctx->codebook_last_foreground_scrub_timestamp = frame_timestamp;
+        }
+    }
+
+    uint64_t codeword_timeout_ns = ctx->codeword_timeout * 1e9;
+
     for (unsigned off = 0; off < codebook_size; off++) {
         std::vector<struct seg_codeword> &codewords = seg_codebook[off];
 
@@ -4076,10 +4150,63 @@ stage_codebook_resolve_background_cb(struct gm_tracking_impl *tracking,
             else
                 i++;
         }
+    }
+}
 
-        // Note: we use a separate loop for finding the background codeword
-        // because we don't want removals to invalidate our background
-        // codeword pointers
+static void
+stage_codebook_retire_debug_cb(struct gm_tracking_impl *tracking,
+                               struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    int seg_res = state->seg_res;
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
+
+    if (ctx->codebook_debug_view == CODEBOOK_DEBUG_VIEW_POINT_CLOUD) {
+        add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
+
+        colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+    } else {
+        add_debug_cloud_xyz_from_codebook(ctx,
+                                          tracking,
+                                          *state->seg_codebook,
+                                          ctx->seg_codebook_bg,
+                                          &tracking->debug_cloud_intrinsics);
+    }
+}
+
+static void
+stage_codebook_resolve_background_cb(struct gm_tracking_impl *tracking,
+                                     struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+    std::vector<std::vector<struct seg_codeword>> &seg_codebook =
+        *state->seg_codebook;
+    std::vector<struct seg_codeword *> &seg_codebook_bg = ctx->seg_codebook_bg;
+    unsigned codebook_size = tracking->downsampled_cloud->points.size();
+
+    seg_codebook_bg.resize(codebook_size);
+
+    // Ranked by codeword.n (the number of times points have matched it) pick
+    // the codeword with the highest number of matches as our canonical
+    // background codeword.
+    //
+    // Note: if we find multiple codewords with the same ->n count then as a
+    // tie breaker we pick the codeword with the farthest mean depth as the
+    // canonical background.
+    //
+    for (unsigned off = 0; off < codebook_size; off++) {
+        std::vector<struct seg_codeword> &codewords = seg_codebook[off];
+
+        // Note: we have to be careful to not allow edits of the
+        // codebook while maintaining seg_codebook_bg to avoid
+        // invalidating these codeword pointers!
         //
         seg_codebook_bg[off] = NULL;
         for (unsigned i = 0; i < codewords.size(); i++) {
@@ -4159,7 +4286,19 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     glm::mat4 start_to_codebook = state->start_to_codebook;
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     int seg_res = state->seg_res;
-    uint64_t frame_timestamp = tracking->frame->timestamp;
+    uint64_t frame_timestamp = 0;
+    uint64_t frame_counter = 0;
+
+    /* If the codebook is frozen then we want any classification that is timing
+     * sensitive also be based on a frozen timestamp...
+     */
+    if (state->codebook_frozen) {
+        frame_timestamp = ctx->last_codebook_update_time;
+        frame_counter = ctx->last_codebook_update_frame_counter;
+    } else {
+        frame_timestamp = tracking->frame->timestamp;
+        frame_counter = state->frame_counter;
+    }
 
     pcl::PointCloud<pcl::PointXYZL>::VectorType &downsampled_points =
         tracking->downsampled_cloud->points;
@@ -4170,14 +4309,6 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     const int codeword_flicker_max_quiet_frames = (float)ctx->codeword_flicker_max_quiet_frames;
     const int codeword_obj_min_n = ctx->codeword_obj_min_n;
     const float codeword_obj_max_frame_to_n_ratio = ctx->codeword_obj_max_frame_to_n_ratio;
-
-    // XXX: It's very fragile that we are using the most recent frame duration
-    // (or a guess/constant) to extrapolate frame counts from time durations
-    // below.
-    // FIXME: We should look at avoiding this...
-    const float example_frame_time = ctx->n_tracking ?
-        (float)(frame_timestamp - ctx->tracking_history[0]->frame->timestamp) :
-        100000000.f;
 
     for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; depth_off++)
     {
@@ -4259,18 +4390,15 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
         //
         //  1) the codeword doesn't (on average) see runs of more than
         //     ->codeword_flicker_max_run_len consecutive updates
-        //  2) (on average) consecutive runs are occurring at a frequency
-        //     higher than ->codeword_min_flicker_freq_hz
+        //  2) The first condition should be met (on average) at least every
+        //     N frames (where N = 'codeword_flicker_max_quiet_frames')
         //
         bool requirement_one = (codeword_flicker_max_run_len *
                                 codeword->n_consecutive_update_runs) > codeword->n;
 
-        // XXX: deriving a frame count from (codeword_lifetime / example_frame_duration)
-        // seems extremely fragile...
-        int n_frames_since_create =
-            ((frame_timestamp - codeword->create_timestamp) / example_frame_time);
+        int n_frames_since_create = frame_counter - codeword->create_frame_counter;
         bool requirement_two =
-            ((int)(n_frames_since_create / codeword_flicker_max_quiet_frames) <=
+            ((n_frames_since_create / codeword_flicker_max_quiet_frames) <=
              codeword->n_consecutive_update_runs);
         if (requirement_one && requirement_two)
             flickering = true;
@@ -4282,9 +4410,8 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        // XXX: deriving a frame count like this seems extremely fragile...
-        int n_update_frames = ((codeword->last_update_timestamp -
-                                codeword->create_timestamp) / example_frame_time);
+        int n_update_frames = (codeword->last_update_frame_count -
+                               codeword->create_frame_counter);
         if (codeword->n > codeword_obj_min_n &&
             n_update_frames / (float)codeword->n >= codeword_obj_max_frame_to_n_ratio)
         {
@@ -5039,9 +5166,14 @@ static void
 stage_update_codebook_cb(struct gm_tracking_impl *tracking,
                          struct pipeline_scratch_state *state)
 {
+    if (state->codebook_frozen)
+        return;
+
     struct gm_context *ctx = tracking->ctx;
 
     int seg_res = state->seg_res;
+    uint64_t frame_time = tracking->frame->timestamp;
+    uint64_t update_frame_count = state->frame_counter;
 
     float clear_tracked_threshold = ctx->codebook_clear_tracked_threshold;
 
@@ -5123,14 +5255,13 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
         if (best_codeword_distance > ctx->codebook_bg_threshold)
             codeword = NULL;
 
-        uint64_t frame_time = tracking->frame->timestamp;
-
         if (!codeword) {
             struct seg_codeword new_codeword = {};
             new_codeword.mean = depth;
             new_codeword.n = 1;
             new_codeword.create_timestamp = frame_time;
             new_codeword.last_update_timestamp = frame_time;
+            new_codeword.last_update_frame_count = update_frame_count;
             new_codeword.n_consecutive_update_runs = 0;
 
             // We insert sorted so that our matching logic can bail as soon
@@ -5172,11 +5303,14 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
                 codeword->n_consecutive_update_runs++;
 
             codeword->last_update_timestamp = frame_time;
+            codeword->last_update_frame_count = update_frame_count;
         }
     }
 
-    if (!state->paused)
-        ctx->last_codebook_update_time = tracking->frame->timestamp;
+    if (!state->paused) {
+        ctx->last_codebook_update_time = frame_time;
+        ctx->last_codebook_update_frame_counter = update_frame_count;
+    }
 }
 
 static void
@@ -5365,6 +5499,7 @@ context_clear_tracking_history_locked(struct gm_context *ctx)
         ctx->tracking_history[i] = NULL;
     }
     ctx->n_tracking = 0;
+    ctx->last_tracking_success_timestamp = 0;
 }
 
 /* XXX: this API must either be called with the tracking_swap_mutex held or
@@ -5452,8 +5587,10 @@ context_track_skeleton(struct gm_context *ctx,
          * affect the codebook_pose here.
          */
         unsigned int codebook_size = ctx->seg_codebook.size();
-        ctx->seg_codebook.clear();
-        ctx->seg_codebook.resize(codebook_size);
+        if (!state.codebook_frozen) {
+            ctx->seg_codebook.clear();
+            ctx->seg_codebook.resize(codebook_size);
+        }
 
         gm_debug(ctx->log, "Clearing tracking history (frame discontinuity)");
 
@@ -5602,6 +5739,10 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     if (motion_detection) {
+
+        if (state.codebook_frozen)
+            reset_codebook = false;
+
         if (reset_codebook) {
             if (state.paused)
                 state.seg_codebook = &ctx->pause_frame_seg_codebook;
@@ -5632,6 +5773,12 @@ context_track_skeleton(struct gm_context *ctx,
 
             state.codebook_pose = ctx->codebook_pose;
             state.start_to_codebook = ctx->start_to_codebook;
+
+            run_stage(tracking,
+                      TRACKING_STAGE_CODEBOOK_RETIRE_WORDS,
+                      stage_codebook_retire_cb,
+                      stage_codebook_retire_debug_cb,
+                      &state);
 
             run_stage(tracking,
                       TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND,
@@ -5810,7 +5957,6 @@ context_track_skeleton(struct gm_context *ctx,
               stage_refine_skeleton_debug_cb,
               &state);
 
-
     bool valid_skeleton = true;
     if (ctx->skeleton_validation) {
         valid_skeleton = (state.confidence >= ctx->skeleton_min_confidence &&
@@ -5818,17 +5964,24 @@ context_track_skeleton(struct gm_context *ctx,
                           ctx->skeleton_max_distance);
     }
 
-    // Update the depth classification so it knows which pixels are tracked
-    // TODO: We should actually use the label cluster points, which may not
-    //       consist of this entire cloud.
-    // XXX: should we only do this if motion_detection enabled?
-    pcl::PointIndices &best_person = state.persons[state.best_person];
-    int tracked_label = valid_skeleton ? CODEBOOK_CLASS_TRACKED :
-        CODEBOOK_CLASS_FAILED_CANDIDATE;
-    for (auto &idx : best_person.indices) {
-        tracking->downsampled_cloud->points[idx].label = tracked_label;
+#warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
+    if (motion_detection) {
+        for (int i = 0; i < state.persons.size(); i++) {
+            pcl::PointIndices &person = state.persons[i];
+
+            if (valid_skeleton && i == state.best_person) {
+                for (auto &idx : person.indices) {
+                    tracking->downsampled_cloud->points[idx].label =
+                        CODEBOOK_CLASS_TRACKED;
+                }
+            } else {
+                for (auto &idx : person.indices) {
+                    tracking->downsampled_cloud->points[idx].label =
+                        CODEBOOK_CLASS_FAILED_CANDIDATE;
+                }
+            }
+        }
     }
-#warning "XXX: Should we set the 'CODEBOOK_CLASS_FAILED_CANDIDATE' label on all the candidates we found - not just the 'best' failure?"
 
     if (!valid_skeleton) {
         if (motion_detection) {
@@ -5840,48 +5993,6 @@ context_track_skeleton(struct gm_context *ctx,
         }
         gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
         return false;
-    }
-
-    // The codebook may have been polluted before this point by a human
-    // failing to track. To counteract this, as well as removing any of
-    // the codewords that apply to the tracked figure, we also remove all
-    // but the furthest-away codewords. This is in the hope that if there
-    // was an untracked human in the codebook that at some point we saw
-    // background behind them.
-    if (motion_detection &&
-        (!ctx->latest_tracking || !ctx->latest_tracking->success))
-    {
-#if 0
-        std::vector<std::vector<struct seg_codeword>> &seg_codebook =
-            *state.seg_codebook;
-        foreach_xy_off(tracking->downsampled_cloud->width,
-                       tracking->downsampled_cloud->height) {
-            std::list<struct seg_codeword> &codewords = seg_codebook[off];
-            if (codewords.size() <= 1) {
-                continue;
-            }
-
-            std::list<struct seg_codeword>::iterator furthest, it;
-            for (furthest = it = codewords.begin();
-                 it != codewords.end(); ++it) {
-                if ((*it).m > (*furthest).m) {
-                    furthest = it;
-                }
-            }
-
-            it = codewords.begin();
-            while (it != codewords.end()) {
-                if (it == furthest) {
-                    ++it;
-                } else {
-                    it = codewords.erase(it);
-                }
-            }
-        }
-#else
-        state.seg_codebook->clear();
-        state.seg_codebook->resize(downsampled_cloud_size);
-#endif
     }
 
     // TODO: We just take the most confident skeleton above, but we should
@@ -6506,6 +6617,8 @@ detector_thread_cb(void *data)
 
         struct pipeline_scratch_state state = {};
         state.paused = frame->paused;
+        state.codebook_frozen = ctx->codebook_frozen;
+        state.frame_counter = ctx->frame_counter++;
 
         struct gm_tracking_impl *tracking =
             mem_pool_acquire_tracking(ctx->tracking_pool);
@@ -6634,6 +6747,8 @@ detector_thread_cb(void *data)
                          ctx->tracking_history[i],
                          atomic_load(&ctx->tracking_history[i]->base.ref));
             }
+
+            ctx->last_tracking_success_timestamp = frame->timestamp;
         }
 
         /* Hold onto the latest tracking regardless of whether it was
@@ -7884,13 +7999,71 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     {
-        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND;
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_RETIRE_WORDS;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "codebook_resolve_bg";
-        stage.desc = "Determine canonical background codewords plus prune old codewords";
+        stage.name = "codebook_retire";
+        stage.desc = "Retire old codewords";
 
+        // XXX: aliased property
+        ctx->codebook_frozen = false;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_frozen";
+        prop.desc = "Disable any further codebook updates while true";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->codebook_frozen;
+        stage.properties.push_back(prop);
+
+        ctx->codeword_timeout = 3.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codeword_timeout";
+        prop.desc = "Codewords that don't match any points after this timeout will be removed";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codeword_timeout;
+        prop.float_state.min = 0.2f;
+        prop.float_state.max = 10.f;
+        stage.properties.push_back(prop);
+
+        // XXX: aliased property
+        ctx->codebook_foreground_scrub_timeout = 1.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_foreground_scrub_timeout";
+        prop.desc = "If we haven't tracked for this long (seconds) then try deleting all but the farthest codewords";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codebook_foreground_scrub_timeout;
+        prop.float_state.min = 0.0f;
+        prop.float_state.max = 60.0f;
+        stage.properties.push_back(prop);
+
+        // XXX: aliased property
+        ctx->codebook_clear_timeout = 3.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_foreground_scrub_timeout";
+        prop.desc = "If we haven't tracked for this long (seconds) then try clearing the full codebook";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codebook_clear_timeout;
+        prop.float_state.min = 0.0f;
+        prop.float_state.max = 60.0f;
+        stage.properties.push_back(prop);
+
+        // XXX: aliased property
+        ctx->codebook_keep_back_most_threshold = 0.2f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_keep_back_most_threshold";
+        prop.desc = "When tracking fails we throw away all but the farthest codewords, within a threshold band this deep";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codebook_keep_back_most_threshold;
+        prop.float_state.min = 0.0f;
+        prop.float_state.max = 1.0f;
+        stage.properties.push_back(prop);
+
+        // XXX: aliased property
         ctx->debug_codebook_layer = 0;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -7902,6 +8075,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.int_state.max = 15;
         stage.properties.push_back(prop);
 
+        // XXX: aliased property
         ctx->codebook_debug_view = CODEBOOK_DEBUG_VIEW_POINT_CLOUD;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -7922,6 +8096,43 @@ gm_context_new(struct gm_logger *logger, char **err)
         enumerant.val = CODEBOOK_DEBUG_VIEW_CODEBOOK;
         ctx->codebook_debug_view_enumerants.push_back(enumerant);
 
+        prop.enum_state.n_enumerants = ctx->codebook_debug_view_enumerants.size();
+        prop.enum_state.enumerants = ctx->codebook_debug_view_enumerants.data();
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_RESOLVE_BACKGROUND;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "codebook_resolve_bg";
+        stage.desc = "Determine canonical background codewords plus prune old codewords";
+
+        // XXX: aliased property
+        ctx->debug_codebook_layer = 0;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "debug_codebook_layer";
+        prop.desc = "If != 0 then only show the Nth (base 1) codeword for each codebook entry (positive counts from nearest, negative counts from farthest)";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->debug_codebook_layer;
+        prop.int_state.min = -15;
+        prop.int_state.max = 15;
+        stage.properties.push_back(prop);
+
+        // XXX: aliased property
+        ctx->codebook_debug_view = CODEBOOK_DEBUG_VIEW_POINT_CLOUD;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_debug_view";
+        prop.desc = "Whether to visualize the codebook or the point cloud being processed";
+        prop.type = GM_PROPERTY_ENUM;
+        prop.enum_state.ptr = &ctx->codebook_debug_view;
         prop.enum_state.n_enumerants = ctx->codebook_debug_view_enumerants.size();
         prop.enum_state.enumerants = ctx->codebook_debug_view_enumerants.data();
         stage.properties.push_back(prop);
@@ -8033,17 +8244,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->codeword_obj_max_frame_to_n_ratio;
         prop.float_state.min = 0.f;
         prop.float_state.max = 1.f;
-        stage.properties.push_back(prop);
-
-        ctx->codeword_timeout = 3.0f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "codeword_timeout";
-        prop.desc = "Codewords that don't match any points after this timeout will be removed";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->codeword_timeout;
-        prop.float_state.min = 0.2f;
-        prop.float_state.max = 10.f;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
@@ -8384,6 +8584,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.min = 0.0f;
         prop.float_state.max = 1.0f;
         stage.properties.push_back(prop);
+
+        ctx->codebook_keep_back_most_threshold = 0.2f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_keep_back_most_threshold";
+        prop.desc = "When tracking fails we throw away all but the farthest codewords, within a threshold band this deep";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codebook_keep_back_most_threshold;
+        prop.float_state.min = 0.0f;
+        prop.float_state.max = 1.0f;
+        stage.properties.push_back(prop);
+
 
         // XXX: this an alias of a property set up earlier...
         prop = gm_ui_property();
