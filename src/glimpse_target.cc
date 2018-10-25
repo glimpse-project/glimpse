@@ -113,7 +113,13 @@ gm_target_new_from_file(struct gm_context *ctx,
         JSON_Array *joints_js = json_object_get_array(frame_js, "joints");
 
         frame.timestamp = json_object_get_number(frame_js, "timestamp");
-        frame.anchor_joint = json_object_get_number(frame_js, "anchor_joint");
+        if (json_object_has_value(frame_js, "anchor_joint"))
+            frame.anchor_joint = json_object_get_number(frame_js, "anchor_joint");
+        else {
+            // For target sequences that don't have anchor joints then
+            // joint 1 will correspond to the neck
+            frame.anchor_joint = 1;
+        }
 
         int n_joints = json_array_get_count(joints_js);
         if (n_joints != context_n_joints) {
