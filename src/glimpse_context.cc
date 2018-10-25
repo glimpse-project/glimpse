@@ -1355,7 +1355,10 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
                       (parent_tail.x == head.x &&
                       parent_tail.y == head.y &&
                       parent_tail.z == head.z),
-                      "Expected bone tail to == parent head");
+                      "Expected bone[%d] head to == parent bone[%d] tail: head=(%f,%f,%f), parent tail=(%f,%f,%f)",
+                      i, bone_parent_idx,
+                      head.x, head.y, head.z,
+                      parent_tail.x, parent_tail.y, parent_tail.z);
 
             glm::vec3 parent_vec = glm::normalize(
                 glm::vec3(parent_tail.x - parent_head.x,
