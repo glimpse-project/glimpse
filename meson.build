@@ -437,7 +437,7 @@ executable('annotate_bone_map',
              'src/llist.c',
              'src/xalloc.c' ],
            include_directories: inc,
-           dependencies: [ libpng_dep, threads_dep ])
+           dependencies: [ libpng_dep, threads_dep, glm_dep ])
 
 executable('train_joint_params',
            [ 'src/train_joint_params.cc',
