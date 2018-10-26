@@ -1307,17 +1307,27 @@ calc_mismatched_bones(struct gm_context *ctx,
         struct gm_bone &ref_bone = ref.bones[i];
         struct gm_bone_info &bone_info = ctx->bone_info[i];
 
-        // Skip root bone
-        if (bone_info.parent < 0)
+        // XXX: it's not entirely obvious what the best way of considering
+        // bone validity is here but one aim is to avoid having a skeleton
+        // where all bones are invalid looking better than any valid skeleton
+        // so we count invalid bones as violations.
+        if (!bone.valid)
+            violations++;
+
+        // We can't compare lengths or angles if either bone is invalid...
+        if (!bone.valid || !ref_bone.valid)
             continue;
 
         if (is_bone_length_diff(bone, ref_bone, ctx->bone_length_variance))
             violations++;
 
-        if (is_bone_angle_diff(ctx, bone, ref, skel, time_delta,
-                               ctx->bone_rotation_variance))
-        {
-            violations++;
+        // Don't check for angle missmatches for the root bone...
+        if (bone_info.parent >= 0) {
+            if (is_bone_angle_diff(ctx, bone, ref, skel, time_delta,
+                                   ctx->bone_rotation_variance))
+            {
+                violations++;
+            }
         }
     }
 
