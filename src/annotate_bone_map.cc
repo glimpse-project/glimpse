@@ -63,12 +63,15 @@ typedef struct {
 
     JSON_Value* bone_map;      // JSON nested bone map
     std::vector<Bone> bones;   // Description of each bone
+    std::vector<glm::quat> avg_bone_rot; // Average bone rotations
 } TrainContext;
 
 typedef struct {
-    glm::quat rotation;
-    float     radius;
-} Rotation;
+    glm::quat first_rotation;       // Bone rotation for the first dataset
+    glm::vec4 cumulative_rotation;  // Cumulative rotation for all frames
+    float radius;                   // Radius required from average rotation to
+                                    // encompass all rotations
+} RotationData;
 
 typedef struct {
     TrainContext* ctx;
@@ -77,100 +80,45 @@ typedef struct {
     float*        min_lengths;   // Minimum lengths of each bone
     float*        mean_lengths;  // Mean length of each bone
     float*        max_lengths;   // Maximum length of each bone
-    Rotation*     rot_limit;     // A cone that encompasses all bone rotations
-                                 // within the given dataset.
+    RotationData  *rotation;     // Bone rotation data
+    glm::quat*    first_rot;     // Bone rotations of the first frame
+    glm::vec4*    acc_rot;       // Cumulative bone rotations
+    int*          n_rots;        // Number of accumulated rotations
+    float*        radius;        // Radius from the average rotation that
+                                 // encompasses every rotation
 } ThreadContext;
 
-static void
-widen_constraint(Rotation& constraint, glm::quat& new_rotation)
+static glm::quat
+calc_bone_rotation(TrainContext* ctx, Bone& bone, int joint_idx)
 {
-    float diff = glm::angle(new_rotation * glm::inverse(constraint.rotation));
-    while (diff > M_PI) diff -= 2 * M_PI;
-    diff = fabsf(diff);
+    Bone& parent = ctx->bones[bone.parent];
+    float* joints = &ctx->joints[joint_idx];
 
-    if (diff <= constraint.radius) {
-        return;
-    }
+    float* head = &joints[bone.head * 3];
+    float* tail = &joints[bone.tail * 3];
 
-    // We want to move the constraint half the distance towards the new
-    // rotation and then widen it by the remaining distance (so that the radius
-    // is expanded by the minimum amount).
-    float move = (diff - constraint.radius) / 2.f;
-    float change = move / diff;
-    constraint.rotation = glm::normalize(glm::slerp(constraint.rotation,
-                                                    new_rotation, change));
-    constraint.radius += move;
-}
+    float* parent_head = &joints[parent.head * 3];
+    float* parent_tail = &joints[parent.tail * 3];
 
-static void
-add_constraint(Rotation& dest, Rotation& add)
-{
-    // TODO: Find out why multiple threads produces different results.
+    glm::vec3 bone_vec = glm::normalize(
+        glm::vec3(tail[0] - head[0],
+                  tail[1] - head[1],
+                  tail[2] - head[2]));
 
-    if (add.radius > dest.radius) {
-        std::swap(dest, add);
-    }
+    glm::vec3 parent_vec = glm::normalize(
+        glm::vec3(parent_tail[0] - parent_head[0],
+                  parent_tail[1] - parent_head[1],
+                  parent_tail[2] - parent_head[2]));
 
-    float diff = glm::angle(add.rotation *
-                            glm::inverse(dest.rotation));
+    glm::vec3 axis = glm::normalize(glm::cross(bone_vec, parent_vec));
+    float angle = acosf(glm::dot(bone_vec, parent_vec));
+    while (angle > M_PI) angle -= 2 * M_PI;
 
-    while (diff > M_PI) diff -= 2 * M_PI;
-    diff = fabsf(diff);
-
-    float diff_plus_radius = diff + add.radius;
-    if (diff_plus_radius <= dest.radius) {
-        return;
-    }
-
-#ifdef DEBUG
-    Rotation orig = dest;
-
-    printf("Dest constraint (%.2f, %.2f, %.2f, %.2f, r: %.2f)\n"
-           " Add constraint (%.2f, %.2f, %.2f, %.2f, r: %.2f)\n"
-           " Distance: %.2f\n",
-           dest.rotation.x, dest.rotation.y, dest.rotation.z, dest.rotation.w,
-           glm::degrees(dest.radius),
-           add.rotation.x, add.rotation.y, add.rotation.z, add.rotation.w,
-           glm::degrees(add.radius),
-           glm::degrees(diff_plus_radius - dest.radius));
-#endif
-
-    float move = std::min((float)M_PI - dest.radius,
-                          (diff_plus_radius - dest.radius) / 2.f);
-    float change = move / diff;
-    dest.rotation = glm::normalize(glm::slerp(dest.rotation,
-                                              add.rotation, change));
-    dest.radius += move;
-
-#ifdef DEBUG
-    printf(" New constraint (%.2f, %.2f, %.2f, %.2f, r: %.2f)\n",
-           dest.rotation.x, dest.rotation.y, dest.rotation.z, dest.rotation.w,
-           glm::degrees(dest.radius));
-
-    diff = glm::angle(add.rotation * glm::inverse(dest.rotation));
-    while (diff > M_PI) diff -= 2 * M_PI;
-    diff = fabsf(diff);
-    if (fabsf((diff + add.radius) - dest.radius) > glm::radians(1.f) &&
-        dest.radius < M_PI) {
-        fprintf(stderr, "Constraint adding failed (1) (%.2f)\n",
-                glm::degrees((diff + add.radius) - dest.radius));
-        exit(1);
-    }
-
-    diff = glm::angle(orig.rotation * glm::inverse(dest.rotation));
-    while (diff > M_PI) diff -= 2 * M_PI;
-    diff = fabsf(diff);
-    if (fabsf((diff + orig.radius) - dest.radius) > glm::radians(1.f) &&
-        dest.radius < M_PI) {
-        fprintf(stderr, "Constraint adding failed (2) (%.2f)\n",
-                glm::degrees((diff + orig.radius) - dest.radius));
-        exit(1);
-    }
-#endif
+    return glm::normalize(glm::angleAxis(angle, axis));
 }
 
 static void*
-thread_body(void* userdata)
+thread_stage1(void* userdata)
 {
     ThreadContext* ctx = (ThreadContext*)userdata;
 
@@ -205,29 +153,48 @@ thread_body(void* userdata)
                 continue;
             }
 
-            glm::vec3 bone_vec = glm::normalize(
-                glm::vec3(tail[0] - head[0],
-                          tail[1] - head[1],
-                          tail[2] - head[2]));
+            glm::quat bone_rotation = calc_bone_rotation(ctx->ctx, bone, joint_idx);
 
-            Bone& parent = ctx->ctx->bones[bone.parent];
-            float* parent_head = &joints[parent.head * 3];
-            float* parent_tail = &joints[parent.tail * 3];
-            glm::vec3 parent_vec = glm::normalize(
-                glm::vec3(parent_tail[0] - parent_head[0],
-                          parent_tail[1] - parent_head[1],
-                          parent_tail[2] - parent_head[2]));
-
-            glm::vec3 axis = glm::normalize(glm::cross(bone_vec, parent_vec));
-            float angle = acosf(glm::dot(bone_vec, parent_vec));
-            while (angle > M_PI) angle -= 2 * M_PI;
-            glm::quat bone_rotation = glm::normalize(glm::angleAxis(angle, axis));
-
+            // Accumulate the bone rotations
             if (i == ctx->start) {
-                ctx->rot_limit[j].rotation = bone_rotation;
-                ctx->rot_limit[j].radius = glm::radians(1.f);
-            } else {
-                widen_constraint(ctx->rot_limit[j], bone_rotation);
+                ctx->rotation[j].first_rotation = bone_rotation;
+            }
+
+            if (glm::dot(ctx->rotation[j].first_rotation,
+                         bone_rotation) < 0.f)
+            {
+                bone_rotation = -bone_rotation;
+            }
+
+            ctx->rotation[j].cumulative_rotation[0] += bone_rotation.w;
+            ctx->rotation[j].cumulative_rotation[1] += bone_rotation.x;
+            ctx->rotation[j].cumulative_rotation[2] += bone_rotation.y;
+            ctx->rotation[j].cumulative_rotation[3] += bone_rotation.z;
+        }
+    }
+
+    pthread_exit(NULL);
+}
+
+static void*
+thread_stage2(void* userdata)
+{
+    ThreadContext* ctx = (ThreadContext*)userdata;
+
+    for (int i = ctx->start; i < ctx->end; i++) {
+        int joint_idx = i * ctx->ctx->n_joints * 3;
+
+        for (int j = 1; j < ctx->ctx->n_bones; ++j) {
+            Bone& bone = ctx->ctx->bones[j];
+
+            glm::quat bone_rotation = calc_bone_rotation(ctx->ctx, bone, joint_idx);
+            float diff = glm::angle(bone_rotation *
+                                    glm::inverse(ctx->ctx->avg_bone_rot[j-1]));
+            while (diff > M_PI) diff -= 2 * M_PI;
+            diff = fabsf(diff);
+
+            if (diff > ctx->rotation[j].radius) {
+                ctx->rotation[j].radius = diff;
             }
         }
     }
@@ -419,9 +386,9 @@ main(int argc, char** argv)
         thread_ctx[i].min_lengths = (float*)xcalloc(ctx.n_bones, sizeof(float));
         thread_ctx[i].mean_lengths = (float*)xcalloc(ctx.n_bones, sizeof(float));
         thread_ctx[i].max_lengths = (float*)xcalloc(ctx.n_bones, sizeof(float));
-        thread_ctx[i].rot_limit = (Rotation*)xcalloc(ctx.n_bones, sizeof(Rotation));
+        thread_ctx[i].rotation = (RotationData*)xcalloc(ctx.n_bones, sizeof(RotationData));
 
-        if (pthread_create(&threads[i], NULL, thread_body,
+        if (pthread_create(&threads[i], NULL, thread_stage1,
                            (void*)(&thread_ctx[i])) != 0)
         {
             fprintf(stderr, "Error creating thread\n");
@@ -449,8 +416,48 @@ main(int argc, char** argv)
             thread_ctx[0].mean_lengths[j] += thread_ctx[i].mean_lengths[j];
 
             if (j != 0) {
-                add_constraint(thread_ctx[0].rot_limit[j],
-                               thread_ctx[i].rot_limit[j]);
+                thread_ctx[0].rotation[j].cumulative_rotation +=
+                    thread_ctx[i].rotation[j].cumulative_rotation;
+            }
+        }
+    }
+
+    // Calculate the average bone rotations
+    float quat_scale = 1.f / ctx.n_sets;
+    for (int i = 1; i < ctx.n_bones; ++i) {
+        ctx.avg_bone_rot.push_back(glm::normalize(
+            glm::quat(thread_ctx[0].rotation[i].cumulative_rotation[0] * quat_scale,
+                      thread_ctx[0].rotation[i].cumulative_rotation[1] * quat_scale,
+                      thread_ctx[0].rotation[i].cumulative_rotation[2] * quat_scale,
+                      thread_ctx[0].rotation[i].cumulative_rotation[3] * quat_scale)));
+    }
+
+    // Run the second stage
+    for (int i = 0; i < ctx.n_threads; i++) {
+        if (pthread_create(&threads[i], NULL, thread_stage2,
+                           (void*)(&thread_ctx[i])) != 0)
+        {
+            fprintf(stderr, "Error creating thread\n");
+            return 1;
+        }
+    }
+
+    for (int i = 0; i < ctx.n_threads; i++) {
+        if (pthread_join(threads[i], NULL) != 0) {
+            fprintf(stderr, "Error joining thread, trying to continue...\n");
+        }
+
+        if (i == 0) {
+            continue;
+        }
+
+        // Determine the max radius
+        for (int j = 1; j < ctx.n_bones; ++j) {
+            if (thread_ctx[i].rotation[j].radius >
+                thread_ctx[0].rotation[j].radius)
+            {
+                thread_ctx[0].rotation[j].radius =
+                    thread_ctx[i].rotation[j].radius;
             }
         }
     }
@@ -488,17 +495,17 @@ main(int argc, char** argv)
         if (bone_id != 0) {
             JSON_Value* constraint = json_value_init_object();
             JSON_Value* rotation = json_value_init_object();
-            json_object_set_number(json_object(rotation), "x",
-                                   thread_ctx[0].rot_limit[bone_id].rotation.x);
-            json_object_set_number(json_object(rotation), "y",
-                                   thread_ctx[0].rot_limit[bone_id].rotation.y);
-            json_object_set_number(json_object(rotation), "z",
-                                   thread_ctx[0].rot_limit[bone_id].rotation.z);
             json_object_set_number(json_object(rotation), "w",
-                                   thread_ctx[0].rot_limit[bone_id].rotation.w);
+                                   ctx.avg_bone_rot[bone_id-1].w);
+            json_object_set_number(json_object(rotation), "x",
+                                   ctx.avg_bone_rot[bone_id-1].x);
+            json_object_set_number(json_object(rotation), "y",
+                                   ctx.avg_bone_rot[bone_id-1].y);
+            json_object_set_number(json_object(rotation), "z",
+                                   ctx.avg_bone_rot[bone_id-1].z);
             json_object_set_value(json_object(constraint), "rotation", rotation);
             json_object_set_number(json_object(constraint), "radius",
-                                   thread_ctx[0].rot_limit[bone_id].radius);
+                                   thread_ctx[0].rotation[bone_id].radius);
 
             json_object_set_value(bone_annotated, "rotation_constraint",
                                   constraint);
@@ -515,11 +522,11 @@ main(int argc, char** argv)
                    thread_ctx[0].min_lengths[bone_id],
                    thread_ctx[0].mean_lengths[bone_id],
                    thread_ctx[0].max_lengths[bone_id],
-                   thread_ctx[0].rot_limit[bone_id].rotation.x,
-                   thread_ctx[0].rot_limit[bone_id].rotation.y,
-                   thread_ctx[0].rot_limit[bone_id].rotation.z,
-                   thread_ctx[0].rot_limit[bone_id].rotation.w,
-                   glm::degrees(thread_ctx[0].rot_limit[bone_id].radius));
+                   ctx.avg_bone_rot[bone_id-1].x,
+                   ctx.avg_bone_rot[bone_id-1].y,
+                   ctx.avg_bone_rot[bone_id-1].z,
+                   ctx.avg_bone_rot[bone_id-1].w,
+                   glm::degrees(thread_ctx[0].rotation[bone_id].radius));
         }
 
         // Prime child objects
@@ -559,7 +566,7 @@ main(int argc, char** argv)
         xfree(thread_ctx[i].min_lengths);
         xfree(thread_ctx[i].mean_lengths);
         xfree(thread_ctx[i].max_lengths);
-        xfree(thread_ctx[i].rot_limit);
+        xfree(thread_ctx[i].rotation);
     }
     xfree(ctx.joints);
 
