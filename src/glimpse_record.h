@@ -32,14 +32,41 @@
 
 struct gm_recording;
 
+#ifndef __cplusplus
+extern "C" {
+#endif
+
 struct gm_recording *
 gm_recording_init(struct gm_logger *log,
                   struct gm_device *device,
                   const char *recordings_path,
                   const char *rel_path,
-                  bool overwrite);
+                  bool overwrite,
+                  uint64_t max_io_buffer_size,
+                  char **err);
 
-void gm_recording_save_frame(struct gm_recording *recording,
-                             struct gm_frame *frame);
+void gm_recording_append_frame(struct gm_recording *recording,
+                               struct gm_frame *frame);
 
-void gm_recording_close(struct gm_recording *recording);
+void
+gm_recording_stop(struct gm_recording *recording);
+
+bool
+gm_recording_is_stopped(struct gm_recording *recording);
+
+bool
+gm_recording_is_async_io_finished(struct gm_recording *recording);
+
+uint64_t
+gm_recording_get_io_buffer_size(struct gm_recording *recording);
+
+uint64_t
+gm_recording_get_max_io_buffer_size(struct gm_recording *recording);
+
+bool
+gm_recording_close(struct gm_recording *recording);
+
+
+#ifndef __cplusplus
+}
+#endif

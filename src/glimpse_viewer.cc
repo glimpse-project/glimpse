@@ -269,6 +269,7 @@ struct _Data
     std::vector<char *> recordings;
     std::vector<char *> recording_names;
     int selected_playback_recording;
+    float max_recording_io_buf_gb;
 
     struct gm_device *playback_device;
 
@@ -438,6 +439,24 @@ format_duration_s16(uint64_t duration_ns, char buf[16])
     return buf;
 }
 
+char *
+format_size_s16(uint64_t size_bytes, char buf[16])
+{
+    if (size_bytes > 1000000000) {
+        float gb = size_bytes / 1e9;
+        snprintf(buf, 16, "%.2fGB", gb);
+    } else if (size_bytes > 1000000) {
+        float mb = size_bytes / 1e6;
+        snprintf(buf, 16, "%.2fMB", mb);
+    } else if (size_bytes > 1000) {
+        float kb = size_bytes / 1e3;
+        snprintf(buf, 16, "%.2fKB", kb);
+    } else {
+        snprintf(buf, 16, "%d bytes", (int)size_bytes);
+    }
+
+    return buf;
+}
 static void
 make_readable_name(const char *symbolic_name,
                    char *readable_dst,
@@ -1113,12 +1132,25 @@ draw_target_controls(Data *data)
 static void
 draw_playback_controls(Data *data)
 {
-    if (ImGui::Button(data->recording ? "Stop" : "Record")) {
-        if (data->recording) {
-            gm_recording_close(data->recording);
-            data->recording = NULL;
-            index_recordings(data);
-        } else if (!data->playback_device) {
+    if (data->recording) {
+        if (gm_recording_is_stopped(data->recording)) {
+            if (gm_recording_is_async_io_finished(data->recording)) {
+                struct gm_recording *recording = data->recording;
+                data->recording = NULL;
+                if (!gm_recording_close(recording)) {
+                    gm_error(data->log, "Note: recording_close returned failure status");
+                }
+                index_recordings(data);
+            } else {
+                ImGui::TextDisabled("Waiting for IO to finish");
+            }
+        } else {
+            if (ImGui::Button("Stop")) {
+                gm_recording_stop(data->recording);
+            }
+        }
+    } else if (!data->playback_device) {
+        if (ImGui::Button("Record")) {
             const char *rel_path = NULL;
             bool overwrite = false;
             if (data->overwrite_recording && data->recordings.size()) {
@@ -1126,13 +1158,21 @@ draw_playback_controls(Data *data)
                 overwrite = true;
             }
 
+            char *err = NULL;
             data->recording = gm_recording_init(data->log,
                                                 data->recording_device,
                                                 glimpse_recordings_path,
                                                 rel_path,
-                                                overwrite);
+                                                overwrite,
+                                                data->max_recording_io_buf_gb * 1e9,
+                                                &err);
+            if (!data->recording) {
+                gm_error(data->log, "Failed to start recording: %s", err);
+                xfree(err);
+            }
         }
     }
+
     ImGui::SameLine();
     if (ImGui::Button(data->playback_device ?
                       "Unload###load_record" : "Load###load_record") &&
@@ -1195,6 +1235,26 @@ draw_playback_controls(Data *data)
     }
 
     ImGui::Checkbox("Track while recording", &data->track_while_recording);
+
+    if (data->recording) {
+        uint64_t io_buf_size = gm_recording_get_io_buffer_size(data->recording);
+        uint64_t max_io_buf_size = gm_recording_get_max_io_buffer_size(data->recording);
+        char size_s16[16];
+        format_size_s16(io_buf_size, size_s16);
+        char buf[32];
+        float fraction = (double)io_buf_size / (double)max_io_buf_size;
+        xsnprintf(buf, sizeof(buf), "%3.f%%/%s", (fraction * 100.f), size_s16);
+
+        ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), buf);
+    } else {
+        ImGui::SliderFloat("Recording RAM Buffer Size (GB)",
+                           &data->max_recording_io_buf_gb,
+                           1, 8);
+#if TARGET_OS_IOS == 1
+        if (data->max_recording_io_buf_gb > 0.7)
+            ImGui::TextDisabled("NB: iOS may kill iPhone X apps using > 1.39GB of RAM");
+#endif
+    }
 
     if (data->playback_device) {
         struct gm_ui_properties *props =
@@ -2342,8 +2402,8 @@ handle_device_frame_updates(Data *data)
             upload_video_texture = true;
         }
 
-        if (data->recording) {
-            gm_recording_save_frame(data->recording, device_frame);
+        if (data->recording && !gm_recording_is_stopped(data->recording)) {
+            gm_recording_append_frame(data->recording, device_frame);
         }
 
         gm_frame_unref(device_frame);
@@ -3574,6 +3634,8 @@ viewer_init(Data *data)
         free(catch_err);
         catch_err = NULL;
     }
+
+    data->max_recording_io_buf_gb = 0.7;
 
     if (!data->recording_device) {
         config.type = GM_DEVICE_NULL;
