@@ -658,6 +658,7 @@ struct gm_context
     int codeword_obj_min_n;
     float codeword_obj_max_frame_to_n_ratio;
     float codeword_timeout;
+    int debug_codebook_layer;
 
     int inf_res;
     bool use_threads;
@@ -3292,6 +3293,7 @@ static void
 add_debug_cloud_xyz_from_codebook(struct gm_context *ctx,
                                   struct gm_tracking_impl *tracking,
                                   std::vector<std::vector<struct seg_codeword>> &seg_codebook,
+                                  std::vector<struct seg_codeword *> &seg_codebook_bg,
                                   struct gm_intrinsics *intrinsics)
 {
     std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
@@ -3305,14 +3307,24 @@ add_debug_cloud_xyz_from_codebook(struct gm_context *ctx,
     const float cx = intrinsics->cx;
     const float cy = intrinsics->cy;
 
+    int debug_layer = ctx->debug_codebook_layer;
+
     foreach_xy_off(width, height) {
         std::vector<struct seg_codeword> &codewords = seg_codebook[off];
         struct gm_point_rgba point;
 
         point.rgba = 0xffffffff;
 
-        for (unsigned i = 0; i < codewords.size(); i++) {
+        for (int i = 0; i < (int)codewords.size(); i++) {
             struct seg_codeword &codeword = codewords[i];
+
+            if (debug_layer < 0) {
+                if (i != (codewords.size() + debug_layer))
+                    continue;
+            } else if (debug_layer > 0) {
+                if (i != (debug_layer - 1))
+                    continue;
+            }
 
             point.z = codeword.mean;
 
@@ -3322,6 +3334,9 @@ add_debug_cloud_xyz_from_codebook(struct gm_context *ctx,
              * extend upwards...
              */
             point.y = -((y - cy) * point.z * inv_fy);
+
+            if (&codeword == seg_codebook_bg[off])
+                point.rgba = 0xff0000ff;
 
             debug_cloud.push_back(point);
         }
@@ -4103,8 +4118,8 @@ stage_codebook_resolve_background_debug_cb(struct gm_tracking_impl *tracking,
         add_debug_cloud_xyz_from_codebook(ctx,
                                           tracking,
                                           *state->seg_codebook,
+                                          ctx->seg_codebook_bg,
                                           &tracking->debug_cloud_intrinsics);
-        colour_debug_cloud(ctx, state, tracking, NULL);
     }
 }
 
@@ -7877,6 +7892,17 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "codebook_resolve_bg";
         stage.desc = "Determine canonical background codewords plus prune old codewords";
+
+        ctx->debug_codebook_layer = 0;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "debug_codebook_layer";
+        prop.desc = "If != 0 then only show the Nth (base 1) codeword for each codebook entry (positive counts from nearest, negative counts from farthest)";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->debug_codebook_layer;
+        prop.int_state.min = -15;
+        prop.int_state.max = 15;
+        stage.properties.push_back(prop);
 
         ctx->codebook_debug_view = CODEBOOK_DEBUG_VIEW_POINT_CLOUD;
         prop = gm_ui_property();
