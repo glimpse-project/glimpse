@@ -169,7 +169,7 @@ using Random = effolkronium::random_thread_local;
 
 #endif
 
-#define TRACK_FRAMES 6
+#define TRACK_FRAMES 12
 
 enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_NONE,
