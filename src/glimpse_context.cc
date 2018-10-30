@@ -352,6 +352,10 @@ struct gm_bone_info
     float min_length;
     float mean_length;
     float max_length;
+
+    bool has_rotation_constraint;
+    glm::quat avg_rotation; // Average bone rotation
+    float max_radius;       // Maximum variance from average rotation
 };
 
 struct gm_bone
@@ -733,6 +737,7 @@ struct gm_context
     bool joint_position_sanitisation;
     bool bone_length_sanitisation;
     bool bone_rotation_sanitisation;
+    bool use_bone_map_annotation;
 
     float joint_move_threshold;
     float parent_joint_outlier_factor;
@@ -1591,6 +1596,43 @@ interpolate_joints(struct gm_joint &a, struct gm_joint &b, float t,
     out.z = a.z + (b.z - a.z) * t;
 }
 
+static bool
+is_bone_length_valid(struct gm_context *ctx,
+                     struct gm_bone &bone,
+                     float avg_bone_length)
+{
+    if (ctx->use_bone_map_annotation) {
+        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
+        if (bone.length < bone_info.min_length ||
+            bone.length > bone_info.max_length) {
+            return false;
+        }
+    }
+    float bone_length_factor = (bone.length > avg_bone_length) ?
+        bone.length / avg_bone_length : avg_bone_length / bone.length;
+
+    return bone_length_factor <= ctx->bone_length_outlier_factor;
+}
+
+static bool
+is_bone_rotation_valid(struct gm_context *ctx,
+                       struct gm_bone &bone)
+{
+    if (ctx->use_bone_map_annotation) {
+        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
+        if (bone_info.has_rotation_constraint) {
+            float diff = glm::angle(bone.angle *
+                                    glm::inverse(bone_info.avg_rotation));
+            while (diff > M_PI) diff -= 2 * M_PI;
+            if (fabsf(diff) > bone_info.max_radius) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
 static void
 sanitise_skeleton(struct gm_context *ctx,
                   struct gm_skeleton &skeleton,
@@ -1696,33 +1738,26 @@ sanitise_skeleton(struct gm_context *ctx,
 
             // Find the average length for this bone and see if this new length
             // conforms.
-            float bone_lengths[ctx->n_tracking];
             float avg_bone_length = bone.length;
-            int n_lengths = 1;
             for (int i = 0; i < ctx->n_tracking; ++i) {
                 const struct gm_bone &prev_bone =
                     prev[i]->skeleton.bones[bone.idx];
-                bone_lengths[i] = prev_bone.length;
                 avg_bone_length += prev_bone.length;
-                ++n_lengths;
             }
-            avg_bone_length /= n_lengths;
+            avg_bone_length /= ctx->n_tracking;
 
-            float bone_length_factor = (bone.length > avg_bone_length) ?
-                bone.length / avg_bone_length : avg_bone_length / bone.length;
-            if (bone_length_factor > ctx->bone_length_outlier_factor) {
+            if (!is_bone_length_valid(ctx, bone, avg_bone_length)) {
                 for (int i = 0; i < ctx->n_tracking; ++i) {
-                    bone_length_factor = (bone_lengths[i] > avg_bone_length) ?
-                        bone_lengths[i] / avg_bone_length :
-                        avg_bone_length / bone_lengths[i];
-                    if (bone_length_factor > ctx->bone_length_outlier_factor) {
+                    struct gm_bone &prev_bone =
+                        prev[i]->skeleton.bones[bone.idx];
+                    if (!is_bone_length_valid(ctx, prev_bone, avg_bone_length)) {
                         continue;
                     }
 
                     // Modify the tail position of this bone so that it's the
                     // same length as the same bone in tracking history that
                     // we've deemed to be valid.
-                    float new_length = bone_lengths[i];
+                    float new_length = prev_bone.length;
 
                     gm_debug(ctx->log,
                              "Bone (%s->%s) average length: %.2f, "
@@ -1765,6 +1800,21 @@ sanitise_skeleton(struct gm_context *ctx,
         // change. If it exceeds it by too much, use the last rotation that
         // doesn't exceed this value.
 
+        // Record which bones were derived from valid joints
+        // If bone-map-annotation is being used, record bones as invalid if
+        // their rotation doesn't lie within the annotated rotation constraints.
+        bool bone_validity[ctx->n_tracking];
+        for (int i = 0; i < ctx->n_tracking; ++i) {
+            if (!prev[i]->skeleton.joints[bone_info.head].valid ||
+                !prev[i]->skeleton.joints[bone_info.tail].valid)
+            {
+                bone_validity[i] = false;
+            } else {
+                struct gm_bone &prev_bone = prev[i]->skeleton.bones[bone.idx];
+                bone_validity[i] = is_bone_rotation_valid(ctx, prev_bone);
+            }
+        }
+
         // Find the average rotation change magnitude
         float bone_rots[ctx->n_tracking - 1];
         float bone_rot = fabsf(bone_angle_diff(ctx,
@@ -1774,10 +1824,7 @@ sanitise_skeleton(struct gm_context *ctx,
         float avg_bone_rot = bone_rot;
         int n_rots = 1;
         for (int i = 0; i < ctx->n_tracking - 1; ++i) {
-            if (!prev[i]->skeleton.joints[bone_info.head].valid ||
-                !prev[i]->skeleton.joints[bone_info.tail].valid ||
-                !prev[i+1]->skeleton.joints[bone_info.head].valid ||
-                !prev[i+1]->skeleton.joints[bone_info.tail].valid)
+            if (!bone_validity[i] || !bone_validity[i + 1])
             {
               bone_rots[i] = 180.f;
               continue;
@@ -1817,9 +1864,9 @@ sanitise_skeleton(struct gm_context *ctx,
 
         float bone_rot_factor = avg_bone_rot *
             ctx->bone_rotation_outlier_factor;
-        if (bone_rot > bone_rot_factor) {
+        if (bone_rot > bone_rot_factor || !is_bone_rotation_valid(ctx, bone)) {
             for (int i = 0; i < ctx->n_tracking; ++i) {
-                if (bone_rots[i] > bone_rot_factor) {
+                if (bone_rots[i] > bone_rot_factor || !bone_validity[i]) {
                     continue;
                 }
 
@@ -7187,6 +7234,19 @@ parse_bone_info(struct gm_context *ctx,
     info.mean_length = (float)json_object_get_number(bone, "mean_length");
     info.max_length = (float)json_object_get_number(bone, "max_length");
 
+    if (json_object_has_value(bone, "rotation_constraint")) {
+        info.has_rotation_constraint = true;
+        JSON_Object *constraint =
+            json_object_get_object(bone, "rotation_constraint");
+        JSON_Object *rotation = json_object_get_object(constraint, "rotation");
+        info.avg_rotation = glm::quat(
+            json_object_get_number(rotation, "w"),
+            json_object_get_number(rotation, "x"),
+            json_object_get_number(rotation, "y"),
+            json_object_get_number(rotation, "z"));
+        info.max_radius = json_object_get_number(constraint, "radius");
+    }
+
     ctx->bone_info.push_back(info);
 
     JSON_Array *children = json_object_get_array(bone, "children");
@@ -7707,6 +7767,16 @@ gm_context_new(struct gm_logger *logger, char **err)
                 "between previous tracked frames, use a previous length.";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->bone_rotation_sanitisation;
+    ctx->properties.push_back(prop);
+
+    ctx->use_bone_map_annotation = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "use_bone_map_annotation";
+    prop.desc = "Use bone map annotations during sanitisation to determine "
+                "if bones are likely to be realistic inferences.";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->use_bone_map_annotation;
     ctx->properties.push_back(prop);
 
     ctx->skeleton_validation = true;
