@@ -885,6 +885,8 @@ static void
 update_target_skeleton_wireframe_gl_bos(Data *data,
                                         struct gm_skeleton *ref_skeleton)
 {
+    data->target_skel_gl.n_bones = 0;
+
     if (!data->target ||
         gm_target_get_n_frames(data->target) == 0)
     {
@@ -960,7 +962,12 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
 static bool
 update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
 {
-    if (!data->latest_tracking) {
+    data->skel_gl.n_bones = 0;
+    data->target_skel_gl.n_bones = 0;
+
+    if (!data->latest_tracking ||
+        !gm_tracking_was_successful(data->latest_tracking))
+    {
         return false;
     }
 
