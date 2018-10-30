@@ -652,6 +652,7 @@ struct gm_context
 
     float codebook_bg_threshold;
     float codebook_flat_threshold;
+    float codebook_clear_tracked_threshold;
     int codeword_mean_n_max;
     int codeword_flicker_max_run_len;
     int codeword_flicker_max_quiet_frames;
@@ -5042,6 +5043,8 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 
     int seg_res = state->seg_res;
 
+    float clear_tracked_threshold = ctx->codebook_clear_tracked_threshold;
+
     glm::mat4 to_start = state->to_start;
     glm::mat4 to_codebook = state->start_to_codebook;
 
@@ -5087,15 +5090,10 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 
                 float dist = fabsf(depth - candidate.mean);
 
-                /* XXX: It would probably be reasonable to use a larger
-                 * threshold for clearing codewords that clash with tracked
-                 * foreground points - maybe +15cm behind point and 5cm in
-                 * front.
-                 *
-                 * Note: we don't typically expect many codewords so don't
+                /* Note: we don't typically expect many codewords so don't
                  * expect array removal to really be a significant cost
                  */
-                if (dist < ctx->codebook_bg_threshold) {
+                if (dist < clear_tracked_threshold) {
                     codewords.erase(codewords.begin() + i);
                 } else
                     i++;
@@ -8375,6 +8373,17 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "update_codebook";
         stage.desc = "Update the codebook state ready for processing motion of future frames";
+
+        ctx->codebook_clear_tracked_threshold = 0.15f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_clear_tracked_threshold";
+        prop.desc = "The depth distance threshold (meters) to use when clearing codewords corresponding to tracked points";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codebook_clear_tracked_threshold;
+        prop.float_state.min = 0.0f;
+        prop.float_state.max = 1.0f;
+        stage.properties.push_back(prop);
 
         // XXX: this an alias of a property set up earlier...
         prop = gm_ui_property();
