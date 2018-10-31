@@ -666,6 +666,7 @@ struct gm_context
     float codebook_flat_threshold;
     float codebook_clear_tracked_threshold;
     float codebook_keep_back_most_threshold;
+    float codebook_cluster_tolerance;
     int codeword_mean_n_max;
     int codeword_flicker_max_run_len;
     int codeword_flicker_max_quiet_frames;
@@ -4455,7 +4456,7 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
     LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
         new LabelComparator<pcl::PointXYZL>);
     label_cluster->setInputCloud(tracking->downsampled_cloud);
-    label_cluster->setDepthThreshold(ctx->cluster_tolerance);
+    label_cluster->setDepthThreshold(ctx->codebook_cluster_tolerance);
 
     tracking->cluster_labels =
         pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
@@ -8273,16 +8274,29 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    tracking_create_rgb_candidate_clusters,
                                });
 
-        ctx->cluster_tolerance = 0.10f;
+        ctx->codebook_cluster_tolerance = 0.10f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "cb_cluster_tolerance";
-        prop.desc = "Distance threshold when clustering points";
+        prop.name = "cluster_tolerance";
+        prop.desc = "Distance threshold when clustering classified points";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_tolerance;
+        prop.float_state.ptr = &ctx->codebook_cluster_tolerance;
         prop.float_state.min = 0.01f;
         prop.float_state.max = 0.5f;
         stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_FILTER_CLUSTERS;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "filter_clusters";
+        stage.desc = "Filter plausible person clusters";
 
         ctx->cluster_min_width = 0.15f;
         prop = gm_ui_property();
@@ -8349,19 +8363,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.min = 0.5f;
         prop.float_state.max = 3.0f;
         stage.properties.push_back(prop);
-
-        stage.properties_state.n_properties = stage.properties.size();
-        stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
-    }
-
-    {
-        enum tracking_stage stage_id = TRACKING_STAGE_FILTER_CLUSTERS;
-        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
-
-        stage.stage_id = stage_id;
-        stage.name = "filter_clusters";
-        stage.desc = "Filter plausible person clusters";
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
