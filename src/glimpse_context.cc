@@ -4888,7 +4888,7 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
 
 static void
 stage_project_clusters_cb(struct gm_tracking_impl *tracking,
-                         struct pipeline_scratch_state *state)
+                          struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
     int seg_res = state->seg_res;
@@ -4900,9 +4900,12 @@ stage_project_clusters_cb(struct gm_tracking_impl *tracking,
 
     std::vector<pcl::PointIndices> &persons = state->persons;
 
+    float bg_depth = ctx->decision_trees[0]->header.bg_depth;
+    gm_assert(ctx->log, !std::isnan(bg_depth),
+              "Spurious NaN background value specified in decision tree header");
+
     for (auto &person : persons) {
         float *depth_img = (float *)xmalloc(width * height * sizeof(float));
-        float bg_depth = ctx->decision_trees[0]->header.bg_depth;
         for (int i = 0; i < width * height; ++i) {
             depth_img[i] = bg_depth;
         }
@@ -4912,17 +4915,22 @@ stage_project_clusters_cb(struct gm_tracking_impl *tracking,
             int ly = idx / tracking->downsampled_cloud->width;
             for (int hy = (int)(ly * seg_res), ey = 0;
                  hy < (int)tracking->depth_cloud->height && ey < seg_res;
-                 ++hy, ++ey) {
+                 ++hy, ++ey)
+            {
                 for (int hx = (int)(lx * seg_res), ex = 0;
                      hx < (int)tracking->depth_cloud->width &&
                      ex < seg_res;
-                     ++hx, ++ex) {
+                     ++hx, ++ex)
+                {
                     int off = hy * tracking->depth_cloud->width + hx;
 
                     // Reproject this point into training camera space
                     glm::vec3 point_t(tracking->depth_cloud->points[off].x,
                                       tracking->depth_cloud->points[off].y,
                                       tracking->depth_cloud->points[off].z);
+
+                    if (std::isnan(point_t.z))
+                        continue;
 
                     int x = (int)
                         ((point_t.x * tracking->training_camera_intrinsics.fx /
