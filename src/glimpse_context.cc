@@ -9493,6 +9493,11 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
         struct gm_bone &bone = closest_skeleton.bones[b];
         struct gm_bone_info &bone_info = ctx->bone_info[b];
 
+        if (!frame2->skeleton_corrected.bones[b].valid ||
+            !frame1->skeleton_corrected.bones[b].valid) {
+            continue;
+        }
+
         // As a special case; use linear interpolation to place the root bone
         if (bone_info.parent < 0 ||
             ctx->prediction_interpolate_angles == false)
@@ -9538,6 +9543,8 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
         prediction->skeleton.joints[bone_info.tail].y = new_tail.y;
         prediction->skeleton.joints[bone_info.tail].z = new_tail.z;
     }
+
+    update_bones(ctx, prediction->skeleton);
 
     return &prediction->base;
 }

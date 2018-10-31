@@ -1012,6 +1012,8 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
             const struct gm_joint *head = gm_skeleton_get_joint(skeleton, head_idx);
             int tail_idx = gm_bone_get_tail(data->ctx, bone);
             const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
+            gm_assert(data->log, head && tail, "Valid bone with invalid joints!");
+
             int pos = data->skel_gl.n_bones;
             XYZRGBA head_rgba = {
                 head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
