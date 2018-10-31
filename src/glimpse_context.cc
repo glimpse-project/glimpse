@@ -8051,7 +8051,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         ctx->codebook_clear_timeout = 3.0f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "codebook_foreground_scrub_timeout";
+        prop.name = "codebook_clear_timeout";
         prop.desc = "If we haven't tracked for this long (seconds) then try clearing the full codebook";
         prop.type = GM_PROPERTY_FLOAT;
         prop.float_state.ptr = &ctx->codebook_clear_timeout;
@@ -8592,18 +8592,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.min = 0.0f;
         prop.float_state.max = 1.0f;
         stage.properties.push_back(prop);
-
-        ctx->codebook_keep_back_most_threshold = 0.2f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "codebook_keep_back_most_threshold";
-        prop.desc = "When tracking fails we throw away all but the farthest codewords, within a threshold band this deep";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->codebook_keep_back_most_threshold;
-        prop.float_state.min = 0.0f;
-        prop.float_state.max = 1.0f;
-        stage.properties.push_back(prop);
-
 
         // XXX: this an alias of a property set up earlier...
         prop = gm_ui_property();
