@@ -740,7 +740,7 @@ struct gm_context
     bool use_bone_map_annotation;
 
     float joint_move_threshold;
-    float parent_joint_outlier_factor;
+    float joint_outlier_factor;
     float bone_length_outlier_factor;
     float bone_rotation_outlier_factor;
 
@@ -1634,43 +1634,36 @@ is_bone_rotation_valid(struct gm_context *ctx,
 }
 
 static void
-sanitise_skeleton(struct gm_context *ctx,
-                  struct gm_skeleton &skeleton,
-                  uint64_t timestamp,
-                  int parent_head = 0)
+sanitise_joint_positions(struct gm_context *ctx,
+                         struct gm_skeleton &skeleton,
+                         uint64_t timestamp,
+                         int parent_head)
 {
-    if (!ctx->n_tracking) {
+    if (!ctx->parent_bone_sanitisation && !ctx->joint_position_sanitisation) {
         return;
     }
-
-    // Cap the time distance used when making time-based extrapolations.
-    struct gm_tracking_impl **prev = ctx->tracking_history;
-
-    // XXX: we probably shouldn't share prediction-related state for this
-    timestamp = calculate_decayed_timestamp(
-        prev[0]->frame->timestamp, timestamp,
-        ctx->max_prediction_delta, ctx->prediction_decay);
 
     // We process the skeleton with regards to the 'parent' joint. At the
     // parent, we just have absolute position to look at, so we make sure it
     // hasn't moved too far too quickly and use the last good position if it
     // has.
+    struct gm_tracking_impl **prev = ctx->tracking_history;
+    bool changed = false;
+
     for (int b = 0; b <= ctx->n_bones; ++b) {
-        // When b == 0, look at the parent joint, when b > 0, look at the
-        // tails of the bones that have the parent head.
+        // When b == 0, look at the parent joint.
         int joint = parent_head;
-        if (b == 0) {
-            if (!ctx->parent_bone_sanitisation &&
-                !ctx->joint_position_sanitisation) {
-                continue;
-            }
-        } else {
+        if (b != 0) {
+            // When b > 0, look at the tail of bone b - 1. If we're only doing
+            // parent bone sanitisation, we only look at bones whose head is
+            // the parent joint.
             struct gm_bone_info &bone = ctx->bone_info[b - 1];
-            if (!ctx->joint_position_sanitisation ||
-                (ctx->parent_bone_sanitisation && bone.head != parent_head)) {
+            if (ctx->joint_position_sanitisation ||
+                (ctx->parent_bone_sanitisation && bone.head == parent_head)) {
+                joint = bone.tail;
+            } else {
                 continue;
             }
-            joint = bone.tail;
         }
 
         struct gm_joint &parent_joint = skeleton.joints[joint];
@@ -1708,7 +1701,7 @@ sanitise_skeleton(struct gm_context *ctx,
 
         // If this point is an outlier, use the last non-outlier position
         float outlier_threshold = avg_displacement *
-            ctx->parent_joint_outlier_factor;
+            ctx->joint_outlier_factor;
         if (distance > outlier_threshold) {
             for (int j = 0; j < ctx->n_tracking - 1; ++j) {
                 if (displacements[j] <= outlier_threshold) {
@@ -1717,6 +1710,7 @@ sanitise_skeleton(struct gm_context *ctx,
                              ctx->joint_names[joint],
                              avg_displacement, distance, displacements[j]);
                     parent_joint = prev[j]->skeleton.joints[joint];
+                    changed = true;
                     break;
                 }
             }
@@ -1724,69 +1718,95 @@ sanitise_skeleton(struct gm_context *ctx,
     }
 
     // Update the bone metadata
-    update_bones(ctx, skeleton);
+    if (changed) {
+        update_bones(ctx, skeleton);
+    }
+}
+
+static void
+sanitise_bone_lengths(struct gm_context *ctx,
+                      struct gm_skeleton &skeleton,
+                      uint64_t timestamp)
+{
+    if (!ctx->bone_length_sanitisation) {
+        return;
+    }
+
+    struct gm_tracking_impl **prev = ctx->tracking_history;
 
     for (auto &bone : skeleton.bones) {
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
         struct gm_joint &head = skeleton.joints[bone_info.head];
         struct gm_joint &tail = skeleton.joints[bone_info.tail];
 
-        if (ctx->bone_length_sanitisation) {
-            // Look at the length of each bone and the average length of that
-            // bone in tracking history. If it deviates too far from the mean,
-            // use the last non-outlier length.
+        // Look at the length of each bone and the average length of that
+        // bone in tracking history. If it deviates too far from the mean,
+        // use the last non-outlier length.
 
-            // Find the average length for this bone and see if this new length
-            // conforms.
-            float avg_bone_length = bone.length;
+        // Find the average length for this bone and see if this new length
+        // conforms.
+        float avg_bone_length = bone.length;
+        for (int i = 0; i < ctx->n_tracking; ++i) {
+            const struct gm_bone &prev_bone =
+                prev[i]->skeleton.bones[bone.idx];
+            avg_bone_length += prev_bone.length;
+        }
+        avg_bone_length /= ctx->n_tracking;
+
+        if (!is_bone_length_valid(ctx, bone, avg_bone_length)) {
             for (int i = 0; i < ctx->n_tracking; ++i) {
-                const struct gm_bone &prev_bone =
+                struct gm_bone &prev_bone =
                     prev[i]->skeleton.bones[bone.idx];
-                avg_bone_length += prev_bone.length;
-            }
-            avg_bone_length /= ctx->n_tracking;
-
-            if (!is_bone_length_valid(ctx, bone, avg_bone_length)) {
-                for (int i = 0; i < ctx->n_tracking; ++i) {
-                    struct gm_bone &prev_bone =
-                        prev[i]->skeleton.bones[bone.idx];
-                    if (!is_bone_length_valid(ctx, prev_bone, avg_bone_length)) {
-                        continue;
-                    }
-
-                    // Modify the tail position of this bone so that it's the
-                    // same length as the same bone in tracking history that
-                    // we've deemed to be valid.
-                    float new_length = prev_bone.length;
-
-                    gm_debug(ctx->log,
-                             "Bone (%s->%s) average length: %.2f, "
-                             "correction: %.2f -> %.2f",
-                             ctx->joint_names[bone_info.head],
-                             ctx->joint_names[bone_info.tail],
-                             avg_bone_length, bone.length, new_length);
-
-                    glm::vec3 new_tail =
-                        glm::vec3(head.x, head.y, head.z) +
-                        (glm::normalize(
-                             glm::vec3(tail.x - head.x,
-                                       tail.y - head.y,
-                                       tail.z - head.z)) * new_length);
-
-                    tail.x = new_tail.x;
-                    tail.y = new_tail.y;
-                    tail.z = new_tail.z;
-
-                    // Refresh bone info now the joint has changed
-                    update_bones(ctx, skeleton);
-                    break;
+                if (!is_bone_length_valid(ctx, prev_bone, avg_bone_length)) {
+                    continue;
                 }
+
+                // Modify the tail position of this bone so that it's the
+                // same length as the same bone in tracking history that
+                // we've deemed to be valid.
+                float new_length = prev_bone.length;
+
+                gm_debug(ctx->log,
+                         "Bone (%s->%s) average length: %.2f, "
+                         "correction: %.2f -> %.2f",
+                         ctx->joint_names[bone_info.head],
+                         ctx->joint_names[bone_info.tail],
+                         avg_bone_length, bone.length, new_length);
+
+                glm::vec3 new_tail =
+                    glm::vec3(head.x, head.y, head.z) +
+                    (glm::normalize(
+                         glm::vec3(tail.x - head.x,
+                                   tail.y - head.y,
+                                   tail.z - head.z)) * new_length);
+
+                tail.x = new_tail.x;
+                tail.y = new_tail.y;
+                tail.z = new_tail.z;
+
+                // Refresh bone info now the joint has changed
+                update_bones(ctx, skeleton);
+                break;
             }
         }
+    }
+}
 
-        if (!ctx->bone_rotation_sanitisation) {
-            continue;
-        }
+static void
+sanitise_bone_rotations(struct gm_context *ctx,
+                        struct gm_skeleton &skeleton,
+                        uint64_t timestamp)
+{
+    if (!ctx->bone_rotation_sanitisation) {
+        return;
+    }
+
+    struct gm_tracking_impl **prev = ctx->tracking_history;
+
+    for (auto &bone : skeleton.bones) {
+        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
+        struct gm_joint &head = skeleton.joints[bone_info.head];
+        struct gm_joint &tail = skeleton.joints[bone_info.tail];
 
         // If this bone has no parent bone, we can't correct its angle
         int parent_bone_idx = bone_info.parent;
@@ -1905,6 +1925,133 @@ sanitise_skeleton(struct gm_context *ctx,
         }
     }
 }
+
+static void
+sanitise_skeleton(struct gm_context *ctx,
+                  struct gm_skeleton &skeleton,
+                  uint64_t timestamp,
+                  int parent_head = 0)
+{
+    // We can't do any sanitisation without any tracking history
+    if (!ctx->n_tracking) {
+        return;
+    }
+
+    // Cap the time distance used when making time-based extrapolations.
+    struct gm_tracking_impl **prev = ctx->tracking_history;
+
+    // XXX: we probably shouldn't share prediction-related state for this
+    timestamp = calculate_decayed_timestamp(
+        prev[0]->frame->timestamp, timestamp,
+        ctx->max_prediction_delta, ctx->prediction_decay);
+
+    sanitise_joint_positions(ctx, skeleton, timestamp, parent_head);
+    sanitise_bone_lengths(ctx, skeleton, timestamp);
+    sanitise_bone_rotations(ctx, skeleton, timestamp);
+}
+
+template<typename PointT>
+class PlaneComparator: public pcl::Comparator<PointT>
+{
+  public:
+    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
+    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
+        PointCloudConstPtr;
+
+    typedef boost::shared_ptr<PlaneComparator<PointT>> Ptr;
+    typedef boost::shared_ptr<const PlaneComparator<PointT>> ConstPtr;
+
+    using pcl::Comparator<PointT>::input_;
+
+    PlaneComparator()
+      : coeffs_(0.f, 1.f, 0.f, 1.f),
+        distance_threshold_(0.03f) {
+    }
+
+    virtual
+    ~PlaneComparator() {
+    }
+
+    inline void
+    setPlaneCoefficients(Eigen::Vector4f &coeffs) {
+        coeffs_ = coeffs;
+    }
+
+    inline Eigen::Vector4f &
+    getPlaneCoefficients() {
+        return coeffs_;
+    }
+
+    inline void
+    setDistanceThreshold(float distance_threshold) {
+        distance_threshold_ = distance_threshold;
+    }
+
+    inline float
+    getDistanceThreshold() const {
+        return distance_threshold_;
+    }
+
+    virtual bool
+    compare (int idx1, int idx2) const {
+        Eigen::Vector4f e_pt(input_->points[idx1].x,
+                             input_->points[idx1].y,
+                             input_->points[idx1].z, 1.f);
+        return coeffs_.dot(e_pt) < distance_threshold_;
+    }
+
+  protected:
+    Eigen::Vector4f coeffs_;
+    float distance_threshold_;
+};
+
+template<typename PointT>
+class LabelComparator: public pcl::Comparator<PointT>
+{
+  public:
+    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
+    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
+        PointCloudConstPtr;
+
+    typedef boost::shared_ptr<LabelComparator<PointT>> Ptr;
+    typedef boost::shared_ptr<const LabelComparator<PointT>> ConstPtr;
+
+    using pcl::Comparator<PointT>::input_;
+
+    LabelComparator()
+      : depth_threshold_(0.03f) {
+    }
+
+    virtual
+    ~LabelComparator() {
+    }
+
+    inline void
+    setDepthThreshold(float depth_threshold) {
+        depth_threshold_ = depth_threshold;
+    }
+
+    inline float
+    getDepthThreshold() const {
+        return depth_threshold_;
+    }
+
+    virtual bool
+    compare (int idx1, int idx2) const {
+        if ((input_->points[idx1].label == CODEBOOK_CLASS_FLICKERING ||
+             input_->points[idx1].label == CODEBOOK_CLASS_FOREGROUND) &&
+            (input_->points[idx2].label == CODEBOOK_CLASS_FLICKERING ||
+             input_->points[idx2].label == CODEBOOK_CLASS_FOREGROUND)) {
+            return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
+                depth_threshold_;
+        }
+
+        return false;
+    }
+
+  protected:
+    float depth_threshold_;
+};
 
 /* TODO: combine the to_start and to_codebook matrices
  */
@@ -8749,14 +8896,14 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.max = 3.0f;
         stage.properties.push_back(prop);
 
-        ctx->parent_joint_outlier_factor = 2.0f;
+        ctx->joint_outlier_factor = 2.0f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "parent_joint_outlier_factor";
-        prop.desc = "The factor by which a parent joint position can deviate "
+        prop.name = "joint_outlier_factor";
+        prop.desc = "The factor by which a joint position can deviate "
                     "from the average variation before being ignored";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->parent_joint_outlier_factor;
+        prop.float_state.ptr = &ctx->joint_outlier_factor;
         prop.float_state.min = 1.0f;
         prop.float_state.max = 5.0f;
         stage.properties.push_back(prop);
