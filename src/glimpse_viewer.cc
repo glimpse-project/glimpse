@@ -3609,7 +3609,8 @@ viewer_init(Data *data)
 #ifdef USE_TANGO
     config.type = GM_DEVICE_TANGO;
 #elif TARGET_OS_IOS == 1
-    config.type = GM_DEVICE_AVF;
+    config.type = GM_DEVICE_AVF_TRUEDEPTH_FRONT;
+    //config.type = GM_DEVICE_AVF_DUAL_BACK;
 #else
     config.type = device_type_opt;
     char rec_path[1024];
@@ -3656,7 +3657,8 @@ viewer_init(Data *data)
     }
 
     if (config.type == GM_DEVICE_TANGO ||
-        config.type == GM_DEVICE_AVF)
+        config.type == GM_DEVICE_AVF_TRUEDEPTH_FRONT ||
+        config.type == GM_DEVICE_AVF_DUAL_BACK)
     {
         data->realtime_ar_mode = true;
     } else {

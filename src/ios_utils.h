@@ -27,8 +27,15 @@ ios_end_generating_device_orientation_notifications(void);
 
 struct ios_av_session;
 
+enum ios_av_device_type
+{
+    IOS_AV_DEVICE_BUILTIN_TRUEDEPTH_CAMERA_FRONT,
+    IOS_AV_DEVICE_BUILTIN_DUAL_CAMERA_BACK,
+};
+
 struct ios_av_session *
 ios_util_av_session_new(struct gm_logger *log,
+                        enum ios_av_device_type device_type,
                         void (*configured_cb)(struct ios_av_session *session, void *user_data),
                         void (*depth_cb)(struct ios_av_session *session,
                                          struct gm_intrinsics *intrinsics,

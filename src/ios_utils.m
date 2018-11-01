@@ -87,6 +87,8 @@ ios_end_generating_device_orientation_notifications(void)
 {
     struct gm_logger *log;
 
+    enum ios_av_device_type device_type;
+
     AVCaptureSession *session;
 
     AVCaptureDeviceDiscoverySession *video_device_discovery_session;
@@ -271,19 +273,26 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
     self->session.sessionPreset = AVCaptureSessionPreset640x480;
     //self->session.sessionPreset = AVCaptureSessionPreset1280x720; XXX: not getting depth with this preset
 
-    self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInTrueDepthCamera
-                                                               mediaType:AVMediaTypeVideo
-                                                                position:AVCaptureDevicePositionFront];
-    //self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInDualCamera
-    //                                                           mediaType:AVMediaTypeVideo
-    //                                                            position:AVCaptureDevicePositionBack];
+    switch (self->device_type) {
+        case IOS_AV_DEVICE_BUILTIN_TRUEDEPTH_CAMERA_FRONT:
+            self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInTrueDepthCamera
+                                                                       mediaType:AVMediaTypeVideo
+                                                                        position:AVCaptureDevicePositionFront];
+        break;
+        case IOS_AV_DEVICE_BUILTIN_DUAL_CAMERA_BACK:
+            self->dual_cam_device = [AVCaptureDevice defaultDeviceWithDeviceType:AVCaptureDeviceTypeBuiltInDualCamera
+                                                                       mediaType:AVMediaTypeVideo
+                                                                        position:AVCaptureDevicePositionBack];
+        break;
+    }
+
     if (!self->dual_cam_device) {
-        gm_debug(self->log, "Failed to find dual camera device");
+        gm_debug(self->log, "Failed to find iOS AV camera device");
         //self->setupResult = AVCamSetupResultSessionConfigurationFailed;
         [self->session commitConfiguration];
         return;
     } else {
-        gm_debug(self->log, "Found dual camera device");
+        gm_debug(self->log, "Found iOS AV camera device");
     }
 
     AVCaptureDeviceInput *device_input =
@@ -377,6 +386,7 @@ didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
 
 struct ios_av_session *
 ios_util_av_session_new(struct gm_logger *log,
+                        enum ios_av_device_type device_type,
                         void (*configured_cb)(struct ios_av_session *session, void *user_data),
                         void (*depth_cb)(struct ios_av_session *session,
                                          struct gm_intrinsics *intrinsics,
@@ -394,6 +404,7 @@ ios_util_av_session_new(struct gm_logger *log,
     IOSAVSession *session = [[IOSAVSession alloc] init];
 
     session->log = log;
+    session->device_type = device_type;
     session->configured_cb = configured_cb;
     session->depth_cb = depth_cb;
     session->video_cb = video_cb;

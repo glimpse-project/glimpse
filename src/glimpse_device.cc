@@ -565,7 +565,8 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         /* Allocated large enough for RGB data */
         buf->base.len = dev->max_video_pixels * 3;
         break;
-    case GM_DEVICE_AVF:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
     case GM_DEVICE_RECORDING:
         /* Allocated large enough for any data format */
         buf->base.len = dev->max_video_pixels * 4;
@@ -612,7 +613,8 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         /* Allocated large enough for _XYZC_F32_M data */
         buf->base.len = dev->max_depth_pixels * 16;
         break;
-    case GM_DEVICE_AVF:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
         /* Allocated large enough for any data */
         buf->base.len = dev->max_depth_pixels * 16;
         break;
@@ -2740,10 +2742,11 @@ on_avf_depth_cb(struct ios_av_session *session,
 }
 
 static bool
-avf_open(struct gm_device *dev, const struct gm_device_config *config,
-         char **err)
+avf_open_truedepth_front(struct gm_device *dev,
+                         const struct gm_device_config *config,
+                         char **err)
 {
-    gm_debug(dev->log, "AVFrameworks Device Open");
+    gm_debug(dev->log, "AVFrameworks Device Open (TrueDepth Front)");
 
     /* We wait until _configure() time before doing much because we want to
      * allow the device to be configured with an event callback first
@@ -2760,6 +2763,39 @@ avf_open(struct gm_device *dev, const struct gm_device_config *config,
     dev->device_to_camera_rotation = GM_ROTATION_270;
 
     dev->avf.session = ios_util_av_session_new(dev->log,
+                                               IOS_AV_DEVICE_BUILTIN_TRUEDEPTH_CAMERA_FRONT,
+                                               on_avf_configure_finished_cb,
+                                               on_avf_depth_cb,
+                                               on_avf_video_cb,
+                                               dev);
+    //ios_util_session_configure(dev->avf.session);
+
+    return true;
+}
+
+static bool
+avf_open_dual_back(struct gm_device *dev,
+                   const struct gm_device_config *config,
+                   char **err)
+{
+    gm_debug(dev->log, "AVFrameworks Device Open (Dual Camera, Back)");
+
+    /* We wait until _configure() time before doing much because we want to
+     * allow the device to be configured with an event callback first
+     * so we will be able to notify that the device is ready if the Tango
+     * service has already been bound.
+     */
+
+    dev->video_format = GM_FORMAT_BGRA_U8;
+    dev->max_video_pixels = 640 * 480;
+
+    dev->depth_format = GM_FORMAT_Z_F32_M;
+    dev->max_depth_pixels = 640 * 480;
+
+    dev->device_to_camera_rotation = GM_ROTATION_270;
+
+    dev->avf.session = ios_util_av_session_new(dev->log,
+                                               IOS_AV_DEVICE_BUILTIN_DUAL_CAMERA_BACK,
                                                on_avf_configure_finished_cb,
                                                on_avf_depth_cb,
                                                on_avf_video_cb,
@@ -2866,14 +2902,23 @@ gm_device_open(struct gm_logger *log,
         gm_assert(log, 0, "Tango support not enabled");
 #endif
         break;
-    case GM_DEVICE_AVF:
-        gm_debug(log, "Opening AVFoundation device");
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+        gm_debug(log, "Opening AVFoundation, Front, TrueDepth device");
 #ifdef USE_AVF
-        status = avf_open(dev, config, err);
+        status = avf_open_truedepth_front(dev, config, err);
 #else
         gm_assert(log, 0, "AVFoundation support not enabled");
 #endif
         break;
+    case GM_DEVICE_AVF_DUAL_BACK:
+        gm_debug(log, "Opening AVFoundation, Back, Dual Camera device");
+#ifdef USE_AVF
+        status = avf_open_dual_back(dev, config, err);
+#else
+        gm_assert(log, 0, "AVFoundation support not enabled");
+#endif
+        break;
+
     }
 
     if (!status) {
@@ -2957,7 +3002,8 @@ gm_device_commit_config(struct gm_device *dev, char **err)
         status = tango_configure(dev, err);
 #endif
         break;
-    case GM_DEVICE_AVF:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
 #ifdef USE_AVF
         status = avf_configure(dev, err);
 #endif
@@ -3066,7 +3112,8 @@ gm_device_close(struct gm_device *dev)
         tango_close(dev);
 #endif
         break;
-    case GM_DEVICE_AVF:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
 #ifdef USE_AVF
         gm_debug(dev->log, "Closing AVF device");
         avf_close(dev);
@@ -3152,7 +3199,8 @@ gm_device_start(struct gm_device *dev)
         tango_start(dev);
 #endif
         break;
-    case GM_DEVICE_AVF:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
 #ifdef USE_AVF
         avf_start(dev);
 #endif
@@ -3233,7 +3281,8 @@ gm_device_stop(struct gm_device *dev)
         tango_stop(dev);
 #endif
         break;
-    case GM_DEVICE_AVF:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
 #ifdef USE_AVF
         gm_debug(dev->log, "avf_stop");
         avf_stop(dev);

@@ -1611,7 +1611,7 @@ gm_unity_init(char *config_json, bool force_null_device)
         config.type = GM_DEVICE_TANGO;
 #elif TARGET_OS_IOS == 1
         gm_info(data->log, "Requested device type = Auto (Avf)");
-        config.type = GM_DEVICE_AVF;
+        config.type = GM_DEVICE_AVF_TRUEDEPTH_FRONT;
 #else
         if (have_recording) {
             gm_info(data->log, "Requested device type = Auto (Recording)");
