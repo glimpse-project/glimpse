@@ -22,6 +22,46 @@
  * SOFTWARE.
  */
 
+/*
+ * (Our cluster_codebook_classified_points() implementation was based
+ *  on PCL's pcl::OrganizedConnectedComponentSegmentation::segment...)
+ *
+ * Software License Agreement (BSD License)
+ *
+ *  Point Cloud Library (PCL) - www.pointclouds.org
+ *  Copyright (c) 2010-2012, Willow Garage, Inc.
+ *
+ *  All rights reserved.
+ *
+ *  Redistribution and use in source and binary forms, with or without
+ *  modification, are permitted provided that the following conditions
+ *  are met:
+ *
+ *   * Redistributions of source code must retain the above copyright
+ *     notice, this list of conditions and the following disclaimer.
+ *   * Redistributions in binary form must reproduce the above
+ *     copyright notice, this list of conditions and the following
+ *     disclaimer in the documentation and/or other materials provided
+ *     with the distribution.
+ *   * Neither the name of the copyright holder(s) nor the names of its
+ *     contributors may be used to endorse or promote products derived
+ *     from this software without specific prior written permission.
+ *
+ *  THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+ *  "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+ *  LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+ *  FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+ *  COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+ *  INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+ *  BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+ *  LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+ *  CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ *  LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
+ *  ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+ *  POSSIBILITY OF SUCH DAMAGE.
+ */
+
+
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -1801,109 +1841,6 @@ sanitise_skeleton(struct gm_context *ctx,
         }
     }
 }
-
-template<typename PointT>
-class PlaneComparator: public pcl::Comparator<PointT>
-{
-  public:
-    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
-    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
-        PointCloudConstPtr;
-
-    typedef boost::shared_ptr<PlaneComparator<PointT>> Ptr;
-    typedef boost::shared_ptr<const PlaneComparator<PointT>> ConstPtr;
-
-    using pcl::Comparator<PointT>::input_;
-
-    PlaneComparator()
-      : coeffs_(0.f, 1.f, 0.f, 1.f),
-        distance_threshold_(0.03f) {
-    }
-
-    virtual
-    ~PlaneComparator() {
-    }
-
-    inline void
-    setPlaneCoefficients(Eigen::Vector4f &coeffs) {
-        coeffs_ = coeffs;
-    }
-
-    inline Eigen::Vector4f &
-    getPlaneCoefficients() {
-        return coeffs_;
-    }
-
-    inline void
-    setDistanceThreshold(float distance_threshold) {
-        distance_threshold_ = distance_threshold;
-    }
-
-    inline float
-    getDistanceThreshold() const {
-        return distance_threshold_;
-    }
-
-    virtual bool
-    compare (int idx1, int idx2) const {
-        Eigen::Vector4f e_pt(input_->points[idx1].x,
-                             input_->points[idx1].y,
-                             input_->points[idx1].z, 1.f);
-        return coeffs_.dot(e_pt) < distance_threshold_;
-    }
-
-  protected:
-    Eigen::Vector4f coeffs_;
-    float distance_threshold_;
-};
-
-template<typename PointT>
-class LabelComparator: public pcl::Comparator<PointT>
-{
-  public:
-    typedef typename pcl::Comparator<PointT>::PointCloud PointCloud;
-    typedef typename pcl::Comparator<PointT>::PointCloudConstPtr
-        PointCloudConstPtr;
-
-    typedef boost::shared_ptr<LabelComparator<PointT>> Ptr;
-    typedef boost::shared_ptr<const LabelComparator<PointT>> ConstPtr;
-
-    using pcl::Comparator<PointT>::input_;
-
-    LabelComparator()
-      : depth_threshold_(0.03f) {
-    }
-
-    virtual
-    ~LabelComparator() {
-    }
-
-    inline void
-    setDepthThreshold(float depth_threshold) {
-        depth_threshold_ = depth_threshold;
-    }
-
-    inline float
-    getDepthThreshold() const {
-        return depth_threshold_;
-    }
-
-    virtual bool
-    compare (int idx1, int idx2) const {
-        if ((input_->points[idx1].label == CODEBOOK_CLASS_FLICKERING ||
-             input_->points[idx1].label == CODEBOOK_CLASS_FOREGROUND) &&
-            (input_->points[idx2].label == CODEBOOK_CLASS_FLICKERING ||
-             input_->points[idx2].label == CODEBOOK_CLASS_FOREGROUND)) {
-            return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
-                depth_threshold_;
-        }
-
-        return false;
-    }
-
-  protected:
-    float depth_threshold_;
-};
 
 /* TODO: combine the to_start and to_codebook matrices
  */
@@ -4445,25 +4382,188 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 }
 
+// When scanning along a single row we may define new labels due to comparison
+// failures which we later find need to be effectively merged with the next
+// row. This merging is done by maintaining an array of label ids ('runs')
+// where normally runs[label_id] == label_id but when we need to track the
+// merging of label IDs then runs[label_id] can point back to an earlier
+// label_id index. There may be multiple jumps like this due to multiple such
+// merges so this function follows the indirections to find the 'root' label_id
+// that will be the final effective label_id.
+static unsigned
+find_label_root(const std::vector<unsigned>& runs, unsigned index)
+{
+    unsigned idx = index;
+    while (runs[idx] != idx)
+        idx = runs[idx];
+
+    return idx;
+}
+
+static bool
+compare_codebook_classified_points(
+    pcl::PointCloud<pcl::PointXYZL>::Ptr input_,
+    int idx1, int idx2,
+    float depth_threshold)
+{
+    if ((input_->points[idx1].label == CODEBOOK_CLASS_FLICKERING ||
+         input_->points[idx1].label == CODEBOOK_CLASS_FOREGROUND) &&
+        (input_->points[idx2].label == CODEBOOK_CLASS_FLICKERING ||
+         input_->points[idx2].label == CODEBOOK_CLASS_FOREGROUND))
+    {
+        return fabsf(input_->points[idx1].z - input_->points[idx2].z) <
+            depth_threshold;
+    }
+
+    return false;
+}
+
+static void
+cluster_codebook_classified_points(
+    pcl::PointCloud<pcl::PointXYZL>::Ptr input_,
+    pcl::PointCloud<pcl::Label>& labels,
+    std::vector<pcl::PointIndices>& label_indices,
+    float depth_threshold)
+{
+    std::vector<unsigned> run_ids;
+
+    unsigned invalid_label = std::numeric_limits<unsigned>::max();
+    pcl::Label invalid_pt;
+    invalid_pt.label = std::numeric_limits<unsigned>::max();
+    labels.points.resize(input_->points.size(), invalid_pt);
+    labels.width = input_->width;
+    labels.height = input_->height;
+    unsigned int clust_id = 0;
+
+    //First pixel
+    if (std::isfinite(input_->points[0].x))
+    {
+        labels[0].label = clust_id++;
+        run_ids.push_back(labels[0].label);
+    }
+
+    // First row
+    for (int colIdx = 1; colIdx < static_cast<int>(input_->width); ++colIdx)
+    {
+        if (!std::isfinite(input_->points[colIdx].x))
+            continue;
+
+        if (compare_codebook_classified_points(input_, colIdx, colIdx - 1, depth_threshold))
+        {
+            labels[colIdx].label = labels[colIdx - 1].label;
+        }
+        else
+        {
+            labels[colIdx].label = clust_id++;
+            run_ids.push_back (labels[colIdx].label );
+        }
+    }
+
+    // Everything else
+    unsigned int current_row = input_->width;
+    unsigned int previous_row = 0;
+    for (size_t rowIdx = 1;
+         rowIdx < input_->height;
+         ++rowIdx, previous_row = current_row, current_row += input_->width)
+    {
+        // First pixel
+        if (std::isfinite(input_->points[current_row].x))
+        {
+            if (compare_codebook_classified_points(input_,
+                                                   current_row,
+                                                   previous_row,
+                                                   depth_threshold))
+            {
+                labels[current_row].label = labels[previous_row].label;
+            }
+            else
+            {
+                labels[current_row].label = clust_id++;
+                run_ids.push_back(labels[current_row].label);
+            }
+        }
+
+        // Rest of row
+        for (int colIdx = 1;
+             colIdx < static_cast<int>(input_->width);
+             ++colIdx)
+        {
+            if (std::isfinite(input_->points[current_row + colIdx].x))
+            {
+                if (compare_codebook_classified_points(input_,
+                                                       current_row + colIdx,
+                                                       current_row + colIdx - 1,
+                                                       depth_threshold))
+                {
+                    labels[current_row + colIdx].label =
+                        labels[current_row + colIdx - 1].label;
+                }
+
+                if (compare_codebook_classified_points(input_,
+                                                       current_row + colIdx,
+                                                       previous_row + colIdx,
+                                                       depth_threshold))
+                {
+                    if (labels[current_row + colIdx].label == invalid_label)
+                    {
+                        labels[current_row + colIdx].label =
+                            labels[previous_row + colIdx].label;
+                    }
+                    else if (labels[previous_row + colIdx].label != invalid_label)
+                    {
+                        unsigned root1 = find_label_root(run_ids, labels[current_row + colIdx].label);
+                        unsigned root2 = find_label_root(run_ids, labels[previous_row + colIdx].label);
+
+                        if (root1 < root2)
+                            run_ids[root2] = root1;
+                        else
+                            run_ids[root1] = root2;
+                    }
+                }
+
+                if (labels[current_row + colIdx].label == invalid_label)
+                {
+                    labels[current_row + colIdx].label = clust_id++;
+                    run_ids.push_back(labels[current_row + colIdx].label);
+                }
+            }
+        }
+    }
+
+    std::vector<unsigned> map(clust_id);
+    unsigned max_id = 0;
+    for (unsigned runIdx = 0; runIdx < run_ids.size(); ++runIdx)
+    {
+        // if it is its own root -> new region
+        if (run_ids[runIdx] == runIdx)
+            map[runIdx] = max_id++;
+        else // assign this sub-segment to the region (root) it belongs
+            map[runIdx] = map[find_label_root(run_ids, runIdx)];
+    }
+
+    label_indices.resize(max_id + 1);
+    for (unsigned idx = 0; idx < input_->points.size(); idx++)
+    {
+        if (labels[idx].label != invalid_label)
+        {
+            labels[idx].label = map[labels[idx].label];
+            label_indices[labels[idx].label].indices.push_back(idx);
+        }
+    }
+}
+
 static void
 stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                           struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
 
-    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
-
-    LabelComparator<pcl::PointXYZL>::Ptr label_cluster(
-        new LabelComparator<pcl::PointXYZL>);
-    label_cluster->setInputCloud(tracking->downsampled_cloud);
-    label_cluster->setDepthThreshold(ctx->codebook_cluster_tolerance);
-
     tracking->cluster_labels =
         pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
-    pcl::OrganizedConnectedComponentSegmentation<pcl::PointXYZL, pcl::Label>
-        depth_connector(label_cluster);
-    depth_connector.setInputCloud(tracking->downsampled_cloud);
-    depth_connector.segment(*tracking->cluster_labels, cluster_indices);
+    cluster_codebook_classified_points(tracking->downsampled_cloud,
+                                       *tracking->cluster_labels,
+                                       state->cluster_indices,
+                                       ctx->codebook_cluster_tolerance);
 }
 
 static void
