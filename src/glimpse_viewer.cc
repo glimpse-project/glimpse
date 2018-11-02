@@ -1730,6 +1730,27 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 }
 
 static void
+draw_debug_text(Data *data)
+{
+    ImGui::Begin("Tracking debug text", NULL,
+                 ImGuiWindowFlags_NoResize|
+                 ImGuiWindowFlags_NoMove);
+
+    if (data->latest_tracking) {
+        int n_debug_strings = 0;
+        const char **debug_strings =
+            gm_tracking_get_debug_text(data->latest_tracking, &n_debug_strings);
+        if (debug_strings && n_debug_strings) {
+            for (int i = 0; i < n_debug_strings; ++i) {
+                ImGui::Text("%s", debug_strings[i]);
+            }
+        }
+    }
+
+    ImGui::End();
+}
+
+static void
 draw_joint_summary(Data *data)
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
@@ -2185,6 +2206,13 @@ draw_ui(Data *data)
                       false); // enabled
     }
 
+    ImGui::PopStyleVar(); // ImGuiStyleVar_WindowRounding
+
+    ImGui::SetNextWindowPos({(float)main_x, (float)main_y});
+    ImGui::SetNextWindowSize({main_area_size.x, main_area_size.y/6.f});
+    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+    draw_debug_text(data);
     ImGui::PopStyleVar(); // ImGuiStyleVar_WindowRounding
 
     if (data->show_profiler) {

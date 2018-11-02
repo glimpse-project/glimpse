@@ -581,6 +581,10 @@ const struct gm_point_rgba *
 gm_tracking_get_debug_lines(struct gm_tracking *tracking,
                             int *n_lines);
 
+const char **
+gm_tracking_get_debug_text(struct gm_tracking *tracking,
+                           int *n_strings);
+
 uint64_t
 gm_tracking_get_duration(struct gm_tracking *tracking);
 

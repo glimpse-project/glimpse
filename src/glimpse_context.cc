@@ -518,6 +518,8 @@ struct gm_tracking_impl
 
     std::vector<struct gm_point_rgba> debug_lines;
 
+    std::vector<char *> debug_text;
+
     // Whether any person clouds were tracked in this frame
     bool success;
 
@@ -1481,6 +1483,21 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
     }
 }
 
+static void
+add_debug_text(struct gm_tracking_impl *tracking,
+               const char *fmt,
+               ...)
+{
+    va_list args;
+    char *debug_text = NULL;
+    va_start (args, fmt);
+    vasprintf(&debug_text, fmt, args);
+    va_end(args);
+    if (debug_text) {
+        tracking->debug_text.push_back(debug_text);
+    }
+}
+
 static float
 calc_skeleton_distance(struct gm_context *ctx,
                        struct gm_skeleton *skeleton)
@@ -2207,6 +2224,11 @@ tracking_state_recycle(struct gm_tracking *self)
         tracking->joints = NULL;
     }
 
+    for (auto string : tracking->debug_text) {
+        free(string);
+    }
+    tracking->debug_text.resize(0);
+
     tracking->trail.clear();
 
     mem_pool_recycle_resource(pool, tracking);
@@ -2815,6 +2837,15 @@ gm_tracking_get_debug_lines(struct gm_tracking *_tracking,
               "Odd number of points in debug_lines array");
     *n_lines = tracking->debug_lines.size() / 2;
     return tracking->debug_lines.data();
+}
+
+const char **
+gm_tracking_get_debug_text(struct gm_tracking *_tracking,
+                           int *n_strings)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    *n_strings = tracking->debug_text.size();
+    return (const char **)tracking->debug_text.data();
 }
 
 uint64_t
@@ -5896,6 +5927,11 @@ context_track_skeleton(struct gm_context *ctx,
         tracking->debug_lines.resize(0);
     }
 
+    for (auto string : tracking->debug_text) {
+        free(string);
+    }
+    tracking->debug_text.resize(0);
+
     /* Discontinuities will e.g. happen when a recording loops or if we jump
      * frames in a recording.
      */
@@ -6277,11 +6313,14 @@ context_track_skeleton(struct gm_context *ctx,
               stage_refine_skeleton_debug_cb,
               &state);
 
+    add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
+    float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton);
+    add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
+
     bool valid_skeleton = true;
     if (ctx->skeleton_validation) {
         valid_skeleton = (state.confidence >= ctx->skeleton_min_confidence &&
-                          calc_skeleton_distance(ctx, &tracking->skeleton) <=
-                          ctx->skeleton_max_distance);
+                          skel_dist <= ctx->skeleton_max_distance);
     }
 
 #warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
