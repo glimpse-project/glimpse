@@ -4695,11 +4695,15 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
 // merges so this function follows the indirections to find the 'root' label_id
 // that will be the final effective label_id.
 static unsigned
-find_label_root(const std::vector<unsigned>& runs, unsigned index)
+find_label_root(std::vector<unsigned>& runs, unsigned index)
 {
     unsigned idx = index;
     while (runs[idx] != idx)
         idx = runs[idx];
+
+    // In case there were multiple indirections then updating the index
+    // will reduce all further lookups to one indirection at most
+    //runs[index] = idx; (Didn't improve performance)
 
     return idx;
 }
@@ -4737,12 +4741,11 @@ cluster_codebook_classified_points(
     labels.points.resize(input_->points.size(), invalid_pt);
     labels.width = input_->width;
     labels.height = input_->height;
-    unsigned int clust_id = 0;
 
     //First pixel
     if (std::isfinite(input_->points[0].x))
     {
-        labels[0].label = clust_id++;
+        labels[0].label = run_ids.size();
         run_ids.push_back(labels[0].label);
     }
 
@@ -4754,12 +4757,13 @@ cluster_codebook_classified_points(
 
         if (compare_codebook_classified_points(input_, colIdx, colIdx - 1, depth_threshold))
         {
-            labels[colIdx].label = labels[colIdx - 1].label;
+            unsigned label = labels[colIdx - 1].label;
+            labels[colIdx].label = label;
         }
         else
         {
-            labels[colIdx].label = clust_id++;
-            run_ids.push_back (labels[colIdx].label );
+            labels[colIdx].label = run_ids.size();
+            run_ids.push_back(labels[colIdx].label);
         }
     }
 
@@ -4778,11 +4782,12 @@ cluster_codebook_classified_points(
                                                    previous_row,
                                                    depth_threshold))
             {
-                labels[current_row].label = labels[previous_row].label;
+                unsigned label = labels[previous_row].label;
+                labels[current_row].label = label;
             }
             else
             {
-                labels[current_row].label = clust_id++;
+                labels[current_row].label = run_ids.size();
                 run_ids.push_back(labels[current_row].label);
             }
         }
@@ -4799,8 +4804,8 @@ cluster_codebook_classified_points(
                                                        current_row + colIdx - 1,
                                                        depth_threshold))
                 {
-                    labels[current_row + colIdx].label =
-                        labels[current_row + colIdx - 1].label;
+                    unsigned label = labels[current_row + colIdx - 1].label;
+                    labels[current_row + colIdx].label = label;
                 }
 
                 if (compare_codebook_classified_points(input_,
@@ -4810,8 +4815,8 @@ cluster_codebook_classified_points(
                 {
                     if (labels[current_row + colIdx].label == invalid_label)
                     {
-                        labels[current_row + colIdx].label =
-                            labels[previous_row + colIdx].label;
+                        unsigned label = labels[previous_row + colIdx].label;
+                        labels[current_row + colIdx].label = label;
                     }
                     else if (labels[previous_row + colIdx].label != invalid_label)
                     {
@@ -4827,14 +4832,14 @@ cluster_codebook_classified_points(
 
                 if (labels[current_row + colIdx].label == invalid_label)
                 {
-                    labels[current_row + colIdx].label = clust_id++;
+                    labels[current_row + colIdx].label = run_ids.size();
                     run_ids.push_back(labels[current_row + colIdx].label);
                 }
             }
         }
     }
 
-    std::vector<unsigned> map(clust_id);
+    std::vector<unsigned> map(run_ids.size());
     unsigned max_id = 0;
     for (unsigned runIdx = 0; runIdx < run_ids.size(); ++runIdx)
     {
