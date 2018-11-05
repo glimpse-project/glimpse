@@ -4892,6 +4892,33 @@ stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.cy /= seg_res;
     tracking->debug_cloud_intrinsics.fx /= seg_res;
     tracking->debug_cloud_intrinsics.fy /= seg_res;
+
+    std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
+    std::vector<int> &debug_cloud_indices = tracking->debug_cloud_indices;
+    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+
+    for (auto &cluster : state->cluster_indices) {
+        for (int i : cluster.indices) {
+            pcl::PointXYZL &point = pcl_cloud->points[i];
+            struct gm_point_rgba rgba_point;
+
+            rgba_point.x = point.x;
+            rgba_point.y = point.y;
+            rgba_point.z = point.z;
+
+            int label = tracking->cluster_labels->points[i].label;
+            png_color *color =
+                &default_palette[label % ARRAY_LEN(default_palette)];
+            float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
+            uint8_t r = (uint8_t)(color->red * shade);
+            uint8_t g = (uint8_t)(color->green * shade);
+            uint8_t b = (uint8_t)(color->blue * shade);
+            rgba_point.rgba = r<<24|g<<16|b<<8|0xff;
+
+            debug_cloud.push_back(rgba_point);
+            debug_cloud_indices.push_back(i);
+        }
+    }
 }
 
 static void
