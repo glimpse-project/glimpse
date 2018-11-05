@@ -229,7 +229,7 @@ enum {
 
 enum tracking_stage {
     TRACKING_STAGE_START,
-    TRACKING_STAGE_GAP_FILLED,
+    TRACKING_STAGE_NEAR_FAR_CULL_AND_INFILL,
     TRACKING_STAGE_DOWNSAMPLED,
     TRACKING_STAGE_EDGE_DETECT,
     TRACKING_STAGE_GROUND_SPACE,
@@ -686,6 +686,8 @@ struct gm_context
 
     float min_depth;
     float max_depth;
+    bool clamp_to_max_depth;
+
     int seg_res;
 
     float floor_threshold;
@@ -3335,11 +3337,11 @@ copy_and_rotate_depth_buffer(struct gm_context *ctx,
 }
 
 static void
-pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
-                                                struct gm_tracking_impl *tracking,
-                                                pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud,
-                                                float *depth,
-                                                struct gm_intrinsics *intrinsics)
+pcl_xyzl_cloud_from_buf_with_near_far_cull_and_infill(struct gm_context *ctx,
+                                                      struct gm_tracking_impl *tracking,
+                                                      pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud,
+                                                      float *depth,
+                                                      struct gm_intrinsics *intrinsics)
 {
     float nan = std::numeric_limits<float>::quiet_NaN();
 
@@ -3364,27 +3366,45 @@ pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
 
     float z_min = ctx->min_depth;
     float z_max = ctx->max_depth;
+    bool clamp_max = ctx->clamp_to_max_depth;
+
+    // May 'continue;' after setting a points position to NaN values
+    // so expected to be use with a loop over a row of points...
+#define near_far_cull_point_within_loop(point, off) \
+    ({ \
+        if (!std::isnormal(point.z) || \
+            point.z < z_min) \
+        { \
+            point.x = point.y = point.z = nan; \
+            point.label = -1; \
+            pcl_cloud->points[off] = point; \
+            continue; \
+        } \
+        if (point.z > z_max) \
+        { \
+            if (clamp_max) { \
+                point.z = z_max; \
+            } else { \
+                point.x = point.y = point.z = nan; \
+                point.label = -1; \
+                pcl_cloud->points[off] = point; \
+                continue; \
+            } \
+        } \
+        point.x = (x - cx) * point.z * inv_fx; \
+        point.y = -((y - cy) * point.z * inv_fy); \
+        point.label = -1; \
+        pcl_cloud->points[off] = point; \
+    })
 
 #define copy_row(Y) do { \
     int y = Y; \
     int row = y * width; \
     for (int x = 0; x < width; x++) { \
+        int off = row + x; \
         pcl::PointXYZL point; \
-        point.z = depth[row + x]; \
-        \
-        if (!std::isnormal(point.z) || \
-            point.z < z_min || \
-            point.z > z_max) \
-        { \
-            point.x = point.y = point.z = nan; \
-            point.label = -1; \
-            pcl_cloud->points[row + x] = point; \
-            continue; \
-        } \
-        point.x = (x - cx) * point.z * inv_fx; \
-        point.y = -((y - cy) * point.z * inv_fy); \
-        point.label = -1; \
-        pcl_cloud->points[row + x] = point; \
+        point.z = depth[off]; \
+        near_far_cull_point_within_loop(point, off); \
     } \
 } while(0)
 
@@ -3421,30 +3441,13 @@ pcl_xyzl_cloud_from_buf_with_fill_and_threshold(struct gm_context *ctx,
                 }
             }
 
-            if (!std::isnormal(point.z) ||
-                point.z < z_min ||
-                point.z > z_max)
-            {
-                point.x = point.y = point.z = nan;
-                point.label = -1;
-                pcl_cloud->points[off] = point;
-                continue;
-            }
-
-            point.x = (x - cx) * point.z * inv_fx;
-
-            /* We want Y for our point cloud to point up, so flip as we project
-             * the 2D image coordinates (where y=0 is at the top)
-             */
-            point.y = -((y - cy) * point.z * inv_fy);
-
-            point.label = -1;
-            pcl_cloud->points[off] = point;
+            near_far_cull_point_within_loop(point, off);
         }
     }
 
     copy_row(height - 1);
 #undef copy_row
+#undef near_far_cull_point_within_loop
 }
 
 static void
@@ -3852,8 +3855,8 @@ stage_start_debug_cb(struct gm_tracking_impl *tracking,
 }
 
 static void
-stage_gap_fill_cb(struct gm_tracking_impl *tracking,
-                  struct pipeline_scratch_state *state)
+stage_near_far_cull_and_infill_cb(struct gm_tracking_impl *tracking,
+                                  struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
 
@@ -3862,17 +3865,17 @@ stage_gap_fill_cb(struct gm_tracking_impl *tracking,
             new pcl::PointCloud<pcl::PointXYZL>);
     }
 
-    pcl_xyzl_cloud_from_buf_with_fill_and_threshold(ctx,
-                                                    tracking,
-                                                    tracking->depth_cloud,
-                                                    tracking->depth,
-                                                    &tracking->
-                                                     depth_camera_intrinsics);
+    pcl_xyzl_cloud_from_buf_with_near_far_cull_and_infill(ctx,
+                                                          tracking,
+                                                          tracking->depth_cloud,
+                                                          tracking->depth,
+                                                          &tracking->
+                                                          depth_camera_intrinsics);
 }
 
 static void
-stage_gap_fill_debug_cb(struct gm_tracking_impl *tracking,
-                        struct pipeline_scratch_state *state)
+stage_near_far_cull_and_infill_debug_cb(struct gm_tracking_impl *tracking,
+                                        struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
 
@@ -6035,9 +6038,9 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     run_stage(tracking,
-              TRACKING_STAGE_GAP_FILLED,
-              stage_gap_fill_cb,
-              stage_gap_fill_debug_cb,
+              TRACKING_STAGE_NEAR_FAR_CULL_AND_INFILL,
+              stage_near_far_cull_and_infill_cb,
+              stage_near_far_cull_and_infill_debug_cb,
               &state);
 
     run_stage(tracking,
@@ -8202,11 +8205,11 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     {
-        enum tracking_stage stage_id = TRACKING_STAGE_GAP_FILLED;
+        enum tracking_stage stage_id = TRACKING_STAGE_NEAR_FAR_CULL_AND_INFILL;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "gap_fill";
+        stage.name = "near_far_cull_and_infill";
         stage.desc = "Fill gaps and apply min/max depth thresholding";
 
         ctx->min_depth = 0.5;
@@ -8229,6 +8232,15 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->max_depth;
         prop.float_state.min = 0.5;
         prop.float_state.max = 10;
+        stage.properties.push_back(prop);
+
+        ctx->clamp_to_max_depth = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "clamp_to_max_depth";
+        prop.desc = "Clamp the maximum depth of points instead of culling far points";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->clamp_to_max_depth;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
