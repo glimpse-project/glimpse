@@ -715,6 +715,9 @@ struct gm_context
     float codebook_clear_tracked_threshold;
     float codebook_keep_back_most_threshold;
     float codebook_cluster_tolerance;
+    bool codebook_cluster_infill;
+    int codebook_tiny_cluster_threshold;
+    int codebook_large_cluster_threshold;
     int codeword_mean_n_max;
     int codeword_flicker_max_run_len;
     int codeword_flicker_max_quiet_frames;
@@ -4872,10 +4875,78 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
 
     tracking->cluster_labels =
         pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
+    //std::vector<pcl::PointIndices> all_clusters;
     cluster_codebook_classified_points(tracking->downsampled_cloud,
                                        *tracking->cluster_labels,
                                        state->cluster_indices,
+                                       //all_clusters,
                                        ctx->codebook_cluster_tolerance);
+
+    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
+
+#if 0
+    for (auto &cluster : all_clusters) {
+        if (cluster.indices.size() > tiny_cluster_threshold) {
+            cluster_indices.push_back(std::move(cluster));
+        }
+    }
+#endif
+
+    if (ctx->codebook_cluster_infill)
+    {
+        int width = tracking->downsampled_cloud->width;
+        //int height = tracking->downsampled_cloud->height;
+
+        pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+        pcl::PointCloud<pcl::Label> &labels = *tracking->cluster_labels;
+
+        int tiny_cluster_threshold = ctx->codebook_tiny_cluster_threshold;
+        int large_cluster_threshold = ctx->codebook_large_cluster_threshold;
+        for (unsigned label = 0; label < cluster_indices.size(); label++)
+        {
+            auto &cluster = cluster_indices[label];
+
+            if (cluster.indices.size() < large_cluster_threshold)
+                continue;
+
+            std::vector<unsigned> to_merge = {};
+
+            for (int i : cluster.indices) {
+                //pcl::PointXYZL &point = pcl_cloud->points[i];
+                int x = i % width;
+                int y = i / width;
+
+                if (x == 0 || y == 0)
+                    continue;
+
+                int left_neightbour =  y * width + (x - 1);
+                unsigned left_label = labels[left_neightbour].label;
+                if (left_label != label &&
+                    left_label != -1 &&
+                    cluster_indices[left_label].indices.size() < tiny_cluster_threshold)
+                {
+                    to_merge.push_back(left_label);
+                }
+
+                int top_neightbour =  (y - 1) * width + x;
+                unsigned top_label = labels[top_neightbour].label;
+                if (top_label != label &&
+                    top_label != -1 &&
+                    cluster_indices[top_label].indices.size() < tiny_cluster_threshold)
+                {
+                    to_merge.push_back(top_label);
+                }
+            }
+
+            for (unsigned merge_label : to_merge) {
+                auto &merge_cluster = cluster_indices[merge_label];
+                for (int i : merge_cluster.indices) {
+                    cluster.indices.push_back(i);
+                }
+                merge_cluster.indices.clear();
+            }
+        }
+    }
 }
 
 static void
@@ -8785,6 +8856,37 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->codebook_cluster_tolerance;
         prop.float_state.min = 0.01f;
         prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->codebook_tiny_cluster_threshold = 10;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "tiny_cluster_threshold";
+        prop.desc = "Clusters with fewer points will be considered noise and possibly merged into larger candidate clusters";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->codebook_tiny_cluster_threshold;
+        prop.int_state.min = 0;
+        prop.int_state.max = 100;
+        stage.properties.push_back(prop);
+
+        ctx->codebook_large_cluster_threshold = 200;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "large_cluster_threshold";
+        prop.desc = "Clusters with at least this many points may be merged with 'tiny' clusters (based on cluster_tolerance distance thresholding)";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->codebook_large_cluster_threshold;
+        prop.int_state.min = 0;
+        prop.int_state.max = 2000;
+        stage.properties.push_back(prop);
+
+        ctx->codebook_cluster_infill = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_cluster_infill";
+        prop.desc = "Merge touching tiny clusters into large clusters";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->codebook_cluster_infill;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
