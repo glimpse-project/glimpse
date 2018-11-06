@@ -1483,21 +1483,6 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
     }
 }
 
-static void
-add_debug_text(struct gm_tracking_impl *tracking,
-               const char *fmt,
-               ...)
-{
-    va_list args;
-    char *debug_text = NULL;
-    va_start (args, fmt);
-    vasprintf(&debug_text, fmt, args);
-    va_end(args);
-    if (debug_text) {
-        tracking->debug_text.push_back(debug_text);
-    }
-}
-
 static float
 calc_skeleton_distance(struct gm_context *ctx,
                        struct gm_skeleton *skeleton)
@@ -2839,6 +2824,21 @@ tracking_draw_transformed_grid(struct gm_tracking_impl *tracking,
         float end1[] = { corner1[0] + off, corner1[1], corner1[2] };
 
         tracking_draw_transformed_line(tracking, end0, end1, color, transform);
+    }
+}
+
+static void
+tracking_add_debug_text(struct gm_tracking_impl *tracking,
+                        const char *fmt,
+                        ...)
+{
+    va_list args;
+    char *debug_text = NULL;
+    va_start (args, fmt);
+    vasprintf(&debug_text, fmt, args);
+    va_end(args);
+    if (debug_text) {
+        tracking->debug_text.push_back(debug_text);
     }
 }
 
@@ -6374,7 +6374,7 @@ context_track_skeleton(struct gm_context *ctx,
               stage_refine_skeleton_debug_cb,
               &state);
 
-    add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
+    tracking_add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
 
     // TODO: We just take the most confident skeleton above, but we should
     //       probably establish some thresholds and spit out multiple
@@ -6386,7 +6386,7 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton_corrected);
-    add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
+    tracking_add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
 
     bool valid_skeleton = true;
     if (ctx->skeleton_validation) {
