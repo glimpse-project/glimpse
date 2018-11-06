@@ -1508,8 +1508,12 @@ calc_skeleton_distance(struct gm_context *ctx,
     for (int b = 0; b < n_bones; ++b) {
         struct gm_bone_info &bone_info = ctx->bone_info[b];
         struct gm_bone &bone = skeleton->bones[b];
-        float length = bone.length;
 
+        if (!bone.valid) {
+            continue;
+        }
+
+        float length = bone.length;
         if (length < bone_info.min_length) {
             distance += powf(bone_info.min_length - length, 2.f);
         } else if (length > bone_info.max_length) {
@@ -8031,7 +8035,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 5000.f;
     ctx->properties.push_back(prop);
 
-    ctx->skeleton_max_distance = 0.2f;
+    ctx->skeleton_max_distance = 0.15f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "skeleton_max_distance";
