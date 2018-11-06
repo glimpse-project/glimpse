@@ -735,13 +735,13 @@ struct gm_context
     float max_prediction_delta;
     float prediction_decay;
 
-    bool parent_bone_sanitisation;
-    bool joint_position_sanitisation;
+    float sanitisation_window;
+    bool joint_velocity_sanitisation;
     bool bone_length_sanitisation;
     bool bone_rotation_sanitisation;
     bool use_bone_map_annotation;
 
-    float joint_move_threshold;
+    float joint_velocity_threshold;
     float joint_outlier_factor;
     float bone_length_outlier_factor;
     float bone_rotation_outlier_factor;
@@ -1651,12 +1651,12 @@ is_bone_rotation_valid(struct gm_context *ctx,
 }
 
 static void
-sanitise_joint_positions(struct gm_context *ctx,
-                         struct gm_skeleton &skeleton,
-                         uint64_t timestamp,
-                         int parent_head)
+sanitise_joint_velocities(struct gm_context *ctx,
+                          struct gm_skeleton &skeleton,
+                          uint64_t timestamp,
+                          uint64_t max_window)
 {
-    if (!ctx->parent_bone_sanitisation && !ctx->joint_position_sanitisation) {
+    if (!ctx->joint_velocity_sanitisation) {
         return;
     }
 
@@ -1668,65 +1668,111 @@ sanitise_joint_positions(struct gm_context *ctx,
     bool changed = false;
 
     for (int b = 0; b <= ctx->n_bones; ++b) {
-        // When b == 0, look at the parent joint.
-        int joint = parent_head;
-        if (b != 0) {
-            // When b > 0, look at the tail of bone b - 1. If we're only doing
-            // parent bone sanitisation, we only look at bones whose head is
-            // the parent joint.
-            struct gm_bone_info &bone = ctx->bone_info[b - 1];
-            if (ctx->joint_position_sanitisation ||
-                (ctx->parent_bone_sanitisation && bone.head == parent_head)) {
-                joint = bone.tail;
-            } else {
-                continue;
+        // When b == 0, look at the bone head joint, otherwise look at the tail
+        // of bone b - 1.
+        // TODO: We assume bone 0 is the parent bone
+        int joint;
+        struct gm_bone_info *bone;
+        if (b == 0) {
+            bone = &ctx->bone_info[0];
+            joint = bone->head;
+        } else {
+            bone = &ctx->bone_info[b - 1];
+            joint = bone->tail;
+        }
+
+        // Find the last valid joint in history
+        struct gm_joint &parent_joint = skeleton.joints[joint];
+        struct gm_joint *prev_joint = NULL;
+        int n_prev = -1;
+        for (int i = 0; i < ctx->n_tracking; ++i) {
+            if (prev[i]->skeleton_corrected.joints[joint].valid) {
+                prev_joint = &prev[i]->skeleton_corrected.joints[joint];
+                n_prev = i;
+                break;
             }
         }
 
-        struct gm_joint &parent_joint = skeleton.joints[joint];
-        struct gm_joint &prev_joint = prev[0]->skeleton.joints[joint];
-
-        float time = (float)((timestamp - prev[0]->frame->timestamp) / 1e9);
-        float distance = distance_between(&parent_joint.x,
-                                          &prev_joint.x) / time;
-
-        if (distance < ctx->joint_move_threshold) {
+        // If there are no previous valid joints, we can't do any sanitisation
+        if (!prev_joint) {
             continue;
         }
 
-        // Check the distance to the previous point for each preceding
-        // tracking frame
-        float displacements[ctx->n_tracking - 1];
-        float avg_displacement = distance;
-        int n_displacements = 1;
+        // Calculate the current joint velocity and if it falls below a
+        // particular threshold, don't bother with sanitisation
+        float time = (float)((timestamp - prev[n_prev]->frame->timestamp) / 1e9);
+        float velocity = distance_between(&parent_joint.x,
+                                          &prev_joint->x) / time;
+
+        if (velocity < ctx->joint_velocity_threshold) {
+            continue;
+        }
+
+        // Check the velocity of the joint at each previous tracking frame
+        float velocities[ctx->n_tracking - 1];
+        float avg_velocity = velocity;
+        int n_velocities = 1;
         for (int j = 0; j < ctx->n_tracking - 1; ++j) {
             struct gm_joint &joint1 = prev[j]->skeleton.joints[joint];
             struct gm_joint &joint2 = prev[j+1]->skeleton.joints[joint];
-            if (!joint1.valid || !joint2.valid) {
-                displacements[j] = FLT_MAX;
+            if (!joint1.valid || !joint2.valid ||
+                prev[j+1]->frame->timestamp + max_window < timestamp)
+            {
+                velocities[j] = FLT_MAX;
                 continue;
             }
 
             time = (float)((prev[j]->frame->timestamp -
                             prev[j+1]->frame->timestamp) / 1e9);
-            displacements[j] = distance_between(&joint1.x,
-                                                &joint2.x) / time;
-            avg_displacement += displacements[j];
-            ++n_displacements;
+            velocities[j] = distance_between(&joint1.x,
+                                             &joint2.x) / time;
+            avg_velocity += velocities[j];
+            ++n_velocities;
         }
-        avg_displacement /= n_displacements;
+        avg_velocity /= n_velocities;
 
-        // If this point is an outlier, use the last non-outlier position
-        float outlier_threshold = avg_displacement *
-            ctx->joint_outlier_factor;
-        if (distance > outlier_threshold) {
+        // If this new joint is an outlier, use the last non-outlier position
+        float outlier_threshold = avg_velocity * ctx->joint_outlier_factor;
+        if (n_velocities > 1 && velocity > outlier_threshold) {
             for (int j = 0; j < ctx->n_tracking - 1; ++j) {
-                if (displacements[j] <= outlier_threshold) {
-                    gm_debug(ctx->log, "Bone joint (%s) average displacement: "
+                if (velocities[j] <= outlier_threshold) {
+                    gm_debug(ctx->log, "Bone joint (%s) average velocity: "
                              "%.2f, correction: %.2f -> %.2f",
                              ctx->joint_names[joint],
-                             avg_displacement, distance, displacements[j]);
-                    parent_joint = prev[j]->skeleton.joints[joint];
+                             avg_velocity, velocity, velocities[j]);
+                    struct gm_joint &prev_joint =
+                        prev[j]->skeleton.joints[joint];
+
+                    bool canUseDisplacement = false;
+                    if (b != 0) {
+                        // If this isn't the parent joint, find the bone that
+                        // has it as a tail and use the displacement instead of
+                        // the absolute position.
+                        if (skeleton.joints[bone->head].valid &&
+                            prev[j]->skeleton.joints[bone->head].valid) {
+                            canUseDisplacement = true;
+                        }
+                    }
+
+                    if (canUseDisplacement) {
+                        struct gm_joint &head_joint =
+                            skeleton.joints[bone->head];
+                        struct gm_joint &prev_head_joint =
+                            prev[j]->skeleton.joints[bone->head];
+                        parent_joint.x =
+                            head_joint.x + (prev_joint.x - prev_head_joint.x);
+                        parent_joint.y =
+                            head_joint.y + (prev_joint.y - prev_head_joint.y);
+                        parent_joint.z =
+                            head_joint.z + (prev_joint.z - prev_head_joint.z);
+                    } else {
+                        // If we can't correct the joint position wrt its
+                        // displacement from a head joint, use the absolute
+                        // position.
+                        parent_joint = prev_joint;
+                    }
+
+                    parent_joint.valid = true;
                     changed = true;
                     break;
                 }
@@ -1743,7 +1789,8 @@ sanitise_joint_positions(struct gm_context *ctx,
 static void
 sanitise_bone_lengths(struct gm_context *ctx,
                       struct gm_skeleton &skeleton,
-                      uint64_t timestamp)
+                      uint64_t timestamp,
+                      uint64_t max_window)
 {
     if (!ctx->bone_length_sanitisation) {
         return;
@@ -1763,12 +1810,17 @@ sanitise_bone_lengths(struct gm_context *ctx,
         // Find the average length for this bone and see if this new length
         // conforms.
         float avg_bone_length = bone.length;
+        int n_lengths = 1;
         for (int i = 0; i < ctx->n_tracking; ++i) {
+            if (prev[i]->frame->timestamp + max_window < timestamp) {
+                break;
+            }
             const struct gm_bone &prev_bone =
                 prev[i]->skeleton.bones[bone.idx];
             avg_bone_length += prev_bone.length;
+            ++n_lengths;
         }
-        avg_bone_length /= ctx->n_tracking;
+        avg_bone_length /= n_lengths;
 
         if (!is_bone_length_valid(ctx, bone, avg_bone_length)) {
             for (int i = 0; i < ctx->n_tracking; ++i) {
@@ -1812,7 +1864,8 @@ sanitise_bone_lengths(struct gm_context *ctx,
 static void
 sanitise_bone_rotations(struct gm_context *ctx,
                         struct gm_skeleton &skeleton,
-                        uint64_t timestamp)
+                        uint64_t timestamp,
+                        uint64_t max_window)
 {
     if (!ctx->bone_rotation_sanitisation) {
         return;
@@ -1822,8 +1875,6 @@ sanitise_bone_rotations(struct gm_context *ctx,
 
     for (auto &bone : skeleton.bones) {
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
-        struct gm_joint &head = skeleton.joints[bone_info.head];
-        struct gm_joint &tail = skeleton.joints[bone_info.tail];
 
         // If this bone has no parent bone, we can't correct its angle
         int parent_bone_idx = bone_info.parent;
@@ -1843,7 +1894,8 @@ sanitise_bone_rotations(struct gm_context *ctx,
         bool bone_validity[ctx->n_tracking];
         for (int i = 0; i < ctx->n_tracking; ++i) {
             if (!prev[i]->skeleton.joints[bone_info.head].valid ||
-                !prev[i]->skeleton.joints[bone_info.tail].valid)
+                !prev[i]->skeleton.joints[bone_info.tail].valid ||
+                prev[i]->frame->timestamp + max_window < timestamp)
             {
                 bone_validity[i] = false;
             } else {
@@ -1946,25 +1998,23 @@ sanitise_bone_rotations(struct gm_context *ctx,
 static void
 sanitise_skeleton(struct gm_context *ctx,
                   struct gm_skeleton &skeleton,
-                  uint64_t timestamp,
-                  int parent_head = 0)
+                  uint64_t timestamp)
 {
     // We can't do any sanitisation without any tracking history
     if (!ctx->n_tracking) {
         return;
     }
 
-    // Cap the time distance used when making time-based extrapolations.
-    struct gm_tracking_impl **prev = ctx->tracking_history;
+    // We can't do any sanitisation if the last tracking history item is too old
+    uint64_t max_window =
+        timestamp - (uint64_t)((double)ctx->sanitisation_window * 1e9);
+    if (ctx->tracking_history[0]->frame->timestamp + max_window < timestamp) {
+        return;
+    }
 
-    // XXX: we probably shouldn't share prediction-related state for this
-    timestamp = calculate_decayed_timestamp(
-        prev[0]->frame->timestamp, timestamp,
-        ctx->max_prediction_delta, ctx->prediction_decay);
-
-    sanitise_joint_positions(ctx, skeleton, timestamp, parent_head);
-    sanitise_bone_lengths(ctx, skeleton, timestamp);
-    sanitise_bone_rotations(ctx, skeleton, timestamp);
+    sanitise_joint_velocities(ctx, skeleton, timestamp, max_window);
+    sanitise_bone_lengths(ctx, skeleton, timestamp, max_window);
+    sanitise_bone_rotations(ctx, skeleton, timestamp, max_window);
 }
 
 template<typename PointT>
@@ -6314,7 +6364,17 @@ context_track_skeleton(struct gm_context *ctx,
               &state);
 
     add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
-    float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton);
+
+    // TODO: We just take the most confident skeleton above, but we should
+    //       probably establish some thresholds and spit out multiple
+    //       skeletons.
+    run_stage(tracking,
+              TRACKING_STAGE_SANITIZE_SKELETON,
+              stage_sanitize_skeleton_cb,
+              NULL,
+              &state);
+
+    float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton_corrected);
     add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
 
     bool valid_skeleton = true;
@@ -6343,25 +6403,8 @@ context_track_skeleton(struct gm_context *ctx,
     }
 
     if (!valid_skeleton) {
-        if (motion_detection) {
-            run_stage(tracking,
-                      TRACKING_STAGE_UPDATE_CODEBOOK,
-                      stage_update_codebook_cb,
-                      NULL,
-                      &state);
-        }
         gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
-        return false;
     }
-
-    // TODO: We just take the most confident skeleton above, but we should
-    //       probably establish some thresholds and spit out multiple
-    //       skeletons.
-    run_stage(tracking,
-              TRACKING_STAGE_SANITIZE_SKELETON,
-              stage_sanitize_skeleton_cb,
-              NULL,
-              &state);
 
     if (motion_detection) {
         run_stage(tracking,
@@ -6371,9 +6414,9 @@ context_track_skeleton(struct gm_context *ctx,
                   &state);
     }
 
-    tracking->success = true;
+    tracking->success = valid_skeleton;
 
-    return true;
+    return tracking->success;
 }
 
 static void
@@ -7915,24 +7958,26 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.max = 4.f;
     ctx->properties.push_back(prop);
 
-    ctx->parent_bone_sanitisation = true;
+    ctx->sanitisation_window = 1.f;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "parent_bone_sanitisation";
-    prop.desc = "If parent bone movement exceeds set movement thresholds, "
-                "use a position from a previous well-tracked frame.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->parent_bone_sanitisation;
+    prop.name = "sanitisation_window";
+    prop.desc = "The maximum time differential on which to base skeleton"
+                "sanitisation, in seconds.";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->sanitisation_window;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 10.f;
     ctx->properties.push_back(prop);
 
-    ctx->joint_position_sanitisation = false;
+    ctx->joint_velocity_sanitisation = true;
     prop = gm_ui_property();
     prop.object = ctx;
-    prop.name = "joint_position_sanitisation";
-    prop.desc = "If any joint position exceeds set movement thresholds, "
-                "use a position from a previous well-tracked frame.";
+    prop.name = "joint_velocity_sanitisation";
+    prop.desc = "If any joint position exceeds set velocity thresholds, "
+                "use the displacement from the last well-tracked frame.";
     prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->joint_position_sanitisation;
+    prop.bool_state.ptr = &ctx->joint_velocity_sanitisation;
     ctx->properties.push_back(prop);
 
     ctx->bone_length_sanitisation = true;
@@ -7945,7 +7990,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.bool_state.ptr = &ctx->bone_length_sanitisation;
     ctx->properties.push_back(prop);
 
-    ctx->bone_rotation_sanitisation = true;
+    ctx->bone_rotation_sanitisation = false;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "bone_rotation_sanitisation";
@@ -8923,14 +8968,14 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "sanitize_skeleton";
         stage.desc = "Try and clean up issues with the derived skeleton";
 
-        ctx->joint_move_threshold = 1.5f;
+        ctx->joint_velocity_threshold = 1.5f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "joint_move_threshold";
-        prop.desc = "Minimum travel distance (m/s) "
-            "before considering a joint for error correction";
+        prop.name = "joint_velocity_threshold";
+        prop.desc = "Minimum travel velocity (m/s) "
+                    "before considering a joint for error correction";
         prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->joint_move_threshold;
+        prop.float_state.ptr = &ctx->joint_velocity_threshold;
         prop.float_state.min = 0.3f;
         prop.float_state.max = 3.0f;
         stage.properties.push_back(prop);
@@ -8939,8 +8984,8 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop = gm_ui_property();
         prop.object = ctx;
         prop.name = "joint_outlier_factor";
-        prop.desc = "The factor by which a joint position can deviate "
-                    "from the average variation before being ignored";
+        prop.desc = "The factor by which a joint velocity can deviate "
+                    "from the average velocity before being sanitised";
         prop.type = GM_PROPERTY_FLOAT;
         prop.float_state.ptr = &ctx->joint_outlier_factor;
         prop.float_state.min = 1.0f;
@@ -8952,7 +8997,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.object = ctx;
         prop.name = "bone_length_outlier_factor";
         prop.desc = "The factor by which a bone length can deviate from the "
-                    "average variation before being ignored";
+                    "average length before being sanitised";
         prop.type = GM_PROPERTY_FLOAT;
         prop.float_state.ptr = &ctx->bone_length_outlier_factor;
         prop.float_state.min = 1.0f;
@@ -8963,8 +9008,8 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop = gm_ui_property();
         prop.object = ctx;
         prop.name = "bone_rotation_outlier_factor";
-        prop.desc = "The factor by which a bone's rotation can deviate "
-                    "from the average rotation variation before being ignored";
+        prop.desc = "The factor by which a bone's rotation can deviate from "
+                    "the average rotation variation before being sanitised";
         prop.type = GM_PROPERTY_FLOAT;
         prop.float_state.ptr = &ctx->bone_rotation_outlier_factor;
         prop.float_state.min = 1.0f;
