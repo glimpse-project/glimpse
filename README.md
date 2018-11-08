@@ -118,9 +118,9 @@ pip3 install --user --upgrade git+https://github.com/glimpse-project/meson
 On OSX you may need to explicitly add locally installed Python binaries to your
 PATH, E.g. by adding the following line to your ~/.bash_profile:
 
-`export PATH=$HOME/Library/Python/3.6/bin:$PATH`
+`export PATH=$HOME/Library/Python/3.7/bin:$PATH`
 
-_(The `3.6` version number may differ, depending on the specific version of
+_(The `3.7` version number may differ, depending on the specific version of
  Python 3 being used)_
 
 
@@ -209,7 +209,7 @@ keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -s
 Assuming you use [brew](http://brew.sh/) to install third-party tools then the
 Glimpse build will first require:
 
-`brew install pkg-config zlib libpng glfw3 python ninja git`
+`brew install pkg-config zlib libpng glfw python ninja git`
 
 If you want to use the software with a Kinect device, you will also need
 libfreenect installed:
