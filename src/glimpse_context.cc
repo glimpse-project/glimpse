@@ -755,6 +755,8 @@ struct gm_context
     bool fast_clustering;
 
     bool joint_refinement;
+    float max_joint_refinement_delta;
+
     float bone_length_variance;
     float bone_rotation_variance;
 
@@ -1384,6 +1386,27 @@ is_bone_angle_diff(struct gm_context *ctx,
     return angle_delta > max_angle;
 }
 
+static float
+calc_cumulative_joint_difference(struct gm_context *ctx,
+                                 struct gm_skeleton &skel,
+                                 struct gm_skeleton &ref)
+{
+    float diff = 0.f;
+
+    for (int i = 0; i < ctx->n_joints; ++i) {
+        struct gm_joint &joint = skel.joints[i];
+        struct gm_joint &ref_joint = ref.joints[i];
+
+        if (joint.valid != ref_joint.valid) {
+            continue;
+        }
+
+        diff += distance_between(&joint.x, &ref_joint.x);
+    }
+
+    return diff;
+}
+
 static int
 calc_mismatched_bones(struct gm_context *ctx,
                       struct gm_skeleton &skel,
@@ -1567,21 +1590,22 @@ static void
 refine_skeleton(struct gm_tracking_impl *tracking)
 {
     struct gm_context *ctx = tracking->ctx;
-    if (!ctx->joint_refinement || !ctx->n_tracking) {
+    uint64_t time_threshold = tracking->frame->timestamp -
+        (uint64_t)((double)ctx->max_joint_refinement_delta * 1e9);
+
+    if (!ctx->joint_refinement || !ctx->n_tracking ||
+        ctx->tracking_history[0]->frame->timestamp < time_threshold) {
         return;
     }
 
-    float time_delta = (float)
-        ((tracking->frame->timestamp -
-          ctx->tracking_history[0]->frame->timestamp) / 1e9);
-    int n_bone_mismatch =
-        calc_mismatched_bones(ctx, tracking->skeleton_corrected,
-                              ctx->tracking_history[0]->skeleton_corrected,
-                              time_delta);
+    float joint_diff =
+        calc_cumulative_joint_difference(ctx, tracking->skeleton_corrected,
+                                         ctx->tracking_history[0]->
+                                         skeleton_corrected);
 
-    // For each joint, we look at the 'score' of the skeleton using each
-    // joint cluster and if it scores higher than the most confident
-    // joint, we replace that joint and continue.
+    // For each joint, we look at the cumulative distance between joints using
+    // each joint cluster and if the distance is lower, we replace that joint
+    // and continue.
     for (int j = 0; j < ctx->n_joints; ++j) {
         if (!tracking->joints->joints[j] ||
             !tracking->joints->joints[j]->next) {
@@ -1605,13 +1629,13 @@ refine_skeleton(struct gm_tracking_impl *tracking)
                                                 j); // Don't overwrite this joint
             update_bones(ctx, candidate_skeleton);
 
-            int cand_bone_mismatch =
-                calc_mismatched_bones(ctx, candidate_skeleton,
-                                      ctx->tracking_history[0]->skeleton_corrected,
-                                      time_delta);
-            if (cand_bone_mismatch <= n_bone_mismatch) {
+            float cand_joint_diff =
+                calc_cumulative_joint_difference(ctx, candidate_skeleton,
+                                                 ctx->tracking_history[0]->
+                                                 skeleton_corrected);
+            if (cand_joint_diff <= joint_diff) {
                 std::swap(tracking->skeleton_corrected, candidate_skeleton);
-                n_bone_mismatch = cand_bone_mismatch;
+                joint_diff = cand_joint_diff;
             }
         }
     }
@@ -8337,9 +8361,21 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.object = ctx;
     prop.name = "joint_refinement";
     prop.desc = "Favour less confident joint predictions that conform "
-                "to a statistical joint position model better";
+                "to previous tracked joint positions better";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->joint_refinement;
+    ctx->properties.push_back(prop);
+
+    ctx->max_joint_refinement_delta = 0.2f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "max_joint_refinement_delta";
+    prop.desc = "The maximum time between joint refinement comparisons, "
+                "in seconds";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->max_joint_refinement_delta;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1.f;
     ctx->properties.push_back(prop);
 
     ctx->prediction_dampen_large_deltas = true;
