@@ -1667,7 +1667,7 @@ static void
 sanitise_joint_velocities(struct gm_context *ctx,
                           struct gm_skeleton &skeleton,
                           uint64_t timestamp,
-                          uint64_t max_window)
+                          uint64_t time_threshold)
 {
     if (!ctx->joint_velocity_sanitisation) {
         return;
@@ -1729,7 +1729,7 @@ sanitise_joint_velocities(struct gm_context *ctx,
             struct gm_joint &joint1 = prev[j]->skeleton.joints[joint];
             struct gm_joint &joint2 = prev[j+1]->skeleton.joints[joint];
             if (!joint1.valid || !joint2.valid ||
-                prev[j+1]->frame->timestamp + max_window < timestamp)
+                prev[j+1]->frame->timestamp < time_threshold)
             {
                 velocities[j] = FLT_MAX;
                 continue;
@@ -1802,8 +1802,7 @@ sanitise_joint_velocities(struct gm_context *ctx,
 static void
 sanitise_bone_lengths(struct gm_context *ctx,
                       struct gm_skeleton &skeleton,
-                      uint64_t timestamp,
-                      uint64_t max_window)
+                      uint64_t time_threshold)
 {
     if (!ctx->bone_length_sanitisation) {
         return;
@@ -1825,7 +1824,7 @@ sanitise_bone_lengths(struct gm_context *ctx,
         float avg_bone_length = bone.length;
         int n_lengths = 1;
         for (int i = 0; i < ctx->n_tracking; ++i) {
-            if (prev[i]->frame->timestamp + max_window < timestamp) {
+            if (prev[i]->frame->timestamp < time_threshold) {
                 break;
             }
             const struct gm_bone &prev_bone =
@@ -1884,8 +1883,7 @@ sanitise_bone_lengths(struct gm_context *ctx,
 static void
 sanitise_bone_rotations(struct gm_context *ctx,
                         struct gm_skeleton &skeleton,
-                        uint64_t timestamp,
-                        uint64_t max_window)
+                        uint64_t time_threshold)
 {
     if (!ctx->bone_rotation_sanitisation) {
         return;
@@ -1915,7 +1913,7 @@ sanitise_bone_rotations(struct gm_context *ctx,
         for (int i = 0; i < ctx->n_tracking; ++i) {
             if (!prev[i]->skeleton.joints[bone_info.head].valid ||
                 !prev[i]->skeleton.joints[bone_info.tail].valid ||
-                prev[i]->frame->timestamp + max_window < timestamp)
+                prev[i]->frame->timestamp < time_threshold)
             {
                 bone_validity[i] = false;
             } else {
@@ -2026,15 +2024,15 @@ sanitise_skeleton(struct gm_context *ctx,
     }
 
     // We can't do any sanitisation if the last tracking history item is too old
-    uint64_t max_window =
+    uint64_t time_threshold =
         timestamp - (uint64_t)((double)ctx->sanitisation_window * 1e9);
-    if (ctx->tracking_history[0]->frame->timestamp + max_window < timestamp) {
+    if (ctx->tracking_history[0]->frame->timestamp < time_threshold) {
         return;
     }
 
-    sanitise_joint_velocities(ctx, skeleton, timestamp, max_window);
-    sanitise_bone_lengths(ctx, skeleton, timestamp, max_window);
-    sanitise_bone_rotations(ctx, skeleton, timestamp, max_window);
+    sanitise_joint_velocities(ctx, skeleton, timestamp, time_threshold);
+    sanitise_bone_lengths(ctx, skeleton, time_threshold);
+    sanitise_bone_rotations(ctx, skeleton, time_threshold);
 }
 
 template<typename PointT>
