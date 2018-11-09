@@ -1821,6 +1821,13 @@ sanitise_bone_lengths(struct gm_context *ctx,
             }
             const struct gm_bone &prev_bone =
                 prev[i]->skeleton.bones[bone.idx];
+            if (ctx->use_bone_map_annotation) {
+                struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
+                if (bone.length < bone_info.min_length ||
+                    bone.length > bone_info.max_length) {
+                    continue;
+                }
+            }
             avg_bone_length += prev_bone.length;
             ++n_lengths;
         }
