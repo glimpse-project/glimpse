@@ -2839,6 +2839,7 @@ tracking_add_debug_text(struct gm_tracking_impl *tracking,
     va_end(args);
     if (debug_text) {
         tracking->debug_text.push_back(debug_text);
+        gm_debug(tracking->ctx->log, "Tracking debug: %s", debug_text);
     }
 }
 
