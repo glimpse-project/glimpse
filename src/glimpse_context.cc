@@ -500,11 +500,11 @@ struct gm_tracking_impl
     // The depth cloud downsampled for segmentation
     pcl::PointCloud<pcl::PointXYZL>::Ptr downsampled_cloud;
 
+    // naive or codebook segmentation/clustering
+    std::vector<pcl::PointIndices> cluster_indices;
+
     // The ground-aligned segmentation-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr ground_cloud;
-
-    // Labels based on clustering after plane removal
-    pcl::PointCloud<pcl::Label>::Ptr cluster_labels;
 
     std::vector<struct gm_point_rgba> debug_cloud;
     // It's useful to associate some intrinsics with the debug cloud to help
@@ -714,10 +714,13 @@ struct gm_context
     float codebook_flat_threshold;
     float codebook_clear_tracked_threshold;
     float codebook_keep_back_most_threshold;
+    pcl::PointCloud<pcl::Label>::Ptr codebook_cluster_labels_scratch;
     float codebook_cluster_tolerance;
+    bool codebook_cluster_merge_large_neighbours;
     bool codebook_cluster_infill;
     int codebook_tiny_cluster_threshold;
     int codebook_large_cluster_threshold;
+    int debug_codebook_cluster_idx;
     int codeword_mean_n_max;
     int codeword_flicker_max_run_len;
     int codeword_flicker_max_quiet_frames;
@@ -914,9 +917,6 @@ struct pipeline_scratch_state
     struct gm_pose codebook_pose;
     glm::mat4 start_to_codebook;
     std::vector<std::vector<struct seg_codeword>> *seg_codebook;
-
-    // naive or codebook segmentation/clustering
-    std::vector<pcl::PointIndices> cluster_indices;
 
     bool codebook_frozen;
 
@@ -2574,31 +2574,63 @@ tracking_create_rgb_video(struct gm_tracking *_tracking,
 
 static bool
 tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
-                                       int *width, int *height,
+                                       int *width_out, int *height_out,
                                        uint8_t **output)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    //struct gm_context *ctx = tracking->ctx;
+    struct gm_context *ctx = tracking->ctx;
 
-    if (!tracking->cluster_labels) {
+    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+
+    if (!tracking->cluster_indices.size()) {
         return false;
     }
 
-    *width = (int)tracking->cluster_labels->width;
-    *height = (int)tracking->cluster_labels->height;
+    int width = pcl_cloud->width;
+    int height = pcl_cloud->height;
+    *width_out = width;
+    *height_out = height;
 
-    if (!(*output)) {
-        *output = (uint8_t *)malloc((*width) * (*height) * 3);
-    }
+    if (!width || !height)
+        return false;
 
-    foreach_xy_off(*width, *height) {
-        int label = tracking->cluster_labels->points[off].label;
-        png_color *color =
-            &default_palette[label % ARRAY_LEN(default_palette)];
-        float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
-        (*output)[off * 3] = (uint8_t)(color->red * shade);
-        (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
-        (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
+    size_t out_size = width * height * 3;
+    if (!(*output))
+        *output = (uint8_t *)malloc(out_size);
+
+    memset(*output, 0, out_size);
+
+    int nth_large = -1;
+    for (unsigned label = 0; label < cluster_indices.size(); label++) {
+        auto &cluster = cluster_indices[label];
+
+        if (cluster.indices.size() < ctx->codebook_large_cluster_threshold)
+            continue;
+
+        nth_large++;
+
+        if (ctx->debug_codebook_cluster_idx != -1 &&
+            ctx->debug_codebook_cluster_idx != nth_large)
+        {
+            continue;
+        }
+
+        for (int i : cluster.indices) {
+            int x = i % width;
+            int y = i / width;
+            int off = width * y + x;
+
+            if (x >= width || y >= height)
+                continue;
+
+            png_color *color =
+                &default_palette[label % ARRAY_LEN(default_palette)];
+            float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
+            (*output)[off * 3] = (uint8_t)(color->red * shade);
+            (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
+            (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
+        }
     }
 
     return true;
@@ -4744,6 +4776,7 @@ cluster_codebook_classified_points(
     unsigned invalid_label = std::numeric_limits<unsigned>::max();
     pcl::Label invalid_pt;
     invalid_pt.label = std::numeric_limits<unsigned>::max();
+    labels.points.clear();
     labels.points.resize(input_->points.size(), invalid_pt);
     labels.width = input_->width;
     labels.height = input_->height;
@@ -4873,35 +4906,38 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    tracking->cluster_labels =
-        pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
-    //std::vector<pcl::PointIndices> all_clusters;
+    if (!ctx->codebook_cluster_labels_scratch) {
+        ctx->codebook_cluster_labels_scratch =
+            pcl::PointCloud<pcl::Label>::Ptr(new pcl::PointCloud<pcl::Label>);
+    }
+
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    cluster_indices.clear();
+
     cluster_codebook_classified_points(tracking->downsampled_cloud,
-                                       *tracking->cluster_labels,
-                                       state->cluster_indices,
-                                       //all_clusters,
+                                       *ctx->codebook_cluster_labels_scratch,
+                                       cluster_indices,
                                        ctx->codebook_cluster_tolerance);
 
-    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
+    int tiny_cluster_threshold = ctx->codebook_tiny_cluster_threshold;
+    int large_cluster_threshold = ctx->codebook_large_cluster_threshold;
 
-#if 0
-    for (auto &cluster : all_clusters) {
-        if (cluster.indices.size() > tiny_cluster_threshold) {
-            cluster_indices.push_back(std::move(cluster));
-        }
-    }
-#endif
+    int width = tracking->downsampled_cloud->width;
+    //int height = tracking->downsampled_cloud->height;
+
+    struct large_label {
+        unsigned label;
+        int min_x, max_x;
+        int min_y, max_y;
+    };
+    std::vector<large_label> large_labels = {};
 
     if (ctx->codebook_cluster_infill)
     {
-        int width = tracking->downsampled_cloud->width;
-        //int height = tracking->downsampled_cloud->height;
 
         pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
-        pcl::PointCloud<pcl::Label> &labels = *tracking->cluster_labels;
+        pcl::PointCloud<pcl::Label> &labels = *ctx->codebook_cluster_labels_scratch;
 
-        int tiny_cluster_threshold = ctx->codebook_tiny_cluster_threshold;
-        int large_cluster_threshold = ctx->codebook_large_cluster_threshold;
         for (unsigned label = 0; label < cluster_indices.size(); label++)
         {
             auto &cluster = cluster_indices[label];
@@ -4911,6 +4947,8 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
 
             std::vector<unsigned> to_merge = {};
 
+            struct large_label large_label = { 0, INT_MAX, -1, INT_MAX, -1 };
+
             for (int i : cluster.indices) {
                 //pcl::PointXYZL &point = pcl_cloud->points[i];
                 int x = i % width;
@@ -4918,6 +4956,15 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
 
                 if (x == 0 || y == 0)
                     continue;
+
+                if (x > large_label.max_x)
+                    large_label.max_x = x;
+                if (x < large_label.min_x)
+                    large_label.min_x = x;
+                if (y > large_label.max_y)
+                    large_label.max_y = y;
+                if (y < large_label.min_y)
+                    large_label.min_y = y;
 
                 int left_neightbour =  y * width + (x - 1);
                 unsigned left_label = labels[left_neightbour].label;
@@ -4941,9 +4988,120 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
             for (unsigned merge_label : to_merge) {
                 auto &merge_cluster = cluster_indices[merge_label];
                 for (int i : merge_cluster.indices) {
+                    int x = i % width;
+                    int y = i / width;
+
+                    if (x > large_label.max_x)
+                        large_label.max_x = x;
+                    if (x < large_label.min_x)
+                        large_label.min_x = x;
+                    if (y > large_label.max_y)
+                        large_label.max_y = y;
+                    if (y < large_label.min_y)
+                        large_label.min_y = y;
+
                     cluster.indices.push_back(i);
                 }
                 merge_cluster.indices.clear();
+            }
+
+            if (large_label.max_x != -1 && large_label.max_y != -1) {
+                large_label.label = label;
+                large_labels.push_back(large_label);
+            }
+        }
+    } else {
+        for (unsigned label = 0; label < cluster_indices.size(); label++)
+        {
+            auto &cluster = cluster_indices[label];
+
+            if (cluster.indices.size() < large_cluster_threshold)
+                continue;
+
+            struct large_label large_label = { 0, INT_MAX, -1, INT_MAX, -1 };
+
+            for (int i : cluster.indices) {
+                //pcl::PointXYZL &point = pcl_cloud->points[i];
+                int x = i % width;
+                int y = i / width;
+
+                if (x > large_label.max_x)
+                    large_label.max_x = x;
+                if (x < large_label.min_x)
+                    large_label.min_x = x;
+                if (y > large_label.max_y)
+                    large_label.max_y = y;
+                if (y < large_label.min_y)
+                    large_label.min_y = y;
+            }
+
+            gm_assert(ctx->log, large_label.max_x != -1 && large_label.max_y != -1,
+                      "Spurious, undefined large label bounds");
+            large_label.label = label;
+            large_labels.push_back(large_label);
+        }
+    }
+
+    if (ctx->codebook_cluster_merge_large_neighbours)
+    {
+        tracking_add_debug_text(tracking,
+                                "Looking at %d large clusters to possibly merge",
+                                (int)large_labels.size());
+        for (int i = 0; i < large_labels.size(); i++) {
+            struct large_label &large_label = large_labels[i];
+            tracking_add_debug_text(tracking,
+                                    "Large Cluster %d (label=%d, %d points): min_x=%d,min_y=%d,max_x=%d,max_y=%d",
+                                    i,
+                                    large_label.label,
+                                    cluster_indices[large_label.label].indices.size(),
+                                    large_label.min_x,
+                                    large_label.min_y,
+                                    large_label.max_x,
+                                    large_label.max_y);
+        }
+
+        for (auto &current_label : large_labels) {
+            auto &cluster = cluster_indices[current_label.label];
+
+            // we may have merged the indices already...
+            if (!cluster.indices.size())
+                continue;
+
+            gm_assert(ctx->log, cluster.indices.size() >= large_cluster_threshold,
+                      "Spurious 'large' cluster (label=%d) isn't large (%d points)",
+                      current_label.label, (int)cluster.indices.size());
+            for (auto &other_label : large_labels) {
+                auto &other_cluster = cluster_indices[other_label.label];
+
+                if (other_label.label == current_label.label)
+                    continue;
+
+                // we may have merged the indices already...
+                if (!other_cluster.indices.size())
+                    continue;
+
+                gm_assert(ctx->log, other_cluster.indices.size() >= large_cluster_threshold,
+                          "Spurious merge with non-large label (%d) cluster (%d points)",
+                          other_label.label,
+                          (int)other_cluster.indices.size());
+
+                int x0 = std::max(current_label.min_x, other_label.min_x);
+                int y0 = std::max(current_label.min_y, other_label.min_y);
+                int x1 = std::min(current_label.max_x, other_label.max_x);
+                int y1 = std::min(current_label.max_y, other_label.max_y);
+                if (x0 <= x1 && y0 <= y1)
+                {
+                    tracking_add_debug_text(tracking, "Merging label %d (%d points) into %d (%d points)",
+                                            other_label.label,
+                                            (int)other_cluster.indices.size(),
+                                            current_label.label,
+                                            (int)cluster.indices.size());
+
+                   for (int i : other_cluster.indices) {
+                       cluster.indices.push_back(i);
+                   }
+                   other_cluster.indices.clear();
+                }
             }
         }
     }
@@ -4953,7 +5111,7 @@ static void
 stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
                                 struct pipeline_scratch_state *state)
 {
-    //struct gm_context *ctx = tracking->ctx;
+    struct gm_context *ctx = tracking->ctx;
     int seg_res = state->seg_res;
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
@@ -4966,9 +5124,25 @@ stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
 
     std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
     std::vector<int> &debug_cloud_indices = tracking->debug_cloud_indices;
-    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
 
-    for (auto &cluster : state->cluster_indices) {
+    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+
+    int nth_large = -1;
+    for (unsigned label = 0; label < cluster_indices.size(); label++) {
+        auto &cluster = cluster_indices[label];
+
+        if (cluster.indices.size() < ctx->codebook_large_cluster_threshold)
+            continue;
+
+        nth_large++;
+
+        if (ctx->debug_codebook_cluster_idx != -1 &&
+            ctx->debug_codebook_cluster_idx != nth_large)
+        {
+            continue;
+        }
+
         for (int i : cluster.indices) {
             pcl::PointXYZL &point = pcl_cloud->points[i];
             struct gm_point_rgba rgba_point;
@@ -4977,7 +5151,6 @@ stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
             rgba_point.y = point.y;
             rgba_point.z = point.z;
 
-            int label = tracking->cluster_labels->points[i].label;
             png_color *color =
                 &default_palette[label % ARRAY_LEN(default_palette)];
             float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
@@ -5188,6 +5361,9 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
 
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    cluster_indices.clear();
+
     int width = (int)tracking->downsampled_cloud->width;
     int height = (int)tracking->downsampled_cloud->height;
 
@@ -5268,7 +5444,6 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
     }
 
     if (!person_indices.indices.empty()) {
-        std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
         cluster_indices.push_back(person_indices);
     }
 }
@@ -5312,7 +5487,7 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    std::vector<pcl::PointIndices> &cluster_indices = state->cluster_indices;
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
 
     // Assume the any cluster that has roughly human dimensions and
     // contains its centroid may be a person.
@@ -8887,6 +9062,26 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.desc = "Merge touching tiny clusters into large clusters";
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->codebook_cluster_infill;
+        stage.properties.push_back(prop);
+
+        ctx->codebook_cluster_merge_large_neighbours = false;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_cluster_merge_large_neighbours";
+        prop.desc = "Merge large, adjacent clusters";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->codebook_cluster_merge_large_neighbours;
+        stage.properties.push_back(prop);
+
+        ctx->debug_codebook_cluster_idx = -1;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "debug_codebook_cluster_idx";
+        prop.desc = "Only view this (large) cluster (show all if == -1)";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->debug_codebook_cluster_idx;
+        prop.int_state.min = 0;
+        prop.int_state.max = 100;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
