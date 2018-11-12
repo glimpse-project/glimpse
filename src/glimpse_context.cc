@@ -722,6 +722,9 @@ struct gm_context
 
     bool motion_detection;
     bool naive_seg_fallback;
+    bool cluster_from_prev;
+    float cluster_from_prev_dist_threshold;
+    float cluster_from_prev_time_threshold;
 
     bool codebook_frozen;
     float codebook_foreground_scrub_timeout;
@@ -2164,6 +2167,16 @@ class LabelComparator: public pcl::Comparator<PointT>
 
 /* TODO: combine the to_start and to_codebook matrices
  */
+static inline void
+project_point(float *point,
+              struct gm_intrinsics *intrinsics,
+              float *out_x,
+              float *out_y)
+{
+    *out_x = ((point[0] * intrinsics->fx / point[2]) + intrinsics->cx);
+    *out_y = ((point[1] * intrinsics->fy / point[2]) + intrinsics->cy);
+}
+
 static int
 project_point_into_codebook(pcl::PointXYZL *point,
                             glm::mat4 to_start,
@@ -2173,33 +2186,28 @@ project_point_into_codebook(pcl::PointXYZL *point,
     if (std::isnan(point->z))
         return -1;
 
-    const int width = intrinsics->width;
-    const int height = intrinsics->height;
-    const float fx = intrinsics->fx;
-    const float fy = intrinsics->fy;
-    const float cx = intrinsics->cx;
-    const float cy = intrinsics->cy;
-
     glm::vec4 pt(point->x, point->y, point->z, 1.f);
     pt = (to_start * pt);
     pt = (start_to_codebook * pt);
+
+    float transformed_pt[3] = { pt.x, pt.y, pt.z };
     point->x = pt.x;
     point->y = pt.y;
     point->z = pt.z;
 
-    float nx = ((pt.x * fx / pt.z) + cx);
-    float ny = ((-pt.y * fy / pt.z) + cy);
+    float nx, ny;
+    project_point(&transformed_pt[0], intrinsics, &nx, &ny);
 
     int dnx = nx;
     int dny = ny;
 
-    if (dnx < 0 || dnx >= width ||
-        dny < 0 || dny >= height)
+    if (dnx < 0 || dnx >= intrinsics->width ||
+        dny < 0 || dny >= intrinsics->height)
     {
         return -1;
     }
 
-    return width * dny + dnx;
+    return intrinsics->width * dny + dnx;
 }
 
 static inline bool
@@ -5407,7 +5415,6 @@ stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
                                   struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
@@ -5438,18 +5445,73 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
     int width = (int)tracking->downsampled_cloud->width;
     int height = (int)tracking->downsampled_cloud->height;
 
-    int fx = state->naive_fx;
-    int fy = state->naive_fy;
-
-    int fidx = fy * width + fx;
-    pcl::PointXYZL &focus_pt = tracking->downsampled_cloud->points[fidx];
-
     float lowest_point = state->naive_floor_y;
 
     std::queue<struct PointCmp> &flood_fill = state->flood_fill;
     std::vector<bool> &done_mask = state->done_mask;
 
-    flood_fill.push({ fx, fy, fx, fy });
+    uint64_t time_threshold = tracking->frame->timestamp -
+        (uint64_t)((double)ctx->cluster_from_prev_time_threshold * 1e9);
+
+    if (ctx->cluster_from_prev && ctx->n_tracking &&
+        ctx->tracking_history[0]->frame->timestamp >= time_threshold) {
+        for (int j = 0; j < ctx->n_joints; ++j) {
+            struct gm_joint &joint =
+                ctx->tracking_history[0]->skeleton_corrected.joints[j];
+            if (!joint.valid) {
+                continue;
+            }
+
+            // Project joint position into the spaces of the old frame and
+            // the current one.
+            float ox, oy, nx, ny;
+            struct gm_intrinsics *old_intrinsics =
+                &ctx->tracking_history[0]->downsampled_intrinsics;
+            struct gm_intrinsics *new_intrinsics =
+                &tracking->downsampled_intrinsics;
+
+            project_point(&joint.x, old_intrinsics, &ox, &oy);
+            project_point(&joint.x, new_intrinsics, &nx, &ny);
+
+            // Flip Y values as we're using this to address a buffer that's
+            // organised with the top-left of the image at the zero index.
+            oy = old_intrinsics->height - oy;
+            ny = new_intrinsics->height - ny;
+
+            // See if the depth has gone past the threshold and if it hasn't,
+            // add it as a point to cluster (flood-fill) from.
+            int dox = ox;
+            int doy = oy;
+            if (dox < 0 || dox >= old_intrinsics->width ||
+                doy < 0 || doy >= old_intrinsics->height)
+            {
+                continue;
+            }
+
+            int dnx = nx;
+            int dny = ny;
+            if (dnx < 0 || dnx >= new_intrinsics->width ||
+                dny < 0 || dny >= new_intrinsics->height)
+            {
+                continue;
+            }
+
+            float od = ctx->tracking_history[0]->downsampled_cloud->
+                points[doy * old_intrinsics->width + dox].z;
+            float nd = tracking->downsampled_cloud->
+                points[dny * new_intrinsics->width + dnx].z;
+
+            float diff = fabsf(od - nd);
+            if (diff <= ctx->cluster_from_prev_dist_threshold) {
+                flood_fill.push({ dnx, dny, dnx, dny });
+            }
+        }
+    }
+    if (flood_fill.empty()) {
+        int fx = state->naive_fx;
+        int fy = state->naive_fy;
+        flood_fill.push({ fx, fy, fx, fy });
+    }
     std::fill(done_mask.begin(), done_mask.end(), false);
 
     struct candidate_cluster person_cluster = {};
@@ -5467,21 +5529,9 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        pcl::PointXYZL &pcl_pt =
-            tracking->downsampled_cloud->points[idx];
-
-        // Avoid building a cloud that would be considered invalid. We
-        // assume the focus point is somewhere near the center of the body,
-        // but not the exact center (so we divide by 1.75 and not 2).
-        if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width / 1.75f ||
-            fabsf(focus_pt.y - pcl_pt.y) > ctx->cluster_max_height / 1.75f ||
-            fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth / 1.75f) {
-            continue;
-        }
-
+        pcl::PointXYZL pcl_pt = tracking->downsampled_cloud->points[idx];
         float aligned_y = tracking->ground_cloud->size() ?
-            tracking->ground_cloud->points[idx].y :
-            tracking->downsampled_cloud->points[idx].y;
+            tracking->ground_cloud->points[idx].y : pcl_pt.y;
         if (aligned_y < lowest_point + ctx->floor_threshold) {
             continue;
         }
@@ -5527,9 +5577,9 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             {
                 struct gm_point_rgba debug_point;
 
-                debug_point.x = tracking->downsampled_cloud->points[idx].x;
-                debug_point.y = tracking->downsampled_cloud->points[idx].y;
-                debug_point.z = tracking->downsampled_cloud->points[idx].z;
+                debug_point.x = pcl_pt.x;
+                debug_point.y = pcl_pt.y;
+                debug_point.z = pcl_pt.z;
                 debug_point.rgba = 0xffffffff;
 
                 tracking->debug_cloud.push_back(debug_point);
@@ -8829,6 +8879,40 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "naive_cluster";
         stage.desc = "Cluster based on assumptions about single-person tracking";
+
+        ctx->cluster_from_prev = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cluster_from_prev";
+        prop.desc = "During naive segmentation, cluster from the positions of "
+                    "tracked joints on previous frames";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->cluster_from_prev;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_from_prev_dist_threshold = 0.1f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cluster_from_prev_dist_threshold";
+        prop.desc = "The maximum distance between the point in an old frame "
+                    "and new before not considering it for clustering.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_from_prev_dist_threshold;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_from_prev_time_threshold = 0.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "cluster_from_prev_time_threshold";
+        prop.desc = "The maximum time difference when using a previous frame "
+                    "to determine clustering start points, in seconds.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_from_prev_time_threshold;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 1.f;
+        stage.properties.push_back(prop);
 
         ctx->floor_threshold = 0.1f;
         prop = gm_ui_property();
