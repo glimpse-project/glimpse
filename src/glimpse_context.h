@@ -567,11 +567,6 @@ gm_tracking_get_video_camera_intrinsics(struct gm_tracking *tracking);
 const struct gm_intrinsics *
 gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *tracking);
 
-const float *
-gm_tracking_get_label_probabilities(struct gm_tracking *tracking,
-                                    int *width,
-                                    int *height);
-
 const struct gm_point_rgba *
 gm_tracking_get_debug_point_cloud(struct gm_tracking *_tracking,
                                   int *n_points,

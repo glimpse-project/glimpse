@@ -175,6 +175,15 @@ thread_body(void* userdata)
 
     int last_output = -1;
 
+    struct gm_intrinsics intrinsics;
+    intrinsics.width = ctx->width;
+    intrinsics.height = ctx->height;
+    intrinsics.cx = intrinsics.width / 2;
+    intrinsics.cy = intrinsics.height / 2;
+    intrinsics.fx = intrinsics.fy =
+        intrinsics.height /
+        (2 * tanf(ctx->forest[0]->header.fov / 2));
+
     int n_labels = ctx->forest[0]->header.n_labels;
     float bg_depth = ctx->forest[0]->header.bg_depth;
 
@@ -251,23 +260,29 @@ thread_body(void* userdata)
             if (ctx->fast) {
                 ctx->inferred_joints[(i * n_combos) + c] =
                     joints_inferrer_infer_fast(ctx->joints_inferrer,
+                                               &intrinsics,
+                                               ctx->width,
+                                               ctx->height,
+                                               0, // x0
+                                               0, // y0
                                                depth_image,
                                                pr_table.data(),
                                                weights.data(),
-                                               ctx->width, ctx->height,
                                                n_labels,
-                                               ctx->forest[0]->header.fov,
                                                params);
             } else {
                 ctx->inferred_joints[(i * n_combos) + c] =
                     joints_inferrer_infer(ctx->joints_inferrer,
+                                          &intrinsics,
+                                          ctx->width,
+                                          ctx->height,
+                                          0, // x0
+                                          0, // y0
                                           depth_image,
                                           pr_table.data(),
                                           weights.data(),
-                                          ctx->width, ctx->height,
                                           bg_depth,
                                           n_labels,
-                                          ctx->forest[0]->header.fov,
                                           params);
             }
         }

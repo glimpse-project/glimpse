@@ -244,7 +244,7 @@ enum tracking_stage {
     TRACKING_STAGE_CODEBOOK_CLUSTER,
 
     TRACKING_STAGE_FILTER_CLUSTERS,
-    TRACKING_STAGE_PROJECT_CLUSTERS,
+    TRACKING_STAGE_CROP_CLUSTER_IMAGE,
 
     TRACKING_STAGE_SELECT_CANDIDATE_CLUSTER,
     TRACKING_STAGE_LABEL_INFERENCE,
@@ -327,6 +327,23 @@ enum codebook_class
     CODEBOOK_CLASS_FOREGROUND,
     CODEBOOK_CLASS_FAILED_CANDIDATE,
     CODEBOOK_CLASS_TRACKED,
+};
+
+struct candidate_cluster {
+    unsigned label; // indexes into tracking->cluster_indices[]
+
+    // 2D bounds (inclusive)
+    int min_x_2d = INT_MAX;
+    int max_x_2d = -1;
+    int min_y_2d = INT_MAX;
+    int max_y_2d = -1;
+
+    float min_x = FLT_MAX;
+    float max_x = -FLT_MAX;
+    float min_y = FLT_MAX;
+    float max_y = -FLT_MAX;
+    float min_z = FLT_MAX;
+    float max_z = -FLT_MAX;
 };
 
 struct joint_dist
@@ -475,11 +492,6 @@ struct gm_tracking_impl
     struct gm_intrinsics depth_camera_intrinsics;
     struct gm_intrinsics video_camera_intrinsics;
 
-    /* This is derived from the depth camera intrinsics and the loaded
-     * decision trees.
-     */
-    struct gm_intrinsics training_camera_intrinsics;
-
     /* XXX: these are currently a copy of ctx->basis_depth_to_video_extrinsics
      * and don't take into account device rotation
      */
@@ -493,6 +505,8 @@ struct gm_tracking_impl
 
     // Label probability tables
     std::vector<float> label_probs;
+    int label_probs_width;
+    int label_probs_height;
 
     // The unprojected full-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_cloud;
@@ -728,7 +742,8 @@ struct gm_context
     float codeword_obj_max_frame_to_n_ratio;
     int debug_codebook_layer;
 
-    int inf_res;
+    std::vector<float> inference_cluster_depth_image;
+    std::vector<float> inference_cluster_weights;
     bool use_threads;
     bool flip_labels;
 
@@ -789,7 +804,7 @@ struct gm_context
     /* A re-usable allocation for label probabilities that might
      * get swapped into the latest tracking object
      */
-    std::vector<float> label_probs_backbuffer;
+    std::vector<float> label_probs_back;
 
     /* When paused we're careful to not preserve any results for tracking
      * frames so the future frames will be processed with the same initial
@@ -930,19 +945,15 @@ struct pipeline_scratch_state
     std::queue<struct PointCmp> flood_fill;
     float naive_floor_y;
 
-    // cluster_select
-    std::vector<pcl::PointIndices> persons;
-
-    // cluster_project
-    std::vector<float*> depth_images;
+    std::vector<candidate_cluster> candidate_clusters;
+    std::vector<candidate_cluster> person_clusters;
+    int current_person_cluster;
+    int best_person_cluster;
 
     // per-cluster inference
-    float *depth_image;
     bool done_label_inference;
-    float *weights;
     InferredJoints *joints_candidate;
 
-    int best_person;
     float confidence;
 };
 
@@ -2400,8 +2411,8 @@ tracking_create_rgb_label_map(struct gm_tracking *_tracking,
 
     uint8_t n_labels = ctx->n_labels;
 
-    int width = (int)tracking->training_camera_intrinsics.width;
-    int height = (int)tracking->training_camera_intrinsics.height;
+    int width = tracking->label_probs_width;
+    int height = tracking->label_probs_height;
 
     if (tracking->label_probs.size() != width * height * n_labels)
         return false;
@@ -3073,19 +3084,6 @@ gm_tracking_create_stage_rgb_image(struct gm_tracking *_tracking,
         return false;
 }
 
-const float *
-gm_tracking_get_label_probabilities(struct gm_tracking *_tracking,
-                                    int *width,
-                                    int *height)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    *width = tracking->training_camera_intrinsics.width;
-    *height = tracking->training_camera_intrinsics.height;
-
-    return tracking->label_probs.data();
-}
-
 uint64_t
 gm_tracking_get_timestamp(struct gm_tracking *_tracking)
 {
@@ -3650,13 +3648,18 @@ add_debug_cloud_person_masks_except(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    /* Also show other failed candidates... */
-    for (int i = 0; i < (int)state->persons.size(); i++) {
-        if (i == except_person)
+    int except_label = (except_person < 0 ? -1 :
+                        state->person_clusters[except_person].label);
+
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+
+    for (auto &cluster : state->person_clusters) {
+        if (cluster.label == except_label)
             continue;
+
         add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
                                                       tracking->downsampled_cloud,
-                                                      state->persons[i].indices);
+                                                      cluster_indices[cluster.label].indices);
     }
 }
 
@@ -4925,18 +4928,13 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
     int width = tracking->downsampled_cloud->width;
     //int height = tracking->downsampled_cloud->height;
 
-    struct large_label {
-        unsigned label;
-        int min_x, max_x;
-        int min_y, max_y;
-    };
-    std::vector<large_label> large_labels = {};
+    std::vector<candidate_cluster> large_clusters = {};
 
     if (ctx->codebook_cluster_infill)
     {
-
         pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
         pcl::PointCloud<pcl::Label> &labels = *ctx->codebook_cluster_labels_scratch;
+        std::vector<unsigned> to_merge = {};
 
         for (unsigned label = 0; label < cluster_indices.size(); label++)
         {
@@ -4945,26 +4943,38 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
             if (cluster.indices.size() < large_cluster_threshold)
                 continue;
 
-            std::vector<unsigned> to_merge = {};
+            struct candidate_cluster large_label = { label };
 
-            struct large_label large_label = { 0, INT_MAX, -1, INT_MAX, -1 };
-
+            to_merge.clear();
             for (int i : cluster.indices) {
-                //pcl::PointXYZL &point = pcl_cloud->points[i];
+                pcl::PointXYZL &point = pcl_cloud->points[i];
                 int x = i % width;
                 int y = i / width;
 
                 if (x == 0 || y == 0)
                     continue;
 
-                if (x > large_label.max_x)
-                    large_label.max_x = x;
-                if (x < large_label.min_x)
-                    large_label.min_x = x;
-                if (y > large_label.max_y)
-                    large_label.max_y = y;
-                if (y < large_label.min_y)
-                    large_label.min_y = y;
+                if (x > large_label.max_x_2d)
+                    large_label.max_x_2d = x;
+                if (x < large_label.min_x_2d)
+                    large_label.min_x_2d = x;
+                if (y > large_label.max_y_2d)
+                    large_label.max_y_2d = y;
+                if (y < large_label.min_y_2d)
+                    large_label.min_y_2d = y;
+
+                if (point.x > large_label.max_x)
+                    large_label.max_x = point.x;
+                if (point.x < large_label.min_x)
+                    large_label.min_x = point.x;
+                if (point.y > large_label.max_y)
+                    large_label.max_y = point.y;
+                if (point.y < large_label.min_y)
+                    large_label.min_y = point.y;
+                if (point.z > large_label.max_z)
+                    large_label.max_z = point.z;
+                if (point.z < large_label.min_z)
+                    large_label.min_z = point.z;
 
                 int left_neightbour =  y * width + (x - 1);
                 unsigned left_label = labels[left_neightbour].label;
@@ -4988,29 +4998,44 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
             for (unsigned merge_label : to_merge) {
                 auto &merge_cluster = cluster_indices[merge_label];
                 for (int i : merge_cluster.indices) {
+                    pcl::PointXYZL &point = pcl_cloud->points[i];
                     int x = i % width;
                     int y = i / width;
 
-                    if (x > large_label.max_x)
-                        large_label.max_x = x;
-                    if (x < large_label.min_x)
-                        large_label.min_x = x;
-                    if (y > large_label.max_y)
-                        large_label.max_y = y;
-                    if (y < large_label.min_y)
-                        large_label.min_y = y;
+                    if (x > large_label.max_x_2d)
+                        large_label.max_x_2d = x;
+                    if (x < large_label.min_x_2d)
+                        large_label.min_x_2d = x;
+                    if (y > large_label.max_y_2d)
+                        large_label.max_y_2d = y;
+                    if (y < large_label.min_y_2d)
+                        large_label.min_y_2d = y;
+
+                    if (point.x > large_label.max_x)
+                        large_label.max_x = point.x;
+                    if (point.x < large_label.min_x)
+                        large_label.min_x = point.x;
+                    if (point.y > large_label.max_y)
+                        large_label.max_y = point.y;
+                    if (point.y < large_label.min_y)
+                        large_label.min_y = point.y;
+                    if (point.z > large_label.max_z)
+                        large_label.max_z = point.z;
+                    if (point.z < large_label.min_z)
+                        large_label.min_z = point.z;
 
                     cluster.indices.push_back(i);
                 }
                 merge_cluster.indices.clear();
             }
 
-            if (large_label.max_x != -1 && large_label.max_y != -1) {
-                large_label.label = label;
-                large_labels.push_back(large_label);
+            if (large_label.max_x_2d != -1 && large_label.max_y_2d != -1) {
+                large_clusters.push_back(large_label);
             }
         }
     } else {
+        pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+
         for (unsigned label = 0; label < cluster_indices.size(); label++)
         {
             auto &cluster = cluster_indices[label];
@@ -5018,27 +5043,39 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
             if (cluster.indices.size() < large_cluster_threshold)
                 continue;
 
-            struct large_label large_label = { 0, INT_MAX, -1, INT_MAX, -1 };
+            struct candidate_cluster large_label = { label };
 
             for (int i : cluster.indices) {
-                //pcl::PointXYZL &point = pcl_cloud->points[i];
+                pcl::PointXYZL &point = pcl_cloud->points[i];
                 int x = i % width;
                 int y = i / width;
 
-                if (x > large_label.max_x)
-                    large_label.max_x = x;
-                if (x < large_label.min_x)
-                    large_label.min_x = x;
-                if (y > large_label.max_y)
-                    large_label.max_y = y;
-                if (y < large_label.min_y)
-                    large_label.min_y = y;
+                if (x > large_label.max_x_2d)
+                    large_label.max_x_2d = x;
+                if (x < large_label.min_x_2d)
+                    large_label.min_x_2d = x;
+                if (y > large_label.max_y_2d)
+                    large_label.max_y_2d = y;
+                if (y < large_label.min_y_2d)
+                    large_label.min_y_2d = y;
+
+                if (point.x > large_label.max_x)
+                    large_label.max_x = point.x;
+                if (point.x < large_label.min_x)
+                    large_label.min_x = point.x;
+                if (point.y > large_label.max_y)
+                    large_label.max_y = point.y;
+                if (point.y < large_label.min_y)
+                    large_label.min_y = point.y;
+                if (point.z > large_label.max_z)
+                    large_label.max_z = point.z;
+                if (point.z < large_label.min_z)
+                    large_label.min_z = point.z;
             }
 
-            gm_assert(ctx->log, large_label.max_x != -1 && large_label.max_y != -1,
+            gm_assert(ctx->log, large_label.max_x_2d != -1 && large_label.max_y_2d != -1,
                       "Spurious, undefined large label bounds");
-            large_label.label = label;
-            large_labels.push_back(large_label);
+            large_clusters.push_back(large_label);
         }
     }
 
@@ -5046,64 +5083,70 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
     {
         tracking_add_debug_text(tracking,
                                 "Looking at %d large clusters to possibly merge",
-                                (int)large_labels.size());
-        for (int i = 0; i < large_labels.size(); i++) {
-            struct large_label &large_label = large_labels[i];
+                                (int)large_clusters.size());
+        for (int i = 0; i < large_clusters.size(); i++) {
+            struct candidate_cluster &large_label = large_clusters[i];
             tracking_add_debug_text(tracking,
-                                    "Large Cluster %d (label=%d, %d points): min_x=%d,min_y=%d,max_x=%d,max_y=%d",
+                                    "Large Cluster %d (label=%d, %d points): min_x_2d=%d,min_y_2d=%d,max_x_2d=%d,max_y_2d=%d",
                                     i,
                                     large_label.label,
                                     cluster_indices[large_label.label].indices.size(),
-                                    large_label.min_x,
-                                    large_label.min_y,
-                                    large_label.max_x,
-                                    large_label.max_y);
+                                    large_label.min_x_2d,
+                                    large_label.min_y_2d,
+                                    large_label.max_x_2d,
+                                    large_label.max_y_2d);
         }
 
-        for (auto &current_label : large_labels) {
-            auto &cluster = cluster_indices[current_label.label];
+        for (auto &current_cluster : large_clusters) {
+            auto &current_indices = cluster_indices[current_cluster.label];
 
             // we may have merged the indices already...
-            if (!cluster.indices.size())
+            if (!current_indices.indices.size())
                 continue;
 
-            gm_assert(ctx->log, cluster.indices.size() >= large_cluster_threshold,
+            gm_assert(ctx->log,
+                      current_indices.indices.size() >= large_cluster_threshold,
                       "Spurious 'large' cluster (label=%d) isn't large (%d points)",
-                      current_label.label, (int)cluster.indices.size());
-            for (auto &other_label : large_labels) {
-                auto &other_cluster = cluster_indices[other_label.label];
+                      current_cluster.label, (int)current_indices.indices.size());
+            for (auto &other_cluster : large_clusters) {
+                auto &other_indices = cluster_indices[other_cluster.label];
 
-                if (other_label.label == current_label.label)
+                if (other_cluster.label == current_cluster.label)
                     continue;
 
                 // we may have merged the indices already...
-                if (!other_cluster.indices.size())
+                if (!other_indices.indices.size())
                     continue;
 
-                gm_assert(ctx->log, other_cluster.indices.size() >= large_cluster_threshold,
-                          "Spurious merge with non-large label (%d) cluster (%d points)",
-                          other_label.label,
-                          (int)other_cluster.indices.size());
+                gm_assert(ctx->log, other_indices.indices.size() >= large_cluster_threshold,
+                          "Spurious merge with non-large cluster (label=%d, %d points)",
+                          other_cluster.label,
+                          (int)other_indices.indices.size());
 
-                int x0 = std::max(current_label.min_x, other_label.min_x);
-                int y0 = std::max(current_label.min_y, other_label.min_y);
-                int x1 = std::min(current_label.max_x, other_label.max_x);
-                int y1 = std::min(current_label.max_y, other_label.max_y);
+                int x0 = std::max(current_cluster.min_x_2d, other_cluster.min_x_2d);
+                int y0 = std::max(current_cluster.min_y_2d, other_cluster.min_y_2d);
+                int x1 = std::min(current_cluster.max_x_2d, other_cluster.max_x_2d);
+                int y1 = std::min(current_cluster.max_y_2d, other_cluster.max_y_2d);
                 if (x0 <= x1 && y0 <= y1)
                 {
                     tracking_add_debug_text(tracking, "Merging label %d (%d points) into %d (%d points)",
-                                            other_label.label,
-                                            (int)other_cluster.indices.size(),
-                                            current_label.label,
-                                            (int)cluster.indices.size());
+                                            other_cluster.label,
+                                            (int)other_indices.indices.size(),
+                                            current_cluster.label,
+                                            (int)current_indices.indices.size());
 
-                   for (int i : other_cluster.indices) {
-                       cluster.indices.push_back(i);
+                   for (int i : other_indices.indices) {
+                       current_indices.indices.push_back(i);
                    }
-                   other_cluster.indices.clear();
+                   other_indices.indices.clear();
                 }
             }
         }
+    }
+
+    for (auto &large_cluster : large_clusters) {
+        if (cluster_indices[large_cluster.label].indices.size())
+            state->candidate_clusters.push_back(large_cluster);
     }
 }
 
@@ -5381,6 +5424,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
     flood_fill.push({ fx, fy, fx, fy });
     std::fill(done_mask.begin(), done_mask.end(), false);
 
+    struct candidate_cluster person_cluster = {};
     pcl::PointIndices person_indices;
 
     while (!flood_fill.empty()) {
@@ -5418,8 +5462,31 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
                                  point.x, point.y, point.lx, point.ly,
                                  ctx->cluster_tolerance))
         {
-            done_mask[idx] = true;
+            if (point.x > person_cluster.max_x_2d)
+                person_cluster.max_x_2d = point.x;
+            if (point.x < person_cluster.min_x_2d)
+                person_cluster.min_x_2d = point.x;
+            if (point.y > person_cluster.max_y_2d)
+                person_cluster.max_y_2d = point.y;
+            if (point.y < person_cluster.min_y_2d)
+                person_cluster.min_y_2d = point.y;
+
+            if (pcl_pt.x > person_cluster.max_x)
+                person_cluster.max_x = pcl_pt.x;
+            if (pcl_pt.x < person_cluster.min_x)
+                person_cluster.min_x = pcl_pt.x;
+            if (pcl_pt.y > person_cluster.max_y)
+                person_cluster.max_y = pcl_pt.y;
+            if (pcl_pt.y < person_cluster.min_y)
+                person_cluster.min_y = pcl_pt.y;
+            if (pcl_pt.z > person_cluster.max_z)
+                person_cluster.max_z = pcl_pt.z;
+            if (pcl_pt.z < person_cluster.min_z)
+                person_cluster.min_z = pcl_pt.z;
+
             person_indices.indices.push_back(idx);
+            done_mask[idx] = true;
+
             flood_fill.push({ point.x - 1, point.y, point.x, point.y });
             flood_fill.push({ point.x + 1, point.y, point.x, point.y });
             flood_fill.push({ point.x, point.y - 1, point.x, point.y });
@@ -5444,7 +5511,9 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
     }
 
     if (!person_indices.indices.empty()) {
+        person_cluster.label = cluster_indices.size();
         cluster_indices.push_back(person_indices);
+        state->candidate_clusters.push_back(person_cluster);
     }
 }
 
@@ -5488,67 +5557,34 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    // Assume the any cluster that has roughly human dimensions and
-    // contains its centroid may be a person.
+    // Check the cluster at least has vaguely human dimensions
 
-    //const float centroid_tolerance = 0.1f;
-    std::vector<pcl::PointIndices> &persons = state->persons;
-    for (unsigned i = 0; i < cluster_indices.size(); ++i) {
-        pcl::PointIndices &points = cluster_indices[i];
+    for (auto &candidate : state->candidate_clusters) {
+        std::vector<int> &indices = cluster_indices[candidate.label].indices;
 
-        // Check if the cluster has human-ish dimensions
-        Eigen::Vector4f min, max;
-        pcl::getMinMax3D(*tracking->downsampled_cloud, points, min, max);
-        Eigen::Vector4f diff = max - min;
-        if (diff[0] < ctx->cluster_min_width ||
-            diff[0] > ctx->cluster_max_width ||
-            diff[1] < ctx->cluster_min_height ||
-            diff[1] > ctx->cluster_max_height ||
-            diff[2] < ctx->cluster_min_depth ||
-            diff[2] > ctx->cluster_max_depth) {
+        float cluster_width = candidate.max_x - candidate.min_x;
+        float cluster_height = candidate.max_y - candidate.min_y;
+        float cluster_depth = candidate.max_z - candidate.min_z;
+
+        if (cluster_width < ctx->cluster_min_width ||
+            cluster_width > ctx->cluster_max_width ||
+            cluster_height < ctx->cluster_min_height ||
+            cluster_height > ctx->cluster_max_height ||
+            cluster_depth < ctx->cluster_min_depth ||
+            cluster_depth > ctx->cluster_max_depth)
+        {
             continue;
         }
         gm_info(ctx->log,
-                "Cluster with %d points, (%.2fx%.2fx%.2f)\n",
-                (int)(points).indices.size(), diff[0], diff[1], diff[2]);
+                "Person cluster with %d points, (%.2fx%.2fx%.2f)\n",
+                (int)indices.size(),
+                cluster_width,
+                cluster_height,
+                cluster_depth);
 
-#if 0
-        // Work out the centroid of the cloud and see if there's a point
-        // near there. A human, unless they're falling, ought to contain
-        // their center of gravity. If they're jumping or falling, we can
-        // probably interpolate joint positions.
-        // Note that I guess humans are actually quite frequently in a state
-        // of semi-falling, so we have a pretty generous tolerance.
-        Eigen::VectorXf centroid;
-        pcl::computeNDCentroid(*tracking->downsampled_cloud, points,
-                               centroid);
-
-        // Reproject this point into the depth buffer space to get an offset
-        // and check if the point exists in the dense cloud.
-        int x = (int)
-            ((centroid[0] * tracking->depth_camera_intrinsics.fx / centroid[2]) +
-             tracking->depth_camera_intrinsics.cx);
-        if (x < 0 || x >= (int)tracking->depth_camera_intrinsics.width) {
-            continue;
-        }
-
-        int y = (int)
-            ((centroid[0] * tracking->depth_camera_intrinsics.fy / centroid[2]) +
-             tracking->depth_camera_intrinsics.cy);
-        if (y < 0 || y >= (int)tracking->depth_camera_intrinsics.height) {
-            continue;
-        }
-
-        int off = y * tracking->depth_camera_intrinsics.width + x;
-        if (std::isnan(tracking->depth_cloud->points[off].z) ||
-            fabsf(centroid[2] - tracking->depth_cloud->points[off].z) >
-            centroid_tolerance) {
-            continue;
-        }
-#endif
-
-        persons.push_back(points);
+        person_clusters.push_back(candidate);
     }
 }
 
@@ -5570,99 +5606,133 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.cy /= seg_res;
     tracking->debug_cloud_intrinsics.fx /= seg_res;
     tracking->debug_cloud_intrinsics.fy /= seg_res;
+
+    for (auto &cluster : state->person_clusters) {
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.min_y, cluster.min_z,
+                           cluster.min_x, cluster.max_y, cluster.min_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.max_y, cluster.min_z,
+                           cluster.min_x, cluster.max_y, cluster.max_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.max_y, cluster.max_z,
+                           cluster.min_x, cluster.min_y, cluster.max_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.min_y, cluster.max_z,
+                           cluster.min_x, cluster.min_y, cluster.min_z,
+                           0x0000ffff);
+
+        tracking_draw_line(tracking,
+                           cluster.max_x, cluster.min_y, cluster.min_z,
+                           cluster.max_x, cluster.max_y, cluster.min_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.max_x, cluster.max_y, cluster.min_z,
+                           cluster.max_x, cluster.max_y, cluster.max_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.max_x, cluster.max_y, cluster.max_z,
+                           cluster.max_x, cluster.min_y, cluster.max_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.max_x, cluster.min_y, cluster.max_z,
+                           cluster.max_x, cluster.min_y, cluster.min_z,
+                           0x0000ffff);
+
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.min_y, cluster.min_z,
+                           cluster.max_x, cluster.min_y, cluster.min_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.max_y, cluster.min_z,
+                           cluster.max_x, cluster.max_y, cluster.min_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.max_y, cluster.max_z,
+                           cluster.max_x, cluster.max_y, cluster.max_z,
+                           0x0000ffff);
+        tracking_draw_line(tracking,
+                           cluster.min_x, cluster.min_y, cluster.max_z,
+                           cluster.max_x, cluster.min_y, cluster.max_z,
+                           0x0000ffff);
+    }
 }
 
 static void
-stage_project_clusters_cb(struct gm_tracking_impl *tracking,
-                          struct pipeline_scratch_state *state)
+stage_crop_cluster_image_cb(struct gm_tracking_impl *tracking,
+                            struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
-    int width = tracking->training_camera_intrinsics.width;
-    int height = tracking->training_camera_intrinsics.height;
-
-    std::vector<float*> &depth_images = state->depth_images;
-
-    std::vector<pcl::PointIndices> &persons = state->persons;
+    std::vector<float> &depth_image = ctx->inference_cluster_depth_image;
 
     float bg_depth = ctx->decision_trees[0]->header.bg_depth;
     gm_assert(ctx->log, !std::isnan(bg_depth),
               "Spurious NaN background value specified in decision tree header");
 
-    for (auto &person : persons) {
-        float *depth_img = (float *)xmalloc(width * height * sizeof(float));
-        for (int i = 0; i < width * height; ++i) {
-            depth_img[i] = bg_depth;
-        }
+    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+    int cloud_width_2d = pcl_cloud->width;
+    //int cloud_height_2d = pcl_cloud->width;
 
-        for (int idx : person.indices) {
-            int lx = idx % tracking->downsampled_cloud->width;
-            int ly = idx / tracking->downsampled_cloud->width;
-            for (int hy = (int)(ly * seg_res), ey = 0;
-                 hy < (int)tracking->depth_cloud->height && ey < seg_res;
-                 ++hy, ++ey)
-            {
-                for (int hx = (int)(lx * seg_res), ex = 0;
-                     hx < (int)tracking->depth_cloud->width &&
-                     ex < seg_res;
-                     ++hx, ++ex)
-                {
-                    int off = hy * tracking->depth_cloud->width + hx;
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-                    // Reproject this point into training camera space
-                    glm::vec3 point_t(tracking->depth_cloud->points[off].x,
-                                      tracking->depth_cloud->points[off].y,
-                                      tracking->depth_cloud->points[off].z);
+    gm_assert(ctx->log, state->current_person_cluster >= 0,
+              "No person cluster selected for cropping");
 
-                    if (std::isnan(point_t.z))
-                        continue;
+    auto &cluster = person_clusters[state->current_person_cluster];
+    int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+    int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
 
-                    int x = (int)
-                        ((point_t.x * tracking->training_camera_intrinsics.fx /
-                          point_t.z) + tracking->training_camera_intrinsics.cx);
+    size_t img_size = cluster_width_2d * cluster_height_2d;
+    depth_image.clear();
+    depth_image.resize(img_size, bg_depth);
 
-                    if (x < 0 || x >= width) {
-                        continue;
-                    }
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+    for (int i : indices) {
+        pcl::PointXYZL &point = pcl_cloud->points[i];
 
-                    /* NB: we need to invert Y here since we're going from Y+
-                     * going upwards to 2D coordinates with y=0 at the top
-                     */
-                    int y = (int)
-                        ((-point_t.y * tracking->training_camera_intrinsics.fy /
-                          point_t.z) + tracking->training_camera_intrinsics.cy);
+        int x = i % cloud_width_2d;
+        int y = i / cloud_width_2d;
+        int cluster_x = x - cluster.min_x_2d;
+        int cluster_y = y - cluster.min_y_2d;
 
-                    if (y < 0 || y >= height) {
-                        continue;
-                    }
-
-                    int doff = width * y + x;
-                    depth_img[doff] = point_t.z;
-                }
-            }
-        }
-
-        depth_images.push_back(depth_img);
+        int doff = cluster_width_2d * cluster_y + cluster_x;
+        depth_image[doff] = point.z;
     }
 }
 
 static void
-stage_project_clusters_debug_cb(struct gm_tracking_impl *tracking,
-                                struct pipeline_scratch_state *state)
+stage_crop_cluster_image_debug_cb(struct gm_tracking_impl *tracking,
+                                  struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
+    int seg_res = state->seg_res;
 
-    for (int i = 0; i < state->depth_images.size(); i++) {
-        float *depth_img = state->depth_images[state->best_person];
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-        add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                                 depth_img,
-                                                 &tracking->training_camera_intrinsics);
-    }
+    gm_assert(ctx->log, state->current_person_cluster >= 0,
+              "No person cluster selected");
 
-    colour_debug_cloud(ctx, state, tracking, NULL);
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
+    struct candidate_cluster &cluster = person_clusters[state->current_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->downsampled_cloud,
+                                                  indices);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -5671,15 +5741,26 @@ stage_label_inference_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    int width = tracking->training_camera_intrinsics.width;
-    int height = tracking->training_camera_intrinsics.height;
+    //std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+
+    gm_assert(ctx->log, state->current_person_cluster >= 0,
+              "No person cluster selected for cropping");
+
+    auto &cluster = person_clusters[state->current_person_cluster];
+    int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+    int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+
+    ctx->label_probs_back.resize(cluster_width_2d *
+                                 cluster_height_2d *
+                                 ctx->n_labels);
 
     infer_labels(ctx->log,
                  ctx->decision_trees,
                  ctx->n_decision_trees,
-                 state->depth_image,
-                 width, height,
-                 ctx->label_probs_backbuffer.data(),
+                 ctx->inference_cluster_depth_image.data(),
+                 cluster_width_2d, cluster_height_2d,
+                 ctx->label_probs_back.data(),
                  ctx->use_threads,
                  ctx->flip_labels);
 
@@ -5691,16 +5772,29 @@ stage_label_inference_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    float *depth_img = state->depth_images[state->best_person];
+    int seg_res = state->seg_res;
 
-    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                             depth_img,
-                                             &tracking->training_camera_intrinsics);
-    colour_debug_cloud(ctx, state, tracking, NULL);
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    add_debug_cloud_person_masks_except(tracking, state, state->best_person);
+    gm_assert(ctx->log, state->best_person_cluster >= 0,
+              "No person best person cluster determined");
 
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
+    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->downsampled_cloud,
+                                                  indices);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -5709,15 +5803,25 @@ stage_joint_weights_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    int width = tracking->training_camera_intrinsics.width;
-    int height = tracking->training_camera_intrinsics.height;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+
+    gm_assert(ctx->log, state->current_person_cluster >= 0,
+              "No person cluster selected");
+
+    auto &cluster = person_clusters[state->current_person_cluster];
+    int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+    int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+
+    ctx->inference_cluster_weights.resize(cluster_width_2d *
+                                          cluster_height_2d *
+                                          ctx->n_joints);
 
     joints_inferrer_calc_pixel_weights(ctx->joints_inferrer,
-                                       state->depth_image,
-                                       ctx->label_probs_backbuffer.data(),
-                                       width, height,
+                                       ctx->inference_cluster_depth_image.data(),
+                                       ctx->label_probs_back.data(),
+                                       cluster_width_2d, cluster_height_2d,
                                        ctx->n_labels,
-                                       state->weights);
+                                       ctx->inference_cluster_weights.data());
 }
 
 static void
@@ -5725,16 +5829,29 @@ stage_joint_weights_debug_cb(struct gm_tracking_impl *tracking,
                              struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    float *depth_img = state->depth_images[state->best_person];
+    int seg_res = state->seg_res;
 
-    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                             depth_img,
-                                             &tracking->training_camera_intrinsics);
-    colour_debug_cloud(ctx, state, tracking, NULL);
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    add_debug_cloud_person_masks_except(tracking, state, state->best_person);
+    gm_assert(ctx->log, state->best_person_cluster >= 0,
+              "No best person cluster determined");
 
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
+    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->downsampled_cloud,
+                                                  indices);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -5742,30 +5859,47 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                          struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
+    int seg_res = state->seg_res;
 
-    int width = tracking->training_camera_intrinsics.width;
-    int height = tracking->training_camera_intrinsics.height;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+
+    gm_assert(ctx->log, state->current_person_cluster >= 0,
+              "No person cluster selected");
+
+    auto &cluster = person_clusters[state->current_person_cluster];
+    int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+    int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+
+    struct gm_intrinsics downsampled_intrinsics = tracking->depth_camera_intrinsics;
+    downsampled_intrinsics.width /= seg_res;
+    downsampled_intrinsics.height /= seg_res;
+    downsampled_intrinsics.cx /= seg_res;
+    downsampled_intrinsics.cy /= seg_res;
+    downsampled_intrinsics.fx /= seg_res;
+    downsampled_intrinsics.fy /= seg_res;
 
     if (ctx->fast_clustering) {
         state->joints_candidate =
                 joints_inferrer_infer_fast(ctx->joints_inferrer,
-                                           state->depth_image,
-                                           ctx->label_probs_backbuffer.data(),
-                                           state->weights,
-                                           width, height,
+                                           &downsampled_intrinsics,
+                                           cluster_width_2d, cluster_height_2d,
+                                           cluster.min_x_2d, cluster.min_y_2d,
+                                           ctx->inference_cluster_depth_image.data(),
+                                           ctx->label_probs_back.data(),
+                                           ctx->inference_cluster_weights.data(),
                                            ctx->n_labels,
-                                           pcl::rad2deg(ctx->decision_trees[0]->header.fov),
                                            ctx->joint_params->joint_params);
     } else {
         state->joints_candidate =
                 joints_inferrer_infer(ctx->joints_inferrer,
-                                      state->depth_image,
-                                      ctx->label_probs_backbuffer.data(),
-                                      state->weights,
-                                      width, height,
+                                      &downsampled_intrinsics,
+                                      cluster_width_2d, cluster_height_2d,
+                                      cluster.min_x_2d, cluster.min_y_2d,
+                                      ctx->inference_cluster_depth_image.data(),
+                                      ctx->label_probs_back.data(),
+                                      ctx->inference_cluster_weights.data(),
                                       ctx->decision_trees[0]->header.bg_depth,
                                       ctx->n_labels,
-                                      pcl::rad2deg(ctx->decision_trees[0]->header.fov),
                                       ctx->joint_params->joint_params);
     }
 }
@@ -5775,16 +5909,29 @@ stage_joint_inference_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    float *depth_img = state->depth_images[state->best_person];
+    int seg_res = state->seg_res;
 
-    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                             depth_img,
-                                             &tracking->training_camera_intrinsics);
-    colour_debug_cloud(ctx, state, tracking, NULL);
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    add_debug_cloud_person_masks_except(tracking, state, state->best_person);
+    gm_assert(ctx->log, state->best_person_cluster >= 0,
+              "No best person cluster determined");
 
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
+    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->downsampled_cloud,
+                                                  indices);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -5807,14 +5954,29 @@ stage_refine_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    float *depth_img = state->depth_images[state->best_person];
+    int seg_res = state->seg_res;
 
-    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                             depth_img,
-                                             &tracking->training_camera_intrinsics);
-    colour_debug_cloud(ctx, state, tracking, NULL);
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
+    gm_assert(ctx->log, state->best_person_cluster >= 0,
+              "No best person cluster determined");
+
+    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->downsampled_cloud,
+                                                  indices);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -5832,14 +5994,29 @@ stage_sanitize_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                  struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    float *depth_img = state->depth_images[state->best_person];
+    int seg_res = state->seg_res;
 
-    add_debug_cloud_xyz_from_dense_depth_buf(ctx, tracking,
-                                             depth_img,
-                                             &tracking->training_camera_intrinsics);
-    colour_debug_cloud(ctx, state, tracking, NULL);
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
+    gm_assert(ctx->log, state->best_person_cluster >= 0,
+              "No best person cluster determined");
+
+    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                  tracking->downsampled_cloud,
+                                                  indices);
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -5847,13 +6024,29 @@ stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
                                         struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
+    int seg_res = state->seg_res;
+
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+
+    gm_assert(ctx->log, state->best_person_cluster >= 0,
+              "No best person cluster determined");
+
+    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+    std::vector<int> &indices = cluster_indices[cluster.label].indices;
 
     add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
                                                   tracking->downsampled_cloud,
-                                                  state->persons[state->best_person].indices);
+                                                  indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    add_debug_cloud_person_masks_except(tracking, state, state->best_person);
+    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
+    tracking->debug_cloud_intrinsics.width /= seg_res;
+    tracking->debug_cloud_intrinsics.height /= seg_res;
+    tracking->debug_cloud_intrinsics.cx /= seg_res;
+    tracking->debug_cloud_intrinsics.cy /= seg_res;
+    tracking->debug_cloud_intrinsics.fx /= seg_res;
+    tracking->debug_cloud_intrinsics.fy /= seg_res;
 }
 
 static void
@@ -6102,8 +6295,6 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
 
         gm_prediction_unref(prediction);
     }
-
-    tracking->debug_cloud_intrinsics = tracking->training_camera_intrinsics;
 }
 
 #if 0
@@ -6225,22 +6416,15 @@ context_clear_tracking_locked(struct gm_context *ctx, bool clear_pools)
 }
 
 /* The scratch state itself is stack allocated so we don't need to free
- * the struct itself, but there are a few members that may contain non-RAII
- * allocations...
+ * the struct itself, but in case we hang any non-RAII allocations off
+ * the struct...
  */
 static void
 pipeline_scratch_state_clear(struct pipeline_scratch_state *state)
 {
-    if (state->weights) {
-        xfree(state->weights);
-        state->weights = NULL;
-    }
-
-    for (int i = 0; i < (int)state->depth_images.size(); i++) {
-        xfree(state->depth_images[i]);
-        state->depth_images[i] = NULL;
-    }
-    state->depth_images.clear();
+    /* XXX: everything is RAII managed now so don't need to manually
+     * free anything now and we could just remove this function
+     */
 }
 
 static bool
@@ -6513,7 +6697,7 @@ context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    if (naive_seg_fallback && state.persons.size() == 0) {
+    if (naive_seg_fallback && state.person_clusters.size() == 0) {
         gm_debug(ctx->log, "Running naive segmentation");
 
         run_stage(tracking,
@@ -6535,7 +6719,7 @@ context_track_skeleton(struct gm_context *ctx,
                   &state);
     }
 
-    if (state.persons.size() == 0) {
+    if (state.person_clusters.size() == 0) {
         if (motion_detection) {
             run_stage(tracking,
                       TRACKING_STAGE_UPDATE_CODEBOOK,
@@ -6547,29 +6731,29 @@ context_track_skeleton(struct gm_context *ctx,
         return false;
     }
 
-    run_stage(tracking,
-              TRACKING_STAGE_PROJECT_CLUSTERS,
-              stage_project_clusters_cb,
-              stage_project_clusters_debug_cb,
-              &state);
 
-
-    int inf_width = tracking->training_camera_intrinsics.width;
-    int inf_height = tracking->training_camera_intrinsics.height;
-    std::vector<float*> &depth_images = state.depth_images;
-    state.weights = (float*)
-        xmalloc(inf_width * inf_height * ctx->n_joints * sizeof(float));
-    state.best_person = -1;
+    std::vector<candidate_cluster> &person_clusters = state.person_clusters;
+    state.best_person_cluster = -1;
+    state.current_person_cluster = -1;
     state.confidence = 0.f;
 
-    gm_assert(ctx->log, state.depth_images.size() > 0,
+    tracking->label_probs.clear();
+    tracking->label_probs_width = 0;
+    tracking->label_probs_height = 0;
+
+    gm_assert(ctx->log, state.person_clusters.size() > 0,
               "Spurious empty array of candidate person clusters");
 
-    for (int i = 0; i < (int)depth_images.size(); i++) {
-        state.depth_image = depth_images[i];
+    for (state.current_person_cluster = 0;
+         state.current_person_cluster < state.person_clusters.size();
+         state.current_person_cluster++)
+    {
+        run_stage(tracking,
+                  TRACKING_STAGE_CROP_CLUSTER_IMAGE,
+                  stage_crop_cluster_image_cb,
+                  stage_crop_cluster_image_debug_cb,
+                  &state);
 
-        ctx->label_probs_backbuffer.resize(inf_width * inf_height *
-                                           ctx->n_labels);
         run_stage(tracking,
                   TRACKING_STAGE_LABEL_INFERENCE,
                   stage_label_inference_cb,
@@ -6589,7 +6773,10 @@ context_track_skeleton(struct gm_context *ctx,
                   stage_joint_inference_cb,
                   NULL,
                   &state);
-        assert(state.joints_candidate->n_joints == ctx->n_joints);
+
+        gm_assert(ctx->log,
+                  state.joints_candidate->n_joints == ctx->n_joints,
+                  "ctx->n_joints != joints_candidate->n_joints");
 
         // Calculate cumulative confidence of the joint inference of this cloud
         float confidence = 0.f;
@@ -6602,11 +6789,17 @@ context_track_skeleton(struct gm_context *ctx,
         }
 
         // If this skeleton has higher confidence than the last, keep it
-        if (i == 0 || confidence > state.confidence)
+        if (state.current_person_cluster == 0 || confidence > state.confidence)
         {
-            std::swap(tracking->label_probs, ctx->label_probs_backbuffer);
+            auto &cluster = person_clusters[state.current_person_cluster];
+            int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+            int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+
+            std::swap(tracking->label_probs, ctx->label_probs_back);
+            tracking->label_probs_width = cluster_width_2d;
+            tracking->label_probs_height = cluster_height_2d;
             std::swap(tracking->joints, state.joints_candidate);
-            state.best_person = i;
+            state.best_person_cluster = state.current_person_cluster;
             state.confidence = confidence;
         }
 
@@ -6617,10 +6810,9 @@ context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    xfree(state.weights);
-    state.weights = NULL;
+    state.current_person_cluster = -1;
 
-    gm_assert(ctx->log, state.best_person >= 0,
+    gm_assert(ctx->log, state.best_person_cluster >= 0,
               "Failed to select best person cluster");
 
     // Only a logical stage since selection is part of the
@@ -6678,16 +6870,20 @@ context_track_skeleton(struct gm_context *ctx,
 
 #warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
     if (motion_detection) {
-        for (int i = 0; i < state.persons.size(); i++) {
-            pcl::PointIndices &person = state.persons[i];
+        std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+        std::vector<candidate_cluster> &person_clusters = state.person_clusters;
 
-            if (valid_skeleton && i == state.best_person) {
-                for (auto &idx : person.indices) {
+        for (int i = 0; i < state.person_clusters.size(); i++) {
+            struct candidate_cluster &cluster = person_clusters[i];
+            std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+            if (valid_skeleton && i == state.best_person_cluster) {
+                for (auto &idx : indices) {
                     tracking->downsampled_cloud->points[idx].label =
                         CODEBOOK_CLASS_TRACKED;
                 }
             } else {
-                for (auto &idx : person.indices) {
+                for (auto &idx : indices) {
                     tracking->downsampled_cloud->points[idx].label =
                         CODEBOOK_CLASS_FAILED_CANDIDATE;
                 }
@@ -7339,21 +7535,6 @@ detector_thread_cb(void *data)
                                      &frame->depth_intrinsics,
                                      &tracking->depth_camera_intrinsics,
                                      tracking->frame->camera_rotation);
-
-        // Fill training camera intrinsics
-        int inf_res = ctx->inf_res;
-        tracking->training_camera_intrinsics.width =
-            frame->depth_intrinsics.width / inf_res;
-        tracking->training_camera_intrinsics.height =
-            frame->depth_intrinsics.height / inf_res;
-        tracking->training_camera_intrinsics.cx =
-            tracking->training_camera_intrinsics.width / 2;
-        tracking->training_camera_intrinsics.cy =
-            tracking->training_camera_intrinsics.height / 2;
-        tracking->training_camera_intrinsics.fx =
-            tracking->training_camera_intrinsics.fy =
-                tracking->training_camera_intrinsics.height /
-                (2 * tanf(ctx->decision_trees[0]->header.fov / 2));
 
         /* FIXME: re-enable support for face detection */
 #if 0
@@ -9169,12 +9350,12 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     {
-        enum tracking_stage stage_id = TRACKING_STAGE_PROJECT_CLUSTERS;
+        enum tracking_stage stage_id = TRACKING_STAGE_CROP_CLUSTER_IMAGE;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "project_clusters";
-        stage.desc = "Project plausible person clusters into 2D depth buffers";
+        stage.name = "crop_cluster_image";
+        stage.desc = "Create a cropped 2D depth buffer from a candidate cluster";
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9187,7 +9368,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.stage_id = stage_id;
         stage.name = "select_cluster";
-        stage.desc = "Select cluster to run label inferrence on (points before projection into depth image)";
+        stage.desc = "Select cluster to run label inference on (points before projection into depth image)";
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9207,17 +9388,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    "Inferred labels",
                                    tracking_create_rgb_label_map,
                                });
-
-        ctx->inf_res = 2;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "inf_res";
-        prop.desc = "Resolution divider for running inference";
-        prop.type = GM_PROPERTY_INT;
-        prop.int_state.ptr = &ctx->inf_res;
-        prop.int_state.min = 1;
-        prop.int_state.max = 4;
-        stage.properties.push_back(prop);
 
         ctx->use_threads = false;
         prop = gm_ui_property();
