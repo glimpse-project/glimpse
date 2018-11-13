@@ -3880,9 +3880,11 @@ stage_start_debug_cb(struct gm_tracking_impl *tracking,
             start[2] + gravity[2]
         };
 
+        float pos[3] = { 0, 0, 1 };
+        uint32_t colors[3] = { 0xff0000ff, 0x00ff00ff, 0x0000ffff };
         tracking_draw_transformed_axis(tracking,
-                                       (float[3]){ 0, 0, 1 }, // pos
-                                       (uint32_t[3]){ 0xff0000ff, 0x00ff00ff, 0x0000ffff },
+                                       pos,
+                                       colors,
                                        glm::mat4(1.0));
 
         tracking_draw_line(tracking,
@@ -3976,9 +3978,11 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
+    float pos[3] = { 0, 0, 1 };
+    uint32_t colors[3] = { 0xff0000ff, 0x00ff00ff, 0x0000ffff };
     tracking_draw_transformed_axis(tracking,
-                                   (float[3]){ 0, 0, 1 }, // pos
-                                   (uint32_t[3]){ 0xff0000ff, 0x00ff00ff, 0x0000ffff },
+                                   pos,
+                                   colors,
                                    glm::mat4(1.0));
 
     tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
@@ -4204,9 +4208,10 @@ stage_edge_detect_debug_cb(struct gm_tracking_impl *tracking,
             return;
         }
 
+        float pos[3] = { point.x, point.y, point.z };
         tracking_draw_transformed_crosshair(
             tracking,
-            (float[3]){ point.x, point.y, point.z },
+            pos,
             0.01, // 1cm
             0x00ff00ff,
             glm::mat4(1.0));
@@ -4301,14 +4306,17 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
                                                       tracking->downsampled_cloud,
                                                       state->to_ground);
         colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
+        float pos[3] = { 0, 0, 1 };
+        uint32_t colors[3] = { 0xff0000ff, 0x00ff00ff, 0x0000ffff };
         tracking_draw_transformed_axis(tracking,
-                                       (float[3]){ 0, 0, 1 }, // pos
-                                       (uint32_t[3]){ 0xff0000ff, 0x00ff00ff, 0x0000ffff },
+                                       pos,
+                                       colors,
                                        state->to_ground);
 
+        uint32_t light_colors[3] = { 0x800000ff, 0x008000ff, 0x000080ff };
         tracking_draw_transformed_axis(tracking,
-                                       (float[3]){ 0, 0, 1 }, // pos
-                                       (uint32_t[3]){ 0x800000ff, 0x008000ff, 0x000080ff },
+                                       pos,
+                                       light_colors,
                                        glm::mat4(1.0));
 
         if (tracking->frame->gravity_valid) {
