@@ -31,6 +31,8 @@
 #include "llist.h"
 #include "parson.h"
 
+#include "glimpse_context.h"
+
 typedef struct {
     float x;
     float y;
@@ -68,26 +70,30 @@ joints_inferrer_calc_pixel_weights(struct joints_inferrer* inferrer,
                                    float* out_weights);
 
 InferredJoints*
-joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
-                           float* depth_image,
-                           float* pr_table,
-                           float* weights,
-                           int width,
-                           int height,
+joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
+                           struct gm_intrinsics *intrinsics,
+                           int cluster_width,
+                           int cluster_height,
+                           int cluster_x0,
+                           int cluster_y0,
+                           float* cluster_depth_image,
+                           float* cluster_label_probs,
+                           float* cluster_weights,
                            int n_labels,
-                           float vfov,
                            JIParam* params);
 
 InferredJoints*
 joints_inferrer_infer(struct joints_inferrer* inferrer,
-                      float* depth_image,
-                      float* pr_table,
-                      float* weights,
-                      int width,
-                      int height,
+                      struct gm_intrinsics *intrinsics,
+                      int cluster_width,
+                      int cluster_height,
+                      int cluster_x0,
+                      int cluster_y0,
+                      float* cluster_depth_image,
+                      float* cluster_label_probs,
+                      float* cluster_weights,
                       float bg_depth,
                       int n_labels,
-                      float vfov,
                       JIParam* params);
 
 void

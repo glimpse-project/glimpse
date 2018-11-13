@@ -112,12 +112,16 @@ compare_joints(LList* a, LList* b, void* userdata)
 }
 
 InferredJoints*
-joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
-                           float* depth_image,
-                           float* pr_table,
-                           float* weights,
-                           int width, int height, int n_labels,
-                           float vfov,
+joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
+                           struct gm_intrinsics *intrinsics,
+                           int cluster_width,
+                           int cluster_height,
+                           int cluster_x0,
+                           int cluster_y0,
+                           float* cluster_depth_image,
+                           float* cluster_label_probs,
+                           float* cluster_weights,
+                           int n_labels,
                            JIParam* params)
 {
     int n_joints = inferrer->n_joints;
@@ -148,10 +152,10 @@ joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
 
     // Collect clusters across scanlines
     ScanlineSegment* last_segment[n_joints];
-    for (int y = 0; y < height; ++y)
+    for (int y = 0; y < cluster_height; ++y)
     {
         memset(last_segment, 0, sizeof(ScanlineSegment*) * n_joints);
-        for (int x = 0; x < width; ++x)
+        for (int x = 0; x < cluster_width; ++x)
         {
             for (int j = 0; j < n_joints; ++j)
             {
@@ -159,7 +163,7 @@ joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
                 for (int n = 0; n < map[j].n_labels; ++n)
                 {
                     int label = (int)map[j].labels[n];
-                    float label_pr = pr_table[(y * width + x) * n_labels + label];
+                    float label_pr = cluster_label_probs[(y * cluster_width + x) * n_labels + label];
                     if (label_pr >= params[j].threshold)
                     {
                         threshold_passed = true;
@@ -248,16 +252,12 @@ joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
     // cluster and the projected cluster centroid.
 
     // Variables for reprojection of 2d point + depth
-    float half_width = width / 2.f;
-    float half_height = height / 2.f;
-    float aspect = half_width / half_height;
-
-    float vfov_rad = vfov * M_PI / 180.f;
-    float tan_half_vfov = tanf(vfov_rad / 2.f);
-    float tan_half_hfov = tan_half_vfov * aspect;
-    //float hfov = atanf(tan_half_hfov) * 2.f;
-
-    //float root_2pi = sqrtf(2.f * M_PI);
+    float fx = intrinsics->fx;
+    float fy = intrinsics->fy;
+    float inv_fx = 1.0f / fx;
+    float inv_fy = 1.0f / fy;
+    float cx = intrinsics->cx;
+    float cy = intrinsics->cy;
 
     // Allocate/clear joints structure
     InferredJoints* result = (InferredJoints*)xmalloc(sizeof(InferredJoints));
@@ -281,12 +281,12 @@ joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
                  s_it != cluster.end(); ++s_it)
             {
                 ScanlineSegment& segment = *s_it;
-                int idx = segment.y * width;
+                int idx = segment.y * cluster_width;
                 for (int i = segment.left; i <= segment.right; i++, n_points++)
                 {
                     x += i;
                     y += segment.y;
-                    joint->confidence += weights[(idx + i) * n_joints + j];
+                    joint->confidence += cluster_weights[(idx + i) * n_joints + j];
                 }
             }
 
@@ -294,12 +294,12 @@ joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
             y = (int)roundf(y / (float)n_points);
 
             // Reproject and offset point
-            float s = (x / half_width) - 1.f;
+
+            float depth = (float)cluster_depth_image[y * cluster_width + x];
+
+            joint->x = ((x + cluster_x0) - cx) * depth * inv_fx;
             // NB: The coordinate space for joints has Y+ extending upwards...
-            float t = -((y / half_height) - 1.f);
-            float depth = (float)depth_image[y * width + x];
-            joint->x = (tan_half_hfov * depth) * s;
-            joint->y = (tan_half_vfov * depth) * t;
+            joint->y = -(((y + cluster_y0) - cy) * depth * inv_fy);
             joint->z = depth + params[j].offset;
 
             // Add the joint to the list
@@ -315,14 +315,16 @@ joints_inferrer_infer_fast(struct joints_inferrer* inferrer,
 
 InferredJoints*
 joints_inferrer_infer(struct joints_inferrer* inferrer,
-                      float* depth_image,
-                      float* pr_table,
-                      float* weights,
-                      int width,
-                      int height,
+                      struct gm_intrinsics *intrinsics,
+                      int cluster_width,
+                      int cluster_height,
+                      int cluster_x0,
+                      int cluster_y0,
+                      float* cluster_depth_image,
+                      float* cluster_label_probs,
+                      float* cluster_weights,
                       float bg_depth,
                       int n_labels,
-                      float vfov,
                       JIParam* params)
 {
     int n_joints = inferrer->n_joints;
@@ -331,32 +333,28 @@ joints_inferrer_infer(struct joints_inferrer* inferrer,
     // Use mean-shift to find the inferred joint positions, set them back into
     // the body using the given offset, and return the results
     int* n_pixels = (int*)xcalloc(n_joints, sizeof(int));
-    size_t points_size = n_joints * width * height * 3 * sizeof(float);
+    size_t points_size = n_joints * cluster_width * cluster_height * 3 * sizeof(float);
     float* points = (float*)xmalloc(points_size);
     float* density = (float*)xmalloc(points_size);
 
     // Variables for reprojection of 2d point + depth
-    float half_width = width / 2.f;
-    float half_height = height / 2.f;
-    float aspect = half_width / half_height;
-
-    float vfov_rad = vfov * M_PI / 180.f;
-    float tan_half_vfov = tanf(vfov_rad / 2.f);
-    float tan_half_hfov = tan_half_vfov * aspect;
-    //float hfov = atanf(tan_half_hfov) * 2;
+    float fx = intrinsics->fx;
+    float fy = intrinsics->fy;
+    float inv_fx = 1.0f / fx;
+    float inv_fy = 1.0f / fy;
+    float cx = intrinsics->cx;
+    float cy = intrinsics->cy;
 
     float root_2pi = sqrtf(2 * M_PI);
 
-    int too_many_pixels = (width * height) / 2;
+    int too_many_pixels = (cluster_width * cluster_height) / 2;
 
     // Gather pixels above the given threshold
-    for (int y = 0, idx = 0; y < height; y++)
+    for (int y = 0, idx = 0; y < cluster_height; y++)
     {
-        float t = -((y / half_height) - 1.f);
-        for (int x = 0; x < width; x++, idx++)
+        for (int x = 0; x < cluster_width; x++, idx++)
         {
-            float s = (x / half_width) - 1.f;
-            float depth = (float)depth_image[idx];
+            float depth = (float)cluster_depth_image[idx];
             if (!std::isnormal(depth) || depth >= bg_depth)
             {
                 continue;
@@ -365,25 +363,25 @@ joints_inferrer_infer(struct joints_inferrer* inferrer,
             for (int j = 0; j < n_joints; j++)
             {
                 float threshold = params[j].threshold;
-                int joint_idx = j * width * height;
+                int joint_idx = j * cluster_width * cluster_height;
 
                 for (int n = 0; n < map[j].n_labels; n++)
                 {
                     int label = (int)map[j].labels[n];
-                    float label_pr = pr_table[(idx * n_labels) + label];
+                    float label_pr = cluster_label_probs[(idx * n_labels) + label];
                     if (label_pr >= threshold)
                     {
                         // Reproject point
                         points[(joint_idx + n_pixels[j]) * 3] =
-                            (tan_half_hfov * depth) * s;
+                            ((x + cluster_x0) - cx) * depth * inv_fx;
                         points[(joint_idx + n_pixels[j]) * 3 + 1] =
-                            (tan_half_vfov * depth) * t;
+                            -(((y + cluster_y0) - cy) * depth * inv_fy);
                         points[(joint_idx + n_pixels[j]) * 3 + 2] =
                             depth;
 
                         // Store pixel weight (density)
                         density[joint_idx + n_pixels[j]] =
-                            weights[(idx * n_joints) + j];
+                            cluster_weights[(idx * n_joints) + j];
 
                         n_pixels[j]++;
                         break;
@@ -408,7 +406,7 @@ joints_inferrer_infer(struct joints_inferrer* inferrer,
         float bandwidth = params[j].bandwidth;
         float offset = params[j].offset;
 
-        int joint_idx = j * width * height;
+        int joint_idx = j * cluster_width * cluster_height;
         for (int s = 0; s < N_SHIFTS; s++)
         {
             float new_points[n_pixels[j] * 3];
