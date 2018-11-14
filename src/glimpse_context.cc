@@ -3720,11 +3720,15 @@ add_debug_cloud_xyz_of_codebook_space(struct gm_context *ctx,
         pcl::PointXYZL pcl_point = pcl_cloud->points[i];
         struct gm_point_rgba point;
 
-        project_point_into_codebook(&pcl_point,
-                                    to_start,
-                                    start_to_codebook,
-                                    &tracking->depth_camera_intrinsics,
-                                    seg_res);
+        int off = project_point_into_codebook(&pcl_point,
+                                              to_start,
+                                              start_to_codebook,
+                                              &tracking->depth_camera_intrinsics,
+                                              seg_res);
+        // Falls outside of codebook...
+        if (off < 0)
+            continue;
+
         point.x = pcl_point.x;
         point.y = pcl_point.y;
         point.z = pcl_point.z;
