@@ -910,6 +910,9 @@ struct pipeline_scratch_state
 {
     bool paused;
 
+    int debug_pipeline_stage;
+    int debug_cloud_mode;
+
     uint64_t frame_counter;
 
     int seg_res;
@@ -3741,7 +3744,7 @@ colour_debug_cloud(struct gm_context *ctx,
               (indices.size() == 0 || debug_cloud.size() == indices.size()),
               "Can't mix and match use of debug cloud indexing");
 
-    switch ((enum debug_cloud_mode)ctx->debug_cloud_mode)
+    switch ((enum debug_cloud_mode)state->debug_cloud_mode)
     {
     case DEBUG_CLOUD_MODE_VIDEO: {
         const float vid_fx = tracking->video_camera_intrinsics.fx;
@@ -3869,7 +3872,7 @@ colour_debug_cloud(struct gm_context *ctx,
         break;
     case DEBUG_CLOUD_MODE_EDGES:
         if (state->done_edge_detect &&
-            ctx->debug_pipeline_stage == TRACKING_STAGE_EDGE_DETECT)
+            state->debug_pipeline_stage == TRACKING_STAGE_EDGE_DETECT)
         {
             std::vector<bool> &edge_mask = ctx->edge_detect_scratch;
             for (int i = 0; i < debug_cloud.size(); i++) {
@@ -5265,7 +5268,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
-    enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
+    enum tracking_stage debug_stage_id = (enum tracking_stage)state->debug_pipeline_stage;
 
     // If we've not tracked a human yet, the depth classification may not
     // be reliable - just use a simple clustering technique to find a
@@ -5319,9 +5322,9 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
     fy = idx / width;
     fz = focal_region[fr_i].fz;
 
-    if (ctx->debug_cloud_mode &&
-        (ctx->debug_pipeline_stage == TRACKING_STAGE_NAIVE_FLOOR ||
-         ctx->debug_pipeline_stage == TRACKING_STAGE_NAIVE_CLUSTER))
+    if (state->debug_cloud_mode &&
+        (state->debug_pipeline_stage == TRACKING_STAGE_NAIVE_FLOOR ||
+         state->debug_pipeline_stage == TRACKING_STAGE_NAIVE_CLUSTER))
     {
         // Draw the lines of focus...
         if (fz != FLT_MAX) {
@@ -5401,7 +5404,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
             // TODO: move outside loop, and instead iterate flood_fill
             // queue when done
             if (debug_stage_id == TRACKING_STAGE_NAIVE_FLOOR &&
-                ctx->debug_cloud_mode)
+                state->debug_cloud_mode)
             {
                 struct gm_point_rgba debug_point;
 
@@ -5453,7 +5456,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
                        struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    enum tracking_stage debug_stage_id = (enum tracking_stage)ctx->debug_pipeline_stage;
+    enum tracking_stage debug_stage_id = (enum tracking_stage)state->debug_pipeline_stage;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     cluster_indices.clear();
@@ -5546,7 +5549,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             // TODO: move outside loop, and instead iterate flood_fill
             // queue when done
             if (debug_stage_id == TRACKING_STAGE_NAIVE_CLUSTER &&
-                ctx->debug_cloud_mode)
+                state->debug_cloud_mode)
             {
                 struct gm_point_rgba debug_point;
 
@@ -6375,10 +6378,8 @@ run_stage_debug(struct gm_tracking_impl *tracking,
                                              struct pipeline_scratch_state *state),
                 struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
-    if (ctx->debug_cloud_mode &&
-        ctx->debug_pipeline_stage == stage_id &&
+    if (state->debug_cloud_mode &&
+        state->debug_pipeline_stage == stage_id &&
         stage_debug_callback)
     {
         stage_debug_callback(tracking, state);
@@ -6499,7 +6500,16 @@ context_track_skeleton(struct gm_context *ctx,
         tracking->stage_data[i].durations.clear();
     }
 
-    if (ctx->debug_cloud_mode) {
+    /* Especially for a debug build if stages take a long time to process
+     * it's possible that changes to this state could result in running
+     * multiple incompatible debug stages if we didn't snapshot at the
+     * start...
+     */
+    state.debug_pipeline_stage = ctx->debug_pipeline_stage;
+    state.debug_cloud_mode = ctx->debug_cloud_mode;
+
+    if (state.debug_cloud_mode) {
+        gm_debug(ctx->log, "Clearing debug visualization state");
         tracking->debug_cloud.resize(0);
         memset(&tracking->debug_cloud_intrinsics, 0,
                sizeof(tracking->debug_cloud_intrinsics));
@@ -6565,8 +6575,8 @@ context_track_skeleton(struct gm_context *ctx,
      * points would get deleted...
      */
     if (ctx->delete_edges ||
-        (ctx->debug_cloud_mode &&
-         ctx->debug_pipeline_stage == TRACKING_STAGE_EDGE_DETECT))
+        (state.debug_cloud_mode &&
+         state.debug_pipeline_stage == TRACKING_STAGE_EDGE_DETECT))
     {
         run_stage(tracking,
                   TRACKING_STAGE_EDGE_DETECT,
