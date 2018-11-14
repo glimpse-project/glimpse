@@ -3494,15 +3494,16 @@ add_debug_cloud_xyz_from_pcl_xyzl(struct gm_context *ctx,
     gm_assert(ctx->log, debug_cloud.size() == debug_cloud_indices.size(),
               "Can't mix and match use of debug cloud indexing");
 
-    debug_cloud.resize(debug_cloud.size() + pcl_cloud->size());
-    debug_cloud_indices.resize(debug_cloud_indices.size() + pcl_cloud->size());
+    for (int i = 0; i < (int)pcl_cloud->size(); i++) {
+        struct gm_point_rgba point;
 
-    for (unsigned i = 0; i < pcl_cloud->size(); i++) {
-        debug_cloud[i].x = pcl_cloud->points[i].x;
-        debug_cloud[i].y = pcl_cloud->points[i].y;
-        debug_cloud[i].z = pcl_cloud->points[i].z;
-        debug_cloud[i].rgba = 0xffffffff;
-        debug_cloud_indices[i] = i;
+        point.x = pcl_cloud->points[i].x;
+        point.y = pcl_cloud->points[i].y;
+        point.z = pcl_cloud->points[i].z;
+        point.rgba = 0xffffffff;
+
+        debug_cloud.push_back(point);
+        debug_cloud_indices.push_back(i);
     }
 }
 
@@ -3518,21 +3519,22 @@ add_debug_cloud_xyz_from_pcl_xyzl_transformed(struct gm_context *ctx,
     gm_assert(ctx->log, debug_cloud.size() == debug_cloud_indices.size(),
               "Can't mix and match use of debug cloud indexing");
 
-    debug_cloud.resize(debug_cloud.size() + pcl_cloud->size());
-    debug_cloud_indices.resize(debug_cloud_indices.size() + pcl_cloud->size());
+    for (int i = 0; i < (int)pcl_cloud->size(); i++) {
+        struct gm_point_rgba point;
 
-    for (unsigned i = 0; i < pcl_cloud->size(); i++) {
         glm::vec4 pt(pcl_cloud->points[i].x,
                      pcl_cloud->points[i].y,
                      pcl_cloud->points[i].z,
                      1.f);
         pt = (transform * pt);
 
-        debug_cloud[i].x = pt.x;
-        debug_cloud[i].y = pt.y;
-        debug_cloud[i].z = pt.z;
-        debug_cloud[i].rgba = 0xffffffff;
-        debug_cloud_indices[i] = i;
+        point.x = pt.x;
+        point.y = pt.y;
+        point.z = pt.z;
+        point.rgba = 0xffffffff;
+
+        debug_cloud.push_back(point);
+        debug_cloud_indices.push_back(i);
     }
 }
 
@@ -3548,19 +3550,21 @@ add_debug_cloud_xyz_from_pcl_xyzl_and_indices(struct gm_context *ctx,
     gm_assert(ctx->log, debug_cloud.size() == debug_cloud_indices.size(),
               "Can't mix and match use of debug cloud indexing");
 
-    debug_cloud.resize(debug_cloud.size() + indices.size());
-    debug_cloud_indices.resize(debug_cloud_indices.size() + indices.size());
-
     int n_points = pcl_cloud->points.size();
 
-    for (unsigned i = 0; i < indices.size(); i++) {
-        debug_cloud[i].x = pcl_cloud->points[indices[i]].x;
-        debug_cloud[i].y = pcl_cloud->points[indices[i]].y;
-        debug_cloud[i].z = pcl_cloud->points[indices[i]].z;
-        debug_cloud[i].rgba = 0xffffffff;
-        debug_cloud_indices[i] = indices[i];
-        gm_assert(ctx->log, indices[i] < n_points, "Out-of-bounds index (%d > n_points=%d)",
-                  indices[i], n_points);
+    for (int i : indices) {
+        struct gm_point_rgba point;
+
+        point.x = pcl_cloud->points[i].x;
+        point.y = pcl_cloud->points[i].y;
+        point.z = pcl_cloud->points[i].z;
+        point.rgba = 0xffffffff;
+
+        debug_cloud.push_back(point);
+        debug_cloud_indices.push_back(i);
+
+        gm_assert(ctx->log, i < n_points, "Out-of-bounds index (%d > n_points=%d)",
+                  i, n_points);
     }
 }
 
