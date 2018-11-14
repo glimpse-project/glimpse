@@ -85,6 +85,15 @@ joints_inferrer_calc_pixel_weights(struct joints_inferrer *inferrer,
         for (int x = 0; x < width; x++, pixel_idx++)
         {
             float depth = (float)depth_image[pixel_idx];
+
+            /* XXX: I think the idea here is to consider the surface area of
+             * points, where points that are farther away really represent
+             * a larger pysical surface than nearer points and so points
+             * farther away will add more weight.
+             *
+             * Notably though this seems like a crude aproximation and maybe
+             * we should actually consider the fov and camera resolution...
+             */
             float depth_2 = depth * depth;
 
             for (int j = 0; j < n_joints; j++, weight_idx++)
