@@ -5615,57 +5615,59 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics.fx /= seg_res;
     tracking->debug_cloud_intrinsics.fy /= seg_res;
 
+    uint32_t color = 0x00ff00ff;
+
     for (auto &cluster : state->person_clusters) {
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.min_y, cluster.min_z,
                            cluster.min_x, cluster.max_y, cluster.min_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.max_y, cluster.min_z,
                            cluster.min_x, cluster.max_y, cluster.max_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.max_y, cluster.max_z,
                            cluster.min_x, cluster.min_y, cluster.max_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.min_y, cluster.max_z,
                            cluster.min_x, cluster.min_y, cluster.min_z,
-                           0x0000ffff);
+                           color);
 
         tracking_draw_line(tracking,
                            cluster.max_x, cluster.min_y, cluster.min_z,
                            cluster.max_x, cluster.max_y, cluster.min_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.max_x, cluster.max_y, cluster.min_z,
                            cluster.max_x, cluster.max_y, cluster.max_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.max_x, cluster.max_y, cluster.max_z,
                            cluster.max_x, cluster.min_y, cluster.max_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.max_x, cluster.min_y, cluster.max_z,
                            cluster.max_x, cluster.min_y, cluster.min_z,
-                           0x0000ffff);
+                           color);
 
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.min_y, cluster.min_z,
                            cluster.max_x, cluster.min_y, cluster.min_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.max_y, cluster.min_z,
                            cluster.max_x, cluster.max_y, cluster.min_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.max_y, cluster.max_z,
                            cluster.max_x, cluster.max_y, cluster.max_z,
-                           0x0000ffff);
+                           color);
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.min_y, cluster.max_z,
                            cluster.max_x, cluster.min_y, cluster.max_z,
-                           0x0000ffff);
+                           color);
     }
 }
 
