@@ -955,7 +955,7 @@ struct pipeline_scratch_state
     int naive_fx;
     int naive_fy;
     std::vector<bool> done_mask;
-    std::queue<struct PointCmp> flood_fill;
+    std::list<struct PointCmp> flood_fill;
     float naive_floor_y;
 
     std::vector<candidate_cluster> candidate_clusters;
@@ -4953,6 +4953,78 @@ cluster_codebook_classified_points(
 }
 
 static void
+get_prev_cluster_positions(struct gm_tracking_impl *tracking,
+                           struct pipeline_scratch_state *state,
+                           std::list<struct PointCmp> &points)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    if (!ctx->cluster_from_prev || !ctx->n_tracking) {
+        return;
+    }
+
+    uint64_t earliest_time = tracking->frame->timestamp -
+        (uint64_t)((double)ctx->cluster_from_prev_time_threshold * 1e9);
+
+    if (ctx->tracking_history[0]->frame->timestamp < earliest_time)
+    {
+        return;
+    }
+
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        struct gm_joint &joint =
+            ctx->tracking_history[0]->skeleton_corrected.joints[j];
+        if (!joint.valid) {
+            continue;
+        }
+
+        // Project joint position into the spaces of the old frame and
+        // the current one.
+        float ox, oy, nx, ny;
+        struct gm_intrinsics *old_intrinsics =
+            &ctx->tracking_history[0]->downsampled_intrinsics;
+        struct gm_intrinsics *new_intrinsics =
+            &tracking->downsampled_intrinsics;
+
+        project_point(&joint.x, old_intrinsics, &ox, &oy);
+        project_point(&joint.x, new_intrinsics, &nx, &ny);
+
+        // Flip Y values as we're using this to address a buffer that's
+        // organised with the top-left of the image at the zero index.
+        oy = old_intrinsics->height - oy;
+        ny = new_intrinsics->height - ny;
+
+        // See if the depth has gone past the threshold and if it hasn't,
+        // add it as a point to cluster (flood-fill) from.
+        int dox = ox;
+        int doy = oy;
+        if (dox < 0 || dox >= old_intrinsics->width ||
+            doy < 0 || doy >= old_intrinsics->height)
+        {
+            continue;
+        }
+
+        int dnx = nx;
+        int dny = ny;
+        if (dnx < 0 || dnx >= new_intrinsics->width ||
+            dny < 0 || dny >= new_intrinsics->height)
+        {
+            continue;
+        }
+
+        float od = ctx->tracking_history[0]->downsampled_cloud->
+            points[doy * old_intrinsics->width + dox].z;
+        float nd = tracking->downsampled_cloud->
+            points[dny * new_intrinsics->width + dnx].z;
+
+        float diff = fabsf(od - nd);
+        if (diff <= ctx->cluster_from_prev_dist_threshold) {
+            points.push_back({dnx, dny, dnx, dny});
+        }
+    }
+}
+
+static void
 stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                           struct pipeline_scratch_state *state)
 {
@@ -4978,6 +5050,46 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
     //int height = tracking->downsampled_cloud->height;
 
     std::vector<candidate_cluster> large_clusters = {};
+
+    // Merge clusters that contain old joint positions
+    std::list<struct PointCmp> old_joint_positions;
+    get_prev_cluster_positions(tracking, state, old_joint_positions);
+
+    bool label_set = false;
+    unsigned merge_label = 0;
+    for (unsigned label = 0;
+         label < cluster_indices.size() &&
+         !old_joint_positions.empty(); label++)
+    {
+        auto &cluster = cluster_indices[label];
+        bool label_found = false;
+        for (int i : cluster.indices) {
+            int x = i % width;
+            int y = i / width;
+            for (auto iter = old_joint_positions.begin();
+                 iter != old_joint_positions.end(); ++iter)
+            {
+                struct PointCmp &point = *iter;
+                if (point.x == x && point.y == y) {
+                    label_found = true;
+                    if (!label_set) {
+                        merge_label = label;
+                        label_set = true;
+                    }
+                    old_joint_positions.erase(iter);
+                    break;
+                }
+            }
+        }
+
+        if (label_found && label != merge_label) {
+            cluster_indices[merge_label].indices.insert(
+                cluster_indices[merge_label].indices.end(),
+                cluster.indices.begin(),
+                cluster.indices.end());
+            cluster.indices.clear();
+        }
+    }
 
     if (ctx->codebook_cluster_infill)
     {
@@ -5342,8 +5454,8 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
     // us to hopefully find the floor level and establish a y limit before
     // then flood-filling again without the x and z limits.
 
-    std::queue<struct PointCmp> &flood_fill = state->flood_fill;
-    flood_fill.push({ fx, fy, fx, fy });
+    std::list<struct PointCmp> &flood_fill = state->flood_fill;
+    flood_fill.push_back({ fx, fy, fx, fy });
 
     std::vector<bool> &done_mask = state->done_mask;
     done_mask.resize(downsampled_cloud_size, false);
@@ -5354,7 +5466,7 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
     float lowest_point = FLT_MAX;
     while (!flood_fill.empty()) {
         struct PointCmp point = flood_fill.front();
-        flood_fill.pop();
+        flood_fill.pop_front();
 
         int idx = point.y * width + point.x;
 
@@ -5384,13 +5496,13 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
                                  ctx->cluster_tolerance))
         {
             done_mask[idx] = true;
-            flood_fill.push({ point.x - 1, point.y, point.x, point.y });
-            flood_fill.push({ point.x + 1, point.y, point.x, point.y });
-            flood_fill.push({ point.x, point.y - 1, point.x, point.y });
-            flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+            flood_fill.push_back({ point.x - 1, point.y, point.x, point.y });
+            flood_fill.push_back({ point.x + 1, point.y, point.x, point.y });
+            flood_fill.push_back({ point.x, point.y - 1, point.x, point.y });
+            flood_fill.push_back({ point.x, point.y + 1, point.x, point.y });
 
             // TODO: move outside loop, and instead iterate flood_fill
-            // queue when done
+            //       list when done
             if (debug_stage_id == TRACKING_STAGE_NAIVE_FLOOR &&
                 state->debug_cloud_mode)
             {
@@ -5447,71 +5559,15 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
 
     float lowest_point = state->naive_floor_y;
 
-    std::queue<struct PointCmp> &flood_fill = state->flood_fill;
-    std::vector<bool> &done_mask = state->done_mask;
-
-    uint64_t time_threshold = tracking->frame->timestamp -
-        (uint64_t)((double)ctx->cluster_from_prev_time_threshold * 1e9);
-
-    if (ctx->cluster_from_prev && ctx->n_tracking &&
-        ctx->tracking_history[0]->frame->timestamp >= time_threshold) {
-        for (int j = 0; j < ctx->n_joints; ++j) {
-            struct gm_joint &joint =
-                ctx->tracking_history[0]->skeleton_corrected.joints[j];
-            if (!joint.valid) {
-                continue;
-            }
-
-            // Project joint position into the spaces of the old frame and
-            // the current one.
-            float ox, oy, nx, ny;
-            struct gm_intrinsics *old_intrinsics =
-                &ctx->tracking_history[0]->downsampled_intrinsics;
-            struct gm_intrinsics *new_intrinsics =
-                &tracking->downsampled_intrinsics;
-
-            project_point(&joint.x, old_intrinsics, &ox, &oy);
-            project_point(&joint.x, new_intrinsics, &nx, &ny);
-
-            // Flip Y values as we're using this to address a buffer that's
-            // organised with the top-left of the image at the zero index.
-            oy = old_intrinsics->height - oy;
-            ny = new_intrinsics->height - ny;
-
-            // See if the depth has gone past the threshold and if it hasn't,
-            // add it as a point to cluster (flood-fill) from.
-            int dox = ox;
-            int doy = oy;
-            if (dox < 0 || dox >= old_intrinsics->width ||
-                doy < 0 || doy >= old_intrinsics->height)
-            {
-                continue;
-            }
-
-            int dnx = nx;
-            int dny = ny;
-            if (dnx < 0 || dnx >= new_intrinsics->width ||
-                dny < 0 || dny >= new_intrinsics->height)
-            {
-                continue;
-            }
-
-            float od = ctx->tracking_history[0]->downsampled_cloud->
-                points[doy * old_intrinsics->width + dox].z;
-            float nd = tracking->downsampled_cloud->
-                points[dny * new_intrinsics->width + dnx].z;
-
-            float diff = fabsf(od - nd);
-            if (diff <= ctx->cluster_from_prev_dist_threshold) {
-                flood_fill.push({ dnx, dny, dnx, dny });
-            }
-        }
-    }
+    std::list<struct PointCmp> &flood_fill = state->flood_fill;
+    get_prev_cluster_positions(tracking, state, flood_fill);
     if (flood_fill.empty()) {
         int fx = state->naive_fx;
         int fy = state->naive_fy;
-        flood_fill.push({ fx, fy, fx, fy });
+        flood_fill.push_back({ fx, fy, fx, fy });
     }
+
+    std::vector<bool> &done_mask = state->done_mask;
     std::fill(done_mask.begin(), done_mask.end(), false);
 
     struct candidate_cluster person_cluster = {};
@@ -5519,7 +5575,7 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
 
     while (!flood_fill.empty()) {
         struct PointCmp point = flood_fill.front();
-        flood_fill.pop();
+        flood_fill.pop_front();
 
         int idx = point.y * width + point.x;
 
@@ -5565,13 +5621,13 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             person_indices.indices.push_back(idx);
             done_mask[idx] = true;
 
-            flood_fill.push({ point.x - 1, point.y, point.x, point.y });
-            flood_fill.push({ point.x + 1, point.y, point.x, point.y });
-            flood_fill.push({ point.x, point.y - 1, point.x, point.y });
-            flood_fill.push({ point.x, point.y + 1, point.x, point.y });
+            flood_fill.push_back({ point.x - 1, point.y, point.x, point.y });
+            flood_fill.push_back({ point.x + 1, point.y, point.x, point.y });
+            flood_fill.push_back({ point.x, point.y - 1, point.x, point.y });
+            flood_fill.push_back({ point.x, point.y + 1, point.x, point.y });
 
             // TODO: move outside loop, and instead iterate flood_fill
-            // queue when done
+            //       list when done
             if (debug_stage_id == TRACKING_STAGE_NAIVE_CLUSTER &&
                 state->debug_cloud_mode)
             {
@@ -8406,6 +8462,40 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.bool_state.ptr = &ctx->naive_seg_fallback;
     ctx->properties.push_back(prop);
 
+    ctx->cluster_from_prev = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_from_prev";
+    prop.desc = "During naive segmentation, cluster from the positions of "
+                "tracked joints on previous frames";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->cluster_from_prev;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_from_prev_dist_threshold = 0.1f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_from_prev_dist_threshold";
+    prop.desc = "The maximum distance between the point in an old frame "
+                "and new before not considering it for clustering.";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_from_prev_dist_threshold;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.5f;
+    ctx->properties.push_back(prop);
+
+    ctx->cluster_from_prev_time_threshold = 0.5f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cluster_from_prev_time_threshold";
+    prop.desc = "The maximum time difference when using a previous frame "
+                "to determine clustering start points, in seconds.";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_from_prev_time_threshold;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1.f;
+    ctx->properties.push_back(prop);
+
     ctx->joint_refinement = true;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -8879,40 +8969,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "naive_cluster";
         stage.desc = "Cluster based on assumptions about single-person tracking";
-
-        ctx->cluster_from_prev = true;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "cluster_from_prev";
-        prop.desc = "During naive segmentation, cluster from the positions of "
-                    "tracked joints on previous frames";
-        prop.type = GM_PROPERTY_BOOL;
-        prop.bool_state.ptr = &ctx->cluster_from_prev;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_from_prev_dist_threshold = 0.1f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "cluster_from_prev_dist_threshold";
-        prop.desc = "The maximum distance between the point in an old frame "
-                    "and new before not considering it for clustering.";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_from_prev_dist_threshold;
-        prop.float_state.min = 0.01f;
-        prop.float_state.max = 0.5f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_from_prev_time_threshold = 0.5f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "cluster_from_prev_time_threshold";
-        prop.desc = "The maximum time difference when using a previous frame "
-                    "to determine clustering start points, in seconds.";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_from_prev_time_threshold;
-        prop.float_state.min = 0.f;
-        prop.float_state.max = 1.f;
-        stage.properties.push_back(prop);
 
         ctx->floor_threshold = 0.1f;
         prop = gm_ui_property();
