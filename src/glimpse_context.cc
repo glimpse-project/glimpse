@@ -2146,18 +2146,17 @@ static int
 project_point_into_codebook(pcl::PointXYZL *point,
                             glm::mat4 to_start,
                             glm::mat4 start_to_codebook,
-                            struct gm_intrinsics *intrinsics,
-                            int seg_res)
+                            struct gm_intrinsics *intrinsics)
 {
     if (std::isnan(point->z))
         return -1;
 
-    const int width = intrinsics->width / seg_res;
-    const int height = intrinsics->height / seg_res;
-    const float fx = intrinsics->fx / seg_res;
-    const float fy = intrinsics->fy / seg_res;
-    const float cx = intrinsics->cx / seg_res;
-    const float cy = intrinsics->cy / seg_res;
+    const int width = intrinsics->width;
+    const int height = intrinsics->height;
+    const float fx = intrinsics->fx;
+    const float fy = intrinsics->fy;
+    const float cx = intrinsics->cx;
+    const float cy = intrinsics->cy;
 
     glm::vec4 pt(point->x, point->y, point->z, 1.f);
     pt = (to_start * pt);
@@ -2167,11 +2166,10 @@ project_point_into_codebook(pcl::PointXYZL *point,
     point->z = pt.z;
 
     float nx = ((pt.x * fx / pt.z) + cx);
-    float ny = ((pt.y * fy / pt.z) + cy);
+    float ny = ((-pt.y * fy / pt.z) + cy);
 
-    /* XXX: check the rounding here... */
-    int dnx = (int)roundf(nx / seg_res);
-    int dny = (int)roundf(ny / seg_res);
+    int dnx = nx;
+    int dny = ny;
 
     if (dnx < 0 || dnx >= width ||
         dny < 0 || dny >= height)
@@ -3707,8 +3705,7 @@ add_debug_cloud_xyz_of_codebook_space(struct gm_context *ctx,
                                       pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud,
                                       glm::mat4 to_start,
                                       glm::mat4 start_to_codebook,
-                                      struct gm_intrinsics *intrinsics,
-                                      int seg_res)
+                                      struct gm_intrinsics *intrinsics)
 {
     std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
     std::vector<int> &debug_cloud_indices = tracking->debug_cloud_indices;
@@ -3723,8 +3720,7 @@ add_debug_cloud_xyz_of_codebook_space(struct gm_context *ctx,
         int off = project_point_into_codebook(&pcl_point,
                                               to_start,
                                               start_to_codebook,
-                                              &tracking->depth_camera_intrinsics,
-                                              seg_res);
+                                              intrinsics);
         // Falls outside of codebook...
         if (off < 0)
             continue;
@@ -4578,11 +4574,10 @@ stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
     struct gm_context *ctx = tracking->ctx;
     glm::mat4 to_start = state->to_start;
     glm::mat4 start_to_codebook = state->start_to_codebook;
-    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_of_codebook_space(
         ctx, tracking, tracking->downsampled_cloud, to_start,
-        start_to_codebook, &tracking->depth_camera_intrinsics, seg_res);
+        start_to_codebook, &tracking->downsampled_intrinsics);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
@@ -4599,7 +4594,6 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     glm::mat4 to_start = state->to_start;
     glm::mat4 start_to_codebook = state->start_to_codebook;
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
-    int seg_res = state->seg_res;
     uint64_t frame_timestamp = 0;
     uint64_t frame_counter = 0;
 
@@ -4616,6 +4610,8 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
 
     pcl::PointCloud<pcl::PointXYZL>::VectorType &downsampled_points =
         tracking->downsampled_cloud->points;
+
+    struct gm_intrinsics codebook_intrinsics = tracking->downsampled_intrinsics;
 
     const float codebook_bg_threshold = ctx->codebook_bg_threshold;
     const float codebook_flat_threshold = ctx->codebook_flat_threshold;
@@ -4638,8 +4634,7 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
         int off = project_point_into_codebook(&point,
                                               to_start,
                                               start_to_codebook,
-                                              &tracking->depth_camera_intrinsics,
-                                              seg_res);
+                                              &codebook_intrinsics);
         // Falls outside of codebook so we can't classify...
         if (off < 0)
             continue;
@@ -6020,7 +6015,6 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 
     struct gm_context *ctx = tracking->ctx;
 
-    int seg_res = state->seg_res;
     uint64_t frame_time = tracking->frame->timestamp;
     uint64_t update_frame_count = state->frame_counter;
 
@@ -6032,7 +6026,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
     std::vector<std::vector<struct seg_codeword>> &seg_codebook =
         *state->seg_codebook;
 
-    struct gm_intrinsics intrinsics = tracking->depth_camera_intrinsics;
+    struct gm_intrinsics codebook_intrinsics = tracking->downsampled_intrinsics;
 
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off)
@@ -6045,8 +6039,7 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
         int off = project_point_into_codebook(&point,
                                               to_start,
                                               to_codebook,
-                                              &intrinsics,
-                                              seg_res);
+                                              &codebook_intrinsics);
         // Falls outside of codebook so we can't classify...
         if (off < 0)
             continue;
