@@ -5598,15 +5598,25 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    add_debug_cloud_person_masks_except(tracking, state,
-                                        -1); // no exception
-    colour_debug_cloud(ctx, state, tracking, NULL);
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
 
     tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 
-    uint32_t color = 0x00ff00ff;
+    for (auto &cluster : state->candidate_clusters) {
+        uint32_t color = 0xff0000ff;
 
-    for (auto &cluster : state->person_clusters) {
+        for (auto &person_cluster : state->person_clusters) {
+            if (person_cluster.label == cluster.label) {
+                color = 0x00ff00ff;
+                break;
+            }
+        }
+
+        std::vector<int> &indices = cluster_indices[cluster.label].indices;
+        add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                      tracking->downsampled_cloud,
+                                                      indices);
+
         tracking_draw_line(tracking,
                            cluster.min_x, cluster.min_y, cluster.min_z,
                            cluster.min_x, cluster.max_y, cluster.min_z,
@@ -5658,6 +5668,8 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
                            cluster.max_x, cluster.min_y, cluster.max_z,
                            color);
     }
+
+    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 }
 
 static void
