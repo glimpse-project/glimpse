@@ -9210,8 +9210,8 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.desc = "Only view this (large) cluster (show all if == -1)";
         prop.type = GM_PROPERTY_INT;
         prop.int_state.ptr = &ctx->debug_codebook_cluster_idx;
-        prop.int_state.min = 0;
-        prop.int_state.max = 100;
+        prop.int_state.min = -1;
+        prop.int_state.max = 20;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
