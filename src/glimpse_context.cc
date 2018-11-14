@@ -498,6 +498,11 @@ struct gm_tracking_impl
     struct gm_extrinsics depth_to_video_extrinsics;
     bool extrinsics_set;
 
+    /* Based on the depth_camera_intrinsics but taking into account the seg_res
+     * resolution
+     */
+    struct gm_intrinsics downsampled_intrinsics;
+
     struct gm_frame *frame;
 
     // Depth data, in meters
@@ -3983,6 +3988,7 @@ stage_downsample_cb(struct gm_tracking_impl *tracking,
     int seg_res = state->seg_res;
     if (seg_res == 1) {
         tracking->downsampled_cloud = tracking->depth_cloud;
+        tracking->downsampled_intrinsics = tracking->depth_camera_intrinsics;
     } else {
         if (!tracking->downsampled_cloud ||
             tracking->downsampled_cloud == tracking->depth_cloud) {
@@ -4012,6 +4018,14 @@ stage_downsample_cb(struct gm_tracking_impl *tracking,
                 ++n_lores_points;
             }
         }
+
+        tracking->downsampled_intrinsics = tracking->depth_camera_intrinsics;
+        tracking->downsampled_intrinsics.width /= seg_res;
+        tracking->downsampled_intrinsics.height /= seg_res;
+        tracking->downsampled_intrinsics.cx /= seg_res;
+        tracking->downsampled_intrinsics.cy /= seg_res;
+        tracking->downsampled_intrinsics.fx /= seg_res;
+        tracking->downsampled_intrinsics.fy /= seg_res;
     }
 }
 
@@ -4020,7 +4034,6 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
                           struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
@@ -4031,13 +4044,7 @@ stage_downsample_debug_cb(struct gm_tracking_impl *tracking,
                                    colors,
                                    glm::mat4(1.0));
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 }
 
@@ -4215,17 +4222,10 @@ stage_edge_detect_debug_cb(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     int width = tracking->downsampled_cloud->width;
@@ -4345,7 +4345,6 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
                               struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     if (state->to_ground_valid) {
         add_debug_cloud_xyz_from_pcl_xyzl_transformed(ctx, tracking,
@@ -4389,13 +4388,7 @@ stage_ground_project_debug_cb(struct gm_tracking_impl *tracking,
         colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
     }
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx = tracking->debug_cloud_intrinsics.width / seg_res / 2;
-    tracking->debug_cloud_intrinsics.cy = tracking->debug_cloud_intrinsics.height / seg_res / 2;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -4495,15 +4488,8 @@ stage_codebook_retire_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 
     if (ctx->codebook_debug_view == CODEBOOK_DEBUG_VIEW_POINT_CLOUD) {
         add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
@@ -4565,15 +4551,8 @@ stage_codebook_resolve_background_debug_cb(struct gm_tracking_impl *tracking,
                                            struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 
     if (ctx->codebook_debug_view == CODEBOOK_DEBUG_VIEW_POINT_CLOUD) {
         add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
@@ -4602,13 +4581,7 @@ stage_codebook_project_debug_cb(struct gm_tracking_impl *tracking,
         start_to_codebook, &tracking->depth_camera_intrinsics, seg_res);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx = tracking->debug_cloud_intrinsics.width / seg_res / 2;
-    tracking->debug_cloud_intrinsics.cy = tracking->debug_cloud_intrinsics.height / seg_res / 2;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -4766,17 +4739,10 @@ stage_codebook_classify_debug_cb(struct gm_tracking_impl *tracking,
                                  struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 }
@@ -5209,15 +5175,8 @@ stage_codebook_cluster_debug_cb(struct gm_tracking_impl *tracking,
                                 struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 
     std::vector<struct gm_point_rgba> &debug_cloud = tracking->debug_cloud;
     std::vector<int> &debug_cloud_indices = tracking->debug_cloud_indices;
@@ -5442,13 +5401,7 @@ stage_naive_detect_floor_debug_cb(struct gm_tracking_impl *tracking,
     tracking_draw_transformed_grid(tracking, center, full_size, cell_size,
                                    0x00ffffff, ground_to_downsampled);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -5576,7 +5529,6 @@ stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
                              struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     // Note: the actual debug cloud is updated as part of
     // stage_naive_cluster_cb above, so we just need the color..
@@ -5595,13 +5547,7 @@ stage_naive_cluster_debug_cb(struct gm_tracking_impl *tracking,
     tracking_draw_transformed_grid(tracking, center, full_size, cell_size,
                                    0x808080ff, ground_to_downsampled);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -5647,19 +5593,12 @@ stage_filter_clusters_debug_cb(struct gm_tracking_impl *tracking,
                               struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     add_debug_cloud_person_masks_except(tracking, state,
                                         -1); // no exception
     colour_debug_cloud(ctx, state, tracking, NULL);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 
     uint32_t color = 0x00ff00ff;
 
@@ -5766,7 +5705,6 @@ stage_crop_cluster_image_debug_cb(struct gm_tracking_impl *tracking,
                                   struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -5782,13 +5720,7 @@ stage_crop_cluster_image_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -5828,7 +5760,6 @@ stage_label_inference_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -5844,13 +5775,7 @@ stage_label_inference_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -5885,7 +5810,6 @@ stage_joint_weights_debug_cb(struct gm_tracking_impl *tracking,
                              struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -5901,13 +5825,7 @@ stage_joint_weights_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -5965,7 +5883,6 @@ stage_joint_inference_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -5981,13 +5898,7 @@ stage_joint_inference_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -6010,7 +5921,6 @@ stage_refine_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -6026,13 +5936,7 @@ stage_refine_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -6050,7 +5954,6 @@ stage_sanitize_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                  struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -6066,13 +5969,7 @@ stage_sanitize_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -6080,7 +5977,6 @@ stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
                                         struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
-    int seg_res = state->seg_res;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
@@ -6096,13 +5992,7 @@ stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
                                                   indices);
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
 }
 
 static void
@@ -6270,17 +6160,9 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    int seg_res = state->seg_res;
-
     add_debug_cloud_xyz_from_pcl_xyzl(ctx, tracking, tracking->downsampled_cloud);
 
-    tracking->debug_cloud_intrinsics = tracking->depth_camera_intrinsics;
-    tracking->debug_cloud_intrinsics.width /= seg_res;
-    tracking->debug_cloud_intrinsics.height /= seg_res;
-    tracking->debug_cloud_intrinsics.cx /= seg_res;
-    tracking->debug_cloud_intrinsics.cy /= seg_res;
-    tracking->debug_cloud_intrinsics.fx /= seg_res;
-    tracking->debug_cloud_intrinsics.fy /= seg_res;
+    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     struct gm_prediction *prediction = NULL;
