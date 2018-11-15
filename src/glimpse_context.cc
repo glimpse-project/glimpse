@@ -5051,46 +5051,6 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
 
     std::vector<candidate_cluster> large_clusters = {};
 
-    // Merge clusters that contain old joint positions
-    std::list<struct PointCmp> old_joint_positions;
-    get_prev_cluster_positions(tracking, state, old_joint_positions);
-
-    bool label_set = false;
-    unsigned merge_label = 0;
-    for (unsigned label = 0;
-         label < cluster_indices.size() &&
-         !old_joint_positions.empty(); label++)
-    {
-        auto &cluster = cluster_indices[label];
-        bool label_found = false;
-        for (int i : cluster.indices) {
-            int x = i % width;
-            int y = i / width;
-            for (auto iter = old_joint_positions.begin();
-                 iter != old_joint_positions.end(); ++iter)
-            {
-                struct PointCmp &point = *iter;
-                if (point.x == x && point.y == y) {
-                    label_found = true;
-                    if (!label_set) {
-                        merge_label = label;
-                        label_set = true;
-                    }
-                    old_joint_positions.erase(iter);
-                    break;
-                }
-            }
-        }
-
-        if (label_found && label != merge_label) {
-            cluster_indices[merge_label].indices.insert(
-                cluster_indices[merge_label].indices.end(),
-                cluster.indices.begin(),
-                cluster.indices.end());
-            cluster.indices.clear();
-        }
-    }
-
     if (ctx->codebook_cluster_infill)
     {
         pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
@@ -5302,6 +5262,48 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                    other_indices.indices.clear();
                 }
             }
+        }
+    }
+
+    // Merge clusters that contain old joint positions.
+    // We assume that even if a human cluster is split, that each component
+    // cluster is still going to be at least as big as a 'large' cluster.
+    std::list<struct PointCmp> old_joint_positions;
+    get_prev_cluster_positions(tracking, state, old_joint_positions);
+
+    bool label_set = false;
+    unsigned merge_label = 0;
+    for (auto &large_cluster : large_clusters) {
+        if (old_joint_positions.empty()) {
+            break;
+        }
+        auto &cluster = cluster_indices[large_cluster.label];
+        bool label_found = false;
+        for (int i : cluster.indices) {
+            int x = i % width;
+            int y = i / width;
+            for (auto iter = old_joint_positions.begin();
+                 iter != old_joint_positions.end(); ++iter)
+            {
+                struct PointCmp &point = *iter;
+                if (point.x == x && point.y == y) {
+                    label_found = true;
+                    if (!label_set) {
+                        merge_label = large_cluster.label;
+                        label_set = true;
+                    }
+                    old_joint_positions.erase(iter);
+                    break;
+                }
+            }
+        }
+
+        if (label_found && large_cluster.label != merge_label) {
+            cluster_indices[merge_label].indices.insert(
+                cluster_indices[merge_label].indices.end(),
+                cluster.indices.begin(),
+                cluster.indices.end());
+            cluster.indices.clear();
         }
     }
 
