@@ -2174,7 +2174,7 @@ project_point(float *point,
               float *out_y)
 {
     *out_x = ((point[0] * intrinsics->fx / point[2]) + intrinsics->cx);
-    *out_y = ((point[1] * intrinsics->fy / point[2]) + intrinsics->cy);
+    *out_y = ((-point[1] * intrinsics->fy / point[2]) + intrinsics->cy);
 }
 
 static int
@@ -4988,11 +4988,6 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
 
         project_point(&joint.x, old_intrinsics, &ox, &oy);
         project_point(&joint.x, new_intrinsics, &nx, &ny);
-
-        // Flip Y values as we're using this to address a buffer that's
-        // organised with the top-left of the image at the zero index.
-        oy = old_intrinsics->height - oy;
-        ny = new_intrinsics->height - ny;
 
         // See if the depth has gone past the threshold and if it hasn't,
         // add it as a point to cluster (flood-fill) from.
