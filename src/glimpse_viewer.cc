@@ -1529,13 +1529,13 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
             gm_context_get_stage_ui_properties(data->ctx, i);
         bool show_props = false;
 
-        char readable_stage_name[64];
+        char readable_stage_name[128];
         make_readable_name(stage_name,
                            readable_stage_name,
                            sizeof(readable_stage_name));
 
         if (stage_props && stage_props->n_properties) {
-            char stage_label[64];
+            char stage_label[128];
             xsnprintf(stage_label, sizeof(stage_label),
                       "%sStage: %s###%s",
                       i == data->current_stage ? "* " : "",

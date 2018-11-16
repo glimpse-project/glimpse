@@ -6083,6 +6083,15 @@ stage_sanitize_skeleton_cb(struct gm_tracking_impl *tracking,
 
     sanitise_skeleton(ctx, tracking->skeleton_corrected,
                       tracking->frame->timestamp);
+
+    float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton_corrected);
+    tracking_add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
+
+    tracking->success = true;
+    if (ctx->skeleton_validation) {
+        tracking->success = (state->confidence >= ctx->skeleton_min_confidence &&
+                             skel_dist <= ctx->skeleton_max_distance);
+    }
 }
 
 static void
@@ -6938,15 +6947,6 @@ context_track_skeleton(struct gm_context *ctx,
               NULL,
               &state);
 
-    float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton_corrected);
-    tracking_add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
-
-    bool valid_skeleton = true;
-    if (ctx->skeleton_validation) {
-        valid_skeleton = (state.confidence >= ctx->skeleton_min_confidence &&
-                          skel_dist <= ctx->skeleton_max_distance);
-    }
-
 #warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
     if (motion_detection) {
         std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
@@ -6956,7 +6956,7 @@ context_track_skeleton(struct gm_context *ctx,
             struct candidate_cluster &cluster = person_clusters[i];
             std::vector<int> &indices = cluster_indices[cluster.label].indices;
 
-            if (valid_skeleton && i == state.best_person_cluster) {
+            if (tracking->success && i == state.best_person_cluster) {
                 for (auto &idx : indices) {
                     tracking->downsampled_cloud->points[idx].label =
                         CODEBOOK_CLASS_TRACKED;
@@ -6970,7 +6970,7 @@ context_track_skeleton(struct gm_context *ctx,
         }
     }
 
-    if (!valid_skeleton) {
+    if (!tracking->success) {
         gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
     }
 
@@ -6981,8 +6981,6 @@ context_track_skeleton(struct gm_context *ctx,
                   NULL,
                   &state);
     }
-
-    tracking->success = valid_skeleton;
 
     return tracking->success;
 }
@@ -8042,6 +8040,55 @@ parse_bone_info(struct gm_context *ctx,
     return true;
 }
 
+static void
+add_cluster_from_prev_props(struct gm_context *ctx,
+                            struct gm_pipeline_stage &stage)
+{
+    const char *name;
+    char *name_copy;
+    struct gm_ui_property prop = gm_ui_property();
+
+    ctx->cluster_from_prev = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    name = "cluster_from_prev";
+    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    prop.name = name_copy;
+    prop.desc = "During naive segmentation, cluster from the positions of "
+                "tracked joints on previous frames";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->cluster_from_prev;
+    stage.properties.push_back(prop);
+
+    ctx->cluster_from_prev_dist_threshold = 0.1f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    name = "prev_dist_threshold";
+    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    prop.name = name_copy;
+    prop.desc = "The maximum distance between the point in an old frame "
+                "and new before not considering it for clustering.";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_from_prev_dist_threshold;
+    prop.float_state.min = 0.01f;
+    prop.float_state.max = 0.5f;
+    stage.properties.push_back(prop);
+
+    ctx->cluster_from_prev_time_threshold = 0.5f;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    name = "prev_time_threshold";
+    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    prop.name = name_copy;
+    prop.desc = "The maximum time difference when using a previous frame "
+                "to determine clustering start points, in seconds.";
+    prop.type = GM_PROPERTY_FLOAT;
+    prop.float_state.ptr = &ctx->cluster_from_prev_time_threshold;
+    prop.float_state.min = 0.f;
+    prop.float_state.max = 1.f;
+    stage.properties.push_back(prop);
+}
+
 struct gm_context *
 gm_context_new(struct gm_logger *logger, char **err)
 {
@@ -8432,89 +8479,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
-    ctx->delete_edges = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "delete_edges";
-    prop.desc = "Detect edges and invalidate edge points";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->delete_edges;
-    ctx->properties.push_back(prop);
-
-    ctx->motion_detection = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "motion_detection";
-    prop.desc = "Enable motion-based human segmentation";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->motion_detection;
-    ctx->properties.push_back(prop);
-
-    ctx->naive_seg_fallback = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "naive_seg_fallback";
-    prop.desc = "Enable a naive segmentation fallback, based on assuming the camera is pointing directly at a person";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->naive_seg_fallback;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_from_prev = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_from_prev";
-    prop.desc = "During naive segmentation, cluster from the positions of "
-                "tracked joints on previous frames";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->cluster_from_prev;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_from_prev_dist_threshold = 0.1f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_from_prev_dist_threshold";
-    prop.desc = "The maximum distance between the point in an old frame "
-                "and new before not considering it for clustering.";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_from_prev_dist_threshold;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
-    ctx->properties.push_back(prop);
-
-    ctx->cluster_from_prev_time_threshold = 0.5f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "cluster_from_prev_time_threshold";
-    prop.desc = "The maximum time difference when using a previous frame "
-                "to determine clustering start points, in seconds.";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->cluster_from_prev_time_threshold;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 1.f;
-    ctx->properties.push_back(prop);
-
-    ctx->joint_refinement = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "joint_refinement";
-    prop.desc = "Favour less confident joint predictions that conform "
-                "to previous tracked joint positions better";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->joint_refinement;
-    ctx->properties.push_back(prop);
-
-    ctx->max_joint_refinement_delta = 0.2f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "max_joint_refinement_delta";
-    prop.desc = "The maximum time between joint refinement comparisons, "
-                "in seconds";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->max_joint_refinement_delta;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 1.f;
-    ctx->properties.push_back(prop);
-
     ctx->prediction_dampen_large_deltas = true;
     prop = gm_ui_property();
     prop.object = ctx;
@@ -8555,91 +8519,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->prediction_decay;
     prop.float_state.min = 0.f;
     prop.float_state.max = 4.f;
-    ctx->properties.push_back(prop);
-
-    ctx->sanitisation_window = 1.f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "sanitisation_window";
-    prop.desc = "The maximum time differential on which to base skeleton"
-                "sanitisation, in seconds.";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->sanitisation_window;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 10.f;
-    ctx->properties.push_back(prop);
-
-    ctx->joint_velocity_sanitisation = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "joint_velocity_sanitisation";
-    prop.desc = "If any joint position exceeds set velocity thresholds, "
-                "use the displacement from the last well-tracked frame.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->joint_velocity_sanitisation;
-    ctx->properties.push_back(prop);
-
-    ctx->bone_length_sanitisation = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "bone_length_sanitisation";
-    prop.desc = "If bone length exceeds a set threshold of difference "
-                "between previous tracked frames, use a previous length.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->bone_length_sanitisation;
-    ctx->properties.push_back(prop);
-
-    ctx->bone_rotation_sanitisation = false;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "bone_rotation_sanitisation";
-    prop.desc = "If bone rotation exceeds a set threshold of difference "
-                "between previous tracked frames, use a previous length.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->bone_rotation_sanitisation;
-    ctx->properties.push_back(prop);
-
-    ctx->use_bone_map_annotation = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "use_bone_map_annotation";
-    prop.desc = "Use bone map annotations during sanitisation to determine "
-                "if bones are likely to be realistic inferences.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->use_bone_map_annotation;
-    ctx->properties.push_back(prop);
-
-    ctx->skeleton_validation = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "skeleton_validation";
-    prop.desc = "Whether to validate if inferred skeletons are likely to be "
-                "human.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->skeleton_validation;
-    ctx->properties.push_back(prop);
-
-    ctx->skeleton_min_confidence = 1000.f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "skeleton_min_skeleton";
-    prop.desc = "Minimum cumulative joint confidence of a skeleton";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->skeleton_min_confidence;
-    prop.float_state.min = 50.f;
-    prop.float_state.max = 5000.f;
-    ctx->properties.push_back(prop);
-
-    ctx->skeleton_max_distance = 0.15f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "skeleton_max_distance";
-    prop.desc = "Maximum cumulative square distance from min/max testing "
-                "bone lengths";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->skeleton_max_distance;
-    prop.float_state.min = 0.01f;
-    prop.float_state.max = 0.5f;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
@@ -8859,6 +8738,15 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "edge_detect";
         stage.desc = "Detect gradients coincident with viewing angle";
 
+        ctx->delete_edges = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "delete_edges";
+        prop.desc = "Detect edges and invalidate edge points";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->delete_edges;
+        stage.properties.push_back(prop);
+
         ctx->edge_detect_mode = EDGE_DETECT_MODE_XY;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -8947,127 +8835,21 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     {
-        enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_FLOOR;
-        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
-
-        stage.stage_id = stage_id;
-        stage.name = "naive_find_floor";
-        stage.desc = "Find floor to attempt naive single-person segmentation";
-
-        stage.properties_state.n_properties = stage.properties.size();
-        stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
-    }
-
-    {
-        enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_CLUSTER;
-        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
-
-        stage.stage_id = stage_id;
-        stage.name = "naive_cluster";
-        stage.desc = "Cluster based on assumptions about single-person tracking";
-
-        ctx->floor_threshold = 0.1f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "floor_threshold";
-        prop.desc = "The threshold from the lowest points of a potential person "
-            "cluster to filter out when looking for the floor.";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->floor_threshold;
-        prop.float_state.min = 0.01f;
-        prop.float_state.max = 0.3f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_tolerance = 0.05f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_tolerance";
-        prop.desc = "Distance threshold when clustering points";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_tolerance;
-        prop.float_state.min = 0.01f;
-        prop.float_state.max = 0.5f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_min_width = 0.15f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_min_width";
-        prop.desc = "Minimum width of a human cluster";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_min_width;
-        prop.float_state.min = 0.1f;
-        prop.float_state.max = 1.0f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_min_height = 0.8f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_min_height";
-        prop.desc = "Minimum height of a human cluster";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_min_height;
-        prop.float_state.min = 0.1f;
-        prop.float_state.max = 1.5f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_min_depth = 0.05f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_min_depth";
-        prop.desc = "Minimum depth of a human cluster";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_min_depth;
-        prop.float_state.min = 0.05f;
-        prop.float_state.max = 0.5f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_max_width = 2.0f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_max_width";
-        prop.desc = "Maximum width of a human cluster";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_max_width;
-        prop.float_state.min = 0.5f;
-        prop.float_state.max = 3.0f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_max_height = 2.45f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_max_height";
-        prop.desc = "Maximum height of a human cluster";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_max_height;
-        prop.float_state.min = 1.0f;
-        prop.float_state.max = 4.0f;
-        stage.properties.push_back(prop);
-
-        ctx->cluster_max_depth = 1.5f;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "na_cluster_max_depth";
-        prop.desc = "Maximum depth of a human cluster";
-        prop.type = GM_PROPERTY_FLOAT;
-        prop.float_state.ptr = &ctx->cluster_max_depth;
-        prop.float_state.min = 0.5f;
-        prop.float_state.max = 3.0f;
-        stage.properties.push_back(prop);
-
-        stage.properties_state.n_properties = stage.properties.size();
-        stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
-    }
-
-    {
         enum tracking_stage stage_id = TRACKING_STAGE_CODEBOOK_RETIRE_WORDS;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "codebook_retire";
-        stage.desc = "Retire old codewords";
+        stage.name = "motion_detection_codebook_retire";
+        stage.desc = "Retire old codewords in the motion detection codebook";
+
+        ctx->motion_detection = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "motion_detection";
+        prop.desc = "Enable motion-based human segmentation";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->motion_detection;
+        stage.properties.push_back(prop);
 
         // XXX: aliased property
         ctx->codebook_frozen = false;
@@ -9173,7 +8955,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "codebook_resolve_bg";
+        stage.name = "motion_detection_codebook_resolve_bg";
         stage.desc = "Determine canonical background codewords plus prune old codewords";
 
         // XXX: aliased property
@@ -9210,7 +8992,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "codebook_align";
+        stage.name = "motion_detection_codebook_align";
         stage.desc = "Project into stable 'codebook' space for motion analysis";
 
         stage.properties_state.n_properties = stage.properties.size();
@@ -9223,7 +9005,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "codebook_classify";
+        stage.name = "motion_detection_codebook_classify";
         stage.desc = "Analyse and classify motion in codebook space for segmentation";
         stage.images.push_back((struct image_generator)
                                {
@@ -9319,7 +9101,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "codebook_cluster";
+        stage.name = "motion_detection_codebook_cluster";
         stage.desc = "Cluster based on motion-based codebook classifications";
         stage.images.push_back((struct image_generator)
                                {
@@ -9327,6 +9109,8 @@ gm_context_new(struct gm_logger *logger, char **err)
                                    "All candidate clusters found, before selection",
                                    tracking_create_rgb_candidate_clusters,
                                });
+
+        add_cluster_from_prev_props(ctx, stage);
 
         ctx->codebook_cluster_tolerance = 0.10f;
         prop = gm_ui_property();
@@ -9388,6 +9172,132 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.int_state.ptr = &ctx->debug_codebook_cluster_idx;
         prop.int_state.min = -1;
         prop.int_state.max = 20;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_FLOOR;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "naive_find_floor";
+        stage.desc = "Find floor to attempt naive single-person segmentation";
+
+        ctx->naive_seg_fallback = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "naive_seg_fallback";
+        prop.desc = "Enable a naive segmentation fallback, based on assuming the camera is pointing directly at a person";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->naive_seg_fallback;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_NAIVE_CLUSTER;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "naive_cluster";
+        stage.desc = "Cluster based on assumptions about single-person tracking";
+
+        add_cluster_from_prev_props(ctx, stage);
+
+        ctx->floor_threshold = 0.1f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "floor_threshold";
+        prop.desc = "The threshold from the lowest points of a potential person "
+            "cluster to filter out when looking for the floor.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->floor_threshold;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.3f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_tolerance = 0.05f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_tolerance";
+        prop.desc = "Distance threshold when clustering points";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_tolerance;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_width = 0.15f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_min_width";
+        prop.desc = "Minimum width of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_width;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 1.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_height = 0.8f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_min_height";
+        prop.desc = "Minimum height of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_height;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 1.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_min_depth = 0.05f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_min_depth";
+        prop.desc = "Minimum depth of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_min_depth;
+        prop.float_state.min = 0.05f;
+        prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_width = 2.0f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_max_width";
+        prop.desc = "Maximum width of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_width;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_height = 2.45f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_max_height";
+        prop.desc = "Maximum height of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_height;
+        prop.float_state.min = 1.0f;
+        prop.float_state.max = 4.0f;
+        stage.properties.push_back(prop);
+
+        ctx->cluster_max_depth = 1.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "na_cluster_max_depth";
+        prop.desc = "Maximum depth of a human cluster";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->cluster_max_depth;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 3.0f;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
@@ -9567,6 +9477,28 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.bool_state.ptr = &ctx->fast_clustering;
         stage.properties.push_back(prop);
 
+        ctx->joint_refinement = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "joint_refinement";
+        prop.desc = "Favour less confident joint predictions that conform "
+                    "to previous tracked joint positions better";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->joint_refinement;
+        stage.properties.push_back(prop);
+
+        ctx->max_joint_refinement_delta = 0.2f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_joint_refinement_delta";
+        prop.desc = "The maximum time between joint refinement comparisons, "
+                    "in seconds";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->max_joint_refinement_delta;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 1.f;
+        stage.properties.push_back(prop);
+
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
         pthread_mutex_init(&stage.properties_state.lock, NULL);
@@ -9580,6 +9512,58 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "refine_skeleton";
         stage.desc = "Try to verify the best inferred skeleton joints "
                      "have been chosen";
+
+        ctx->sanitisation_window = 1.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "sanitisation_window";
+        prop.desc = "The maximum time differential on which to base skeleton"
+                    "sanitisation, in seconds.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->sanitisation_window;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 10.f;
+        stage.properties.push_back(prop);
+
+        ctx->joint_velocity_sanitisation = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "joint_velocity_sanitisation";
+        prop.desc = "If any joint position exceeds set velocity thresholds, "
+                    "use the displacement from the last well-tracked frame.";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->joint_velocity_sanitisation;
+        stage.properties.push_back(prop);
+
+        ctx->bone_length_sanitisation = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "bone_length_sanitisation";
+        prop.desc = "If bone length exceeds a set threshold of difference "
+                    "between previous tracked frames, use a previous length.";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->bone_length_sanitisation;
+        stage.properties.push_back(prop);
+
+        ctx->bone_rotation_sanitisation = false;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "bone_rotation_sanitisation";
+        prop.desc = "If bone rotation exceeds a set threshold of difference "
+                    "between previous tracked frames, use a previous length.";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->bone_rotation_sanitisation;
+        stage.properties.push_back(prop);
+
+        ctx->use_bone_map_annotation = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "use_bone_map_annotation";
+        prop.desc = "Use bone map annotations during sanitisation to determine "
+                    "if bones are likely to be realistic inferences.";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->use_bone_map_annotation;
+        stage.properties.push_back(prop);
 
         ctx->bone_length_variance = 0.05f;
         prop = gm_ui_property();
@@ -9662,6 +9646,39 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->bone_rotation_outlier_factor;
         prop.float_state.min = 1.0f;
         prop.float_state.max = 5.0f;
+        stage.properties.push_back(prop);
+
+        ctx->skeleton_validation = true;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "skeleton_validation";
+        prop.desc = "Whether to validate if inferred skeletons are likely to be "
+                    "human.";
+        prop.type = GM_PROPERTY_BOOL;
+        prop.bool_state.ptr = &ctx->skeleton_validation;
+        stage.properties.push_back(prop);
+
+        ctx->skeleton_min_confidence = 1000.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "skeleton_min_skeleton";
+        prop.desc = "Minimum cumulative joint confidence of a skeleton";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->skeleton_min_confidence;
+        prop.float_state.min = 50.f;
+        prop.float_state.max = 5000.f;
+        stage.properties.push_back(prop);
+
+        ctx->skeleton_max_distance = 0.15f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "skeleton_max_distance";
+        prop.desc = "Maximum cumulative square distance from min/max testing "
+                    "bone lengths";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->skeleton_max_distance;
+        prop.float_state.min = 0.01f;
+        prop.float_state.max = 0.5f;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
