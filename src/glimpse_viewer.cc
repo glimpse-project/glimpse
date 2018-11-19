@@ -1396,6 +1396,24 @@ draw_visualisation(Data *data, int x, int y, int width, int height,
     return focused;
 }
 
+static bool
+collapsing_header(const char *label, bool *checkbox = NULL)
+{
+    if (checkbox) {
+        ImGui::Checkbox("", checkbox);
+        ImGui::SameLine();
+        ImVec2 padding = ImGui::GetStyle().FramePadding;
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() - 2 * padding.x);
+    }
+
+    bool is_open =
+        ImGui::TreeNodeEx(label,
+                          ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                          ImGuiTreeNodeFlags_NoAutoOpenOnLog |
+                          ImGuiTreeNodeFlags_FramePadding);
+
+    return is_open;
+}
 
 static bool
 draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
@@ -1524,6 +1542,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     int n_stages = gm_context_get_n_stages(data->ctx);
     for (int i = 0; i < n_stages; i++) {
+        // Format the stage name
         const char *stage_name = gm_context_get_stage_name(data->ctx, i);
         struct gm_ui_properties *stage_props =
             gm_context_get_stage_ui_properties(data->ctx, i);
@@ -1534,6 +1553,70 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                            readable_stage_name,
                            sizeof(readable_stage_name));
 
+        // Generate stage timing fraction and label
+        if (data->latest_tracking) {
+            uint64_t ref_duration_ns = 0;
+            uint64_t stage_duration_ns = 0;
+
+            switch (data->stage_stats_mode)
+            {
+            case 0: // "Aggregated per-frame average",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_frame_duration_avg(data->ctx, i);
+                break;
+            case 1: // "Aggregated per-frame median",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_frame_duration_median(data->ctx, i);
+                break;
+            case 2: // "Aggregated per-run average",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_run_duration_avg(data->ctx, i);
+                break;
+            case 3: // "Aggregated per-run median",
+                ref_duration_ns = avg_frame_duration_ns;
+                stage_duration_ns =
+                    gm_context_get_stage_run_duration_median(data->ctx, i);
+                break;
+            case 4: // "Latest per-frame",
+                ref_duration_ns = tracking_duration_ns;
+                stage_duration_ns =
+                    gm_tracking_get_stage_duration(data->latest_tracking, i);
+                break;
+            case 5: // "Latest per-run average",
+                ref_duration_ns = tracking_duration_ns;
+                stage_duration_ns =
+                    gm_tracking_get_stage_run_duration_avg(data->latest_tracking, i);
+                break;
+            case 6: // "Latest per-run median",
+                ref_duration_ns = tracking_duration_ns;
+                stage_duration_ns =
+                    gm_tracking_get_stage_run_duration_median(data->latest_tracking, i);
+                break;
+            }
+            float fraction = (double)stage_duration_ns / ref_duration_ns;
+
+            ImVec2 cursor = ImGui::GetCursorPos();
+            ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), "");
+
+            char duration_s16[16];
+            format_duration_s16(stage_duration_ns, duration_s16);
+            char buf[32];
+            xsnprintf(buf, sizeof(buf),
+                      "%3.f%%/%s", (fraction * 100.f), duration_s16);
+            ImVec2 text_size = ImGui::CalcTextSize(buf);
+            ImGuiStyle &style = ImGui::GetStyle();
+            ImGui::SetCursorPos({ ImGui::GetWindowWidth() - cursor.x -
+                                  text_size.x -
+                                  style.FramePadding.x - style.ScrollbarSize,
+                                  cursor.y });
+            ImGui::TextUnformatted(buf);
+
+            ImGui::SetCursorPos(cursor);
+        }
+
         if (stage_props && stage_props->n_properties) {
             char stage_label[128];
             xsnprintf(stage_label, sizeof(stage_label),
@@ -1542,8 +1625,9 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                       readable_stage_name,
                       stage_name);
 
-            show_props = ImGui::CollapsingHeader(stage_label);
+            show_props = collapsing_header(stage_label);
         } else {
+            ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%sStage: %s",
                                 i == data->current_stage ? "* " : "",
                                 readable_stage_name);
@@ -1594,65 +1678,12 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
             ImGui::SetCursorPosY(ImGui::GetCursorPosY() + h);
         }
 
-        if (data->latest_tracking) {
-            uint64_t ref_duration_ns = 0;
-            uint64_t stage_duration_ns = 0;
-
-            switch (data->stage_stats_mode)
-            {
-            case 0: // "Aggregated per-frame average",
-                ref_duration_ns = avg_frame_duration_ns;
-                stage_duration_ns =
-                    gm_context_get_stage_frame_duration_avg(data->ctx, i);
-                break;
-            case 1: // "Aggregated per-frame median",
-                ref_duration_ns = avg_frame_duration_ns;
-                stage_duration_ns =
-                    gm_context_get_stage_frame_duration_median(data->ctx, i);
-                break;
-            case 2: // "Aggregated per-run average",
-                ref_duration_ns = avg_frame_duration_ns;
-                stage_duration_ns =
-                    gm_context_get_stage_run_duration_avg(data->ctx, i);
-                break;
-            case 3: // "Aggregated per-run median",
-                ref_duration_ns = avg_frame_duration_ns;
-                stage_duration_ns =
-                    gm_context_get_stage_run_duration_median(data->ctx, i);
-                break;
-            case 4: // "Latest per-frame",
-                ref_duration_ns = tracking_duration_ns;
-                stage_duration_ns =
-                    gm_tracking_get_stage_duration(data->latest_tracking, i);
-                break;
-            case 5: // "Latest per-run average",
-                ref_duration_ns = tracking_duration_ns;
-                stage_duration_ns =
-                    gm_tracking_get_stage_run_duration_avg(data->latest_tracking, i);
-                break;
-            case 6: // "Latest per-run median",
-                ref_duration_ns = tracking_duration_ns;
-                stage_duration_ns =
-                    gm_tracking_get_stage_run_duration_median(data->latest_tracking, i);
-                break;
-            }
-            float fraction = (double)stage_duration_ns / ref_duration_ns;
-
-            char duration_s16[16];
-            format_duration_s16(stage_duration_ns, duration_s16);
-            char buf[32];
-            xsnprintf(buf, sizeof(buf), "%3.f%%/%s", (fraction * 100.f), duration_s16);
-
-            ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), buf);
-        }
-
         if (show_props) {
             draw_properties(data,
                             stage_props,
                             data->stage_control_overrides);
         }
 
-        ImGui::Spacing();
         ImGui::Separator();
     }
 
