@@ -1557,7 +1557,15 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                            readable_stage_name,
                            sizeof(readable_stage_name));
 
+        ImGui::PushStyleColor(ImGuiCol_FrameBg,
+                              (i == data->current_stage) ?
+                              ImVec4(1.f, 1.f, 1.f, 0.2f):
+                              ImVec4(0.f, 0.f, 0.f, 0.f));
+        ImGui::PushStyleColor(ImGuiCol_PlotHistogram,
+                              ImVec4(0.9f, 0.7f, 0.f, 0.5f));
+
         // Generate stage timing fraction and label
+        ImVec2 cursor = ImGui::GetCursorPos();
         if (data->latest_tracking) {
             uint64_t ref_duration_ns = 0;
             uint64_t stage_duration_ns = 0;
@@ -1602,7 +1610,6 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
             }
             float fraction = (double)stage_duration_ns / ref_duration_ns;
 
-            ImVec2 cursor = ImGui::GetCursorPos();
             ImGui::ProgressBar(fraction, ImVec2(-1.0f, 0.0f), "");
 
             char duration_s16[16];
@@ -1617,17 +1624,16 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                                   style.FramePadding.x - style.ScrollbarSize,
                                   cursor.y });
             ImGui::TextUnformatted(buf);
-
-            ImGui::SetCursorPos(cursor);
+        } else {
+            // Draw an empty progress bar so we still get the frame background
+            ImGui::ProgressBar(0.f, ImVec2(-1.0f, 0.0f), "");
         }
+        ImGui::SetCursorPos(cursor);
 
         if (stage_props && stage_props->n_properties) {
             char stage_label[128];
             xsnprintf(stage_label, sizeof(stage_label),
-                      "%sStage: %s###%s",
-                      i == data->current_stage ? "* " : "",
-                      readable_stage_name,
-                      stage_name);
+                      "Stage: %s###%s", readable_stage_name, stage_name);
 
             show_props =
                 collapsing_header(stage_label,
@@ -1639,6 +1645,9 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                                 i == data->current_stage ? "* " : "",
                                 readable_stage_name);
         }
+        ImGui::PopStyleColor();
+        ImGui::PopStyleColor();
+
         if (ImGui::IsItemHovered()) {
             ImGui::SetTooltip("%s", gm_context_get_stage_description(data->ctx, i));
         }
