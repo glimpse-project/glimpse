@@ -7521,9 +7521,14 @@ static void *
 detector_thread_cb(void *data)
 {
     struct gm_context *ctx = (struct gm_context *)data;
+    uint64_t start;
+    uint64_t end;
+    uint64_t duration;
 
     gm_debug(ctx->log, "Started Glimpse tracking thread");
 
+    /* FIXME: re-enable support for face detection */
+#if 0
     uint64_t start = get_time();
     ctx->detector = dlib::get_frontal_face_detector();
     uint64_t end = get_time();
@@ -7532,11 +7537,8 @@ detector_thread_cb(void *data)
     gm_debug(ctx->log, "Initialising Dlib frontal face detector took %.3f%s",
              get_duration_ns_print_scale(duration),
              get_duration_ns_print_scale_suffix(duration));
-
     //gm_info(ctx->log, "Dropped all but the first (front-facing HOG) from the DLib face detector");
     //ctx->detector.w.resize(1);
-
-    //gm_info(ctx->log, "Detector debug %p", &ctx->detector.scanner);
 
     char *err = NULL;
     struct gm_asset *predictor_asset =
@@ -7560,6 +7562,7 @@ detector_thread_cb(void *data)
         gm_warn(ctx->log, "Failed to open shape predictor asset: %s", err);
         free(err);
     }
+#endif
 
     while (!ctx->stopping) {
         struct gm_frame *frame = NULL;
