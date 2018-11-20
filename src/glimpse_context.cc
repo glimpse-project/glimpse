@@ -7584,8 +7584,8 @@ detector_thread_cb(void *data)
         }
 
         start = get_time();
-        gm_debug(ctx->log, "Starting tracking iteration (%" PRIu64 ")\n",
-                 frame->timestamp);
+        gm_debug(ctx->log, "Starting tracking iteration (%d)\n",
+                 ctx->frame_counter);
 
         struct pipeline_scratch_state state = {};
         state.paused = frame->paused;
