@@ -1397,10 +1397,14 @@ draw_visualisation(Data *data, int x, int y, int width, int height,
 }
 
 static bool
-collapsing_header(const char *label, bool *checkbox = NULL)
+collapsing_header(const char *label, struct gm_ui_property *toggle)
 {
-    if (checkbox) {
-        ImGui::Checkbox("", checkbox);
+    if (toggle) {
+        // XXX: We're relying implicitly on draw_bool_property not using the
+        //      first two parameters here...
+        char toggle_id[128];
+        snprintf(toggle_id, sizeof(toggle_id), "###%s", toggle->name);
+        draw_bool_property(NULL, NULL, toggle, toggle_id);
         ImGui::SameLine();
         ImVec2 padding = ImGui::GetStyle().FramePadding;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() - 2 * padding.x);
@@ -1625,7 +1629,10 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                       readable_stage_name,
                       stage_name);
 
-            show_props = collapsing_header(stage_label);
+            show_props =
+                collapsing_header(stage_label,
+                                  gm_context_get_stage_toggle_property(
+                                      data->ctx, i));
         } else {
             ImGui::AlignTextToFramePadding();
             ImGui::TextDisabled("%sStage: %s",
@@ -3752,6 +3759,17 @@ viewer_init(Data *data)
         { "||>", NULL },
         { ">>", NULL },
     });
+
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    for (int i = 0; i < n_stages; ++i) {
+        struct gm_ui_property *toggle =
+            gm_context_get_stage_toggle_property(data->ctx, i);
+        if (!toggle) {
+            continue;
+        }
+
+        data->stage_control_overrides.insert({{toggle->name, NULL}});
+    }
 
     data->initialized = true;
 }

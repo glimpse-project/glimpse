@@ -432,6 +432,9 @@ struct gm_pipeline_stage {
 
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
+
+    /* Index to a property that will toggle this stage, or -1 */
+    int toggle_property;
 };
 
 /* A pipeline_stage maintains global information about a stage while
@@ -8633,6 +8636,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "acquire";
         stage.desc = "Captures a new frame to process for tracking";
+        stage.toggle_property = -1;
 
         stage.images.push_back((struct image_generator)
                                {
@@ -8669,6 +8673,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "near_far_cull_and_infill";
         stage.desc = "Fill gaps and apply min/max depth thresholding";
+        stage.toggle_property = -1;
 
         ctx->min_depth = 0.5;
         prop = gm_ui_property();
@@ -8713,6 +8718,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "downsample";
         stage.desc = "Downsamples the native-resolution depth data";
+        stage.toggle_property = -1;
 
         ctx->seg_res = 1;
         prop = gm_ui_property();
@@ -8746,6 +8752,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->delete_edges;
         stage.properties.push_back(prop);
+        stage.toggle_property = stage.properties.size() - 1;
 
         ctx->edge_detect_mode = EDGE_DETECT_MODE_XY;
         prop = gm_ui_property();
@@ -8828,6 +8835,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "ground_align";
         stage.desc = "Projects depth into ground-aligned space";
+        stage.toggle_property = -1;
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -8850,6 +8858,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->motion_detection;
         stage.properties.push_back(prop);
+        stage.toggle_property = stage.properties.size() - 1;
 
         // XXX: aliased property
         ctx->codebook_frozen = false;
@@ -8957,6 +8966,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "motion_detection_codebook_resolve_bg";
         stage.desc = "Determine canonical background codewords plus prune old codewords";
+        stage.toggle_property = -1;
 
         // XXX: aliased property
         ctx->debug_codebook_layer = 0;
@@ -8994,6 +9004,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "motion_detection_codebook_align";
         stage.desc = "Project into stable 'codebook' space for motion analysis";
+        stage.toggle_property = -1;
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9007,6 +9018,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "motion_detection_codebook_classify";
         stage.desc = "Analyse and classify motion in codebook space for segmentation";
+        stage.toggle_property = -1;
         stage.images.push_back((struct image_generator)
                                {
                                    "codebook_classifications",
@@ -9103,6 +9115,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "motion_detection_codebook_cluster";
         stage.desc = "Cluster based on motion-based codebook classifications";
+        stage.toggle_property = -1;
         stage.images.push_back((struct image_generator)
                                {
                                    "candidate_cluster",
@@ -9195,6 +9208,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->naive_seg_fallback;
         stage.properties.push_back(prop);
+        stage.toggle_property = stage.properties.size() - 1;
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9208,6 +9222,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "naive_cluster";
         stage.desc = "Cluster based on assumptions about single-person tracking";
+        stage.toggle_property = -1;
 
         add_cluster_from_prev_props(ctx, stage);
 
@@ -9312,6 +9327,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "filter_clusters";
         stage.desc = "Filter plausible person clusters";
+        stage.toggle_property = -1;
 
         ctx->cluster_min_width = 0.15f;
         prop = gm_ui_property();
@@ -9391,6 +9407,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "crop_cluster_image";
         stage.desc = "Create a cropped 2D depth buffer from a candidate cluster";
+        stage.toggle_property = -1;
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9404,6 +9421,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "select_cluster";
         stage.desc = "Select cluster to run label inference on (points before projection into depth image)";
+        stage.toggle_property = -1;
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9417,6 +9435,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "label_inference";
         stage.desc = "Infer per-pixel body part labels";
+        stage.toggle_property = -1;
         stage.images.push_back((struct image_generator)
                                {
                                    "labels",
@@ -9454,6 +9473,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "joint_weights";
         stage.desc = "Map body-part labels to per-joint weights";
+        stage.toggle_property = -1;
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -9467,6 +9487,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "joint_inference";
         stage.desc = "Infer position of skeleton joints";
+        stage.toggle_property = -1;
 
         ctx->fast_clustering = true;
         prop = gm_ui_property();
@@ -9512,6 +9533,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "refine_skeleton";
         stage.desc = "Try to verify the best inferred skeleton joints "
                      "have been chosen";
+        stage.toggle_property = -1;
 
         ctx->sanitisation_window = 1.f;
         prop = gm_ui_property();
@@ -9599,6 +9621,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "sanitize_skeleton";
         stage.desc = "Try and clean up issues with the derived skeleton";
+        stage.toggle_property = -1;
 
         ctx->joint_velocity_threshold = 1.5f;
         prop = gm_ui_property();
@@ -9693,6 +9716,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "update_codebook";
         stage.desc = "Update the codebook state ready for processing motion of future frames";
+        stage.toggle_property = -1;
 
         ctx->codebook_clear_tracked_threshold = 0.15f;
         prop = gm_ui_property();
@@ -9729,6 +9753,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.stage_id = stage_id;
         stage.name = "update_history";
         stage.desc = "Update the tracking history with new results";
+        stage.toggle_property = -1;
 
         ctx->debug_predictions = false;
         prop = gm_ui_property();
@@ -9999,6 +10024,16 @@ gm_context_get_stage_ui_properties(struct gm_context *ctx, int stage)
               "Out of range stage index");
 
     return &ctx->stages[stage].properties_state;
+}
+
+struct gm_ui_property *
+gm_context_get_stage_toggle_property(struct gm_context *ctx, int stage)
+{
+    gm_assert(ctx->log, stage >=0 && stage < (int)ctx->stages.size(),
+              "Out of range stage index");
+
+    int prop = ctx->stages[stage].toggle_property;
+    return (prop == -1) ? NULL : &ctx->stages[stage].properties[prop];
 }
 
 uint64_t

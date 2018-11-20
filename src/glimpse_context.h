@@ -538,6 +538,9 @@ gm_context_get_stage_nth_image_description(struct gm_context *ctx,
 struct gm_ui_properties *
 gm_context_get_stage_ui_properties(struct gm_context *ctx, int stage);
 
+struct gm_ui_property *
+gm_context_get_stage_toggle_property(struct gm_context *ctx, int stage);
+
 uint64_t
 gm_context_get_average_frame_duration(struct gm_context *ctx);
 
