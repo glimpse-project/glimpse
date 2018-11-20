@@ -1414,7 +1414,9 @@ collapsing_header(const char *label, struct gm_ui_property *toggle)
         ImGui::TreeNodeEx(label,
                           ImGuiTreeNodeFlags_NoTreePushOnOpen |
                           ImGuiTreeNodeFlags_NoAutoOpenOnLog |
-                          ImGuiTreeNodeFlags_FramePadding);
+                          ImGuiTreeNodeFlags_FramePadding |
+                          ImGuiTreeNodeFlags_OpenOnDoubleClick |
+                          ImGuiTreeNodeFlags_OpenOnArrow);
 
     return is_open;
 }
