@@ -31,7 +31,7 @@
 
 #include "xalloc.h"
 
-#define return_if_valid(x) if (x == NULL) exit(1); return x
+#define return_if_valid(x) ({ if (x == NULL) abort(); return x; })
 
 void*
 xmalloc(size_t size)
@@ -84,18 +84,18 @@ xasprintf(char **strp, const char *fmt, ...)
         vfprintf(stderr, fmt, ap);
         va_end(ap);
         fprintf(stderr, "\n");
-        exit(1);
+        abort();
     } else {
 #ifdef __linux__
         va_start(ap, fmt);
         if (vasprintf(strp, fmt, ap) < 0)
-            exit(1);
+            abort();
         va_end(ap);
 #else
         va_start(ap, fmt);
         int len = vsnprintf(NULL, 0, fmt, ap);
         if (len < 0)
-            exit(1);
+            abort();
         va_end(ap);
         va_start(ap, fmt);
         char *str = xmalloc(len + 1);

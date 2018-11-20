@@ -140,7 +140,7 @@
 
 #define xsnprintf(dest, n, fmt, ...) do { \
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
-            exit(1); \
+            abort(); \
     } while(0)
 
 /* With this foreach macro the following block of code will have access to
