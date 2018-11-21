@@ -38,8 +38,10 @@
 
 #include "glimpse_data.h"
 
+static char *index_opt = NULL;
 static bool verbose_opt = false;
-static uint64_t frame_duration_ns = 16000000;
+static int fps_opt = 120;
+static uint64_t frame_duration_ns = 0;
 
 /* XXX: Copied from image-pre-processor */
 static png_color palette[] = {
@@ -238,10 +240,14 @@ static void
 usage(void)
 {
     fprintf(stderr,
-"Usage: index-to-recording [OPTIONS] <data dir> <index name> <fps> <out dir>\n"
+"Usage: index-to-recording [OPTIONS] <data dir> <out dir>\n"
 "\n"
 "Creates a glimpse_viewer recording based on a given index of pre-processed\n"
 "training data frames\n"
+"\n"
+"  -i, --index=<name>            Open index.<name> for list of frames (opens\n"
+"                                index.full by default)\n"
+"  -f, --fps=<N>                 Encode an <N> fps recording (120 by default)\n"
 "\n"
 "  -v, --verbose                 Verbose output.\n"
 "  -h, --help                    Display this message.\n"
@@ -254,8 +260,10 @@ main(int argc, char **argv)
 {
     struct gm_logger *log = gm_logger_new(NULL, NULL);
 
-    const char *short_options="vht";
+    const char *short_options="ifvht";
     const struct option long_options[] = {
+        {"index",           required_argument,  0, 'i'},
+        {"fps",             required_argument,  0, 'f'},
         {"verbose",         no_argument,        0, 'v'},
         {"help",            no_argument,        0, 'h'},
         {0, 0, 0, 0}
@@ -266,6 +274,18 @@ main(int argc, char **argv)
            != -1)
     {
         switch (opt) {
+        case 'i':
+            free(index_opt);
+            index_opt = strdup(optarg);
+            break;
+        case 'f':
+            fps_opt = atoi(optarg);
+            if (fps_opt <= 0 || fps_opt >= 2000) {
+                gm_error(log, "Out-of-bounds fps value %d", fps_opt);
+                exit(1);
+            }
+
+            break;
         case 'v':
             verbose_opt = true;
             break;
@@ -278,21 +298,16 @@ main(int argc, char **argv)
         }
     }
 
-    if (argc - optind < 4)
+    if (argc - optind < 2)
         usage();
 
+    if (!index_opt)
+        index_opt = strdup("full");
+
+    frame_duration_ns = 1000000000 / fps_opt;
+
     const char *data_dir = argv[optind];
-    const char *index_name = argv[optind + 1];
-    char *fps_str = argv[optind + 2];
-    int fps = atoi(fps_str);
-    if (fps <= 0 || fps >= 2000) {
-        gm_error(log, "Out-of-bounds fps value %d", fps);
-        exit(1);
-    }
-
-    frame_duration_ns = 1000000000 / fps;
-
-    const char *out_dir = argv[optind + 3];
+    const char *out_dir = argv[optind + 1];
 
     char out_filename[512];
     snprintf(out_filename, sizeof(out_filename), "%s/glimpse_recording.json", out_dir);
@@ -327,7 +342,7 @@ main(int argc, char **argv)
     struct gm_data_index *data_index =
         gm_data_index_open(log,
                            data_dir,
-                           index_name,
+                           index_opt,
                            NULL); // abort on error
     if (!data_index)
         return 1;
