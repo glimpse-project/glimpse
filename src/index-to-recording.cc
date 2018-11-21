@@ -39,6 +39,7 @@
 #include "glimpse_data.h"
 
 static bool verbose_opt = false;
+static uint64_t frame_duration_ns = 16000000;
 
 /* XXX: Copied from image-pre-processor */
 static png_color palette[] = {
@@ -99,6 +100,8 @@ struct data_loader
     std::vector<float> depth_image;
     std::vector<uint8_t> label_image;
 
+    uint64_t current_time;
+
     float bg_depth;
 
 };
@@ -123,7 +126,6 @@ load_frame_data_cb(struct gm_data_index *data_index,
     JSON_Value *frames = loader->frames;
 
     uint8_t *labels = loader->label_image.data();
-    uint64_t current_time = get_time();
     uint8_t *rgba_image = (uint8_t *)xmalloc(width * height * 4);
 
     const char* top_dir = gm_data_index_get_top_dir(data_index);
@@ -173,8 +175,8 @@ load_frame_data_cb(struct gm_data_index *data_index,
     }
 
     JSON_Value *frame = json_value_init_object();
-    json_object_set_number(json_object(frame), "timestamp", current_time);
-    current_time += 16000000;
+    json_object_set_number(json_object(frame), "timestamp", loader->current_time);
+    loader->current_time += frame_duration_ns;
 
     JSON_Object *camera = json_object_get_object(json_object(frame_js), "camera");
     JSON_Object *pose_meta = json_object_get_object(camera, "pose");
@@ -236,7 +238,7 @@ static void
 usage(void)
 {
     fprintf(stderr,
-"Usage: index-to-recording [OPTIONS] <data dir> <index name> <out dir>\n"
+"Usage: index-to-recording [OPTIONS] <data dir> <index name> <fps> <out dir>\n"
 "\n"
 "Creates a glimpse_viewer recording based on a given index of pre-processed\n"
 "training data frames\n"
@@ -276,12 +278,21 @@ main(int argc, char **argv)
         }
     }
 
-    if (argc - optind < 3)
+    if (argc - optind < 4)
         usage();
 
     const char *data_dir = argv[optind];
     const char *index_name = argv[optind + 1];
-    const char *out_dir = argv[optind + 2];
+    char *fps_str = argv[optind + 2];
+    int fps = atoi(fps_str);
+    if (fps <= 0 || fps >= 2000) {
+        gm_error(log, "Out-of-bounds fps value %d", fps);
+        exit(1);
+    }
+
+    frame_duration_ns = 1000000000 / fps;
+
+    const char *out_dir = argv[optind + 3];
 
     char out_filename[512];
     snprintf(out_filename, sizeof(out_filename), "%s/glimpse_recording.json", out_dir);
@@ -364,7 +375,6 @@ main(int argc, char **argv)
     JSON_Value *frames = json_value_init_array();
     json_object_set_value(json_object(recording), "frames", frames);
 
-    //uint64_t current_time = get_time();
     uint8_t *rgba_image = (uint8_t *)xmalloc(width * height * 4);
 
     struct data_loader loader;
@@ -378,6 +388,7 @@ main(int argc, char **argv)
                                              height);
     loader.label_image = std::vector<uint8_t>((int64_t)width *
                                                height);
+    loader.current_time = get_time();
 
     printf("Processing frames...\n");
 
