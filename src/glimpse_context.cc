@@ -728,6 +728,7 @@ struct gm_context
     bool cluster_from_prev;
     float cluster_from_prev_dist_threshold;
     float cluster_from_prev_time_threshold;
+    int cluster_from_prev_bounds;
 
     bool codebook_frozen;
     float codebook_foreground_scrub_timeout;
@@ -4981,19 +4982,16 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        // Project joint position into the spaces of the old frame and
-        // the current one.
-        float ox, oy, nx, ny;
+        // Project the joint position into the space of the old frame and
+        // record the depth.
+        float ox, oy;
         struct gm_intrinsics *old_intrinsics =
             &ctx->tracking_history[0]->downsampled_intrinsics;
-        struct gm_intrinsics *new_intrinsics =
-            &tracking->downsampled_intrinsics;
 
         project_point(&joint.x, old_intrinsics, &ox, &oy);
-        project_point(&joint.x, new_intrinsics, &nx, &ny);
 
-        // See if the depth has gone past the threshold and if it hasn't,
-        // add it as a point to cluster (flood-fill) from.
+        // Check that this pixel lies within the image (it should be very rare
+        // that it doesn't, but it is possible for corrected joint positions)
         int dox = ox;
         int doy = oy;
         if (dox < 0 || dox >= old_intrinsics->width ||
@@ -5002,22 +5000,41 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        int dnx = nx;
-        int dny = ny;
-        if (dnx < 0 || dnx >= new_intrinsics->width ||
-            dny < 0 || dny >= new_intrinsics->height)
-        {
-            continue;
-        }
-
+        // Project the joint position into the space of the new frame.
         float od = ctx->tracking_history[0]->downsampled_cloud->
             points[doy * old_intrinsics->width + dox].z;
-        float nd = tracking->downsampled_cloud->
-            points[dny * new_intrinsics->width + dnx].z;
 
-        float diff = fabsf(od - nd);
-        if (diff <= ctx->cluster_from_prev_dist_threshold) {
-            points.push_back({dnx, dny, dnx, dny});
+        float nx, ny;
+        struct gm_intrinsics *new_intrinsics =
+            &tracking->downsampled_intrinsics;
+
+        project_point(&joint.x, new_intrinsics, &nx, &ny);
+
+        // Do a bounding box search for a pixel that lies within the depth
+        // bounds and add that as a point to cluster from.
+        bool found = false;
+        for (int i = 0; i <= ctx->cluster_from_prev_bounds && !found; ++i) {
+            for (int y = ny - i; y <= ny + i && !found; ++y) {
+                if (y < 0 || y >= new_intrinsics->height) {
+                    continue;
+                }
+                for (int x = nx - i; x <= nx + i && !found; ++x) {
+                    if (y != ny - i && y != ny + i &&
+                        x != nx - i && x != nx + i) {
+                        continue;
+                    }
+                    if (x < 0 || x >= new_intrinsics->width) {
+                        continue;
+                    }
+                    float nd = tracking->downsampled_cloud->
+                        points[y * new_intrinsics->width + x].z;
+                    float diff = fabsf(od - nd);
+                    if (diff <= ctx->cluster_from_prev_dist_threshold) {
+                        points.push_back({x, y, x, y});
+                        found = true;
+                    }
+                }
+            }
         }
     }
 }
@@ -8092,6 +8109,20 @@ add_cluster_from_prev_props(struct gm_context *ctx,
     prop.float_state.ptr = &ctx->cluster_from_prev_time_threshold;
     prop.float_state.min = 0.f;
     prop.float_state.max = 1.f;
+    stage.properties.push_back(prop);
+
+    ctx->cluster_from_prev_bounds = 4;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    name = "prev_bounds";
+    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    prop.name = name_copy;
+    prop.desc = "The pixel distance to search for matching depth points in "
+                "the current frame.";
+    prop.type = GM_PROPERTY_INT;
+    prop.int_state.ptr = &ctx->cluster_from_prev_bounds;
+    prop.int_state.min = 0;
+    prop.int_state.max = 50;
     stage.properties.push_back(prop);
 }
 
