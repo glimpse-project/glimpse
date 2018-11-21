@@ -1514,7 +1514,7 @@ main(int argc, char **argv)
     meta = NULL;
 
     char index_filename[512];
-    xsnprintf(index_filename, "%s/index", top_out_dir);
+    xsnprintf(index_filename, "%s/index.full", top_out_dir);
     index_fp = fopen(index_filename, "w");
 
     int n_threads = std::thread::hardware_concurrency();
