@@ -44,6 +44,7 @@
 #define SHIFT_THRESHOLD 0.01f
 
 #define ARRAY_LEN(ARRAY) (sizeof(ARRAY)/sizeof(ARRAY[0]))
+#define CLAMP(x,min,max) ((x) < (min) ? (min) : ((x) > (max) ? (max) : (x)))
 
 
 struct joint_labels_entry {
@@ -286,10 +287,7 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
             int x = 0;
             int y = 0;
             joint->confidence = 0.f;
-            for (typename Cluster::iterator s_it = cluster.begin();
-                 s_it != cluster.end(); ++s_it)
-            {
-                ScanlineSegment& segment = *s_it;
+            for (auto segment : cluster) {
                 int idx = segment.y * cluster_width;
                 for (int i = segment.left; i <= segment.right; i++, n_points++)
                 {
@@ -302,13 +300,33 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
             x = (int)roundf(x / (float)n_points);
             y = (int)roundf(y / (float)n_points);
 
+            // Find the nearest point in the cluster - the coordinates above
+            // aren't guaranteed to be in the cluster (though they more often
+            // than not are, they aren't frequently enough that we can't rely
+            // on that).
+            float dist = std::numeric_limits<float>::max();
+            int nx = x, ny = y;
+            for (auto segment : cluster) {
+                int sy = segment.y;
+                int sx = CLAMP(x, segment.left, segment.right);
+                float sdist = sqrtf(powf(fabsf((float)x - sx), 2.f) +
+                                    powf(fabsf((float)y - sy), 2.f));
+                if (sdist < dist) {
+                    nx = sx;
+                    ny = sy;
+                    dist = sdist;
+                }
+                if (nx == x && ny == y) {
+                    break;
+                }
+            }
+
             // Reproject and offset point
+            float depth = (float)cluster_depth_image[ny * cluster_width + nx];
 
-            float depth = (float)cluster_depth_image[y * cluster_width + x];
-
-            joint->x = ((x + cluster_x0) - cx) * depth * inv_fx;
+            joint->x = ((nx + cluster_x0) - cx) * depth * inv_fx;
             // NB: The coordinate space for joints has Y+ extending upwards...
-            joint->y = -(((y + cluster_y0) - cy) * depth * inv_fy);
+            joint->y = -(((ny + cluster_y0) - cy) * depth * inv_fy);
             joint->z = depth + params[j].offset;
 
             // Add the joint to the list
