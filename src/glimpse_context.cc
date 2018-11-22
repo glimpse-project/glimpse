@@ -9562,6 +9562,20 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.bool_state.ptr = &ctx->fast_clustering;
         stage.properties.push_back(prop);
 
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_REFINE_SKELETON;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "refine_skeleton";
+        stage.desc = "Try to verify the best inferred skeleton joints "
+                     "have been chosen";
+
         ctx->joint_refinement = true;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -9571,6 +9585,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->joint_refinement;
         stage.properties.push_back(prop);
+        stage.toggle_property = stage.properties.size() - 1;
 
         ctx->max_joint_refinement_delta = 0.2f;
         prop = gm_ui_property();
@@ -9590,13 +9605,12 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     {
-        enum tracking_stage stage_id = TRACKING_STAGE_REFINE_SKELETON;
+        enum tracking_stage stage_id = TRACKING_STAGE_SANITIZE_SKELETON;
         struct gm_pipeline_stage &stage = ctx->stages[stage_id];
 
         stage.stage_id = stage_id;
-        stage.name = "refine_skeleton";
-        stage.desc = "Try to verify the best inferred skeleton joints "
-                     "have been chosen";
+        stage.name = "sanitize_skeleton";
+        stage.desc = "Try and clean up issues with the derived skeleton";
         stage.toggle_property = -1;
 
         ctx->sanitisation_window = 1.f;
@@ -9672,20 +9686,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.min = 100.f;
         prop.float_state.max = 1500.f;
         stage.properties.push_back(prop);
-
-        stage.properties_state.n_properties = stage.properties.size();
-        stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
-    }
-
-    {
-        enum tracking_stage stage_id = TRACKING_STAGE_SANITIZE_SKELETON;
-        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
-
-        stage.stage_id = stage_id;
-        stage.name = "sanitize_skeleton";
-        stage.desc = "Try and clean up issues with the derived skeleton";
-        stage.toggle_property = -1;
 
         ctx->joint_velocity_threshold = 1.5f;
         prop = gm_ui_property();
