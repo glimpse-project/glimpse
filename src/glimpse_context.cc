@@ -253,6 +253,7 @@ enum tracking_stage {
     TRACKING_STAGE_REFINE_SKELETON,
 
     TRACKING_STAGE_SANITIZE_SKELETON,
+    TRACKING_STAGE_VALIDATE_SKELETON,
 
     TRACKING_STAGE_UPDATE_CODEBOOK,
 
@@ -6099,10 +6100,15 @@ static void
 stage_sanitize_skeleton_cb(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
-    sanitise_skeleton(ctx, tracking->skeleton_corrected,
+    sanitise_skeleton(tracking->ctx, tracking->skeleton_corrected,
                       tracking->frame->timestamp);
+}
+
+static void
+stage_validate_skeleton_cb(struct gm_tracking_impl *tracking,
+                           struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
 
     float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton_corrected);
     tracking_add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
@@ -6964,6 +6970,12 @@ context_track_skeleton(struct gm_context *ctx,
     run_stage(tracking,
               TRACKING_STAGE_SANITIZE_SKELETON,
               stage_sanitize_skeleton_cb,
+              NULL,
+              &state);
+
+    run_stage(tracking,
+              TRACKING_STAGE_VALIDATE_SKELETON,
+              stage_validate_skeleton_cb,
               NULL,
               &state);
 
@@ -9705,6 +9717,19 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.max = 5.0f;
         stage.properties.push_back(prop);
 
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_VALIDATE_SKELETON;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "validate_skeleton";
+        stage.desc = "Verify if the skeleton appears to be correct";
+
         ctx->skeleton_validation = true;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -9714,6 +9739,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->skeleton_validation;
         stage.properties.push_back(prop);
+        stage.toggle_property = stage.properties.size() - 1;
 
         ctx->skeleton_min_confidence = 1000.f;
         prop = gm_ui_property();
