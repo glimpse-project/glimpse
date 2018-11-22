@@ -245,7 +245,7 @@
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = JREH3XN3YY;
 				INFOPLIST_FILE = GlimpseViewer/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 12.1;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.impossible.glimpse.viewer;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -262,7 +262,7 @@
 				CODE_SIGN_STYLE = Manual;
 				DEVELOPMENT_TEAM = JREH3XN3YY;
 				INFOPLIST_FILE = GlimpseViewer/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 12.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 12.1;
 				LD_RUNPATH_SEARCH_PATHS = "$(inherited) @executable_path/Frameworks";
 				PRODUCT_BUNDLE_IDENTIFIER = com.impossible.glimpse.viewer;
 				PRODUCT_NAME = "$(TARGET_NAME)";
