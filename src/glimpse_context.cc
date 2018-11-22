@@ -787,6 +787,7 @@ struct gm_context
     bool skeleton_validation;
     float skeleton_min_confidence;
     float skeleton_max_distance;
+    float codebook_update_delay;
 
     bool debug_predictions;
     float debug_prediction_offset;
@@ -6979,6 +6980,21 @@ context_track_skeleton(struct gm_context *ctx,
               NULL,
               &state);
 
+    // If we failed to track, delay updates to the motion detection codebook
+    // for a short period so as not to pollute what may actually be valid
+    // human depth data.
+    if (!tracking->success &&
+        ctx->codebook_update_delay > 0.f &&
+        ctx->n_tracking)
+    {
+        float delay = (float)
+            ((tracking->frame->timestamp -
+              ctx->tracking_history[0]->frame->timestamp) / 1e9);
+        if (delay < ctx->codebook_update_delay) {
+            motion_detection = false;
+        }
+    }
+
 #warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
     if (motion_detection) {
         std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
@@ -7000,18 +7016,16 @@ context_track_skeleton(struct gm_context *ctx,
                 }
             }
         }
-    }
 
-    if (!tracking->success) {
-        gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
-    }
-
-    if (motion_detection) {
         run_stage(tracking,
                   TRACKING_STAGE_UPDATE_CODEBOOK,
                   stage_update_codebook_cb,
                   NULL,
                   &state);
+    }
+
+    if (!tracking->success) {
+        gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
     }
 
     return tracking->success;
@@ -9762,6 +9776,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->skeleton_max_distance;
         prop.float_state.min = 0.01f;
         prop.float_state.max = 0.5f;
+        stage.properties.push_back(prop);
+
+        ctx->codebook_update_delay = 2.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "codebook_update_delay";
+        prop.desc = "Delay after tracking validation fails to halt codebook "
+                    "updates, in seconds.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->codebook_update_delay;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 10.f;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
