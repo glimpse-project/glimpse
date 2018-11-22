@@ -4977,6 +4977,7 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
         return;
     }
 
+    int cluster_bounds = ctx->cluster_from_prev_bounds;
     for (int j = 0; j < ctx->n_joints; ++j) {
         struct gm_joint &joint =
             ctx->tracking_history[0]->skeleton_corrected.joints[j];
@@ -5011,18 +5012,21 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             &tracking->downsampled_intrinsics;
 
         project_point(&joint.x, new_intrinsics, &nx, &ny);
+        int dnx = nx;
+        int dny = ny;
 
         // Do a bounding box search for a pixel that lies within the depth
         // bounds and add that as a point to cluster from.
         bool found = false;
-        for (int i = 0; i <= ctx->cluster_from_prev_bounds && !found; ++i) {
-            for (int y = ny - i; y <= ny + i && !found; ++y) {
+        for (int i = 0; i <= cluster_bounds && !found; ++i) {
+            for (int y = dny - i; y <= dny + i && !found; ++y) {
                 if (y < 0 || y >= new_intrinsics->height) {
                     continue;
                 }
-                for (int x = nx - i; x <= nx + i && !found; ++x) {
-                    if (y != ny - i && y != ny + i &&
-                        x != nx - i && x != nx + i) {
+                for (int x = dnx - i; x <= dnx + i && !found; ++x) {
+                    if (y != dny - i && y != dny + i &&
+                        x != dnx - i && x != dnx + i)
+                    {
                         continue;
                     }
                     if (x < 0 || x >= new_intrinsics->width) {
