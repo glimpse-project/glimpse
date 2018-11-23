@@ -221,6 +221,7 @@ struct _Data
     bool show_skeletons;
     bool show_view_cam_controls;
     bool show_profiler;
+    bool show_debug_text;
 
     int stage_stats_mode;
 
@@ -1326,6 +1327,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Checkbox("Show skeletons", &data->show_skeletons);
     ImGui::Checkbox("Show view camera controls", &data->show_view_cam_controls);
     ImGui::Checkbox("Show profiler", &data->show_profiler);
+    ImGui::Checkbox("Show debug text", &data->show_debug_text);
 
     int queue_len = data->ar_video_queue_len;
     ImGui::SliderInt("AR video queue len", &queue_len, 1, 30);
@@ -2069,12 +2071,17 @@ draw_ui(Data *data)
 
     ImGui::PopStyleVar(); // ImGuiStyleVar_WindowRounding
 
-    ImGui::SetNextWindowPos({(float)main_x, (float)main_y});
-    ImGui::SetNextWindowSize({main_area_size.x, main_area_size.y/6.f});
-    ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
-    draw_debug_text(data);
-    ImGui::PopStyleVar(); // ImGuiStyleVar_WindowRounding
+    if (show_controls &&
+        data->show_debug_text &&
+        !data->realtime_ar_mode)
+    {
+        ImGui::SetNextWindowPos({(float)main_x, (float)controls_y});
+        ImGui::SetNextWindowSize({main_area_size.x, main_area_size.y/6.f});
+        ImGui::SetNextWindowCollapsed(true, ImGuiCond_FirstUseEver);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
+        draw_debug_text(data);
+        ImGui::PopStyleVar(); // ImGuiStyleVar_WindowRounding
+    }
 
     if (data->show_profiler) {
         // Draw profiler window always-on-top
