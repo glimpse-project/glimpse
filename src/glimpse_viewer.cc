@@ -1454,19 +1454,11 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
     bool current_ar_mode = data->realtime_ar_mode;
     ImGui::Checkbox("Real-time AR Mode", &data->realtime_ar_mode);
-    if (data->realtime_ar_mode != current_ar_mode)
-    {
-        if (data->realtime_ar_mode) {
-            // Make sure to disable the debug cloud in real-time AR mode since it
-            // may be costly to create.
-            //
-            // Note: We don't have to explicitly disable most debug views because
-            // we only do work when we pull the data from the context, but that's
-            // not the case for the cloud debug view.
-            gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 0);
-        } else {
-            gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
-        }
+    if (data->realtime_ar_mode != current_ar_mode) {
+        // Make sure to disable the debug cloud in real-time AR mode since it
+        // may be costly to create.
+        gm_prop_set_bool(find_prop(ctx_props, "debug_enable"),
+                         !data->realtime_ar_mode);
     }
 
     ImGui::Checkbox("Show skeleton", &data->show_skeleton);
@@ -3746,11 +3738,12 @@ viewer_init(Data *data)
     {
         data->realtime_ar_mode = true;
     } else {
-        struct gm_ui_properties *ctx_props =
-            gm_context_get_ui_properties(data->ctx);
         data->realtime_ar_mode = false;
-        gm_prop_set_enum(find_prop(ctx_props, "cloud_mode"), 1);
     }
+    struct gm_ui_properties *ctx_props =
+        gm_context_get_ui_properties(data->ctx);
+    gm_prop_set_bool(find_prop(ctx_props, "debug_enable"),
+                     !data->realtime_ar_mode);
 
     update_ar_video_queue_len(data, 6);
 

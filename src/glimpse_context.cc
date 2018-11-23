@@ -675,6 +675,8 @@ struct gm_context
     int grey_debug_height;
     std::vector<uint8_t> grey_debug_buffer;
 
+    bool debug_enable;
+
     /*
      * -1 means to visualize the most probable labels. Any other value
      *  says to visualize the probability of specific labels...
@@ -6597,7 +6599,7 @@ context_track_skeleton(struct gm_context *ctx,
      * start...
      */
     state.debug_pipeline_stage = ctx->debug_pipeline_stage;
-    state.debug_cloud_mode = ctx->debug_cloud_mode;
+    state.debug_cloud_mode = ctx->debug_enable ? ctx->debug_cloud_mode : 0;
 
     if (state.debug_cloud_mode) {
         gm_debug(ctx->log, "Clearing debug visualization state");
@@ -8664,6 +8666,15 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     prop.enum_state.n_enumerants = ctx->label_enumerants.size();
     prop.enum_state.enumerants = ctx->label_enumerants.data();
+    ctx->properties.push_back(prop);
+
+    ctx->debug_enable = true;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "debug_enable";
+    prop.desc = "Enable or disable debugging visualisations";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->debug_enable;
     ctx->properties.push_back(prop);
 
     ctx->debug_cloud_mode = DEBUG_CLOUD_MODE_VIDEO;
