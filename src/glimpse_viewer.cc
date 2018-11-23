@@ -3744,6 +3744,7 @@ viewer_init(Data *data)
         gm_context_get_ui_properties(data->ctx);
     gm_prop_set_bool(find_prop(ctx_props, "debug_enable"),
                      !data->realtime_ar_mode);
+    gm_prop_set_enum(find_prop(ctx_props, "debug_stage"), data->current_stage);
 
     update_ar_video_queue_len(data, 6);
 
