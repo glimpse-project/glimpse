@@ -1408,6 +1408,8 @@ collapsing_header(const char *label, struct gm_ui_property *toggle)
         ImGui::SameLine();
         ImVec2 padding = ImGui::GetStyle().FramePadding;
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() - 2 * padding.x);
+    } else {
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetFrameHeight());
     }
 
     bool is_open =
@@ -1632,20 +1634,23 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         }
         ImGui::SetCursorPos(cursor);
 
+        char stage_label[128];
+        xsnprintf(stage_label, sizeof(stage_label),
+                  "Stage: %s###%s", readable_stage_name, stage_name);
         if (stage_props && stage_props->n_properties) {
-            char stage_label[128];
-            xsnprintf(stage_label, sizeof(stage_label),
-                      "Stage: %s###%s", readable_stage_name, stage_name);
 
             show_props =
                 collapsing_header(stage_label,
                                   gm_context_get_stage_toggle_property(
                                       data->ctx, i));
         } else {
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%sStage: %s",
-                                i == data->current_stage ? "* " : "",
-                                readable_stage_name);
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() +
+                                 ImGui::GetFrameHeight());
+            ImGui::TreeNodeEx(stage_label,
+                              ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                              ImGuiTreeNodeFlags_NoAutoOpenOnLog |
+                              ImGuiTreeNodeFlags_Leaf |
+                              ImGuiTreeNodeFlags_FramePadding);
         }
         ImGui::PopStyleColor();
         ImGui::PopStyleColor();
