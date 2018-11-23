@@ -3892,23 +3892,58 @@ colour_debug_cloud(struct gm_context *ctx,
         }
         break;
     case DEBUG_CLOUD_MODE_LABELS:
-        if (state->done_label_inference)
+        if (state->done_label_inference &&
+            indices.size() &&
+            state->best_person_cluster >= 0 &&
+            tracking->label_probs.size())
         {
             int n_labels = ctx->n_labels;
 
-            if (debug_cloud.size() * n_labels == tracking->label_probs.size()) {
-                for (int i = 0; i < debug_cloud.size(); i++) {
-                    float *label_probs = &tracking->label_probs[i * n_labels];
-                    uint8_t rgb[3];
-                    label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
-                    debug_cloud[i].rgba = (((uint32_t)rgb[0])<<24 |
-                                           ((uint32_t)rgb[1])<<16 |
-                                           ((uint32_t)rgb[2])<<8 |
-                                           0xff);
+            int cloud_width_2d = indexed_pcl_cloud->width;
+            //int cloud_height_2d = indexed_pcl_cloud->height;
+
+            std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+            std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+
+            gm_assert(ctx->log, state->best_person_cluster >= 0,
+                      "No person best person cluster determined");
+
+            struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
+            //std::vector<int> &best_indices = cluster_indices[cluster.label].indices;
+
+            int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+            int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+
+            gm_assert(ctx->log,
+                      (cluster_width_2d * cluster_height_2d * n_labels ==
+                       tracking->label_probs.size()),
+                      "Cluster bounds don't corresponds with size of label_probs array");
+
+            for (int i = 0; i < indices.size(); i++) {
+                int idx = indices[i];
+                int x = idx % cloud_width_2d;
+                int y = idx / cloud_width_2d;
+                int cluster_x = x - cluster.min_x_2d;
+                int cluster_y = y - cluster.min_y_2d;
+
+                if (cluster_x < 0 || cluster_x >= cluster_width_2d ||
+                    cluster_y < 0 || cluster_y >= cluster_height_2d)
+                {
+                    continue;
                 }
-            } else {
-                gm_warn(ctx->log, "Can't color debug cloud with labels due to inconsistent point cloud and label_probs[] size.");
+
+                int cluster_idx = cluster_width_2d * cluster_y + cluster_x;
+
+                float *label_probs = &tracking->label_probs[cluster_idx * n_labels];
+                uint8_t rgb[3];
+                label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
+                debug_cloud[i].rgba = (((uint32_t)rgb[0])<<24 |
+                                       ((uint32_t)rgb[1])<<16 |
+                                       ((uint32_t)rgb[2])<<8 |
+                                       0xff);
             }
+        } else {
+            gm_warn(ctx->log, "No labels to colour debug cloud with");
         }
         break;
     case DEBUG_CLOUD_MODE_EDGES:
@@ -5832,7 +5867,7 @@ stage_crop_cluster_image_cb(struct gm_tracking_impl *tracking,
 
     pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
     int cloud_width_2d = pcl_cloud->width;
-    //int cloud_height_2d = pcl_cloud->width;
+    //int cloud_height_2d = pcl_cloud->height;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
