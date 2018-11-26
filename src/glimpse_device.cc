@@ -1732,9 +1732,11 @@ recording_io_thread_cb(void *userdata)
          *
          */
 
-        gm_debug(dev->log, "recording IO unblocked after frame request received, delivering frame %d (%spaused)",
+        gm_debug(dev->log, "recording IO unblocked after frame request received, delivering frame %d/%d (%spaused%s)",
                  recording_frame_no,
-                 paused ? "" : "not-");
+                 n_frames,
+                 paused ? "" : "not-",
+                 discontinuity ? ", discontinuity" : "");
 
         swap_recorded_frame(dev,
                             monotonic_clock,
@@ -1783,7 +1785,9 @@ recording_io_thread_cb(void *userdata)
         if (dev->recording.frame_skip &&
             recording_progress < (real_progress - 33333333))
         {
-            gm_warn(dev->log, "Slow read IO, skipping recorded frames");
+            gm_warn(dev->log, "Slow read IO, skipping recorded frames (recording_frame_no=%d, n_frames=%d, recording_progress=%" PRIu64 ", real_progress=%" PRIu64 ")",
+                    recording_frame_no, n_frames,
+                    recording_progress, real_progress);
 
             int last_depth = -1;
             int i;
@@ -1812,13 +1816,7 @@ recording_io_thread_cb(void *userdata)
                 }
             }
 
-            if (i >= n_frames) {
-                /* If we've skipped to the end of the recording at least keep
-                 * the last frame without immediately looping so we don't have
-                 * more than one place to handle looping.
-                 */
-                next_frame = n_frames - 1;
-            } else if (last_depth > 0 && last_depth != i) {
+            if (last_depth > 0 && last_depth != i) {
                 /* jump back if we need to prioritize an earlier depth frame */
                 next_frame = last_depth;
             } else
