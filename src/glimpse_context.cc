@@ -10454,7 +10454,9 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
             glm::vec3(parent_tail.x - parent_head.x,
                       parent_tail.y - parent_head.y,
                       parent_tail.z - parent_head.z));
-        glm::vec3 new_tail = ((parent_vec * rotate) * bone.length);
+        float length = frame2_bone.length +
+            (frame1_bone.length - frame2_bone.length) * t;
+        glm::vec3 new_tail = ((parent_vec * rotate) * length);
         new_tail.x += prediction->skeleton.joints[bone_info.head].x;
         new_tail.y += prediction->skeleton.joints[bone_info.head].y;
         new_tail.z += prediction->skeleton.joints[bone_info.head].z;
