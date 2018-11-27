@@ -56,6 +56,7 @@
 
 #include "glimpse_log.h"
 #include "glimpse_properties.h"
+#include "glimpse_log.h"
 #include "glimpse_data.h"
 #include "image_utils.h"
 #include "rdt_tree.h"
@@ -98,6 +99,7 @@ struct image
 
 enum noise_type
 {
+    NOISE_FOREGROUND_EDGE_SWIZZLE,
     NOISE_NORMAL,
     NOISE_PERLIN
 };
@@ -150,6 +152,14 @@ struct worker_state
 {
     int idx;
     pthread_t thread;
+
+    struct gm_logger *log;
+
+    std::default_random_engine rand_generator;
+
+    /* for apply_foreground_edge_swizzle... */
+    std::vector<uint8_t> tmp_labels_copy;
+    std::vector<uint8_t> tmp_depth_copy;
 };
 
 
@@ -170,6 +180,7 @@ static int seed_opt = 0;
 
 static const char *config_opt = NULL;
 static bool no_flip_opt = false;
+static bool no_bg_depth_clamp_opt = false;
 
 static std::vector<noise_op> noise_ops;
 
@@ -187,8 +198,6 @@ static int indent = 0;
 
 static uint8_t grey_to_id_map[256];
 static uint8_t left_to_right_map[256];
-
-static std::default_random_engine rand_generator;
 
 static uint64_t max_frame_count = UINT64_MAX;
 static std::atomic<std::uint64_t> frame_count;
@@ -460,7 +469,8 @@ write_pfm(struct image *image, const char *filename)
 }
 
 static struct image *
-load_frame_labels(const char *dir,
+load_frame_labels(struct worker_state *state,
+                  const char *dir,
                   const char *filename)
 {
     char input_filename[1024];
@@ -485,8 +495,13 @@ load_frame_labels(const char *dir,
     for (int y = 0; y < expected_height; y++) {
         uint8_t *row = img->data_u8 + expected_width * y;
 
-        for (int x = 0; x < expected_width; x++)
-            row[x] = grey_to_id_map[row[x]];
+        for (int x = 0; x < expected_width; x++) {
+            uint8_t label = grey_to_id_map[row[x]];
+            gm_assert(state->log, label != 255,
+                      "Spurious grey value %d found in label image that doesn't map to a known label",
+                      row[x]);
+            row[x] = label;
+        }
     }
 
     return img;
@@ -572,83 +587,31 @@ frame_diff(struct image *a, struct image *b,
 }
 
 static void
-apply_gaussian_noise(struct image *labels,
-                     struct image *depth,
-                     struct noise_op &normal_op,
-                     int frame_no)
+apply_foreground_edge_swizzle(struct worker_state *state,
+                              struct image *labels,
+                              struct image *depth,
+                              struct noise_op &normal_op,
+                              int frame_no)
 {
-    uint8_t *labels_px = labels->data_u8;
-    float *depth_px = depth->data_float;
     int width = depth->width;
     int height = depth->height;
 
-    float fwtm_range_map_mm = normal_op.normal.fwtm_range_map_m * 1000.0f;
-
-    /* According to Wikipedia the full width at tenth of maximum of a
-     * Gaussian curve = approximately 4.29193c (where c is the standard
-     * deviation which we need to pass to construct this distribution)
+    /* Before we start modifying the edges we need to make a copy
+     * of our images so that swizzles don't afect how we judge which
+     * pixels are edge pixels...
      */
-    std::normal_distribution<float> gaus_distribution(0, //mean
-                                                      fwtm_range_map_mm / 4.29193f);
 
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int pos = width * y + x;
+    size_t labels_size = height * labels->stride;
+    state->tmp_labels_copy.resize(labels_size);
+    memcpy(state->tmp_labels_copy.data(), labels->data_u8, labels_size);
+    uint8_t *in_labels_px = state->tmp_labels_copy.data();
+    uint8_t *out_labels_px = labels->data_u8;
 
-            if (labels_px[pos] != BACKGROUND_ID) {
-                float delta_mm = gaus_distribution(rand_generator);
-                depth_px[pos] += (delta_mm / 1000.0f);
-            } else {
-                depth_px[pos] = background_depth_m;
-            }
-        }
-    }
-}
-
-static void
-apply_perlin_noise(struct image *labels,
-                   struct image *depth,
-                   struct noise_op &perlin_op,
-                   int frame_no)
-{
-    uint8_t *labels_px = labels->data_u8;
-    float *depth_px = depth->data_float;
-    int width = depth->width;
-    int height = depth->height;
-    int seed = seed_opt + frame_no;
-    float freq = perlin_op.perlin.freq;
-    float amplitude_m = perlin_op.perlin.amplitude_m;
-    int octaves = perlin_op.perlin.octaves;
-
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int pos = width * y + x;
-
-            if (labels_px[pos] != BACKGROUND_ID) {
-                float offset_m = perlin2d(x, y, freq, octaves, seed) * amplitude_m;
-                depth_px[pos] += offset_m;
-            } else {
-                depth_px[pos] = background_depth_m;
-            }
-        }
-    }
-}
-
-static void
-frame_add_noise(const struct image *__restrict__ labels,
-                const struct image *__restrict__ depth,
-                struct image *__restrict__ noisy_labels,
-                struct image *__restrict__ noisy_depth,
-                int frame_no)
-{
-    int width = labels->width;
-    int height = labels->height;
-    const float *in_depth_px = depth->data_float;
-    const uint8_t *in_labels_px = labels->data_u8;
-    float *out_depth_px = noisy_depth->data_float;
-    uint8_t *out_labels_px = noisy_labels->data_u8;
-
-    rand_generator.seed(seed_opt + frame_no);
+    size_t depth_size = height * depth->stride;
+    state->tmp_depth_copy.resize(depth_size);
+    memcpy(state->tmp_depth_copy.data(), depth->data_u8, depth_size);
+    float *in_depth_px = (float *)state->tmp_depth_copy.data();
+    float *out_depth_px = depth->data_float;
 
     /* For picking one of 8 random neighbours for fuzzing the silhouettes */
     std::uniform_int_distribution<int> uniform_distribution(0, 7);
@@ -666,19 +629,17 @@ frame_add_noise(const struct image *__restrict__ labels,
         {   1,   1, },
     };
 
+    std::default_random_engine &rand_generator = state->rand_generator;
+
 #define in_depth_at(x, y) *(in_depth_px + width * y + x)
 #define in_label_at(x, y) *(in_labels_px + width * y + x)
 #define out_depth_at(x, y) *(out_depth_px + width * y + x)
 #define out_label_at(x, y) *(out_labels_px + width * y + x)
 
-    memcpy(noisy_labels->data_u8, labels->data_u8, labels->stride);
-    memcpy(noisy_depth->data_float, depth->data_float, depth->stride);
-
+    // As a special case, we leave the first/last row untouched
     for (int y = 1; y < height - 1; y++) {
 
-        out_label_at(0, y) = in_label_at(0, y);
-        out_depth_at(0, y) = in_depth_at(0, y);
-
+        // As a special case, we leave the first/last column untouched
         for (int x = 1; x < width - 1; x++) {
 
             if (in_label_at(x, y) != BACKGROUND_ID) {
@@ -707,57 +668,122 @@ frame_add_noise(const struct image *__restrict__ labels,
 
                     struct rel_pos *rel_pos = &neighbour_position[neighbour];
                     out_depth_at(x, y) = in_depth_at(x + rel_pos->x, y + rel_pos->y);
-                } else {
-                    out_label_at(x, y) = in_label_at(x, y);
-                    out_depth_at(x, y) = in_depth_at(x, y);
                 }
-            } else {
-                out_label_at(x, y) = BACKGROUND_ID;
-                out_depth_at(x, y) = background_depth_m;
             }
         }
-
-        out_label_at(width - 1, y) = in_label_at(width - 1, y);
-        out_depth_at(width - 1, y) = in_depth_at(width - 1, y);
     }
 #undef in_depth_at
 #undef in_label_at
 #undef out_depth_at
 #undef out_label_at
+}
 
-    memcpy(noisy_labels->data_u8 + (height - 1) * width,
-           labels->data_u8 + (height - 1) * width,
-           labels->stride);
-    memcpy(noisy_depth->data_float + (height - 1) * width,
-           depth->data_float + (height - 1) * width,
-           depth->stride);
+static void
+apply_gaussian_noise(struct worker_state *state,
+                     struct image *labels,
+                     struct image *depth,
+                     struct noise_op &normal_op,
+                     int frame_no)
+{
+    float *depth_px = depth->data_float;
+    int width = depth->width;
+    int height = depth->height;
+
+    float fwtm_range_map_mm = normal_op.normal.fwtm_range_map_m * 1000.0f;
+
+    /* According to Wikipedia the full width at tenth of maximum of a
+     * Gaussian curve = approximately 4.29193c (where c is the standard
+     * deviation which we need to pass to construct this distribution)
+     */
+    std::normal_distribution<float> gaus_distribution(0, //mean
+                                                      fwtm_range_map_mm / 4.29193f);
+
+    std::default_random_engine &rand_generator = state->rand_generator;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int pos = width * y + x;
+
+            float delta_mm = gaus_distribution(rand_generator);
+            depth_px[pos] += (delta_mm / 1000.0f);
+        }
+    }
+}
+
+static void
+apply_perlin_noise(struct worker_state *state,
+                   struct image *labels,
+                   struct image *depth,
+                   struct noise_op &perlin_op,
+                   int frame_no)
+{
+    float *depth_px = depth->data_float;
+    int width = depth->width;
+    int height = depth->height;
+    int seed = seed_opt + frame_no;
+    float freq = perlin_op.perlin.freq;
+    float amplitude_m = perlin_op.perlin.amplitude_m;
+    int octaves = perlin_op.perlin.octaves;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int pos = width * y + x;
+
+            float offset_m = perlin2d(x, y, freq, octaves, seed) * amplitude_m;
+            depth_px[pos] += offset_m;
+        }
+    }
+}
+
+static void
+frame_add_noise(struct worker_state *state,
+                const struct image *__restrict__ labels,
+                const struct image *__restrict__ depth,
+                struct image *__restrict__ noisy_labels,
+                struct image *__restrict__ noisy_depth,
+                int frame_no)
+{
+    int height = labels->height;
+
+    size_t labels_size = height * labels->stride;
+    memcpy(noisy_labels->data_u8, labels->data_u8, labels_size);
+    size_t depth_size = height * depth->stride;
+    memcpy(noisy_depth->data_u8, depth->data_u8, depth_size);
 
     if (noise_ops.size()) {
         int n_ops = noise_ops.size();
         for (int i = 0; i < n_ops; i++) {
             struct noise_op &op = noise_ops[i];
             switch (op.type) {
+            case NOISE_FOREGROUND_EDGE_SWIZZLE:
+                apply_foreground_edge_swizzle(state, noisy_labels, noisy_depth, op, frame_no);
+                break;
             case NOISE_NORMAL:
-                apply_gaussian_noise(noisy_labels, noisy_depth, op, frame_no);
+                apply_gaussian_noise(state, noisy_labels, noisy_depth, op, frame_no);
                 break;
             case NOISE_PERLIN:
-                apply_perlin_noise(noisy_labels, noisy_depth, op, frame_no);
+                apply_perlin_noise(state, noisy_labels, noisy_depth, op, frame_no);
                 break;
             }
         }
-    } else {
-        /* The above noise filters also have the effect of ensuring that
-         * all background pixels will have a depth value of background_depth_m
-         * so if no noise is being applied we at least need to ensure
-         * background depth values are all valid...
-         */
-        for (int y = 0; y < height; y++) {
-            for (int x = 0; x < width; x++) {
-                int pos = width * y + x;
+    }
+}
 
-                if (out_labels_px[pos] == BACKGROUND_ID)
-                    out_depth_px[pos] = background_depth_m;
-            }
+static void
+clamp_depth(struct image *__restrict__ labels,
+            struct image *__restrict__ depth)
+{
+    uint8_t *out_labels_px = labels->data_u8;
+    float *out_depth_px = depth->data_float;
+    int width = labels->width;
+    int height = labels->height;
+
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            int pos = width * y + x;
+
+            if (out_labels_px[pos] == BACKGROUND_ID)
+                out_depth_px[pos] = background_depth_m;
         }
     }
 }
@@ -788,11 +814,13 @@ sanity_check_frame(const struct image *labels,
                         depth_m, background_depth_m);
                 exit(1);
             }
-            if (labels_px[pos] == BACKGROUND_ID &&
-                depth_m != background_depth_m)
-            {
-                fprintf(stderr, "Background pixel has incorrect depth\n");
-                exit(1);
+            if (!no_bg_depth_clamp_opt) {
+                if (labels_px[pos] == BACKGROUND_ID &&
+                    depth_m != background_depth_m)
+                {
+                    fprintf(stderr, "Background pixel has incorrect depth\n");
+                    exit(1);
+                }
             }
             if (labels_px[pos] != BACKGROUND_ID &&
                 depth_m == background_depth_m)
@@ -1006,7 +1034,7 @@ worker_thread_cb(void *data)
 
     char filename[1024];
 
-    debug("Running worker thread\n");
+    debug("Running worker thread %d\n", state->idx);
 
     for (;;) {
         struct work work;
@@ -1025,7 +1053,7 @@ worker_thread_cb(void *data)
             work_queue.pop();
         } else {
             pthread_mutex_unlock(&work_queue_lock);
-            debug("Worker thread finished\n");
+            debug("Worker thread %d finished\n", state->idx);
             break;
         }
         pthread_mutex_unlock(&work_queue_lock);
@@ -1039,7 +1067,7 @@ worker_thread_cb(void *data)
             struct input_frame &frame = work.frames[i];
             debug("Thread %d: processing %s/%s\n", state->idx, work.dir, frame.path);
 
-            struct image *labels = load_frame_labels(work.dir, frame.path);
+            struct image *labels = load_frame_labels(state, work.dir, frame.path);
 
             int n_different_px = 0, n_body_px = 0;
             if (prev_frame_labels) {
@@ -1111,12 +1139,19 @@ worker_thread_cb(void *data)
 
             int out_frame_no = frame.frame_no * 2;
 
-            frame_add_noise(labels,
+            state->rand_generator.seed(seed_opt + out_frame_no);
+
+            frame_add_noise(state,
+                            labels,
                             depth,
                             noisy_labels,
                             noisy_depth,
                             out_frame_no);
 
+            if (!no_bg_depth_clamp_opt) {
+                clamp_depth(noisy_labels,
+                            noisy_depth);
+            }
 
             sanity_check_frame(noisy_labels, noisy_depth);
             save_frame_labels(work.dir, frame.path, noisy_labels);
@@ -1135,12 +1170,17 @@ worker_thread_cb(void *data)
                 flip_frame_depth(depth, flipped_depth);
 
                 out_frame_no = frame.frame_no * 2 + 1;
-                frame_add_noise(flipped_labels,
+                frame_add_noise(state,
+                                flipped_labels,
                                 flipped_depth,
                                 noisy_labels,
                                 noisy_depth,
                                 out_frame_no);
 
+                if (!no_bg_depth_clamp_opt) {
+                    clamp_depth(noisy_labels,
+                                noisy_depth);
+                }
 
                 sanity_check_frame(noisy_labels, noisy_depth);
                 xsnprintf(filename, "%.*s-flipped.png",
@@ -1262,12 +1302,14 @@ usage(void)
     printf(
 "Usage image-pre-processor [options] <top_src> <top_dest> <label_map.json>\n"
 "\n"
-"    -f,--full                  Write full-float channel depth images (otherwise\n"
+"    --full                     Write full-float channel depth images (otherwise\n"
 "                               writes half-float)\n"
-"    -g,--grey                  Write greyscale not palletized label PNGs\n"
-"    -p,--pfm                   Write depth data as PFM files\n"
+"    --grey                     Write greyscale not palletized label PNGs\n"
+"    --pfm                      Write depth data as PFM files\n"
 "                               (otherwise depth data is written in EXR format)\n"
-"    -n,--noflip                Disable flipping of the images                 \n"
+"\n"
+"    --no-flip                  Disable flipping of the images\n"
+"    --no-bg-clamp              Don't clamp background pixels to a constant depth\n"
 "\n"
 "    -c,--config=<json>         Configure pre-processing details\n"
 "    -s,--seed=<n>              Seed to use for RNG (default: 0).\n"
@@ -1301,6 +1343,15 @@ main(int argc, char **argv)
     prop.float_state.ptr = &background_depth_m;
     properties.push_back(prop);
 
+    no_bg_depth_clamp_opt = false;
+    prop = gm_ui_property();
+    prop.object = NULL;
+    prop.name = "no_bg_depth_clamp";
+    prop.desc = "Don't clamp the depth of background pixels according to 'background_depth_m'";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &no_bg_depth_clamp_opt;
+    properties.push_back(prop);
+
     min_body_size_px = 3000;
     prop = gm_ui_property();
     prop.object = NULL;
@@ -1319,17 +1370,33 @@ main(int argc, char **argv)
     prop.float_state.ptr = &min_body_change_percent;
     properties.push_back(prop);
 
+    no_flip_opt = false;
+    prop = gm_ui_property();
+    prop.object = NULL;
+    prop.name = "no_flip";
+    prop.desc = "Don't create flipped copies of each frame";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &no_flip_opt;
+    properties.push_back(prop);
+
     properties_state.n_properties = properties.size();
     pthread_mutex_init(&properties_state.lock, NULL);
     properties_state.properties = &properties[0];
 
-    const char *short_options="hfgpnc:j:m:";
+#define FULL_OPT (CHAR_MAX + 1)
+#define PFM_OPT (CHAR_MAX + 2)
+#define GREY_OPT (CHAR_MAX + 3)
+#define NO_FLIP_OPT (CHAR_MAX + 4)
+#define NO_BG_CLAMP_OPT (CHAR_MAX + 5)
+
+    const char *short_options="hc:j:m:";
     const struct option long_options[] = {
         {"help",            no_argument,        0, 'h'},
-        {"full",            no_argument,        0, 'f'},
-        {"grey",            no_argument,        0, 'g'},
-        {"pfm",             no_argument,        0, 'p'},
-        {"noflip",          no_argument,        0, 'n'},
+        {"full",            no_argument,        0, FULL_OPT}, // no short opt
+        {"grey",            no_argument,        0, GREY_OPT}, // no short opt
+        {"pfm",             no_argument,        0, PFM_OPT}, // no short opt
+        {"no-flip",         no_argument,        0, NO_FLIP_OPT}, // no short opt
+        {"no-bg-clamp",     no_argument,        0, NO_BG_CLAMP_OPT}, // no short opt
         {"config",          required_argument,  0, 'c'},
         {"seed",            required_argument,  0, 's'},
         {"threads",         required_argument,  0, 'j'},
@@ -1346,17 +1413,20 @@ main(int argc, char **argv)
             case 'h':
                 usage();
                 return 0;
-            case 'f':
+            case FULL_OPT:
                 write_half_float = false;
                 break;
-            case 'g':
+            case GREY_OPT:
                 write_palettized_pngs = false;
                 break;
-            case 'p':
+            case PFM_OPT:
                 write_pfm_depth = true;
                 break;
-            case 'n':
+            case NO_FLIP_OPT:
                 no_flip_opt = true;
+                break;
+            case NO_BG_CLAMP_OPT:
+                no_bg_depth_clamp_opt = true;
                 break;
             case 'c':
                 config_opt = strdup(optarg);
@@ -1425,7 +1495,9 @@ main(int argc, char **argv)
                     fprintf(stderr, "Noise configuration missing \"type\"\n");
                     exit(1);
                 }
-                if (strcmp(type_str, "gaussian") == 0) {
+                if (strcmp(type_str, "foreground-edge-swizzle") == 0) {
+                    op.type = NOISE_FOREGROUND_EDGE_SWIZZLE;
+                } else if (strcmp(type_str, "gaussian") == 0) {
                     op.type = NOISE_NORMAL;
                     if (!json_object_has_value(js_op, "fwtm_range_map_m")) {
                         fprintf(stderr, "Gaussian noise config missing 'fwtm_range_map_m' value\n");
@@ -1531,10 +1603,12 @@ main(int argc, char **argv)
 
     for (int i = 0; i < n_threads; i++) {
         workers[i].idx = i;
+        workers[i].log = log;
         pthread_create(&workers[i].thread,
                        NULL, //sttributes
                        worker_thread_cb,
                        &workers[i]); //data
+        printf("Spawned worker thread %d\n", i);
     }
 
     while (true) {
@@ -1555,6 +1629,7 @@ main(int argc, char **argv)
         int progress = 100.0 * ((double)frame_count / (double)target_frame_count);
         printf("\nProgress = %3d%%: %10" PRIu64 " / %-10" PRIu64 " (%d jobs remaining)\n\n",
                progress, (uint64_t)frame_count, (uint64_t)target_frame_count, n_jobs);
+        fflush(stdout);
 
         sleep(1);
     }
