@@ -260,7 +260,7 @@ main(int argc, char **argv)
 {
     struct gm_logger *log = gm_logger_new(NULL, NULL);
 
-    const char *short_options="ifvht";
+    const char *short_options="i:f:vht";
     const struct option long_options[] = {
         {"index",           required_argument,  0, 'i'},
         {"fps",             required_argument,  0, 'f'},
