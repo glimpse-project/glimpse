@@ -8596,7 +8596,8 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "prediction_interpolate_angles";
-    prop.desc = "Interpolate angles of bones (not just positions of joints) when predicting skeletons";
+    prop.desc = "Interpolate angles of bones (not just positions of joints) "
+                "when interpolating between two skeletons.";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->prediction_interpolate_angles;
     ctx->properties.push_back(prop);
@@ -10391,11 +10392,21 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 
     // Work out the two nearest frames and the interpolation value
     int h1;
+    bool interpolate_angles = ctx->prediction_interpolate_angles;
     if (timestamp > closest_timestamp) {
-        h1 = (closest_frame == 0) ? 0 : closest_frame - 1;
+        if (closest_frame == 0) {
+            h1 = 0;
+            interpolate_angles = false;
+        } else {
+            h1 = closest_frame - 1;
+        }
     } else {
-        h1 = (closest_frame == prediction->n_tracking - 1) ?
-            closest_frame - 1 : closest_frame;
+        if (closest_frame == prediction->n_tracking - 1) {
+            h1 = closest_frame - 1;
+            interpolate_angles = false;
+        } else {
+            h1 = closest_frame;
+        }
     }
     int h2 = h1 + 1;
 
@@ -10419,8 +10430,7 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
         }
 
         // As a special case; use linear interpolation to place the root bone
-        if (bone_info.parent < 0 ||
-            ctx->prediction_interpolate_angles == false)
+        if (bone_info.parent < 0 || !interpolate_angles)
         {
             interpolate_joints(
                 frame2->skeleton_corrected.joints[bone_info.head],
