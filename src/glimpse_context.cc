@@ -328,6 +328,7 @@ enum codebook_class
     CODEBOOK_CLASS_FOREGROUND,
     CODEBOOK_CLASS_FAILED_CANDIDATE,
     CODEBOOK_CLASS_TRACKED,
+    CODEBOOK_CLASS_EDGE_DETECT_REMOVED,
 };
 
 struct candidate_cluster {
@@ -905,6 +906,8 @@ struct gm_context
 
     // Note: vector<bool> is implemented as an array of bits as a special case...
     std::vector<bool> edge_detect_scratch;
+
+    int reverse_edge_detect;
 };
 
 struct PointCmp {
@@ -2744,6 +2747,12 @@ depth_classification_to_rgb(enum codebook_class label, uint8_t *rgb_out)
         rgb_out[1] = 0xFF;
         rgb_out[2] = 0x00;
         break;
+    case CODEBOOK_CLASS_EDGE_DETECT_REMOVED:
+        // Grey
+        rgb_out[0] = 0xC0;
+        rgb_out[1] = 0xC0;
+        rgb_out[2] = 0xC0;
+        break;
     case -1:
         // Invalid/unhandled value
         // Pink / Peach
@@ -4277,13 +4286,10 @@ stage_edge_detect_cb(struct gm_tracking_impl *tracking,
      * for the debug visualization of what would be deleted...
      */
     if (ctx->delete_edges) {
-        float nan = std::numeric_limits<float>::quiet_NaN();
-
         foreach_xy_off(width, height) {
             if (edge_mask[off]) {
                 pcl::PointXYZL &point = points[off];
-                point.x = point.y = point.z = nan;
-                point.label = -1;
+                point.label = CODEBOOK_CLASS_EDGE_DETECT_REMOVED;
             }
         }
     }
@@ -4698,6 +4704,12 @@ stage_codebook_classify_cb(struct gm_tracking_impl *tracking,
     {
         pcl::PointXYZL point = downsampled_points[depth_off];
 
+        if (downsampled_points[depth_off].label ==
+            CODEBOOK_CLASS_EDGE_DETECT_REMOVED)
+        {
+            continue;
+        }
+
         if (std::isnan(point.z)) {
             // We'll never cluster a nan value, so we can immediately
             // classify it as background.
@@ -4878,7 +4890,8 @@ cluster_codebook_classified_points(
     labels.height = input_->height;
 
     //First pixel
-    if (std::isfinite(input_->points[0].x))
+    if (std::isfinite(input_->points[0].x) &&
+        input_->points[0].label != CODEBOOK_CLASS_EDGE_DETECT_REMOVED)
     {
         labels[0].label = run_ids.size();
         run_ids.push_back(labels[0].label);
@@ -4887,7 +4900,8 @@ cluster_codebook_classified_points(
     // First row
     for (int colIdx = 1; colIdx < static_cast<int>(input_->width); ++colIdx)
     {
-        if (!std::isfinite(input_->points[colIdx].x))
+        if (!std::isfinite(input_->points[colIdx].x) ||
+            input_->points[colIdx].label == CODEBOOK_CLASS_EDGE_DETECT_REMOVED)
             continue;
 
         if (compare_codebook_classified_points(input_, colIdx, colIdx - 1, depth_threshold))
@@ -4910,7 +4924,9 @@ cluster_codebook_classified_points(
          ++rowIdx, previous_row = current_row, current_row += input_->width)
     {
         // First pixel
-        if (std::isfinite(input_->points[current_row].x))
+        if (std::isfinite(input_->points[current_row].x) &&
+            input_->points[current_row].label !=
+            CODEBOOK_CLASS_EDGE_DETECT_REMOVED)
         {
             if (compare_codebook_classified_points(input_,
                                                    current_row,
@@ -4932,7 +4948,9 @@ cluster_codebook_classified_points(
              colIdx < static_cast<int>(input_->width);
              ++colIdx)
         {
-            if (std::isfinite(input_->points[current_row + colIdx].x))
+            if (std::isfinite(input_->points[current_row + colIdx].x) &&
+                input_->points[current_row + colIdx].label !=
+                CODEBOOK_CLASS_EDGE_DETECT_REMOVED)
             {
                 if (compare_codebook_classified_points(input_,
                                                        current_row + colIdx,
@@ -5555,8 +5573,10 @@ stage_naive_detect_floor_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        pcl::PointXYZL &pcl_pt =
-            tracking->downsampled_cloud->points[idx];
+        pcl::PointXYZL &pcl_pt = tracking->downsampled_cloud->points[idx];
+        if (pcl_pt.label == CODEBOOK_CLASS_EDGE_DETECT_REMOVED) {
+            continue;
+        }
 
         if (fabsf(focus_pt.x - pcl_pt.x) > ctx->cluster_max_width ||
             fabsf(focus_pt.z - pcl_pt.z) > ctx->cluster_max_depth) {
@@ -5664,7 +5684,11 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        pcl::PointXYZL pcl_pt = tracking->downsampled_cloud->points[idx];
+        pcl::PointXYZL &pcl_pt = tracking->downsampled_cloud->points[idx];
+        if (pcl_pt.label == CODEBOOK_CLASS_EDGE_DETECT_REMOVED) {
+            continue;
+        }
+
         float aligned_y = tracking->ground_cloud->size() ?
             tracking->ground_cloud->points[idx].y : pcl_pt.y;
         if (aligned_y < lowest_point + ctx->floor_threshold) {
@@ -5783,6 +5807,7 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
         {
             continue;
         }
+
         gm_info(ctx->log,
                 "Person cluster with %d points, (%.2fx%.2fx%.2f)\n",
                 (int)indices.size(),
@@ -5791,6 +5816,67 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
                 cluster_depth);
 
         person_clusters.push_back(candidate);
+    }
+
+    int reverse_edge_detect = ctx->reverse_edge_detect;
+    if (reverse_edge_detect <= 0) {
+        return;
+    }
+
+    int width = tracking->downsampled_cloud->width;
+    int height = tracking->downsampled_cloud->height;
+
+    auto cloud = tracking->downsampled_cloud;
+
+    // Add back points that were filtered out during edge detection
+    int points_added = 0;
+    for (auto candidate : person_clusters) {
+        std::vector<int> *indices = &cluster_indices[candidate.label].indices;
+        std::vector<int> points_to_add;
+        std::vector<int> indices_for_next_iteration;
+
+        std::vector<int> find_edge;
+        find_edge.reserve(4);
+
+        for (int iteration = 0; iteration < reverse_edge_detect; ++iteration) {
+            points_to_add.clear();
+            for (auto i : *indices) {
+                gm_assert(ctx->log, cloud->points[i].label !=
+                          CODEBOOK_CLASS_EDGE_DETECT_REMOVED,
+                          "Person cluster contains edge-detected point");
+
+                int x = i % width;
+                int y = i / width;
+                auto &pt = cloud->points[i];
+
+                find_edge.clear();
+                if (x > 0) { find_edge.push_back(i - 1); }
+                if (x < width - 1) { find_edge.push_back(i + 1); }
+                if (y > 0) { find_edge.push_back(i - width); }
+                if (y < height - 1) { find_edge.push_back(i + width); }
+
+                for (auto j : find_edge) {
+                    auto &ept = cloud->points[j];
+
+                    if (ept.label ==
+                        CODEBOOK_CLASS_EDGE_DETECT_REMOVED &&
+                        fabsf(ept.z - pt.z) <= ctx->cluster_tolerance)
+                    {
+                        ept.label = pt.label;
+                        points_to_add.push_back(j);
+                        continue;
+                    }
+                }
+            }
+
+            for (auto i : points_to_add) {
+                indices->push_back(i);
+                ++points_added;
+            }
+
+            std::swap(points_to_add, indices_for_next_iteration);
+            indices = &indices_for_next_iteration;
+        }
     }
 }
 
@@ -9534,6 +9620,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->cluster_max_depth;
         prop.float_state.min = 0.5f;
         prop.float_state.max = 3.0f;
+        stage.properties.push_back(prop);
+
+        ctx->reverse_edge_detect = 1;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reverse_edge_detect";
+        prop.desc = "Distance to look from person cloud edges for points that "
+                    "were removed by edge detection, in pixels";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->reverse_edge_detect;
+        prop.int_state.min = 0;
+        prop.int_state.max = 10;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
