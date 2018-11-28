@@ -729,6 +729,7 @@ struct gm_context
     bool motion_detection;
     bool naive_seg_fallback;
     bool cluster_from_prev;
+    bool cluster_from_prev_use_prediction;
     float cluster_from_prev_dist_threshold;
     float cluster_from_prev_time_threshold;
     int cluster_from_prev_bounds;
@@ -5009,16 +5010,20 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
     uint64_t earliest_time = tracking->frame->timestamp -
         (uint64_t)((double)ctx->cluster_from_prev_time_threshold * 1e9);
 
-    if (ctx->tracking_history[0]->frame->timestamp < earliest_time)
-    {
+    if (ctx->tracking_history[0]->frame->timestamp < earliest_time) {
         return;
     }
 
     int cluster_bounds = ctx->cluster_from_prev_bounds;
+    bool use_prediction = ctx->cluster_from_prev_use_prediction;
+
+    struct gm_prediction *prediction = use_prediction ?
+        gm_context_get_prediction(ctx, tracking->frame->timestamp) : NULL;
+
     for (int j = 0; j < ctx->n_joints; ++j) {
-        struct gm_joint &joint =
-            ctx->tracking_history[0]->skeleton_corrected.joints[j];
-        if (!joint.valid) {
+        struct gm_joint *joint =
+            &ctx->tracking_history[0]->skeleton_corrected.joints[j];
+        if (!joint->valid) {
             continue;
         }
 
@@ -5028,7 +5033,7 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
         struct gm_intrinsics *old_intrinsics =
             &ctx->tracking_history[0]->downsampled_intrinsics;
 
-        project_point(&joint.x, old_intrinsics, &ox, &oy);
+        project_point(&joint->x, old_intrinsics, &ox, &oy);
 
         // Check that this pixel lies within the image (it should be very rare
         // that it doesn't, but it is possible for corrected joint positions)
@@ -5040,15 +5045,25 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        // Project the joint position into the space of the new frame.
         float od = ctx->tracking_history[0]->downsampled_cloud->
             points[doy * old_intrinsics->width + dox].z;
+
+        // Project the joint position into the space of the new frame.
+        // Use a predicted position instead of the old position if that feature
+        // is enabled and we were able to get a prediction.
+        if (prediction) {
+            struct gm_skeleton *skeleton =
+                gm_prediction_get_skeleton(prediction);
+            if (skeleton->joints[j].valid) {
+                joint = &skeleton->joints[j];
+            }
+        }
 
         float nx, ny;
         struct gm_intrinsics *new_intrinsics =
             &tracking->downsampled_intrinsics;
 
-        project_point(&joint.x, new_intrinsics, &nx, &ny);
+        project_point(&joint->x, new_intrinsics, &nx, &ny);
         int dnx = nx;
         int dny = ny;
 
@@ -5079,6 +5094,10 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
                 }
             }
         }
+    }
+
+    if (prediction) {
+        gm_prediction_unref(prediction);
     }
 }
 
@@ -8148,6 +8167,17 @@ add_cluster_from_prev_props(struct gm_context *ctx,
                 "tracked joints on previous frames";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->cluster_from_prev;
+    stage.properties.push_back(prop);
+
+    ctx->cluster_from_prev_use_prediction = false;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    name = "prev_use_prediction";
+    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    prop.name = name_copy;
+    prop.desc = "Use a predicted skeleton to determine cluster start positions";
+    prop.type = GM_PROPERTY_BOOL;
+    prop.bool_state.ptr = &ctx->cluster_from_prev_use_prediction;
     stage.properties.push_back(prop);
 
     ctx->cluster_from_prev_dist_threshold = 0.1f;
