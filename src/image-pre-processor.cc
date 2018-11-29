@@ -180,7 +180,7 @@ static int seed_opt = 0;
 
 static const char *config_opt = NULL;
 static bool no_flip_opt = false;
-static bool no_bg_depth_clamp_opt = false;
+static bool bg_far_clamp_mode_opt = false;
 
 static std::vector<noise_op> noise_ops;
 
@@ -782,8 +782,14 @@ clamp_depth(struct image *__restrict__ labels,
         for (int x = 0; x < width; x++) {
             int pos = width * y + x;
 
-            if (out_labels_px[pos] == BACKGROUND_ID)
-                out_depth_px[pos] = background_depth_m;
+            if (out_labels_px[pos] == BACKGROUND_ID) {
+                if (bg_far_clamp_mode_opt) {
+                    if (out_depth_px[pos] > background_depth_m)
+                        out_depth_px[pos] = background_depth_m;
+                } else {
+                    out_depth_px[pos] = background_depth_m;
+                }
+            }
         }
     }
 }
@@ -814,7 +820,7 @@ sanity_check_frame(const struct image *labels,
                         depth_m, background_depth_m);
                 exit(1);
             }
-            if (!no_bg_depth_clamp_opt) {
+            if (!bg_far_clamp_mode_opt) {
                 if (labels_px[pos] == BACKGROUND_ID &&
                     depth_m != background_depth_m)
                 {
@@ -1148,10 +1154,7 @@ worker_thread_cb(void *data)
                             noisy_depth,
                             out_frame_no);
 
-            if (!no_bg_depth_clamp_opt) {
-                clamp_depth(noisy_labels,
-                            noisy_depth);
-            }
+            clamp_depth(noisy_labels, noisy_depth);
 
             sanity_check_frame(noisy_labels, noisy_depth);
             save_frame_labels(work.dir, frame.path, noisy_labels);
@@ -1177,10 +1180,7 @@ worker_thread_cb(void *data)
                                 noisy_depth,
                                 out_frame_no);
 
-                if (!no_bg_depth_clamp_opt) {
-                    clamp_depth(noisy_labels,
-                                noisy_depth);
-                }
+                clamp_depth(noisy_labels, noisy_depth);
 
                 sanity_check_frame(noisy_labels, noisy_depth);
                 xsnprintf(filename, "%.*s-flipped.png",
@@ -1309,7 +1309,9 @@ usage(void)
 "                               (otherwise depth data is written in EXR format)\n"
 "\n"
 "    --no-flip                  Disable flipping of the images\n"
-"    --no-bg-clamp              Don't clamp background pixels to a constant depth\n"
+"    --bg-far-clamp-mode        Only clamp depth values farther than 'background_depth_m'\n"
+"                               property value (otherwise all background depth\n"
+"                               values are overriden to 'background_depth_m')"
 "\n"
 "    -c,--config=<json>         Configure pre-processing details\n"
 "    -s,--seed=<n>              Seed to use for RNG (default: 0).\n"
@@ -1343,13 +1345,13 @@ main(int argc, char **argv)
     prop.float_state.ptr = &background_depth_m;
     properties.push_back(prop);
 
-    no_bg_depth_clamp_opt = false;
+    bg_far_clamp_mode_opt = false;
     prop = gm_ui_property();
     prop.object = NULL;
-    prop.name = "no_bg_depth_clamp";
-    prop.desc = "Don't clamp the depth of background pixels according to 'background_depth_m'";
+    prop.name = "bg_far_clamp_mode";
+    prop.desc = "Only clamp background depth values greater than 'background_depth_m' (don't change nearer depth values)";
     prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &no_bg_depth_clamp_opt;
+    prop.bool_state.ptr = &bg_far_clamp_mode_opt;
     properties.push_back(prop);
 
     min_body_size_px = 3000;
@@ -1387,20 +1389,20 @@ main(int argc, char **argv)
 #define PFM_OPT (CHAR_MAX + 2)
 #define GREY_OPT (CHAR_MAX + 3)
 #define NO_FLIP_OPT (CHAR_MAX + 4)
-#define NO_BG_CLAMP_OPT (CHAR_MAX + 5)
+#define BG_FAR_CLAMP_MODE_OPT (CHAR_MAX + 5)
 
     const char *short_options="hc:j:m:";
     const struct option long_options[] = {
-        {"help",            no_argument,        0, 'h'},
-        {"full",            no_argument,        0, FULL_OPT}, // no short opt
-        {"grey",            no_argument,        0, GREY_OPT}, // no short opt
-        {"pfm",             no_argument,        0, PFM_OPT}, // no short opt
-        {"no-flip",         no_argument,        0, NO_FLIP_OPT}, // no short opt
-        {"no-bg-clamp",     no_argument,        0, NO_BG_CLAMP_OPT}, // no short opt
-        {"config",          required_argument,  0, 'c'},
-        {"seed",            required_argument,  0, 's'},
-        {"threads",         required_argument,  0, 'j'},
-        {"max-frames",      required_argument,  0, 'm'},
+        {"help",                no_argument,        0, 'h'},
+        {"full",                no_argument,        0, FULL_OPT}, // no short opt
+        {"grey",                no_argument,        0, GREY_OPT}, // no short opt
+        {"pfm",                 no_argument,        0, PFM_OPT}, // no short opt
+        {"no-flip",             no_argument,        0, NO_FLIP_OPT}, // no short opt
+        {"bg-far-clamp-mode",   no_argument,        0, BG_FAR_CLAMP_MODE_OPT}, // no short opt
+        {"config",              required_argument,  0, 'c'},
+        {"seed",                required_argument,  0, 's'},
+        {"threads",             required_argument,  0, 'j'},
+        {"max-frames",          required_argument,  0, 'm'},
         {0, 0, 0, 0}
     };
 
@@ -1425,8 +1427,8 @@ main(int argc, char **argv)
             case NO_FLIP_OPT:
                 no_flip_opt = true;
                 break;
-            case NO_BG_CLAMP_OPT:
-                no_bg_depth_clamp_opt = true;
+            case BG_FAR_CLAMP_MODE_OPT:
+                bg_far_clamp_mode_opt = true;
                 break;
             case 'c':
                 config_opt = strdup(optarg);
