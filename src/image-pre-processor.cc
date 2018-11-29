@@ -170,8 +170,6 @@ static int expected_width;
 static int expected_height;
 static float expected_fov;
 
-static FILE *index_fp;
-
 static bool write_half_float = true;
 static bool write_palettized_pngs = true;
 static bool write_pfm_depth = false;
@@ -1160,13 +1158,6 @@ worker_thread_cb(void *data)
             save_frame_labels(work.dir, frame.path, noisy_labels);
             save_frame_depth(work.dir, filename, noisy_depth);
 
-            char index_name[512];
-            xsnprintf(index_name, "%s/%.*s\n",
-                      work.dir,
-                      (int)strlen(frame.path) - 4,
-                      frame.path);
-            fwrite(index_name, strlen(index_name), 1, index_fp);
-
             // do the same for the flipped image (if flipped is on)
             if(!no_flip_opt) {
                 flip_frame_labels(labels, flipped_labels);
@@ -1192,12 +1183,6 @@ worker_thread_cb(void *data)
                           (int)strlen(frame.path) - 4,
                           frame.path);
                 save_frame_depth(work.dir, filename, noisy_depth);
-
-                xsnprintf(index_name, "%s/%.*s-flipped\n",
-                          work.dir,
-                          (int)strlen(frame.path) - 4,
-                          frame.path);
-                fwrite(index_name, strlen(index_name), 1, index_fp);
             }
 
             // Note: we don't free the labels here because they are preserved
@@ -1587,10 +1572,6 @@ main(int argc, char **argv)
     json_value_free(meta);
     meta = NULL;
 
-    char index_filename[512];
-    xsnprintf(index_filename, "%s/index.full", top_out_dir);
-    index_fp = fopen(index_filename, "w");
-
     int n_threads = std::thread::hardware_concurrency();
     if (n_threads_override)
         n_threads = n_threads_override;
@@ -1646,9 +1627,6 @@ main(int argc, char **argv)
 
     end = get_time();
     duration_ns = end - start;
-
-    fclose(index_fp);
-    printf("index written\n");
 
     printf("Finished processing all frames in %.3f%s\n",
            get_duration_ns_print_scale(duration_ns),
