@@ -8861,7 +8861,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.desc = "Downsamples the native-resolution depth data";
         stage.toggle_property = -1;
 
-        ctx->seg_res = 1;
+        ctx->seg_res = 2;
         prop = gm_ui_property();
         prop.object = ctx;
         prop.name = "seg_res";
