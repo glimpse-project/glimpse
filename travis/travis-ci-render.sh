@@ -15,7 +15,7 @@ export PATH=$HOME/.local/bin:$PATH
 
 # Even though it's an out-of-date version we install Blender via apt-get
 # as an easy way of installing dependencies
-sudo apt-get install blender -y --no-install-recommends --no-install-suggests
+# sudo apt-get install blender -y --no-install-recommends --no-install-suggests
 
 if ! test -f blender-2.79-linux-glibc219-x86_64/blender; then
     wget https://ftp.nluug.nl/pub/graphics/blender/release/Blender2.79/blender-2.79-linux-glibc219-x86_64.tar.bz2
