@@ -33,21 +33,20 @@ pushd glimpse-training-data/blender
     ./install-addons.sh
 popd
 
-export PATH=$PWD/glimpse-training-data/blender:$PATH
+export PATH=$PWD/glimpse-training-data:$PATH
 
 mkdir -p rendered-training-data
 
-glimpse-cli.py \
+glimpse-generator.py \
+    preload \
     --start 25 \
-    --end 26 \
-    --preload \
-    glimpse-training-data
+    --end 26
 
-glimpse-cli.py \
+glimpse-generator.py \
+    render \
     --start 25 \
     --end 26 \
     --dest rendered-training-data \
-    --name test-render \
-    glimpse-training-data
+    --name test-render
 
 find rendered-training-data
