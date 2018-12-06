@@ -3,7 +3,7 @@
 set -e
 set -x
 
-if test -d rendered-training-data/generated; then
+if test -d rendered-training-data/rendered; then
     exit 0
 fi
 
