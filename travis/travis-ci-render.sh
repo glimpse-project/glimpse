@@ -35,7 +35,7 @@ popd
 
 export PATH=$PWD/glimpse-training-data:$PATH
 
-mkdir -p rendered-training-data
+mkdir -p rendered-training-data/rendered
 
 glimpse-generator.py \
     preload \
@@ -46,7 +46,7 @@ glimpse-generator.py \
     render \
     --start 25 \
     --end 26 \
-    --dest rendered-training-data \
+    --dest rendered-training-data/rendered \
     --name test-render
 
 find rendered-training-data
