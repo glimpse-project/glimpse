@@ -3,8 +3,8 @@
 set -e
 set -x
 
-if ! test -d rendered-training-data/generated; then
-    echo "Training data expected under rendered-training-data/generated"
+if ! test -d rendered-training-data/rendered; then
+    echo "Training data expected under rendered-training-data/rendered"
     exit 1
 fi
 
