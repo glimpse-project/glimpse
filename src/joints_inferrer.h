@@ -42,7 +42,7 @@ typedef struct {
 
 typedef struct {
     int     n_joints;
-    LList** joints;
+    LList  *joints[];
 } InferredJoints;
 
 

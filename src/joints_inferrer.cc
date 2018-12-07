@@ -65,6 +65,12 @@ struct joints_inferrer
 
     int n_joints;
     std::vector<joint_labels_entry> map;
+
+    std::vector<unsigned> cluster_id_runs;
+    std::vector<unsigned> id_map;
+    std::vector<std::vector<unsigned>> cluster_indices;
+
+    std::vector<std::vector<Joint>> results;
 };
 
 
@@ -113,12 +119,36 @@ joints_inferrer_calc_pixel_weights(struct joints_inferrer *inferrer,
     return weights;
 }
 
-static int
-compare_joints(LList* a, LList* b, void* userdata)
+// Clusters are first described as a sparse collection of per-line spans before
+// we iterate through spans to associate them with cluster IDs. If spans are
+// found to be vertically-adjacent to other spans then they should be mapped to
+// the same cluster ID, but we can't simply edit the ID of spans we've already
+// processed since we don't know what other spans might already be sharing a
+// particular ID. The 'runs' array is a way of representing links or aliases
+// for IDs temporarily and then at the end of clustering we go through and
+// replace all IDs with the canonical 'root' ID that they alias/link to.
+//
+// So the merging of spans is done by maintaining an array of id ('runs') where
+// normally runs[id] == id but when we need to track the merging of IDs then
+// runs[id] can point back to an earlier id index. There may be multiple jumps
+// like this due to multiple such merges so this function follows the
+// indirections to find the 'root' id that will be the final effective id.
+//
+// Note: the indirections always point to lower indices, otherwise it would
+// be possible to have loops.
+//
+static unsigned
+find_id_root(std::vector<unsigned> &runs, unsigned index)
 {
-    Joint* ja = (Joint*)a->data;
-    Joint* jb = (Joint*)b->data;
-    return ja->confidence - jb->confidence;
+    unsigned idx = index;
+    while (runs[idx] != idx)
+        idx = runs[idx];
+
+    // In case there were multiple indirections then updating the index
+    // will reduce all further lookups to one indirection at most
+    //runs[index] = idx; (Didn't improve performance)
+
+    return idx;
 }
 
 InferredJoints*
@@ -137,6 +167,14 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
     int n_joints = inferrer->n_joints;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
+    // Variables for reprojection of 2d point + depth
+    float fx = intrinsics->fx;
+    float fy = intrinsics->fy;
+    float inv_fx = 1.0f / fx;
+    float inv_fy = 1.0f / fy;
+    float cx = intrinsics->cx;
+    float cy = intrinsics->cy;
+
     // Plan: For each scan-line, scan along and record clusters on 1 dimension.
     //       For each scanline segment, check to see if it intersects with any
     //       segment on neighbouring scanlines, then join the lists together.
@@ -149,22 +187,31 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
     //             perfectly contiguous?
     //       TODO: Figure out a way to divide clusters that are only loosely
     //             connected?
-    typedef struct {
-        int y;
+    struct cluster_span {
         int left;
         int right;
-    } ScanlineSegment;
+        int id;
+    };
 
-    typedef std::forward_list<ScanlineSegment> Cluster;
-    typedef std::move_iterator<typename Cluster::iterator> ClusterMoveIterator;
-
-    typename std::list<Cluster> clusters[n_joints];
+    // The 2D clusters for each joint may not be mutually exclusive so
+    // for each joint we build a separate (sparse) representation of
+    // clusters.
+    //
+    // The clusters themselves are first described as a vector of 1D spans
+    // for each line in the image.
+    //
+    // Afterwards we try and merge spans that are connected vertically
+    // on adjacent lines.
+    //
+    std::vector<std::vector<cluster_span>> lines[n_joints];
+    for (int j = 0; j < n_joints; j++)
+    {
+        lines[j].resize(cluster_height);
+    }
 
     // Collect clusters across scanlines
-    ScanlineSegment* last_segment[n_joints];
     for (int y = 0; y < cluster_height; ++y)
     {
-        memset(last_segment, 0, sizeof(ScanlineSegment*) * n_joints);
         for (int x = 0; x < cluster_width; ++x)
         {
             for (int j = 0; j < n_joints; ++j)
@@ -185,136 +232,132 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
                 {
                     // Check to see if this pixel can be added to an existing
                     // cluster.
-                    if (last_segment[j])
+                    if (lines[j][y].size() &&
+                        lines[j][y].back().right == (x - 1))
                     {
-                        last_segment[j]->right = x;
+                        lines[j][y].back().right = x;
                     }
                     else
                     {
-                        clusters[j].emplace_front();
-                        clusters[j].front().push_front({ y, x, x });
-                        last_segment[j] = &clusters[j].front().front();
+                        lines[j][y].push_back({x, x, -1});
                     }
-                }
-                else
-                {
-                    last_segment[j] = nullptr;
                 }
             }
         }
     }
+
+    std::vector<unsigned> &cluster_id_runs = inferrer->cluster_id_runs;
+    std::vector<unsigned> &id_map = inferrer->id_map;
+    std::vector<std::vector<unsigned>> &cluster_indices = inferrer->cluster_indices;
+
+    std::vector<std::vector<Joint>> &results = inferrer->results;
+    results.resize(n_joints);
 
     // Now iteratively connect the scanline clusters
     for (int j = 0; j < n_joints; j++)
     {
-        for (typename std::list<Cluster>::iterator it = clusters[j].begin();
-             it != clusters[j].end(); ++it)
-        {
-            Cluster& parent = *it;
-            for (typename std::list<Cluster>::iterator it2 = clusters[j].begin();
-                 it2 != clusters[j].end();)
-            {
-                Cluster& candidate = *it2;
-                if (it == it2)
-                {
-                    ++it2;
-                    continue;
-                }
+        cluster_id_runs.resize(0);
+        id_map.resize(0);
+        cluster_indices.resize(0);
+        results[j].resize(0);
 
-                // If this scanline segment connects to the cluster being
-                // checked, remove it from the cluster list, add it to the
-                // checked cluster and break out.
-                bool local_change = false;
-                for (typename Cluster::iterator p_it = parent.begin();
-                     p_it != parent.end() && !local_change; ++p_it)
+        for (auto &span : lines[j][0])
+        {
+            span.id = cluster_id_runs.size();
+            cluster_id_runs.push_back(span.id);
+        }
+
+        for (int y = 1; y < cluster_height; y++)
+        {
+            for (auto &span : lines[j][y])
+            {
+                for (auto &span_above : lines[j][y - 1])
                 {
-                    ScanlineSegment& p_segment = *p_it;
-                    for (typename Cluster::iterator c_it = candidate.begin();
-                         c_it != candidate.end(); ++c_it)
+                    if ((span.left <= span_above.right) &&
+                        (span.right >= span_above.left))
                     {
-                        ScanlineSegment& c_segment = *c_it;
-                        // Check if these two scanline cluster segments touch
-                        if ((abs(c_segment.y - p_segment.y) == 1) &&
-                            (c_segment.left <= p_segment.right) &&
-                            (c_segment.right >= p_segment.left))
-                        {
-                            parent.insert_after(
-                                parent.before_begin(),
-                                ClusterMoveIterator(candidate.begin()),
-                                ClusterMoveIterator(candidate.end()));
-                            it2 = clusters[j].erase(it2);
-                            local_change = true;
-                            break;
+                        if (span.id == -1) {
+                            span.id = span_above.id;
+                        } else {
+                            unsigned root_self = find_id_root(cluster_id_runs, span.id);
+                            unsigned root_above = find_id_root(cluster_id_runs, span_above.id);
+                            if (root_self < root_above) {
+                                cluster_id_runs[root_above] = root_self;
+                            } else {
+                                cluster_id_runs[root_self] = root_above;
+                            }
                         }
                     }
                 }
-
-                if (!local_change)
-                {
-                    ++it2;
+                if (span.id == -1) {
+                    span.id = cluster_id_runs.size();
+                    cluster_id_runs.push_back(span.id);
                 }
             }
         }
-    }
 
-    // clusters now contains the boundaries per scanline segment of each cluster
-    // of joint labels, which we can now use to calculate the highest confidence
-    // cluster and the projected cluster centroid.
-
-    // Variables for reprojection of 2d point + depth
-    float fx = intrinsics->fx;
-    float fy = intrinsics->fy;
-    float inv_fx = 1.0f / fx;
-    float inv_fy = 1.0f / fy;
-    float cx = intrinsics->cx;
-    float cy = intrinsics->cy;
-
-    // Allocate/clear joints structure
-    InferredJoints* result = (InferredJoints*)xmalloc(sizeof(InferredJoints));
-    result->n_joints = n_joints;
-    result->joints = (LList**)xcalloc(n_joints, sizeof(LList*));
-
-    for (int j = 0; j < n_joints; j++)
-    {
-        for (typename std::list<Cluster>::iterator it =
-             clusters[j].begin(); it != clusters[j].end(); ++it)
+        id_map.resize(cluster_id_runs.size());
+        unsigned max_id = 0;
+        for (unsigned i = 0; i < cluster_id_runs.size(); i++)
         {
-            Cluster& cluster = *it;
-            Joint* joint = (Joint*)xmalloc(sizeof(Joint));
+            // if it is its own root -> new region
+            if (cluster_id_runs[i] == i)
+                id_map[i] = max_id++;
+            else // assign this sub-segment to the region (root) it belongs
+                id_map[i] = id_map[find_id_root(cluster_id_runs, i)];
+        }
 
-            // Calculate the center-point and confidence of the cluster
-            int n_points = 0;
-            int x = 0;
-            int y = 0;
-            joint->confidence = 0.f;
-            for (auto segment : cluster) {
-                int idx = segment.y * cluster_width;
-                for (int i = segment.left; i <= segment.right; i++, n_points++)
-                {
-                    x += i;
-                    y += segment.y;
-                    joint->confidence += cluster_weights[(idx + i) * n_joints + j];
+        cluster_indices.resize(max_id);
+        for (int y = 0; y < cluster_height; y++)
+        {
+            for (auto &span : lines[j][y])
+            {
+                span.id = id_map[span.id];
+                for (int x = span.left; x <= span.right; x++) {
+                    int idx = cluster_width * y + x;
+                    cluster_indices[span.id].push_back(idx);
                 }
             }
+        }
 
-            x = (int)roundf(x / (float)n_points);
-            y = (int)roundf(y / (float)n_points);
+        for (auto &cluster : cluster_indices) {
+            Joint joint;
+            joint.confidence = 0.f;
+
+            int n_points = cluster.size();
+            int x_sum = 0;
+            int y_sum = 0;
+
+            // Calculate the center-point and confidence of the cluster
+            for (unsigned i : cluster) {
+                int x = i % cluster_width;
+                int y = i / cluster_width;
+
+                x_sum += x;
+                y_sum += y;
+                joint.confidence += cluster_weights[i * n_joints + j];
+            }
+
+            int x = roundf(x_sum / (float)n_points);
+            int y = roundf(y_sum / (float)n_points);
 
             // Find the nearest point in the cluster - the coordinates above
             // aren't guaranteed to be in the cluster (though they more often
             // than not are, they aren't frequently enough that we can't rely
             // on that).
-            float dist = std::numeric_limits<float>::max();
+            float min_squared_sdist = std::numeric_limits<float>::max();
             int nx = x, ny = y;
-            for (auto segment : cluster) {
-                int sy = segment.y;
-                int sx = CLAMP(x, segment.left, segment.right);
-                float sdist = sqrtf(powf(fabsf((float)x - sx), 2.f) +
-                                    powf(fabsf((float)y - sy), 2.f));
-                if (sdist < dist) {
+
+            for (unsigned i : cluster) {
+                int sx = i % cluster_width;
+                int sy = i / cluster_width;
+                float dx = x - sx;
+                float dy = y - sy;
+                float squared_sdist = dx * dx + dy * dy;
+                if (squared_sdist < min_squared_sdist) {
                     nx = sx;
                     ny = sy;
-                    dist = sdist;
+                    min_squared_sdist = squared_sdist;
                 }
                 if (nx == x && ny == y) {
                     break;
@@ -324,20 +367,55 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
             // Reproject and offset point
             float depth = (float)cluster_depth_image[ny * cluster_width + nx];
 
-            joint->x = ((nx + cluster_x0) - cx) * depth * inv_fx;
+            joint.x = ((nx + cluster_x0) - cx) * depth * inv_fx;
             // NB: The coordinate space for joints has Y+ extending upwards...
-            joint->y = -(((ny + cluster_y0) - cy) * depth * inv_fy);
-            joint->z = depth + params[j].offset;
+            joint.y = -(((ny + cluster_y0) - cy) * depth * inv_fy);
+            joint.z = depth + params[j].offset;
 
-            // Add the joint to the list
-            result->joints[j] = llist_insert_before(result->joints[j],
-                                                    llist_new(joint));
+            results[j].push_back(joint);
         }
 
-        llist_sort(result->joints[j], compare_joints, NULL);
+        std::sort(results[j].begin(), results[j].end(),
+                  [](Joint &a, Joint &b){ return a.confidence > b.confidence; });
     }
 
-    return result;
+
+    /* TODO: remove this linked list fiddling, and return a packed array-based
+     * representation of the resuts...
+     */
+
+    InferredJoints *ret = (InferredJoints*)xcalloc(sizeof(InferredJoints) +
+                                                   sizeof(LList*) * n_joints,
+                                                   1);
+    ret->n_joints = n_joints;
+
+    for (int j = 0; j < n_joints; j++) {
+        if (!results[j].size())
+            continue;
+
+        Joint *copy = (Joint *)xmalloc(sizeof(Joint));
+        memcpy(copy, &results[j][0], sizeof(Joint));
+
+        LList *first = llist_new(copy);
+        LList *last = first;
+        for (int i = 1; i < (int)results[j].size(); i++)
+        {
+            copy = (Joint *)xmalloc(sizeof(Joint));
+            memcpy(copy, &results[j][i], sizeof(Joint));
+            last = llist_insert_after(last, llist_new(copy));
+        }
+        ret->joints[j] = first;
+    }
+
+    return ret;
+}
+
+static int
+compare_joints(LList* a, LList* b, void* userdata)
+{
+    Joint* ja = (Joint*)a->data;
+    Joint* jb = (Joint*)b->data;
+    return ja->confidence - jb->confidence;
 }
 
 InferredJoints*
@@ -418,9 +496,10 @@ joints_inferrer_infer(struct joints_inferrer* inferrer,
         }
     }
 
-    InferredJoints* result = (InferredJoints*)xmalloc(sizeof(InferredJoints));
+    InferredJoints* result = (InferredJoints*)xcalloc(sizeof(InferredJoints) +
+                                                      sizeof(LList*) * n_joints,
+                                                      1);
     result->n_joints = n_joints;
-    result->joints = (LList**)xcalloc(n_joints, sizeof(LList*));
 
     // Means shift to find joint modes
     for (int j = 0; j < n_joints; j++)
@@ -533,7 +612,6 @@ joints_inferrer_free_joints(struct joints_inferrer* inferrer,
     for (int i = 0; i < joints->n_joints; i++) {
         llist_free(joints->joints[i], llist_free_cb, NULL);
     }
-    xfree(joints->joints);
     xfree(joints);
 }
 
