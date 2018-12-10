@@ -5,7 +5,7 @@ import argparse, json, copy
 parser = argparse.ArgumentParser(description=
         'Generate job files for train_rdt',
         epilog=
-        'Example usage: %(prog)s -p -s n_thresholds,100 -r uv_range,0.4,0.9,10')
+        'Example usage: %(prog)s --param-set n_thresholds,100 --param-range uv_range,0.4,0.9,10')
 
 def linspace(min, max, n_values):
     step = (max - min) / (int(n_values) - 1)
@@ -67,8 +67,6 @@ def parse_range(string):
 
     return (params[0], list(linspace(min, max, n_values)))
 
-parser.add_argument('-p', '--pretty', action='store_true', default=False,
-                    help='Output pretty JSON')
 parser.add_argument('-o', '--output-prefix', type=str, default='out',
                     help='Prefix for out_file property')
 parser.add_argument('-s', '--param-set', action='append', type=parse_param,
@@ -110,4 +108,4 @@ def add_jobs_recursive(jobs=[], job=None, n_prop=0):
     return jobs
 
 jobs = add_jobs_recursive()
-print(json.dumps(jobs, indent=2 if args.pretty else None))
+print(json.dumps(jobs, indent=2))
