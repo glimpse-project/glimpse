@@ -63,6 +63,7 @@ logger_cb(struct gm_logger *logger,
 {
     struct training_data *data = user_data;
     char *msg = NULL;
+    FILE *fp = data->log_fp ? data->log_fp : stderr;
 
     if (verbose_opt == false && level < GM_LOG_INFO)
         return;
@@ -70,21 +71,21 @@ logger_cb(struct gm_logger *logger,
     if (vasprintf(&msg, format, ap) > 0) {
         switch (level) {
         case GM_LOG_ERROR:
-            fprintf(data->log_fp, "%s: ERROR: ", context);
-            if (data->log_fp != stderr)
+            fprintf(fp, "%s: ERROR: ", context);
+            if (fp != stderr)
                 fprintf(stderr, "%s: ERROR: ", context);
             break;
         case GM_LOG_WARN:
-            fprintf(data->log_fp, "%s: WARN: ", context);
-            if (data->log_fp != stderr)
+            fprintf(fp, "%s: WARN: ", context);
+            if (fp != stderr)
                 fprintf(stderr, "%s: WARN: ", context);
             break;
         default:
-            fprintf(data->log_fp, "%s: ", context);
+            fprintf(fp, "%s: ", context);
         }
 
         fprintf(data->log_fp, "%s\n", msg);
-        if (level >= GM_LOG_WARN && data->log_fp != stderr)
+        if (level >= GM_LOG_WARN && fp != stderr)
             fprintf(stderr, "%s\n", msg);
 
         if (backtrace) {
@@ -95,14 +96,14 @@ logger_cb(struct gm_logger *logger,
                                             line_len, (char *)formatted);
             for (int i = 0; i < backtrace->n_frames; i++) {
                 char *line = formatted + line_len * i;
-                fprintf(data->log_fp, "> %s\n", line);
-                if (data->log_fp != stderr)
+                fprintf(fp, "> %s\n", line);
+                if (fp != stderr)
                     fprintf(stderr, "> %s\n", line);
             }
         }
 
-        fflush(data->log_fp);
-        if (data->log_fp != stderr)
+        fflush(fp);
+        if (fp != stderr)
             fflush(stderr);
 
         free(msg);
@@ -113,11 +114,13 @@ static void
 logger_abort_cb(struct gm_logger *logger, void *user_data)
 {
     struct training_data *data = user_data;
+    FILE *fp = data->log_fp ? data->log_fp : stderr;
 
-    if (data->log_fp) {
-        fprintf(data->log_fp, "ABORT\n");
-        fflush(data->log_fp);
-        fclose(data->log_fp);
+    if (fp) {
+        fprintf(fp, "ABORT\n");
+        fflush(fp);
+        if (fp != stderr)
+            fclose(fp);
     }
 
     abort();
@@ -228,6 +231,9 @@ usage(struct gm_ui_properties *ctx_props, FILE *fp)
 "                             (can be overridden by per-run parameter)\n"
 "  -l, --log-file=FILE        File to write log message to.\n"
 "      --log=FILE\n"
+"      --log-stderr           Write log to stderr.\n"
+"\n"
+"  Note: a logging option must be given.\n"
 "\n"
 "      --verbose              Verbose output.\n"
 "      --profile              Profiling output.\n"
@@ -367,7 +373,7 @@ main(int argc, char **argv)
     struct training_data _data;
     struct training_data *data = &_data;
 
-    data->log_fp = stderr;
+    data->log_fp = NULL;
     data->log = gm_logger_new(logger_cb, data);
     gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
 
@@ -377,6 +383,14 @@ main(int argc, char **argv)
 
 #define VERBOSE_OPT    (CHAR_MAX + 1) // no short opt
 #define PROFILE_OPT    (CHAR_MAX + 2) // no short opt
+
+    /* Unlike for some of our tools, we don't make logging to stderr the
+     * default because we want the user to explicitly choose a logging
+     * behaviour. Considering that training may take days to run then it's
+     * really not wise to avoid logging in case something goes wrong, or we
+     * need to investigate something about older training results...
+     */
+#define LOG_STDERR_OPT (CHAR_MAX + 3) // no short opt
 
     const char *short_options="q:p:v:d:cj:s:l:vh";
     const struct option long_options[] = {
@@ -390,6 +404,7 @@ main(int argc, char **argv)
         {"seed",         required_argument,  0, 's'},
         {"log",          required_argument,  0, 'l'},
         {"log-file",     required_argument,  0, 'l'},
+        {"log-stderr",   no_argument,        0, LOG_STDERR_OPT},
         {"verbose",      no_argument,        0, VERBOSE_OPT},
         {"profile",      no_argument,        0, PROFILE_OPT},
         {"help",         no_argument,        0, 'h'},
@@ -469,6 +484,9 @@ main(int argc, char **argv)
         case 'l':
             data->log_fp = fopen(optarg, "w");
             break;
+        case LOG_STDERR_OPT:
+            data->log_fp = stderr;
+            break;
         case VERBOSE_OPT:
             verbose_opt = true;
             break;
@@ -489,6 +507,17 @@ main(int argc, char **argv)
 
     if (prop_name) {
         fprintf(stderr, "ERROR: Expected a -v,--value=VALUE after property name\n\n");
+        exit(1);
+    }
+
+    if (!data->log_fp) {
+        fprintf(stderr,
+"ERROR: Either --log-file=FILE or --log-stderr must be passed\n\n"
+"\n"
+"Considering how log training may take and the possible need to investigate\n"
+"something about older training runs, it's strongly recommended that you\n"
+"create a persistent log with --log-file=FILE\n"
+        );
         exit(1);
     }
 
