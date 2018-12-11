@@ -5003,7 +5003,7 @@ cluster_codebook_classified_points(
             map[runIdx] = map[find_label_root(run_ids, runIdx)];
     }
 
-    label_indices.resize(max_id + 1);
+    label_indices.resize(max_id);
     for (unsigned idx = 0; idx < input_->points.size(); idx++)
     {
         if (labels[idx].label != invalid_label)
