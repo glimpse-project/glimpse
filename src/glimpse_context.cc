@@ -210,6 +210,7 @@ using Random = effolkronium::random_thread_local;
 #endif
 
 #define TRACK_FRAMES 12
+#define PERSON_HISTORY_SIZE 12
 
 enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_NONE,
@@ -220,6 +221,13 @@ enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_EDGES,
 
     N_DEBUG_CLOUD_MODES
+};
+
+enum debug_cloud_focus {
+    DEBUG_CLOUD_FOCUS_BEST,
+    DEBUG_CLOUD_FOCUS_ALL,
+
+    N_DEBUG_CLOUD_FOCI
 };
 
 enum {
@@ -333,6 +341,7 @@ enum codebook_class
 
 struct candidate_cluster {
     unsigned label; // indexes into tracking->cluster_indices[]
+    bool tracked;
 
     // 2D bounds (inclusive)
     int min_x_2d = INT_MAX;
@@ -453,6 +462,36 @@ struct gm_pipeline_stage_data {
     //std::vector<struct gm_point_rgba> debug_lines;
 };
 
+struct skeleton_history
+{
+    struct gm_skeleton skeleton;
+    struct gm_skeleton skeleton_corrected;
+    uint64_t timestamp;
+    float confidence;
+};
+
+struct average_length
+{
+    float length;
+    int n_samples;
+};
+
+struct gm_person
+{
+    struct gm_context *ctx;
+
+    uint64_t time_detected;
+    float initial_confidence;
+    uint64_t time_last_tracked;
+
+    // Tracked skeletons paired with the timestamp they were tracked on
+    std::deque<struct skeleton_history> history;
+
+    // Running average of bone lengths, paired with the number of samples
+    // they were collected over
+    std::vector<struct average_length> bone_lengths;
+};
+
 struct gm_prediction_impl
 {
     struct gm_prediction base;
@@ -463,8 +502,7 @@ struct gm_prediction_impl
 
     uint64_t timestamp;
 
-    struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
-    int n_tracking;
+    std::deque<skeleton_history> history;
 
     struct gm_skeleton skeleton;
 
@@ -513,10 +551,8 @@ struct gm_tracking_impl
     // Depth data, in meters
     float *depth;
 
-    // Label probability tables
-    std::vector<float> label_probs;
-    int label_probs_width;
-    int label_probs_height;
+    // Data on people inferred by this tracking frame
+    std::list<struct InferredPerson> people;
 
     // The unprojected full-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr depth_cloud;
@@ -544,16 +580,8 @@ struct gm_tracking_impl
 
     std::vector<char *> debug_text;
 
-    // Whether any person clouds were tracked in this frame
-    bool success;
-
     // Whether the tracking was done based on a 'paused' camera frame
     bool paused;
-
-    // Inferred joint positions
-    InferredJoints *joints;
-    struct gm_skeleton skeleton;
-    struct gm_skeleton skeleton_corrected;
 
     uint8_t *face_detect_buf;
     size_t face_detect_buf_width;
@@ -568,6 +596,13 @@ struct gm_tracking_impl
     std::vector<gm_pipeline_stage_data> stage_data;
 
     uint64_t duration_ns;
+
+    /* XXX The following are retained for tracking API that will eventually
+     *     become legacy once we expose gm_person.
+     */
+    bool has_skeleton;
+    struct gm_skeleton skeleton;
+    struct gm_skeleton skeleton_corrected;
 };
 
 struct gm_context
@@ -686,6 +721,7 @@ struct gm_context
 
     int debug_pipeline_stage;
     int debug_cloud_mode;
+    int debug_cloud_focus;
 
     int codebook_debug_view;
 
@@ -765,6 +801,7 @@ struct gm_context
     bool flip_labels;
 
     bool fast_clustering;
+    int max_people;
 
     bool joint_refinement;
     float max_joint_refinement_delta;
@@ -806,6 +843,7 @@ struct gm_context
 
     std::vector<struct gm_ui_enumerant> cloud_stage_enumerants;
     std::vector<struct gm_ui_enumerant> cloud_mode_enumerants;
+    std::vector<struct gm_ui_enumerant> cloud_focus_enumerants;
     std::vector<struct gm_ui_enumerant> codebook_debug_view_enumerants;
     std::vector<struct gm_ui_enumerant> label_enumerants;
     struct gm_ui_properties properties_state;
@@ -858,6 +896,9 @@ struct gm_context
      * latest_paused_frame is non-NULL (see below).
      */
     struct gm_tracking_impl *latest_tracking;
+
+    pthread_mutex_t people_modify_mutex;
+    std::list<struct gm_person> tracked_people;
 
     /* Tracking objects resulting from processing paused frames will never
      * update ctx->latest_tracking, since tracking itself may refer to
@@ -917,6 +958,14 @@ struct PointCmp {
     int ly;
 };
 
+struct InferredPerson {
+    std::vector<float> label_probs;
+    int label_probs_width;
+    int label_probs_height;
+    InferredJoints *joints;
+    float confidence;
+};
+
 /* As a general rule anything that's needed from the ctx for tracking that
  * might need modifying will be copied over to this scratch_state object and
  * becomes the authority for that state for tracking. At the end of tracking we
@@ -934,10 +983,12 @@ struct pipeline_scratch_state
 
     int debug_pipeline_stage;
     int debug_cloud_mode;
+    int debug_cloud_focus;
 
     uint64_t frame_counter;
 
     int seg_res;
+    int max_people;
 
     bool done_edge_detect;
 
@@ -973,13 +1024,18 @@ struct pipeline_scratch_state
     std::vector<candidate_cluster> candidate_clusters;
     std::vector<candidate_cluster> person_clusters;
     int current_person_cluster;
-    int best_person_cluster;
+
+    // A list of inferred people in the current tracking state and an index
+    // into person_clusters for them.
+    std::list<std::pair<InferredPerson&, int>> people;
+
+    // A list of new person history to add and a pointer to the person to add
+    // them to. If the pointer is NULL, a new person has been detected.
+    std::list<std::pair<struct skeleton_history, struct gm_person*>> new_history;
 
     // per-cluster inference
     bool done_label_inference;
     InferredJoints *joints_candidate;
-
-    float confidence;
 };
 
 static png_color default_palette[] = {
@@ -1422,6 +1478,33 @@ calc_cumulative_joint_difference(struct gm_context *ctx,
     return diff;
 }
 
+static float
+calc_average_joint_difference(struct gm_context *ctx,
+                              struct gm_skeleton &skel,
+                              struct gm_skeleton &ref)
+{
+    int n_joints_shared = 0;
+    float diff = 0.f;
+
+    for (int i = 0; i < ctx->n_joints; ++i) {
+        struct gm_joint &joint = skel.joints[i];
+        struct gm_joint &ref_joint = ref.joints[i];
+
+        if (joint.valid != ref_joint.valid) {
+            continue;
+        }
+
+        diff += distance_between(&joint.x, &ref_joint.x);
+        ++n_joints_shared;
+    }
+
+    if (!n_joints_shared) {
+        return FLT_MAX;
+    }
+
+    return diff / n_joints_shared;
+}
+
 static int
 calc_mismatched_bones(struct gm_context *ctx,
                       struct gm_skeleton &skel,
@@ -1573,7 +1656,7 @@ calc_skeleton_distance(struct gm_context *ctx,
 static void
 copy_inferred_joints_to_skel_except(struct gm_skeleton &dest,
                                     InferredJoints *inferred_src,
-                                    int except_joint_no)
+                                    int except_joint_no = -1)
 {
     struct gm_context *ctx = dest.ctx;
 
@@ -1602,32 +1685,32 @@ copy_inferred_joints_to_skel_except(struct gm_skeleton &dest,
 }
 
 static void
-refine_skeleton(struct gm_tracking_impl *tracking)
+refine_latest_skeleton(struct gm_person &person,
+                       InferredJoints *joints)
 {
-    struct gm_context *ctx = tracking->ctx;
-    uint64_t time_threshold = tracking->frame->timestamp -
+    struct gm_context *ctx = person.ctx;
+    uint64_t time_threshold = person.time_last_tracked -
         (uint64_t)((double)ctx->max_joint_refinement_delta * 1e9);
 
-    if (!ctx->joint_refinement || !ctx->n_tracking ||
-        ctx->tracking_history[0]->frame->timestamp < time_threshold) {
+    if (!ctx->joint_refinement || person.history.size() < 2 ||
+        person.history[1].timestamp < time_threshold) {
         return;
     }
 
     float joint_diff =
-        calc_cumulative_joint_difference(ctx, tracking->skeleton_corrected,
-                                         ctx->tracking_history[0]->
-                                         skeleton_corrected);
+        calc_cumulative_joint_difference(ctx, person.history[0].skeleton,
+                                         person.history[1].skeleton_corrected);
 
     // For each joint, we look at the cumulative distance between joints using
     // each joint cluster and if the distance is lower, we replace that joint
     // and continue.
     for (int j = 0; j < ctx->n_joints; ++j) {
-        if (!tracking->joints->joints[j] ||
-            !tracking->joints->joints[j]->next) {
+        if (!joints->joints[j] ||
+            !joints->joints[j]->next) {
             continue;
         }
 
-        for (LList *l = tracking->joints->joints[j]->next; l; l = l->next) {
+        for (LList *l = joints->joints[j]->next; l; l = l->next) {
             struct gm_skeleton candidate_skeleton = {};
 
             candidate_skeleton.ctx = ctx;
@@ -1640,16 +1723,16 @@ refine_skeleton(struct gm_tracking_impl *tracking)
             candidate_skeleton.joints[j].z = joint->z;
 
             copy_inferred_joints_to_skel_except(candidate_skeleton, // dest
-                                                tracking->joints, // src
+                                                joints, // src
                                                 j); // Don't overwrite this joint
             update_bones(ctx, candidate_skeleton);
 
             float cand_joint_diff =
                 calc_cumulative_joint_difference(ctx, candidate_skeleton,
-                                                 ctx->tracking_history[0]->
-                                                 skeleton_corrected);
+                                                 person.history[1].skeleton_corrected);
             if (cand_joint_diff <= joint_diff) {
-                std::swap(tracking->skeleton_corrected, candidate_skeleton);
+                std::swap(person.history[0].skeleton_corrected,
+                          candidate_skeleton);
                 joint_diff = cand_joint_diff;
             }
         }
@@ -1703,11 +1786,13 @@ is_bone_rotation_valid(struct gm_context *ctx,
 }
 
 static void
-sanitise_joint_velocities(struct gm_context *ctx,
+sanitise_joint_velocities(struct gm_person *person,
                           struct gm_skeleton &skeleton,
                           uint64_t timestamp,
                           uint64_t time_threshold)
 {
+    struct gm_context *ctx = person->ctx;
+
     if (!ctx->joint_velocity_sanitisation) {
         return;
     }
@@ -1716,8 +1801,8 @@ sanitise_joint_velocities(struct gm_context *ctx,
     // parent, we just have absolute position to look at, so we make sure it
     // hasn't moved too far too quickly and use the last good position if it
     // has.
-    struct gm_tracking_impl **prev = ctx->tracking_history;
     bool changed = false;
+    auto &history = person->history;
 
     for (int b = 0; b <= ctx->n_bones; ++b) {
         // When b == 0, look at the bone head joint, otherwise look at the tail
@@ -1736,11 +1821,11 @@ sanitise_joint_velocities(struct gm_context *ctx,
         // Find the last valid joint in history
         struct gm_joint &parent_joint = skeleton.joints[joint];
         struct gm_joint *prev_joint = NULL;
-        int n_prev = -1;
-        for (int i = 0; i < ctx->n_tracking; ++i) {
-            if (prev[i]->skeleton_corrected.joints[joint].valid) {
-                prev_joint = &prev[i]->skeleton_corrected.joints[joint];
-                n_prev = i;
+        int last_valid = -1;
+        for (int i = 0; i < history.size(); ++i) {
+            if (history[i].skeleton_corrected.joints[joint].valid) {
+                prev_joint = &history[i].skeleton_corrected.joints[joint];
+                last_valid = i;
                 break;
             }
         }
@@ -1752,7 +1837,7 @@ sanitise_joint_velocities(struct gm_context *ctx,
 
         // Calculate the current joint velocity and if it falls below a
         // particular threshold, don't bother with sanitisation
-        float time = (float)((timestamp - prev[n_prev]->frame->timestamp) / 1e9);
+        float time = (float)((timestamp - history[last_valid].timestamp) / 1e9);
         float velocity = distance_between(&parent_joint.x,
                                           &prev_joint->x) / time;
 
@@ -1761,21 +1846,21 @@ sanitise_joint_velocities(struct gm_context *ctx,
         }
 
         // Check the velocity of the joint at each previous tracking frame
-        float velocities[ctx->n_tracking - 1];
+        float velocities[history.size()];
         float avg_velocity = velocity;
         int n_velocities = 1;
-        for (int j = 0; j < ctx->n_tracking - 1; ++j) {
-            struct gm_joint &joint1 = prev[j]->skeleton.joints[joint];
-            struct gm_joint &joint2 = prev[j+1]->skeleton.joints[joint];
+        for (int j = 0; j < history.size() - 1; ++j) {
+            struct gm_joint &joint1 = history[j].skeleton.joints[joint];
+            struct gm_joint &joint2 = history[j+1].skeleton.joints[joint];
             if (!joint1.valid || !joint2.valid ||
-                prev[j+1]->frame->timestamp < time_threshold)
+                history[j+1].timestamp < time_threshold)
             {
                 velocities[j] = FLT_MAX;
                 continue;
             }
 
-            time = (float)((prev[j]->frame->timestamp -
-                            prev[j+1]->frame->timestamp) / 1e9);
+            time = (float)((history[j].timestamp -
+                            history[j+1].timestamp) / 1e9);
             velocities[j] = distance_between(&joint1.x,
                                              &joint2.x) / time;
             avg_velocity += velocities[j];
@@ -1786,14 +1871,14 @@ sanitise_joint_velocities(struct gm_context *ctx,
         // If this new joint is an outlier, use the last non-outlier position
         float outlier_threshold = avg_velocity * ctx->joint_outlier_factor;
         if (n_velocities > 1 && velocity > outlier_threshold) {
-            for (int j = 0; j < ctx->n_tracking - 1; ++j) {
+            for (int j = 0; j < history.size() - 1; ++j) {
                 if (velocities[j] <= outlier_threshold) {
                     gm_debug(ctx->log, "Bone joint (%s) average velocity: "
                              "%.2f, correction: %.2f -> %.2f",
                              ctx->joint_names[joint],
                              avg_velocity, velocity, velocities[j]);
                     struct gm_joint &prev_joint =
-                        prev[j]->skeleton.joints[joint];
+                        history[j].skeleton.joints[joint];
 
                     bool canUseDisplacement = false;
                     if (b != 0) {
@@ -1801,7 +1886,7 @@ sanitise_joint_velocities(struct gm_context *ctx,
                         // has it as a tail and use the displacement instead of
                         // the absolute position.
                         if (skeleton.joints[bone->head].valid &&
-                            prev[j]->skeleton.joints[bone->head].valid) {
+                            history[j].skeleton.joints[bone->head].valid) {
                             canUseDisplacement = true;
                         }
                     }
@@ -1810,7 +1895,7 @@ sanitise_joint_velocities(struct gm_context *ctx,
                         struct gm_joint &head_joint =
                             skeleton.joints[bone->head];
                         struct gm_joint &prev_head_joint =
-                            prev[j]->skeleton.joints[bone->head];
+                            history[j].skeleton.joints[bone->head];
                         parent_joint.x =
                             head_joint.x + (prev_joint.x - prev_head_joint.x);
                         parent_joint.y =
@@ -1839,15 +1924,17 @@ sanitise_joint_velocities(struct gm_context *ctx,
 }
 
 static void
-sanitise_bone_lengths(struct gm_context *ctx,
+sanitise_bone_lengths(struct gm_person *person,
                       struct gm_skeleton &skeleton,
                       uint64_t time_threshold)
 {
+    struct gm_context *ctx = person->ctx;
+
     if (!ctx->bone_length_sanitisation) {
         return;
     }
 
-    struct gm_tracking_impl **prev = ctx->tracking_history;
+    auto &history = person->history;
 
     for (auto &bone : skeleton.bones) {
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
@@ -1862,12 +1949,12 @@ sanitise_bone_lengths(struct gm_context *ctx,
         // conforms.
         float avg_bone_length = bone.length;
         int n_lengths = 1;
-        for (int i = 0; i < ctx->n_tracking; ++i) {
-            if (prev[i]->frame->timestamp < time_threshold) {
+        for (int i = 0; i < history.size(); ++i) {
+            if (history[i].timestamp < time_threshold) {
                 break;
             }
             const struct gm_bone &prev_bone =
-                prev[i]->skeleton.bones[bone.idx];
+                history[i].skeleton.bones[bone.idx];
             if (ctx->use_bone_map_annotation) {
                 struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
                 if (bone.length < bone_info.min_length ||
@@ -1881,9 +1968,9 @@ sanitise_bone_lengths(struct gm_context *ctx,
         avg_bone_length /= n_lengths;
 
         if (!is_bone_length_valid(ctx, bone, avg_bone_length)) {
-            for (int i = 0; i < ctx->n_tracking; ++i) {
+            for (int i = 0; i < history.size(); ++i) {
                 struct gm_bone &prev_bone =
-                    prev[i]->skeleton.bones[bone.idx];
+                    history[i].skeleton.bones[bone.idx];
                 if (!is_bone_length_valid(ctx, prev_bone, avg_bone_length)) {
                     continue;
                 }
@@ -1920,15 +2007,17 @@ sanitise_bone_lengths(struct gm_context *ctx,
 }
 
 static void
-sanitise_bone_rotations(struct gm_context *ctx,
+sanitise_bone_rotations(struct gm_person *person,
                         struct gm_skeleton &skeleton,
                         uint64_t time_threshold)
 {
+    struct gm_context *ctx = person->ctx;
+
     if (!ctx->bone_rotation_sanitisation) {
         return;
     }
 
-    struct gm_tracking_impl **prev = ctx->tracking_history;
+    auto &history = person->history;
 
     for (auto &bone : skeleton.bones) {
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
@@ -1948,28 +2037,28 @@ sanitise_bone_rotations(struct gm_context *ctx,
         // Record which bones were derived from valid joints
         // If bone-map-annotation is being used, record bones as invalid if
         // their rotation doesn't lie within the annotated rotation constraints.
-        bool bone_validity[ctx->n_tracking];
-        for (int i = 0; i < ctx->n_tracking; ++i) {
-            if (!prev[i]->skeleton.joints[bone_info.head].valid ||
-                !prev[i]->skeleton.joints[bone_info.tail].valid ||
-                prev[i]->frame->timestamp < time_threshold)
+        bool bone_validity[history.size()];
+        for (int i = 0; i < history.size(); ++i) {
+            if (!history[i].skeleton.joints[bone_info.head].valid ||
+                !history[i].skeleton.joints[bone_info.tail].valid ||
+                history[i].timestamp < time_threshold)
             {
                 bone_validity[i] = false;
             } else {
-                struct gm_bone &prev_bone = prev[i]->skeleton.bones[bone.idx];
+                struct gm_bone &prev_bone = history[i].skeleton.bones[bone.idx];
                 bone_validity[i] = is_bone_rotation_valid(ctx, prev_bone);
             }
         }
 
         // Find the average rotation change magnitude
-        float bone_rots[ctx->n_tracking - 1];
+        float bone_rots[history.size() - 1];
         float bone_rot = fabsf(bone_angle_diff(ctx,
                                                &bone,
                                                &skeleton,
-                                               &prev[0]->skeleton));
+                                               &history[0].skeleton));
         float avg_bone_rot = bone_rot;
         int n_rots = 1;
-        for (int i = 0; i < ctx->n_tracking - 1; ++i) {
+        for (int i = 0; i < history.size() - 1; ++i) {
             if (!bone_validity[i] || !bone_validity[i + 1])
             {
               bone_rots[i] = 180.f;
@@ -1978,26 +2067,26 @@ sanitise_bone_rotations(struct gm_context *ctx,
 
             bone_rots[i] = fabsf(bone_angle_diff(ctx,
                                                  &bone,
-                                                 &prev[i]->skeleton,
-                                                 &prev[i+1]->skeleton));
+                                                 &history[i].skeleton,
+                                                 &history[i+1].skeleton));
             gm_assert(ctx->log, !std::isnan(bone_rots[i]),
                       "Bone (%s->%s) angle diff is NaN "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f) v "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f)",
                       ctx->joint_names[bone_info.head],
                       ctx->joint_names[bone_info.tail],
-                      prev[i]->skeleton.joints[bone_info.head].x,
-                      prev[i]->skeleton.joints[bone_info.head].y,
-                      prev[i]->skeleton.joints[bone_info.head].z,
-                      prev[i]->skeleton.joints[bone_info.tail].x,
-                      prev[i]->skeleton.joints[bone_info.tail].y,
-                      prev[i]->skeleton.joints[bone_info.tail].z,
-                      prev[i+1]->skeleton.joints[bone_info.head].x,
-                      prev[i+1]->skeleton.joints[bone_info.head].y,
-                      prev[i+1]->skeleton.joints[bone_info.head].z,
-                      prev[i+1]->skeleton.joints[bone_info.tail].x,
-                      prev[i+1]->skeleton.joints[bone_info.tail].y,
-                      prev[i+1]->skeleton.joints[bone_info.tail].z);
+                      history[i].skeleton.joints[bone_info.head].x,
+                      history[i].skeleton.joints[bone_info.head].y,
+                      history[i].skeleton.joints[bone_info.head].z,
+                      history[i].skeleton.joints[bone_info.tail].x,
+                      history[i].skeleton.joints[bone_info.tail].y,
+                      history[i].skeleton.joints[bone_info.tail].z,
+                      history[i+1].skeleton.joints[bone_info.head].x,
+                      history[i+1].skeleton.joints[bone_info.head].y,
+                      history[i+1].skeleton.joints[bone_info.head].z,
+                      history[i+1].skeleton.joints[bone_info.tail].x,
+                      history[i+1].skeleton.joints[bone_info.tail].y,
+                      history[i+1].skeleton.joints[bone_info.tail].z);
             avg_bone_rot += bone_rots[i];
             ++n_rots;
         }
@@ -2011,7 +2100,7 @@ sanitise_bone_rotations(struct gm_context *ctx,
         float bone_rot_factor = avg_bone_rot *
             ctx->bone_rotation_outlier_factor;
         if (bone_rot > bone_rot_factor || !is_bone_rotation_valid(ctx, bone)) {
-            for (int i = 0; i < ctx->n_tracking; ++i) {
+            for (int i = 0; i < history.size() - 1; ++i) {
                 if (bone_rots[i] > bone_rot_factor || !bone_validity[i]) {
                     continue;
                 }
@@ -2023,7 +2112,7 @@ sanitise_bone_rotations(struct gm_context *ctx,
                          avg_bone_rot, bone_rot, bone_rots[i]);
 
                 const struct gm_bone *abs_prev_bone =
-                    &ctx->tracking_history[i]->skeleton.bones[bone.idx];
+                    &history[i].skeleton.bones[bone.idx];
 
                 glm::mat3 rotate = glm::mat3_cast(abs_prev_bone->angle);
 
@@ -2053,25 +2142,21 @@ sanitise_bone_rotations(struct gm_context *ctx,
 }
 
 static void
-sanitise_skeleton(struct gm_context *ctx,
-                  struct gm_skeleton &skeleton,
-                  uint64_t timestamp)
+sanitise_skeleton(struct gm_person *person, struct skeleton_history &history)
 {
-    // We can't do any sanitisation without any tracking history
-    if (!ctx->n_tracking) {
-        return;
-    }
+    struct gm_context *ctx = person->ctx;
 
     // We can't do any sanitisation if the last tracking history item is too old
-    uint64_t time_threshold =
-        timestamp - (uint64_t)((double)ctx->sanitisation_window * 1e9);
-    if (ctx->tracking_history[0]->frame->timestamp < time_threshold) {
+    uint64_t time_threshold = person->time_last_tracked -
+        (uint64_t)((double)ctx->sanitisation_window * 1e9);
+    if (person->history[0].timestamp < time_threshold) {
         return;
     }
 
-    sanitise_joint_velocities(ctx, skeleton, timestamp, time_threshold);
-    sanitise_bone_lengths(ctx, skeleton, time_threshold);
-    sanitise_bone_rotations(ctx, skeleton, time_threshold);
+    struct gm_skeleton &skeleton = history.skeleton_corrected;
+    sanitise_joint_velocities(person, skeleton, history.timestamp, time_threshold);
+    sanitise_bone_lengths(person, skeleton, time_threshold);
+    sanitise_bone_rotations(person, skeleton, time_threshold);
 }
 
 template<typename PointT>
@@ -2269,8 +2354,6 @@ mem_pool_acquire_tracking(struct gm_mem_pool *pool)
 
     atomic_store(&tracking->base.ref, 1);
 
-    tracking->success = false;
-
     return tracking;
 }
 
@@ -2280,7 +2363,7 @@ tracking_state_free(struct gm_mem_pool *pool,
                     void *user_data)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
-    struct gm_context *ctx = tracking->ctx;
+    //struct gm_context *ctx = tracking->ctx;
 
     free(tracking->depth);
 
@@ -2288,11 +2371,6 @@ tracking_state_free(struct gm_mem_pool *pool,
 
     if (tracking->frame) {
         gm_frame_unref(tracking->frame);
-    }
-
-    if (tracking->joints) {
-        joints_inferrer_free_joints(ctx->joints_inferrer,
-                                    tracking->joints);
     }
 
     delete tracking;
@@ -2328,11 +2406,11 @@ tracking_state_recycle(struct gm_tracking *self)
     gm_frame_unref(tracking->frame);
     tracking->frame = NULL;
 
-    if (tracking->joints) {
-        joints_inferrer_free_joints(ctx->joints_inferrer,
-                                    tracking->joints);
-        tracking->joints = NULL;
+    for (auto &person : tracking->people) {
+        joints_inferrer_free_joints(ctx->joints_inferrer, person.joints);
     }
+    tracking->people.resize(0);
+    tracking->has_skeleton = false;
 
     for (auto string : tracking->debug_text) {
         free(string);
@@ -2379,19 +2457,11 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     tracking->pool = pool;
     tracking->ctx = ctx;
 
-    tracking->joints = NULL;
-
-    tracking->skeleton.ctx = ctx;
-    tracking->skeleton.joints.resize(ctx->n_joints);
-    tracking->skeleton.bones.clear();
-
     gm_assert(ctx->log, ctx->max_depth_pixels,
               "Undefined maximum number of depth pixels");
 
     tracking->depth = (float *)
       xcalloc(ctx->max_depth_pixels, sizeof(float));
-
-    tracking->label_probs.resize(ctx->max_depth_pixels);
 
     gm_assert(ctx->log, ctx->max_video_pixels,
               "Undefined maximum number of video pixels");
@@ -2450,6 +2520,9 @@ label_probs_to_rgb(struct gm_context *ctx,
     }
 }
 
+
+// TODO: Change this to either combine all people's rgb label maps or add API
+//       to retrieve the label map of a specific person.
 static bool
 tracking_create_rgb_label_map(struct gm_tracking *_tracking,
                               int *width_out, int *height_out, uint8_t **output)
@@ -2459,10 +2532,13 @@ tracking_create_rgb_label_map(struct gm_tracking *_tracking,
 
     uint8_t n_labels = ctx->n_labels;
 
-    int width = tracking->label_probs_width;
-    int height = tracking->label_probs_height;
+    if (tracking->people.empty())
+        return false;
 
-    if (tracking->label_probs.size() != width * height * n_labels)
+    int width = tracking->people.front().label_probs_width;
+    int height = tracking->people.front().label_probs_height;
+
+    if (tracking->people.front().label_probs.size() != width * height * n_labels)
         return false;
 
     *width_out = width;
@@ -2477,7 +2553,7 @@ tracking_create_rgb_label_map(struct gm_tracking *_tracking,
               ctx->debug_label);
 
     foreach_xy_off(width, height) {
-        float *label_probs = &tracking->label_probs[off * n_labels];
+        float *label_probs = &tracking->people.front().label_probs[off * n_labels];
 
         uint8_t rgb[3];
         label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
@@ -2959,25 +3035,28 @@ gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *_tracking)
     return &tracking->depth_camera_intrinsics;
 }
 
+// XXX Legacy API, remove once we expose gm_person
 bool
 gm_tracking_has_skeleton(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->success;
+    return tracking->has_skeleton;
 }
 
+// XXX Legacy API, remove once we expose gm_person
 const struct gm_skeleton *
 gm_tracking_get_skeleton(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->success ? &tracking->skeleton_corrected : NULL;
+    return &tracking->skeleton_corrected;
 }
 
+// XXX Legacy API, remove once we expose gm_person
 const struct gm_skeleton *
 gm_tracking_get_raw_skeleton(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->success ? &tracking->skeleton : NULL;
+    return &tracking->skeleton;
 }
 
 const struct gm_point_rgba *
@@ -3146,12 +3225,12 @@ gm_tracking_get_timestamp(struct gm_tracking *_tracking)
     return tracking->frame->timestamp;
 }
 
+// XXX Legacy API, remove once we expose gm_person
 bool
 gm_tracking_was_successful(struct gm_tracking *_tracking)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-
-    return tracking->success;
+    return tracking->has_skeleton;
 }
 
 static struct gm_prediction_impl *
@@ -3174,7 +3253,7 @@ prediction_free(struct gm_mem_pool *pool,
 {
     struct gm_prediction_impl *prediction = (struct gm_prediction_impl *)self;
 
-    gm_assert(prediction->ctx->log, prediction->n_tracking == 0,
+    gm_assert(prediction->ctx->log, prediction->history.size() == 0,
               "Freeing prediction that has tracking references");
 
     delete prediction;
@@ -3189,12 +3268,7 @@ prediction_recycle(struct gm_prediction *self)
     gm_assert(prediction->ctx->log, atomic_load(&prediction->base.ref) == 0,
               "Unbalanced prediction unref");
 
-    for (int i = 0; i < prediction->n_tracking; ++i) {
-        gm_tracking_unref((struct gm_tracking *)
-                          prediction->tracking_history[i]);
-    }
-    prediction->n_tracking = 0;
-
+    prediction->history.clear();
     prediction->trail.clear();
 
     mem_pool_recycle_resource(pool, prediction);
@@ -3235,7 +3309,6 @@ prediction_alloc(struct gm_mem_pool *pool, void *user_data)
     prediction->pool = pool;
 
     prediction->ctx = ctx;
-    prediction->n_tracking = 0;
 
     return (void *)prediction;
 }
@@ -3906,53 +3979,58 @@ colour_debug_cloud(struct gm_context *ctx,
     case DEBUG_CLOUD_MODE_LABELS:
         if (state->done_label_inference &&
             indices.size() &&
-            state->best_person_cluster >= 0 &&
-            tracking->label_probs.size())
+            tracking->people.size())
         {
             int n_labels = ctx->n_labels;
 
             int cloud_width_2d = indexed_pcl_cloud->width;
             //int cloud_height_2d = indexed_pcl_cloud->height;
 
-            std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-            std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+            for (auto &person_data : state->people) {
+                InferredPerson &person = person_data.first;
+                int person_cluster = person_data.second;
 
-            gm_assert(ctx->log, state->best_person_cluster >= 0,
-                      "No person best person cluster determined");
+                struct candidate_cluster &cluster =
+                    state->person_clusters[person_cluster];
 
-            struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-            //std::vector<int> &best_indices = cluster_indices[cluster.label].indices;
+                int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+                int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
 
-            int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
-            int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+                std::vector<float> &person_label_probs = person.label_probs;
 
-            gm_assert(ctx->log,
-                      (cluster_width_2d * cluster_height_2d * n_labels ==
-                       tracking->label_probs.size()),
-                      "Cluster bounds don't corresponds with size of label_probs array");
+                gm_assert(ctx->log,
+                          (cluster_width_2d * cluster_height_2d * n_labels ==
+                           person_label_probs.size()),
+                          "Cluster bounds don't corresponds with size of label_probs array");
 
-            for (int i = 0; i < indices.size(); i++) {
-                int idx = indices[i];
-                int x = idx % cloud_width_2d;
-                int y = idx / cloud_width_2d;
-                int cluster_x = x - cluster.min_x_2d;
-                int cluster_y = y - cluster.min_y_2d;
+                for (int i = 0; i < indices.size(); i++) {
+                    int idx = indices[i];
+                    int x = idx % cloud_width_2d;
+                    int y = idx / cloud_width_2d;
 
-                if (cluster_x < 0 || cluster_x >= cluster_width_2d ||
-                    cluster_y < 0 || cluster_y >= cluster_height_2d)
-                {
-                    continue;
+                    int cluster_x = x - cluster.min_x_2d;
+                    int cluster_y = y - cluster.min_y_2d;
+
+                    if (cluster_x < 0 || cluster_x >= cluster_width_2d ||
+                        cluster_y < 0 || cluster_y >= cluster_height_2d)
+                    {
+                        continue;
+                    }
+
+                    int cluster_idx = cluster_width_2d * cluster_y + cluster_x;
+
+                    float *label_probs = &person_label_probs[cluster_idx * n_labels];
+                    uint8_t rgb[3];
+                    label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
+                    debug_cloud[i].rgba += (((uint32_t)rgb[0])<<24 |
+                                            ((uint32_t)rgb[1])<<16 |
+                                            ((uint32_t)rgb[2])<<8 |
+                                            0xff);
                 }
 
-                int cluster_idx = cluster_width_2d * cluster_y + cluster_x;
-
-                float *label_probs = &tracking->label_probs[cluster_idx * n_labels];
-                uint8_t rgb[3];
-                label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
-                debug_cloud[i].rgba = (((uint32_t)rgb[0])<<24 |
-                                       ((uint32_t)rgb[1])<<16 |
-                                       ((uint32_t)rgb[2])<<8 |
-                                       0xff);
+                if (state->debug_cloud_focus == DEBUG_CLOUD_FOCUS_BEST) {
+                    break;
+                }
             }
         } else {
             gm_warn(ctx->log, "No labels to colour debug cloud with");
@@ -4495,7 +4573,7 @@ stage_codebook_retire_cb(struct gm_tracking_impl *tracking,
     uint64_t since_tracked_duration =
         frame_timestamp - ctx->last_tracking_success_timestamp;
 
-    if (!ctx->latest_tracking || !ctx->latest_tracking->success)
+    if (!tracking->has_skeleton)
     {
         if (frame_timestamp - ctx->codebook_last_clear_timestamp > clear_timeout &&
             since_tracked_duration > clear_timeout)
@@ -5014,10 +5092,159 @@ cluster_codebook_classified_points(
     }
 }
 
+static int
+get_closest_skeleton_history(std::deque<skeleton_history> &history, uint64_t timestamp)
+{
+    int closest_frame = 0;
+    uint64_t closest_diff = UINT64_MAX;
+    for (int i = 0; i < history.size(); ++i) {
+        uint64_t &t1 = history[i].timestamp;
+        uint64_t diff = (t1 > timestamp) ?
+            (t1 - timestamp) : (timestamp - t1);
+        if (diff < closest_diff) {
+            closest_diff = diff;
+            closest_frame = i;
+        } else {
+            break;
+        }
+    }
+    return closest_frame;
+}
+
+static struct gm_prediction *
+gm_context_get_prediction_for_person(struct gm_context *ctx,
+                                     uint64_t timestamp,
+                                     struct gm_person *person)
+{
+    struct gm_prediction_impl *prediction =
+        mem_pool_acquire_prediction(ctx->prediction_pool);
+
+    // Copy the current skeleton history from the person
+    pthread_mutex_lock(&ctx->people_modify_mutex);
+
+    prediction->history.insert(prediction->history.begin(),
+                               person->history.begin(),
+                               person->history.end());
+
+    pthread_mutex_unlock(&ctx->people_modify_mutex);
+
+    // Pre-fill the skeleton with the closest history
+    int closest =
+        get_closest_skeleton_history(prediction->history, timestamp);
+    struct gm_skeleton &closest_skeleton =
+        prediction->history[closest].skeleton_corrected;
+    prediction->skeleton = closest_skeleton;
+
+    if (ctx->prediction_dampen_large_deltas) {
+        timestamp = calculate_decayed_timestamp(
+            prediction->history[closest].timestamp,
+            timestamp, ctx->max_prediction_delta, ctx->prediction_decay);
+    }
+    prediction->timestamp = timestamp;
+
+    uint64_t closest_timestamp =
+        prediction->history[closest].timestamp;
+    if (timestamp == closest_timestamp || prediction->history.size() <= 1) {
+        prediction->h1 = closest;
+        prediction->h2 = -1;
+        return &prediction->base;
+    }
+
+    // Work out the two nearest frames and the interpolation value
+    int h1;
+    bool interpolate_angles = ctx->prediction_interpolate_angles;
+    if (timestamp > closest_timestamp) {
+        if (closest == 0) {
+            h1 = 0;
+            interpolate_angles = false;
+        } else {
+            h1 = closest - 1;
+        }
+    } else {
+        if (closest == prediction->history.size() - 1) {
+            h1 = closest - 1;
+            interpolate_angles = false;
+        } else {
+            h1 = closest;
+        }
+    }
+    int h2 = h1 + 1;
+
+    prediction->h1 = h1;
+    prediction->h2 = h2;
+
+    struct skeleton_history &history1 = prediction->history[h1];
+    struct skeleton_history &history2 = prediction->history[h2];
+    float t = (timestamp - history2.timestamp) /
+              (float)(history1.timestamp - history2.timestamp);
+
+    int n_bones = ctx->n_bones;
+
+    for (int b = 0; b < n_bones; b++) {
+        struct gm_bone &bone = closest_skeleton.bones[b];
+        struct gm_bone_info &bone_info = ctx->bone_info[b];
+
+        if (!history2.skeleton_corrected.bones[b].valid ||
+            !history1.skeleton_corrected.bones[b].valid) {
+            continue;
+        }
+
+        // As a special case; use linear interpolation to place the root bone
+        if (bone_info.parent < 0 || !interpolate_angles)
+        {
+            interpolate_joints(
+                history2.skeleton_corrected.joints[bone_info.head],
+                history1.skeleton_corrected.joints[bone_info.head],
+                t, prediction->skeleton.joints[bone_info.head]);
+            interpolate_joints(
+                history2.skeleton_corrected.joints[bone_info.tail],
+                history1.skeleton_corrected.joints[bone_info.tail],
+                t, prediction->skeleton.joints[bone_info.tail]);
+            continue;
+        }
+
+        struct gm_bone &parent_bone = closest_skeleton.bones[bone_info.parent];
+        struct gm_bone_info &parent_bone_info = ctx->bone_info[parent_bone.idx];
+
+        struct gm_bone &bone1 = history1.skeleton_corrected.bones[bone.idx];
+        struct gm_bone &bone2 = history2.skeleton_corrected.bones[bone.idx];
+
+        // Find the angle to rotate the parent bone. Note, we're relying
+        // on bones being stored in an order where we can rely on the
+        // bone's parent being seen before any descendants.
+        glm::mat3 rotate = glm::mat3_cast(
+            glm::slerp(bone2.angle, bone1.angle, t));
+
+        struct gm_joint &parent_head =
+            prediction->skeleton.joints[parent_bone_info.head];
+        struct gm_joint &parent_tail =
+            prediction->skeleton.joints[parent_bone_info.tail];
+
+        glm::vec3 parent_vec = glm::normalize(
+            glm::vec3(parent_tail.x - parent_head.x,
+                      parent_tail.y - parent_head.y,
+                      parent_tail.z - parent_head.z));
+        float length = bone2.length +
+            (bone1.length - bone2.length) * t;
+        glm::vec3 new_tail = ((parent_vec * rotate) * length);
+        new_tail.x += prediction->skeleton.joints[bone_info.head].x;
+        new_tail.y += prediction->skeleton.joints[bone_info.head].y;
+        new_tail.z += prediction->skeleton.joints[bone_info.head].z;
+
+        prediction->skeleton.joints[bone_info.tail].x = new_tail.x;
+        prediction->skeleton.joints[bone_info.tail].y = new_tail.y;
+        prediction->skeleton.joints[bone_info.tail].z = new_tail.z;
+    }
+
+    update_bones(ctx, prediction->skeleton);
+
+    return &prediction->base;
+}
+
 static void
 get_prev_cluster_positions(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state,
-                           std::list<struct PointCmp> &points)
+                           std::vector<std::list<struct PointCmp>> &points)
 {
     struct gm_context *ctx = tracking->ctx;
 
@@ -5025,98 +5252,157 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
         return;
     }
 
-    uint64_t earliest_time = tracking->frame->timestamp -
-        (uint64_t)((double)ctx->cluster_from_prev_time_threshold * 1e9);
-
-    if (ctx->tracking_history[0]->frame->timestamp < earliest_time) {
-        return;
-    }
+    points.clear();
+    points.resize(ctx->tracked_people.size());
 
     int cluster_bounds = ctx->cluster_from_prev_bounds;
     bool use_prediction = ctx->cluster_from_prev_use_prediction;
 
-    struct gm_prediction *prediction = use_prediction ?
-        gm_context_get_prediction(ctx, tracking->frame->timestamp) : NULL;
+    uint64_t earliest_time = tracking->frame->timestamp -
+        (uint64_t)((double)ctx->cluster_from_prev_time_threshold * 1e9);
 
-    for (int j = 0; j < ctx->n_joints; ++j) {
-        struct gm_joint *joint =
-            &ctx->tracking_history[0]->skeleton_corrected.joints[j];
-        if (!joint->valid) {
+    int id = -1;
+    for (auto &person : ctx->tracked_people) {
+        ++id;
+        if (person.history[0].timestamp < earliest_time) {
             continue;
         }
 
-        // Project the joint position into the space of the old frame and
-        // record the depth.
-        float ox, oy;
-        struct gm_intrinsics *old_intrinsics =
-            &ctx->tracking_history[0]->downsampled_intrinsics;
+        struct gm_prediction *prediction = use_prediction ?
+            gm_context_get_prediction_for_person(
+                ctx, tracking->frame->timestamp, &person) : NULL;
 
-        project_point(&joint->x, old_intrinsics, &ox, &oy);
+        for (int j = 0; j < ctx->n_joints; ++j) {
+            struct gm_joint *joint =
+                &person.history[0].skeleton_corrected.joints[j];
+            if (!joint->valid) {
+                continue;
+            }
 
-        // Check that this pixel lies within the image (it should be very rare
-        // that it doesn't, but it is possible for corrected joint positions)
-        int dox = ox;
-        int doy = oy;
-        if (dox < 0 || dox >= old_intrinsics->width ||
-            doy < 0 || doy >= old_intrinsics->height)
-        {
-            continue;
+            // TODO: We're assuming intrinsics haven't changed here, we should
+            //       either handle changing intrinsics or clear tracking when
+            //       they change.
+            struct gm_intrinsics *intrinsics = &tracking->downsampled_intrinsics;
+
+            // Project the joint position into the space of the frame and
+            // record the depth.
+            float ox, oy;
+            project_point(&joint->x, intrinsics, &ox, &oy);
+
+            // Check that this pixel lies within the image (it should be very
+            // rare that it doesn't, but it is possible for corrected or
+            // predicted joint positions)
+            int dox = ox;
+            int doy = oy;
+            if (dox < 0 || dox >= intrinsics->width ||
+                doy < 0 || doy >= intrinsics->height)
+            {
+                continue;
+            }
+
+            float od = ctx->tracking_history[0]->downsampled_cloud->
+                points[doy * intrinsics->width + dox].z;
+
+            // Project the joint position into the space of the new frame.
+            // Use a predicted position instead of the old position if that feature
+            // is enabled and we were able to get a prediction.
+            if (prediction) {
+                struct gm_skeleton *skeleton =
+                    gm_prediction_get_skeleton(prediction);
+                if (skeleton->joints[j].valid) {
+                    joint = &skeleton->joints[j];
+                }
+            }
+
+            float nx, ny;
+            project_point(&joint->x, intrinsics, &nx, &ny);
+            int dnx = nx;
+            int dny = ny;
+
+            // Do a bounding box search for a pixel that lies within the depth
+            // bounds and add that as a point to cluster from.
+            bool found = false;
+            for (int i = 0; i <= cluster_bounds && !found; ++i) {
+                for (int y = dny - i; y <= dny + i && !found; ++y) {
+                    if (y < 0 || y >= intrinsics->height) {
+                        continue;
+                    }
+                    for (int x = dnx - i; x <= dnx + i && !found; ++x) {
+                        if (y != dny - i && y != dny + i &&
+                            x != dnx - i && x != dnx + i)
+                        {
+                            continue;
+                        }
+                        if (x < 0 || x >= intrinsics->width) {
+                            continue;
+                        }
+                        float nd = tracking->downsampled_cloud->
+                            points[y * intrinsics->width + x].z;
+                        float diff = fabsf(od - nd);
+                        if (diff <= ctx->cluster_from_prev_dist_threshold) {
+                            points[id].push_back({x, y, x, y});
+                            found = true;
+                        }
+                    }
+                }
+            }
         }
 
-        float od = ctx->tracking_history[0]->downsampled_cloud->
-            points[doy * old_intrinsics->width + dox].z;
-
-        // Project the joint position into the space of the new frame.
-        // Use a predicted position instead of the old position if that feature
-        // is enabled and we were able to get a prediction.
         if (prediction) {
-            struct gm_skeleton *skeleton =
-                gm_prediction_get_skeleton(prediction);
-            if (skeleton->joints[j].valid) {
-                joint = &skeleton->joints[j];
-            }
-        }
-
-        float nx, ny;
-        struct gm_intrinsics *new_intrinsics =
-            &tracking->downsampled_intrinsics;
-
-        project_point(&joint->x, new_intrinsics, &nx, &ny);
-        int dnx = nx;
-        int dny = ny;
-
-        // Do a bounding box search for a pixel that lies within the depth
-        // bounds and add that as a point to cluster from.
-        bool found = false;
-        for (int i = 0; i <= cluster_bounds && !found; ++i) {
-            for (int y = dny - i; y <= dny + i && !found; ++y) {
-                if (y < 0 || y >= new_intrinsics->height) {
-                    continue;
-                }
-                for (int x = dnx - i; x <= dnx + i && !found; ++x) {
-                    if (y != dny - i && y != dny + i &&
-                        x != dnx - i && x != dnx + i)
-                    {
-                        continue;
-                    }
-                    if (x < 0 || x >= new_intrinsics->width) {
-                        continue;
-                    }
-                    float nd = tracking->downsampled_cloud->
-                        points[y * new_intrinsics->width + x].z;
-                    float diff = fabsf(od - nd);
-                    if (diff <= ctx->cluster_from_prev_dist_threshold) {
-                        points.push_back({x, y, x, y});
-                        found = true;
-                    }
-                }
-            }
+            gm_prediction_unref(prediction);
         }
     }
+}
 
-    if (prediction) {
-        gm_prediction_unref(prediction);
-    }
+static inline void
+update_candidate_bounds(candidate_cluster *cluster,
+                        int x, int y, pcl::PointXYZL &point)
+{
+    if (x > cluster->max_x_2d)
+        cluster->max_x_2d = x;
+    if (x < cluster->min_x_2d)
+        cluster->min_x_2d = x;
+    if (y > cluster->max_y_2d)
+        cluster->max_y_2d = y;
+    if (y < cluster->min_y_2d)
+        cluster->min_y_2d = y;
+
+    if (point.x > cluster->max_x)
+        cluster->max_x = point.x;
+    if (point.x < cluster->min_x)
+        cluster->min_x = point.x;
+    if (point.y > cluster->max_y)
+        cluster->max_y = point.y;
+    if (point.y < cluster->min_y)
+        cluster->min_y = point.y;
+    if (point.z > cluster->max_z)
+        cluster->max_z = point.z;
+    if (point.z < cluster->min_z)
+        cluster->min_z = point.z;
+}
+
+static void
+merge_clusters(std::vector<pcl::PointIndices> &cluster_indices,
+               candidate_cluster *from,
+               candidate_cluster *into)
+{
+    cluster_indices[into->label].indices.insert(
+        cluster_indices[into->label].indices.end(),
+        cluster_indices[from->label].indices.begin(),
+        cluster_indices[from->label].indices.end());
+    cluster_indices[from->label].indices.clear();
+
+    into->min_x_2d = std::min(from->min_x_2d, into->min_x_2d);
+    into->min_y_2d = std::min(from->min_y_2d, into->min_y_2d);
+    into->max_x_2d = std::max(from->max_x_2d, into->max_x_2d);
+    into->max_y_2d = std::max(from->max_y_2d, into->max_y_2d);
+
+    into->min_x = std::min(from->min_x, into->min_x);
+    into->min_y = std::min(from->min_y, into->min_y);
+    into->min_z = std::min(from->min_z, into->min_z);
+    into->max_x = std::max(from->max_x, into->max_x);
+    into->max_y = std::max(from->max_y, into->max_y);
+    into->max_z = std::max(from->max_z, into->max_z);
 }
 
 static void
@@ -5166,28 +5452,7 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                 pcl::PointXYZL &point = pcl_cloud->points[i];
                 int x = i % width;
                 int y = i / width;
-
-                if (x > large_label.max_x_2d)
-                    large_label.max_x_2d = x;
-                if (x < large_label.min_x_2d)
-                    large_label.min_x_2d = x;
-                if (y > large_label.max_y_2d)
-                    large_label.max_y_2d = y;
-                if (y < large_label.min_y_2d)
-                    large_label.min_y_2d = y;
-
-                if (point.x > large_label.max_x)
-                    large_label.max_x = point.x;
-                if (point.x < large_label.min_x)
-                    large_label.min_x = point.x;
-                if (point.y > large_label.max_y)
-                    large_label.max_y = point.y;
-                if (point.y < large_label.min_y)
-                    large_label.min_y = point.y;
-                if (point.z > large_label.max_z)
-                    large_label.max_z = point.z;
-                if (point.z < large_label.min_z)
-                    large_label.min_z = point.z;
+                update_candidate_bounds(&large_label, x, y, point);
 
                 if (x == 0 || y == 0)
                     continue;
@@ -5218,27 +5483,7 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                     int x = i % width;
                     int y = i / width;
 
-                    if (x > large_label.max_x_2d)
-                        large_label.max_x_2d = x;
-                    if (x < large_label.min_x_2d)
-                        large_label.min_x_2d = x;
-                    if (y > large_label.max_y_2d)
-                        large_label.max_y_2d = y;
-                    if (y < large_label.min_y_2d)
-                        large_label.min_y_2d = y;
-
-                    if (point.x > large_label.max_x)
-                        large_label.max_x = point.x;
-                    if (point.x < large_label.min_x)
-                        large_label.min_x = point.x;
-                    if (point.y > large_label.max_y)
-                        large_label.max_y = point.y;
-                    if (point.y < large_label.min_y)
-                        large_label.min_y = point.y;
-                    if (point.z > large_label.max_z)
-                        large_label.max_z = point.z;
-                    if (point.z < large_label.min_z)
-                        large_label.min_z = point.z;
+                    update_candidate_bounds(&large_label, x, y, point);
 
                     cluster.indices.push_back(i);
                 }
@@ -5266,27 +5511,7 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                 int x = i % width;
                 int y = i / width;
 
-                if (x > large_label.max_x_2d)
-                    large_label.max_x_2d = x;
-                if (x < large_label.min_x_2d)
-                    large_label.min_x_2d = x;
-                if (y > large_label.max_y_2d)
-                    large_label.max_y_2d = y;
-                if (y < large_label.min_y_2d)
-                    large_label.min_y_2d = y;
-
-                if (point.x > large_label.max_x)
-                    large_label.max_x = point.x;
-                if (point.x < large_label.min_x)
-                    large_label.min_x = point.x;
-                if (point.y > large_label.max_y)
-                    large_label.max_y = point.y;
-                if (point.y < large_label.min_y)
-                    large_label.min_y = point.y;
-                if (point.z > large_label.max_z)
-                    large_label.max_z = point.z;
-                if (point.z < large_label.min_z)
-                    large_label.min_z = point.z;
+                update_candidate_bounds(&large_label, x, y, point);
             }
 
             gm_assert(ctx->log, large_label.max_x_2d != -1 && large_label.max_y_2d != -1,
@@ -5350,11 +5575,7 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
                                             (int)other_indices.indices.size(),
                                             current_cluster.label,
                                             (int)current_indices.indices.size());
-
-                   for (int i : other_indices.indices) {
-                       current_indices.indices.push_back(i);
-                   }
-                   other_indices.indices.clear();
+                    merge_clusters(cluster_indices, &other_cluster, &current_cluster);
                 }
             }
         }
@@ -5363,42 +5584,59 @@ stage_codebook_cluster_cb(struct gm_tracking_impl *tracking,
     // Merge clusters that contain old joint positions.
     // We assume that even if a human cluster is split, that each component
     // cluster is still going to be at least as big as a 'large' cluster.
-    std::list<struct PointCmp> old_joint_positions;
+    std::vector<std::list<struct PointCmp>> old_joint_positions;
     get_prev_cluster_positions(tracking, state, old_joint_positions);
 
-    bool label_set = false;
-    unsigned merge_label = 0;
+    std::vector<std::pair<bool, candidate_cluster*>>
+        prev_labels(old_joint_positions.size());
     for (auto &large_cluster : large_clusters) {
         if (old_joint_positions.empty()) {
             break;
         }
         auto &cluster = cluster_indices[large_cluster.label];
-        bool label_found = false;
+        int found_positions_idx = -1;
         for (int i : cluster.indices) {
             int x = i % width;
             int y = i / width;
-            for (auto iter = old_joint_positions.begin();
-                 iter != old_joint_positions.end(); ++iter)
-            {
-                struct PointCmp &point = *iter;
-                if (point.x == x && point.y == y) {
-                    label_found = true;
-                    if (!label_set) {
-                        merge_label = large_cluster.label;
-                        label_set = true;
+
+            // For each tracked person, try to see if this cluster coincides
+            // with any of the previous joint positions. We merge any clouds
+            // that contain the same person's points.
+            for (int p = 0; p < old_joint_positions.size(); ++p) {
+                if (found_positions_idx >= 0 && p != found_positions_idx) {
+                    continue;
+                }
+
+                for (auto iter = old_joint_positions[p].begin();
+                     iter != old_joint_positions[p].end(); ++iter)
+                {
+                    struct PointCmp &point = *iter;
+                    if (point.x == x && point.y == y) {
+                        found_positions_idx = p;
+
+                        // Check if we've found any of the points for this
+                        // person before and if not, set a cloud cluster
+                        // label to merge with.
+                        if (!prev_labels[p].first) {
+                            prev_labels[p].second = &large_cluster;
+                            prev_labels[p].first = true;
+                        }
+
+                        // We've found this point now, so no need to look for
+                        // it again.
+                        old_joint_positions[p].erase(iter);
+                        break;
                     }
-                    old_joint_positions.erase(iter);
-                    break;
                 }
             }
         }
 
-        if (label_found && large_cluster.label != merge_label) {
-            cluster_indices[merge_label].indices.insert(
-                cluster_indices[merge_label].indices.end(),
-                cluster.indices.begin(),
-                cluster.indices.end());
-            cluster.indices.clear();
+        if (found_positions_idx >= 0 &&
+            prev_labels[found_positions_idx].second->label !=
+            large_cluster.label)
+        {
+            merge_clusters(cluster_indices, &large_cluster,
+                           prev_labels[found_positions_idx].second);
         }
     }
 
@@ -5658,99 +5896,103 @@ stage_naive_cluster_cb(struct gm_tracking_impl *tracking,
 
     float lowest_point = state->naive_floor_y;
 
-    std::list<struct PointCmp> &flood_fill = state->flood_fill;
-    get_prev_cluster_positions(tracking, state, flood_fill);
-    if (flood_fill.empty()) {
+    std::vector<std::list<struct PointCmp>> flood_fill_candidates;
+    get_prev_cluster_positions(tracking, state, flood_fill_candidates);
+    if (flood_fill_candidates.empty()) {
+        std::list<struct PointCmp> center_flood;
         int fx = state->naive_fx;
         int fy = state->naive_fy;
-        flood_fill.push_back({ fx, fy, fx, fy });
+        center_flood.push_back({fx, fy, fx, fy});
+        flood_fill_candidates.push_back(center_flood);
     }
 
     std::vector<bool> &done_mask = state->done_mask;
-    std::fill(done_mask.begin(), done_mask.end(), false);
+    for (auto &flood_fill : flood_fill_candidates) {
+        std::fill(done_mask.begin(), done_mask.end(), false);
 
-    struct candidate_cluster person_cluster = {};
-    pcl::PointIndices person_indices;
+        struct candidate_cluster person_cluster = {};
+        pcl::PointIndices person_indices;
 
-    while (!flood_fill.empty()) {
-        struct PointCmp point = flood_fill.front();
-        flood_fill.pop_front();
+        while (!flood_fill.empty()) {
+            struct PointCmp point = flood_fill.front();
+            flood_fill.pop_front();
 
-        int idx = point.y * width + point.x;
+            int idx = point.y * width + point.x;
 
-        if (point.x < 0 || point.y < 0 ||
-            point.x >= width || point.y >= height ||
-            done_mask[idx]) {
-            continue;
-        }
+            if (point.x < 0 || point.y < 0 ||
+                point.x >= width || point.y >= height ||
+                done_mask[idx]) {
+                continue;
+            }
 
-        pcl::PointXYZL &pcl_pt = tracking->downsampled_cloud->points[idx];
-        if (pcl_pt.label == CODEBOOK_CLASS_EDGE_DETECT_REMOVED) {
-            continue;
-        }
+            pcl::PointXYZL &pcl_pt = tracking->downsampled_cloud->points[idx];
+            if (pcl_pt.label == CODEBOOK_CLASS_EDGE_DETECT_REMOVED) {
+                continue;
+            }
 
-        float aligned_y = tracking->ground_cloud->size() ?
-            tracking->ground_cloud->points[idx].y : pcl_pt.y;
-        if (aligned_y < lowest_point + ctx->floor_threshold) {
-            continue;
-        }
+            float aligned_y = tracking->ground_cloud->size() ?
+                tracking->ground_cloud->points[idx].y : pcl_pt.y;
+            if (aligned_y < lowest_point + ctx->floor_threshold) {
+                continue;
+            }
 
-        if (compare_point_depths(tracking->downsampled_cloud,
-                                 point.x, point.y, point.lx, point.ly,
-                                 ctx->cluster_tolerance))
-        {
-            if (point.x > person_cluster.max_x_2d)
-                person_cluster.max_x_2d = point.x;
-            if (point.x < person_cluster.min_x_2d)
-                person_cluster.min_x_2d = point.x;
-            if (point.y > person_cluster.max_y_2d)
-                person_cluster.max_y_2d = point.y;
-            if (point.y < person_cluster.min_y_2d)
-                person_cluster.min_y_2d = point.y;
-
-            if (pcl_pt.x > person_cluster.max_x)
-                person_cluster.max_x = pcl_pt.x;
-            if (pcl_pt.x < person_cluster.min_x)
-                person_cluster.min_x = pcl_pt.x;
-            if (pcl_pt.y > person_cluster.max_y)
-                person_cluster.max_y = pcl_pt.y;
-            if (pcl_pt.y < person_cluster.min_y)
-                person_cluster.min_y = pcl_pt.y;
-            if (pcl_pt.z > person_cluster.max_z)
-                person_cluster.max_z = pcl_pt.z;
-            if (pcl_pt.z < person_cluster.min_z)
-                person_cluster.min_z = pcl_pt.z;
-
-            person_indices.indices.push_back(idx);
-            done_mask[idx] = true;
-
-            flood_fill.push_back({ point.x - 1, point.y, point.x, point.y });
-            flood_fill.push_back({ point.x + 1, point.y, point.x, point.y });
-            flood_fill.push_back({ point.x, point.y - 1, point.x, point.y });
-            flood_fill.push_back({ point.x, point.y + 1, point.x, point.y });
-
-            // TODO: move outside loop, and instead iterate flood_fill
-            //       list when done
-            if (debug_stage_id == TRACKING_STAGE_NAIVE_CLUSTER &&
-                state->debug_cloud_mode)
+            if (compare_point_depths(tracking->downsampled_cloud,
+                                     point.x, point.y, point.lx, point.ly,
+                                     ctx->cluster_tolerance))
             {
-                struct gm_point_rgba debug_point;
+                if (point.x > person_cluster.max_x_2d)
+                    person_cluster.max_x_2d = point.x;
+                if (point.x < person_cluster.min_x_2d)
+                    person_cluster.min_x_2d = point.x;
+                if (point.y > person_cluster.max_y_2d)
+                    person_cluster.max_y_2d = point.y;
+                if (point.y < person_cluster.min_y_2d)
+                    person_cluster.min_y_2d = point.y;
 
-                debug_point.x = pcl_pt.x;
-                debug_point.y = pcl_pt.y;
-                debug_point.z = pcl_pt.z;
-                debug_point.rgba = 0xffffffff;
+                if (pcl_pt.x > person_cluster.max_x)
+                    person_cluster.max_x = pcl_pt.x;
+                if (pcl_pt.x < person_cluster.min_x)
+                    person_cluster.min_x = pcl_pt.x;
+                if (pcl_pt.y > person_cluster.max_y)
+                    person_cluster.max_y = pcl_pt.y;
+                if (pcl_pt.y < person_cluster.min_y)
+                    person_cluster.min_y = pcl_pt.y;
+                if (pcl_pt.z > person_cluster.max_z)
+                    person_cluster.max_z = pcl_pt.z;
+                if (pcl_pt.z < person_cluster.min_z)
+                    person_cluster.min_z = pcl_pt.z;
 
-                tracking->debug_cloud.push_back(debug_point);
-                tracking->debug_cloud_indices.push_back(idx);
+                person_indices.indices.push_back(idx);
+                done_mask[idx] = true;
+
+                flood_fill.push_back({ point.x - 1, point.y, point.x, point.y });
+                flood_fill.push_back({ point.x + 1, point.y, point.x, point.y });
+                flood_fill.push_back({ point.x, point.y - 1, point.x, point.y });
+                flood_fill.push_back({ point.x, point.y + 1, point.x, point.y });
+
+                // TODO: move outside loop, and instead iterate flood_fill
+                //       list when done
+                if (debug_stage_id == TRACKING_STAGE_NAIVE_CLUSTER &&
+                    state->debug_cloud_mode)
+                {
+                    struct gm_point_rgba debug_point;
+
+                    debug_point.x = pcl_pt.x;
+                    debug_point.y = pcl_pt.y;
+                    debug_point.z = pcl_pt.z;
+                    debug_point.rgba = 0xffffffff;
+
+                    tracking->debug_cloud.push_back(debug_point);
+                    tracking->debug_cloud_indices.push_back(idx);
+                }
             }
         }
-    }
 
-    if (!person_indices.indices.empty()) {
-        person_cluster.label = cluster_indices.size();
-        cluster_indices.push_back(person_indices);
-        state->candidate_clusters.push_back(person_cluster);
+        if (!person_indices.indices.empty()) {
+            person_cluster.label = cluster_indices.size();
+            cluster_indices.push_back(person_indices);
+            state->candidate_clusters.push_back(person_cluster);
+        }
     }
 }
 
@@ -5829,8 +6071,7 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
     auto cloud = tracking->downsampled_cloud;
 
     // Add back points that were filtered out during edge detection
-    int points_added = 0;
-    for (auto candidate : person_clusters) {
+    for (auto &candidate : person_clusters) {
         std::vector<int> *indices = &cluster_indices[candidate.label].indices;
         std::vector<int> points_to_add;
         std::vector<int> indices_for_next_iteration;
@@ -5870,8 +6111,11 @@ stage_filter_clusters_cb(struct gm_tracking_impl *tracking,
             }
 
             for (auto i : points_to_add) {
+                int x = i % width;
+                int y = i / width;
+                pcl::PointXYZL &point = cloud->points[i];
+                update_candidate_bounds(&candidate, x, y, point);
                 indices->push_back(i);
-                ++points_added;
             }
 
             std::swap(points_to_add, indices_for_next_iteration);
@@ -5999,6 +6243,13 @@ stage_crop_cluster_image_cb(struct gm_tracking_impl *tracking,
         int cluster_x = x - cluster.min_x_2d;
         int cluster_y = y - cluster.min_y_2d;
 
+        gm_assert(ctx->log, (x >= cluster.min_x_2d && x <= cluster.max_x_2d),
+                  "Cluster X index out of bounds - %d (%d->%d)",
+                  x, cluster.min_x_2d, cluster.max_x_2d);
+        gm_assert(ctx->log, (y >= cluster.min_y_2d && y <= cluster.max_y_2d),
+                  "Cluster Y index out of bounds - %d (%d->%d)",
+                  y, cluster.min_y_2d, cluster.max_y_2d);
+
         int doff = cluster_width_2d * cluster_y + cluster_x;
         depth_image[doff] = point.z;
     }
@@ -6060,26 +6311,43 @@ stage_label_inference_cb(struct gm_tracking_impl *tracking,
 }
 
 static void
-stage_label_inference_debug_cb(struct gm_tracking_impl *tracking,
-                               struct pipeline_scratch_state *state)
+add_debug_cloud_for_people(struct gm_tracking_impl *tracking,
+                           struct pipeline_scratch_state *state)
 {
     struct gm_context *ctx = tracking->ctx;
 
     std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
     std::vector<candidate_cluster> &person_clusters = state->person_clusters;
 
-    gm_assert(ctx->log, state->best_person_cluster >= 0,
-              "No person best person cluster determined");
+    gm_assert(ctx->log, state->people.size() > 0,
+              "No best person clusters derived");
 
-    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-    std::vector<int> &indices = cluster_indices[cluster.label].indices;
+    for (auto &person_data : state->people) {
+        //InferredPerson &person = person_data.first;
+        int person_cluster = person_data.second;
 
-    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->downsampled_cloud,
-                                                  indices);
+        struct candidate_cluster &cluster = person_clusters[person_cluster];
+        std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+        add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
+                                                      tracking->downsampled_cloud,
+                                                      indices);
+
+        if (state->debug_cloud_focus == DEBUG_CLOUD_FOCUS_BEST) {
+            break;
+        }
+    }
+
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
     tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
+}
+
+static void
+stage_label_inference_debug_cb(struct gm_tracking_impl *tracking,
+                               struct pipeline_scratch_state *state)
+{
+    add_debug_cloud_for_people(tracking, state);
 }
 
 static void
@@ -6113,23 +6381,7 @@ static void
 stage_joint_weights_debug_cb(struct gm_tracking_impl *tracking,
                              struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
-    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
-
-    gm_assert(ctx->log, state->best_person_cluster >= 0,
-              "No best person cluster determined");
-
-    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-    std::vector<int> &indices = cluster_indices[cluster.label].indices;
-
-    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->downsampled_cloud,
-                                                  indices);
-    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
-
-    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
+    add_debug_cloud_for_people(tracking, state);
 }
 
 static void
@@ -6186,23 +6438,22 @@ static void
 stage_joint_inference_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
+    add_debug_cloud_for_people(tracking, state);
+}
 
-    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+static bool
+compare_people_confidence(struct gm_person &a, struct gm_person &b)
+{
+    return a.history[0].confidence >= b.history[0].confidence;
+}
 
-    gm_assert(ctx->log, state->best_person_cluster >= 0,
-              "No best person cluster determined");
+static bool
+compare_people_age(struct gm_person &a, struct gm_person &b)
+{
+    if (a.time_detected == b.time_detected)
+        return a.initial_confidence > b.initial_confidence;
 
-    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-    std::vector<int> &indices = cluster_indices[cluster.label].indices;
-
-    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->downsampled_cloud,
-                                                  indices);
-    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
-
-    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
+    return a.time_detected < b.time_detected;
 }
 
 static void
@@ -6211,44 +6462,93 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    copy_inferred_joints_to_skel_except(tracking->skeleton,
-                                        tracking->joints,
-                                        -1); // no joint to skip copying
-    update_bones(ctx, tracking->skeleton);
+    std::list<std::pair<struct gm_skeleton, std::pair<InferredPerson&, int>>>
+        skeletons;
 
-    tracking->skeleton_corrected = tracking->skeleton;
-    refine_skeleton(tracking);
+    for (auto &person_data : state->people) {
+        InferredPerson &person = person_data.first;
+        //int person_cluster = person_data.second;
+
+        skeletons.push_back({{}, person_data});
+
+        // Initialise skeleton
+        struct gm_skeleton &skeleton = skeletons.back().first;
+        skeleton.ctx = ctx;
+        skeleton.joints.resize(ctx->n_joints);
+        copy_inferred_joints_to_skel_except(skeleton, person.joints);
+        update_bones(ctx, skeleton);
+    }
+
+    // Based on skeleton distance, try to match up newly inferred skeletons
+    // with any existing people. If none match, create a new person
+    for (auto &person : ctx->tracked_people) {
+        if (skeletons.empty()) {
+            break;
+        }
+
+        float best_diff = FLT_MAX;
+        auto best_skeleton_iter = skeletons.begin();
+        for (auto iter = skeletons.begin(); iter != skeletons.end(); ++iter)
+        {
+            auto &skeletons_entry = *iter;
+            float diff = calc_average_joint_difference(
+                ctx, skeletons_entry.first,
+                person.history[0].skeleton_corrected);
+            if (diff < best_diff) {
+                best_diff = diff;
+                best_skeleton_iter = iter;
+            }
+        }
+
+        struct gm_skeleton &skeleton = (*best_skeleton_iter).first;
+        auto &person_data = (*best_skeleton_iter).second;
+
+        // TODO: Introduce a maximum skeleton difference threshold
+        // TODO: Introduce a maximum time difference threshold
+        state->new_history.push_front({{}, &person});
+        struct skeleton_history &history = state->new_history.front().first;
+        history.skeleton = history.skeleton_corrected = skeleton;
+        history.timestamp = person.time_last_tracked =
+            tracking->frame->timestamp;
+        history.confidence = person_data.first.confidence;
+
+        refine_latest_skeleton(person, person_data.first.joints);
+        state->person_clusters[person_data.second].tracked = true;
+        skeletons.erase(best_skeleton_iter);
+    }
+
+    // Create new people for any unmatched skeletons
+    while (!skeletons.empty()) {
+        state->new_history.push_front({{}, NULL});
+        struct skeleton_history &history = state->new_history.front().first;
+        history.skeleton = history.skeleton_corrected = skeletons.back().first;
+        history.timestamp = tracking->frame->timestamp;
+        history.confidence = skeletons.back().second.first.confidence;
+
+        skeletons.pop_back();
+    }
 }
 
 static void
 stage_refine_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
-    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
-
-    gm_assert(ctx->log, state->best_person_cluster >= 0,
-              "No best person cluster determined");
-
-    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-    std::vector<int> &indices = cluster_indices[cluster.label].indices;
-
-    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->downsampled_cloud,
-                                                  indices);
-    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
-
-    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
+    add_debug_cloud_for_people(tracking, state);
 }
 
 static void
 stage_sanitize_skeleton_cb(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state)
 {
-    sanitise_skeleton(tracking->ctx, tracking->skeleton_corrected,
-                      tracking->frame->timestamp);
+    struct gm_context *ctx = tracking->ctx;
+
+    for (auto &new_history : state->new_history) {
+        struct skeleton_history &history = new_history.first;
+        struct gm_person *person = new_history.second;
+        if (person) {
+            sanitise_skeleton(person, history);
+        }
+    }
 }
 
 static void
@@ -6257,13 +6557,20 @@ stage_validate_skeleton_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    float skel_dist = calc_skeleton_distance(ctx, &tracking->skeleton_corrected);
-    tracking_add_debug_text(tracking, "Skeleton distance: %f", skel_dist);
+    if (!ctx->skeleton_validation) {
+        return;
+    }
 
-    tracking->success = true;
-    if (ctx->skeleton_validation) {
-        tracking->success = (state->confidence >= ctx->skeleton_min_confidence &&
-                             skel_dist <= ctx->skeleton_max_distance);
+    for (auto iter = state->new_history.begin();
+         iter != state->new_history.end();)
+    {
+        struct skeleton_history &history = (*iter).first;
+        float skel_dist = calc_skeleton_distance(ctx, &history.skeleton_corrected);
+        if (skel_dist > ctx->skeleton_max_distance) {
+            iter = state->new_history.erase(iter);
+        } else {
+            ++iter;
+        }
     }
 }
 
@@ -6271,46 +6578,14 @@ static void
 stage_sanitize_skeleton_debug_cb(struct gm_tracking_impl *tracking,
                                  struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
-    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
-
-    gm_assert(ctx->log, state->best_person_cluster >= 0,
-              "No best person cluster determined");
-
-    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-    std::vector<int> &indices = cluster_indices[cluster.label].indices;
-
-    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->downsampled_cloud,
-                                                  indices);
-    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
-
-    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
+    add_debug_cloud_for_people(tracking, state);
 }
 
 static void
 stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
                                         struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
-    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
-
-    gm_assert(ctx->log, state->best_person_cluster >= 0,
-              "No best person cluster determined");
-
-    struct candidate_cluster &cluster = person_clusters[state->best_person_cluster];
-    std::vector<int> &indices = cluster_indices[cluster.label].indices;
-
-    add_debug_cloud_xyz_from_pcl_xyzl_and_indices(ctx, tracking,
-                                                  tracking->downsampled_cloud,
-                                                  indices);
-    colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
-
-    tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
+    add_debug_cloud_for_people(tracking, state);
 }
 
 static void
@@ -6481,13 +6756,16 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
     tracking->debug_cloud_intrinsics = tracking->downsampled_intrinsics;
     colour_debug_cloud(ctx, state, tracking, tracking->downsampled_cloud);
 
+    if (!ctx->tracked_people.size()) {
+        return;
+    }
+
     struct gm_prediction *prediction = NULL;
     struct gm_prediction_impl *prediction_impl = NULL;
     int h1 = -1;
     int h2 = -1;
 
-    struct gm_tracking_impl **tracking_history = NULL;
-    int n_tracking = 0;
+    std::deque<struct skeleton_history> *skeleton_history = NULL;
 
     if (ctx->debug_predictions) {
         int64_t offset_ns = ctx->debug_prediction_offset * 1e9;
@@ -6495,19 +6773,17 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
             gm_context_get_prediction(ctx, (int64_t)tracking->frame->timestamp + offset_ns);
         prediction_impl = (struct gm_prediction_impl *)prediction;
 
-        tracking_history = prediction_impl->tracking_history;
-        n_tracking = prediction_impl->n_tracking;
+        skeleton_history = &prediction_impl->history;
         h1 = prediction_impl->h1;
         h2 = prediction_impl->h2;
     } else {
-        tracking_history = ctx->tracking_history;
-        n_tracking = ctx->n_tracking;
+        skeleton_history = &ctx->tracked_people.front().history;
     }
 
     int n_bones = ctx->n_bones;
 
-    for (int i = 0; i < n_tracking; i++) {
-        struct gm_tracking_impl *historic = tracking_history[i];
+    for (int i = 0; i < skeleton_history->size(); i++) {
+        struct skeleton_history &historic = (*skeleton_history)[i];
 
         float green = 255.0f - 200.0f * ((float)i / (TRACK_FRAMES - 1));
         uint8_t g = green;
@@ -6522,8 +6798,8 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
         for (int b = 0; b < n_bones; b++) {
             struct gm_bone_info &bone_info = ctx->bone_info[b];
 
-            struct gm_joint &joint0 = historic->skeleton_corrected.joints[bone_info.head];
-            struct gm_joint &joint1 = historic->skeleton_corrected.joints[bone_info.tail];
+            struct gm_joint &joint0 = historic.skeleton_corrected.joints[bone_info.head];
+            struct gm_joint &joint1 = historic.skeleton_corrected.joints[bone_info.tail];
 
             tracking_draw_line(tracking,
                                joint0.x, joint0.y, joint0.z,
@@ -6680,16 +6956,29 @@ pipeline_scratch_state_clear(struct pipeline_scratch_state *state)
 }
 
 static bool
+compare_inferred_person(const InferredPerson &first,
+                        const InferredPerson &second)
+{
+    return (first.confidence > second.confidence);
+}
+
+static bool
+compare_inferred_person_data(const std::pair<InferredPerson&, int> &first,
+                             const std::pair<InferredPerson&, int> &second)
+{
+    return compare_inferred_person(first.first, second.first);
+}
+
+static bool
 context_track_skeleton(struct gm_context *ctx,
                        struct gm_tracking_impl *tracking,
                        struct pipeline_scratch_state &state)
 {
-    tracking->success = false;
-
     tracking->paused = state.paused;
 
     // Insulate the full tracking pipeline from any async property changes
     state.seg_res = ctx->seg_res;
+    state.max_people = ctx->max_people;
     bool motion_detection = ctx->motion_detection;
     bool naive_seg_fallback = ctx->naive_seg_fallback;
 
@@ -6705,6 +6994,7 @@ context_track_skeleton(struct gm_context *ctx,
      */
     state.debug_pipeline_stage = ctx->debug_pipeline_stage;
     state.debug_cloud_mode = ctx->debug_enable ? ctx->debug_cloud_mode : 0;
+    state.debug_cloud_focus = ctx->debug_cloud_focus;
 
     if (state.debug_cloud_mode) {
         gm_debug(ctx->log, "Clearing debug visualization state");
@@ -6994,13 +7284,7 @@ context_track_skeleton(struct gm_context *ctx,
 
 
     std::vector<candidate_cluster> &person_clusters = state.person_clusters;
-    state.best_person_cluster = -1;
     state.current_person_cluster = -1;
-    state.confidence = 0.f;
-
-    tracking->label_probs.clear();
-    tracking->label_probs_width = 0;
-    tracking->label_probs_height = 0;
 
     gm_assert(ctx->log, state.person_clusters.size() > 0,
               "Spurious empty array of candidate person clusters");
@@ -7027,8 +7311,6 @@ context_track_skeleton(struct gm_context *ctx,
                   NULL,
                   &state);
 
-        gm_assert(ctx->log, state.joints_candidate == NULL,
-                  "Spurious non-NULL candidate joints before joint inference");
         run_stage(tracking,
                   TRACKING_STAGE_JOINT_INFERENCE,
                   stage_joint_inference_cb,
@@ -7039,42 +7321,45 @@ context_track_skeleton(struct gm_context *ctx,
                   state.joints_candidate->n_joints == ctx->n_joints,
                   "ctx->n_joints != joints_candidate->n_joints");
 
+        // Keep track of this possible person
+        struct InferredPerson person;
+        int n_cluster = state.current_person_cluster;
+
+        std::swap(ctx->label_probs_back, person.label_probs);
+
+        auto &cluster = person_clusters[state.current_person_cluster];
+        int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+        int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+        person.label_probs_width = cluster_width_2d;
+        person.label_probs_height = cluster_height_2d;
+
+        person.joints = state.joints_candidate;
+
         // Calculate cumulative confidence of the joint inference of this cloud
-        float confidence = 0.f;
+        person.confidence = 0.f;
         for (int j = 0; j < ctx->n_joints; ++j) {
-            LList *joints = state.joints_candidate->joints[j];
+            LList *joints = person.joints->joints[j];
             if (joints) {
                 Joint *joint = (Joint *)joints->data;
-                confidence += joint->confidence;
+                person.confidence += joint->confidence;
             }
         }
 
-        // If this skeleton has higher confidence than the last, keep it
-        if (state.current_person_cluster == 0 || confidence > state.confidence)
-        {
-            auto &cluster = person_clusters[state.current_person_cluster];
-            int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
-            int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
-
-            std::swap(tracking->label_probs, ctx->label_probs_back);
-            tracking->label_probs_width = cluster_width_2d;
-            tracking->label_probs_height = cluster_height_2d;
-            std::swap(tracking->joints, state.joints_candidate);
-            state.best_person_cluster = state.current_person_cluster;
-            state.confidence = confidence;
-        }
-
-        if (state.joints_candidate) {
-            joints_inferrer_free_joints(ctx->joints_inferrer,
-                                        state.joints_candidate);
-            state.joints_candidate = NULL;
-        }
+        tracking->people.push_back(person);
+        state.people.push_back({tracking->people.back(), n_cluster});
     }
 
     state.current_person_cluster = -1;
 
-    gm_assert(ctx->log, state.best_person_cluster >= 0,
-              "Failed to select best person cluster");
+    // Sort list of person clusters
+    state.people.sort(compare_inferred_person_data);
+
+    // Sort on the tracking object too, for convenience when generating
+    // debug images (which is the only reason we keep the data there atm).
+    tracking->people.sort(compare_inferred_person);
+
+    gm_assert(ctx->log, state.people.size() >= 0,
+              "Failed to select any person clusters");
 
     // Only a logical stage since selection is part of the
     // iteration above but we want to see the point cloud
@@ -7109,7 +7394,7 @@ context_track_skeleton(struct gm_context *ctx,
               stage_refine_skeleton_debug_cb,
               &state);
 
-    tracking_add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
+    //tracking_add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
 
     // TODO: We just take the most confident skeleton above, but we should
     //       probably establish some thresholds and spit out multiple
@@ -7126,19 +7411,86 @@ context_track_skeleton(struct gm_context *ctx,
               NULL,
               &state);
 
-    // If we failed to track, delay updates to the motion detection codebook
-    // for a short period so as not to pollute what may actually be valid
-    // human depth data.
-    if (!tracking->success &&
+    // Begin modifications to tracked_people
+    pthread_mutex_lock(&ctx->people_modify_mutex);
+
+    // Add newly tracked people/history to tracked_people
+    while (!state.new_history.empty()) {
+        struct skeleton_history &history = state.new_history.front().first;
+        struct gm_person *person = state.new_history.front().second;
+
+        if (!person) {
+            // Add the newly tracked person
+            ctx->tracked_people.push_back({});
+            person = &ctx->tracked_people.back();
+            person->ctx = ctx;
+            person->time_detected = tracking->frame->timestamp;
+            person->initial_confidence = history.confidence;
+        }
+
+        person->history.push_front(history);
+        person->time_last_tracked = tracking->frame->timestamp;
+        state.new_history.pop_front();
+    }
+
+    // Sort the list of tracked people and remove any over the limit of people
+    // we want to track.
+    ctx->tracked_people.sort(compare_people_confidence);
+    while (ctx->tracked_people.size() > ctx->max_people) {
+        ctx->tracked_people.pop_back();
+    }
+
+    // Cull old history
+    for (auto &person : ctx->tracked_people) {
+        while (person.history.size() > PERSON_HISTORY_SIZE) {
+            person.history.pop_back();
+        }
+    }
+
+    // We want to maintain a stable sort order, keep it in order of detection,
+    // with more confident initial detections sorting first when multiple
+    // people are detected in the same frame.
+    ctx->tracked_people.sort(compare_people_age);
+
+    // We're done modifying tracked_people now
+    pthread_mutex_unlock(&ctx->people_modify_mutex);
+
+    // If we failed to track a person, delay updates to the motion detection
+    // codebook for a short period so as not to pollute what may actually be
+    // valid human depth data.
+    // TODO: Delay updates to the bounding cube of the person's last skeleton.
+    //       Delaying all updates will likely interfere somewhat with any
+    //       successful tracking that was happening.
+    uint64_t last_tracked = 0;
+    struct gm_person *tracked_person = NULL;
+    for (auto &person : ctx->tracked_people) {
+        if (person.time_last_tracked == tracking->frame->timestamp) {
+            if (!tracked_person) {
+                // Given the current sort order, this will be the most
+                // confident tracked person for this tracking frame.
+                tracked_person = &person;
+            }
+        } else if (person.time_last_tracked > last_tracked) {
+            last_tracked = person.time_last_tracked;
+        }
+    }
+
+    if (!tracked_person &&
         ctx->codebook_update_delay > 0.f &&
-        ctx->n_tracking)
+        ctx->tracked_people.size())
     {
         float delay = (float)
-            ((tracking->frame->timestamp -
-              ctx->tracking_history[0]->frame->timestamp) / 1e9);
+            ((tracking->frame->timestamp - last_tracked) / 1e9);
         if (delay < ctx->codebook_update_delay) {
             motion_detection = false;
         }
+    }
+
+    // XXX Copy most confident inferred person for legacy tracking API
+    if (tracked_person) {
+        tracking->has_skeleton = true;
+        tracking->skeleton = tracked_person->history[0].skeleton;
+        tracking->skeleton = tracked_person->history[0].skeleton_corrected;
     }
 
 #warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
@@ -7150,7 +7502,7 @@ context_track_skeleton(struct gm_context *ctx,
             struct candidate_cluster &cluster = person_clusters[i];
             std::vector<int> &indices = cluster_indices[cluster.label].indices;
 
-            if (tracking->success && i == state.best_person_cluster) {
+            if (cluster.tracked) {
                 for (auto &idx : indices) {
                     tracking->downsampled_cloud->points[idx].label =
                         CODEBOOK_CLASS_TRACKED;
@@ -7170,11 +7522,7 @@ context_track_skeleton(struct gm_context *ctx,
                   &state);
     }
 
-    if (!tracking->success) {
-        gm_info(ctx->log, "Give up tracking frame: Skeleton validation for best candidate failed");
-    }
-
-    return tracking->success;
+    return tracked_person != NULL;
 }
 
 static void
@@ -7773,7 +8121,7 @@ detector_thread_cb(void *data)
         }
 
         start = get_time();
-        gm_debug(ctx->log, "Starting tracking iteration (%d)\n",
+        gm_debug(ctx->log, "Starting tracking iteration (%" PRIu64 ")\n",
                  ctx->frame_counter);
 
         struct pipeline_scratch_state state = {};
@@ -7855,9 +8203,9 @@ detector_thread_cb(void *data)
                  get_duration_ns_print_scale_suffix(duration));
 
         if (tracked) {
-            gm_info(ctx->log, "Successfully tracked frame");
+            gm_info(ctx->log, "Frame contains tracked people");
         } else {
-            gm_info(ctx->log, "Failed to track frame");
+            gm_info(ctx->log, "Failed to track any people in frame");
         }
 
         pthread_mutex_lock(&ctx->tracking_swap_mutex);
@@ -8324,6 +8672,7 @@ gm_context_new(struct gm_logger *logger, char **err)
     pthread_cond_init(&ctx->skel_track_cond, NULL);
     pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
     pthread_mutex_init(&ctx->tracking_swap_mutex, NULL);
+    pthread_mutex_init(&ctx->people_modify_mutex, NULL);
     pthread_mutex_init(&ctx->frame_ready_mutex, NULL);
     pthread_cond_init(&ctx->frame_ready_cond, NULL);
     pthread_mutex_init(&ctx->aggregate_metrics_mutex, NULL);
@@ -8842,6 +9191,30 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.enum_state.enumerants = ctx->cloud_mode_enumerants.data();
     ctx->properties.push_back(prop);
 
+    ctx->debug_cloud_focus = DEBUG_CLOUD_FOCUS_BEST;
+    prop = gm_ui_property();
+    prop.object = ctx;
+    prop.name = "cloud_focus";
+    prop.desc = "Point focus for point cloud visualisation";
+    prop.type = GM_PROPERTY_ENUM;
+    prop.enum_state.ptr = &ctx->debug_cloud_focus;
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "best";
+    enumerant.desc = "Most confident person candidate";
+    enumerant.val = DEBUG_CLOUD_FOCUS_BEST;
+    ctx->cloud_focus_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "all";
+    enumerant.desc = "All person candidates";
+    enumerant.val = DEBUG_CLOUD_FOCUS_ALL;
+    ctx->cloud_focus_enumerants.push_back(enumerant);
+
+    prop.enum_state.n_enumerants = ctx->cloud_focus_enumerants.size();
+    prop.enum_state.enumerants = ctx->cloud_focus_enumerants.data();
+    ctx->properties.push_back(prop);
+
     /*
      * XXX: note we have to be careful with the initialization of stage
      * elements. Unlike the properties above, stages contain vectors so if we
@@ -8947,7 +9320,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.desc = "Downsamples the native-resolution depth data";
         stage.toggle_property = -1;
 
-        ctx->seg_res = 2;
+        ctx->seg_res = 1;
         prop = gm_ui_property();
         prop.object = ctx;
         prop.name = "seg_res";
@@ -9661,6 +10034,20 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "select_cluster";
         stage.desc = "Select cluster to run label inference on (points before projection into depth image)";
         stage.toggle_property = -1;
+
+        // TODO: We aren't ready to expose more than 1 person quite yet
+        ctx->max_people = 1;
+#if 0
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_people";
+        prop.desc = "Maximum number of people to track at once";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->max_people;
+        prop.int_state.min = 1;
+        prop.int_state.max = 4;
+        stage.properties.push_back(prop);
+#endif
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
@@ -10452,161 +10839,24 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     return tracking;
 }
 
-static int
-get_closest_tracking_frame(struct gm_tracking_impl **tracking_history,
-                           int n_tracking, uint64_t timestamp)
+struct gm_skeleton *
+gm_person_predict_skeleton(struct gm_person *person, uint64_t timestamp)
 {
-    int closest_frame = 0;
-    uint64_t closest_diff = UINT64_MAX;
-    for (int i = 0; i < n_tracking; ++i) {
-        uint64_t *t1 = &tracking_history[i]->frame->timestamp;
-        uint64_t diff = (*t1 > timestamp) ?
-            (*t1 - timestamp) : (timestamp - *t1);
-        if (diff < closest_diff) {
-            closest_diff = diff;
-            closest_frame = i;
-        } else {
-            break;
-        }
-    }
-    return closest_frame;
+    struct gm_skeleton *skeleton = new struct gm_skeleton;
+    skeleton->joints.resize(person->ctx->n_joints);
+
+    return skeleton;
 }
 
 struct gm_prediction *
 gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 {
-    struct gm_prediction_impl *prediction =
-        mem_pool_acquire_prediction(ctx->prediction_pool);
-
-    // Copy the current tracking history from the context
-    pthread_mutex_lock(&ctx->tracking_swap_mutex);
-
-    if (!ctx->n_tracking) {
-        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
-        gm_prediction_unref(&prediction->base);
+    if (!ctx->tracked_people.size()) {
         return NULL;
     }
 
-    for (int i = 0; i < ctx->n_tracking; ++i) {
-        prediction->tracking_history[i] = ctx->tracking_history[i];
-        gm_tracking_ref(&prediction->tracking_history[i]->base);
-    }
-    prediction->n_tracking = ctx->n_tracking;
-
-    pthread_mutex_unlock(&ctx->tracking_swap_mutex);
-
-    // Pre-fill the skeleton with the closest frame
-    int closest_frame =
-        get_closest_tracking_frame(prediction->tracking_history,
-                                   prediction->n_tracking, timestamp);
-    struct gm_skeleton &closest_skeleton =
-        prediction->tracking_history[closest_frame]->skeleton_corrected;
-    prediction->skeleton = closest_skeleton;
-
-    if (ctx->prediction_dampen_large_deltas) {
-        timestamp = calculate_decayed_timestamp(
-            prediction->tracking_history[closest_frame]->frame->timestamp,
-            timestamp, ctx->max_prediction_delta, ctx->prediction_decay);
-    }
-    prediction->timestamp = timestamp;
-
-    uint64_t closest_timestamp =
-        prediction->tracking_history[closest_frame]->frame->timestamp;
-    if (timestamp == closest_timestamp || prediction->n_tracking <= 1) {
-        prediction->h1 = closest_frame;
-        prediction->h2 = -1;
-        return &prediction->base;
-    }
-
-    // Work out the two nearest frames and the interpolation value
-    int h1;
-    bool interpolate_angles = ctx->prediction_interpolate_angles;
-    if (timestamp > closest_timestamp) {
-        if (closest_frame == 0) {
-            h1 = 0;
-            interpolate_angles = false;
-        } else {
-            h1 = closest_frame - 1;
-        }
-    } else {
-        if (closest_frame == prediction->n_tracking - 1) {
-            h1 = closest_frame - 1;
-            interpolate_angles = false;
-        } else {
-            h1 = closest_frame;
-        }
-    }
-    int h2 = h1 + 1;
-
-    prediction->h1 = h1;
-    prediction->h2 = h2;
-
-    struct gm_tracking_impl *frame1 = prediction->tracking_history[h1];
-    struct gm_tracking_impl *frame2 = prediction->tracking_history[h2];
-    float t = (timestamp - frame2->frame->timestamp) /
-              (float)(frame1->frame->timestamp - frame2->frame->timestamp);
-
-    int n_bones = ctx->n_bones;
-
-    for (int b = 0; b < n_bones; b++) {
-        struct gm_bone &bone = closest_skeleton.bones[b];
-        struct gm_bone_info &bone_info = ctx->bone_info[b];
-
-        if (!frame2->skeleton_corrected.bones[b].valid ||
-            !frame1->skeleton_corrected.bones[b].valid) {
-            continue;
-        }
-
-        // As a special case; use linear interpolation to place the root bone
-        if (bone_info.parent < 0 || !interpolate_angles)
-        {
-            interpolate_joints(
-                frame2->skeleton_corrected.joints[bone_info.head],
-                frame1->skeleton_corrected.joints[bone_info.head],
-                t, prediction->skeleton.joints[bone_info.head]);
-            interpolate_joints(
-                frame2->skeleton_corrected.joints[bone_info.tail],
-                frame1->skeleton_corrected.joints[bone_info.tail],
-                t, prediction->skeleton.joints[bone_info.tail]);
-            continue;
-        }
-
-        struct gm_bone &parent_bone = closest_skeleton.bones[bone_info.parent];
-        struct gm_bone_info &parent_bone_info = ctx->bone_info[parent_bone.idx];
-
-        struct gm_bone &frame1_bone = frame1->skeleton_corrected.bones[bone.idx];
-        struct gm_bone &frame2_bone = frame2->skeleton_corrected.bones[bone.idx];
-
-        // Find the angle to rotate the parent bone. Note, we're relying
-        // on bones being stored in an order where we can rely on the
-        // bone's parent being seen before any descendants.
-        glm::mat3 rotate = glm::mat3_cast(
-            glm::slerp(frame2_bone.angle, frame1_bone.angle, t));
-
-        struct gm_joint &parent_head =
-            prediction->skeleton.joints[parent_bone_info.head];
-        struct gm_joint &parent_tail =
-            prediction->skeleton.joints[parent_bone_info.tail];
-
-        glm::vec3 parent_vec = glm::normalize(
-            glm::vec3(parent_tail.x - parent_head.x,
-                      parent_tail.y - parent_head.y,
-                      parent_tail.z - parent_head.z));
-        float length = frame2_bone.length +
-            (frame1_bone.length - frame2_bone.length) * t;
-        glm::vec3 new_tail = ((parent_vec * rotate) * length);
-        new_tail.x += prediction->skeleton.joints[bone_info.head].x;
-        new_tail.y += prediction->skeleton.joints[bone_info.head].y;
-        new_tail.z += prediction->skeleton.joints[bone_info.head].z;
-
-        prediction->skeleton.joints[bone_info.tail].x = new_tail.x;
-        prediction->skeleton.joints[bone_info.tail].y = new_tail.y;
-        prediction->skeleton.joints[bone_info.tail].z = new_tail.z;
-    }
-
-    update_bones(ctx, prediction->skeleton);
-
-    return &prediction->base;
+    return gm_context_get_prediction_for_person(ctx, timestamp,
+                                                &ctx->tracked_people.front());
 }
 
 void
