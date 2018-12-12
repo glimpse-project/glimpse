@@ -61,7 +61,7 @@ image-pre-processor \
     rendered-training-data/rendered/test-render \
     rendered-training-data/pre-processed/test-render \
     glimpse-training-data/label-maps/2018-11-render-to-2018-08-rdt-map.json \
-    -c glimpse-training-data/pre-processor-configs/iphone-x-config.json
+    --config glimpse-training-data/pre-processor-configs/iphone-x-config.json
 
 glimpse-training-data/glimpse-data-indexer.py rendered-training-data/pre-processed/test-render
 
@@ -90,4 +90,4 @@ JOBS=$(cat<<'EOF'
 EOF
 )
 
-train_rdt -q "$JOBS" -d rendered-training-data/pre-processed/test-render full full-tree.json
+train_rdt --log-stderr -q "$JOBS" -d rendered-training-data/pre-processed/test-render full full-tree.json
