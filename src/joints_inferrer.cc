@@ -33,6 +33,7 @@
 #include <forward_list>
 #include <thread>
 #include <cmath>
+#include <algorithm>
 
 #include "glimpse_log.h"
 
