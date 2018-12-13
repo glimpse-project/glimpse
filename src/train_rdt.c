@@ -84,7 +84,7 @@ logger_cb(struct gm_logger *logger,
             fprintf(fp, "%s: ", context);
         }
 
-        fprintf(data->log_fp, "%s\n", msg);
+        fprintf(fp, "%s\n", msg);
         if (level >= GM_LOG_WARN && fp != stderr)
             fprintf(stderr, "%s\n", msg);
 
