@@ -26,14 +26,22 @@
 #include <sys/types.h>
 #include <dirent.h>
 #include <sys/stat.h>
-#include <unistd.h>
 #include <inttypes.h>
-#include <pthread.h>
+#define _USE_MATH_DEFINES
+#include <math.h>
+
+#ifdef _WIN32
+#define strdup(X) _strdup(X)
+#endif
 
 #include <vector>
+#include <mutex>
+#include <condition_variable>
+#include <thread>
 
 #ifdef USE_FREENECT
 #include <libfreenect.h>
+#include <libfreenect_registration.h>
 #endif
 
 #ifdef __ANDROID__
@@ -71,6 +79,8 @@
 #include "glimpse_mem_pool.h"
 #include "glimpse_device.h"
 #include "glimpse_assets.h"
+#include "glimpse_mutex.h"
+#include "glimpse_os.h"
 
 #undef GM_LOG_CONTEXT
 #ifdef __ANDROID__
@@ -107,7 +117,7 @@ struct gm_device_buffer
     /* Lets us debug when we've failed to release frame resources when
      * we come to destroy our resource pools
      */
-    pthread_mutex_t trail_lock;
+    std::mutex trail_lock;
     std::vector<struct trail_crumb> trail;
 };
 
@@ -129,7 +139,7 @@ struct gm_device_frame
     /* Lets us debug when we've failed to release frame resources when
      * we come to destroy our resource pools
      */
-    pthread_mutex_t trail_lock;
+    std::mutex trail_lock;
     std::vector<struct trail_crumb> trail;
 };
 
@@ -171,8 +181,6 @@ struct gm_device
             struct gm_buffer *last_depth_buf;
             struct gm_buffer *last_video_buf;
 
-            pthread_t io_thread;
-
             /* If 'true' then frames are read at the same rate that
              * _request_frame() is called. It essentially ensures that a
              * request with multiple buffer flags can only be fulfilled by a
@@ -199,13 +207,13 @@ struct gm_device
         struct {
             freenect_context *fctx;
             freenect_device *fdev;
+            freenect_registration registration;
 
             int ir_brightness;
             float req_tilt; // tilt requested via UI
             float phys_tilt; // tilt currently reported by HW
             float accel[3];
             float mks_accel[3];
-            pthread_t io_thread;
         } kinect;
 #endif
 
@@ -222,6 +230,8 @@ struct gm_device
         } avf;
 #endif
     };
+
+    std::thread io_thread;
 
     enum gm_rotation device_to_camera_rotation;
     int user_camera_rotation; // user override property (enum gm_rotation)
@@ -240,12 +250,12 @@ struct gm_device
     /* What data is required for the next frame?
      * E.g. _DEPTH | _VIDEO
      */
-    pthread_cond_t request_buffers_cond;
-    pthread_mutex_t request_buffers_mask_lock;
+    std::condition_variable request_buffers_cond;
+    std::mutex request_buffers_mask_lock;
     uint64_t frame_request_buffers_mask;
     uint64_t frame_ready_buffers_mask;
 
-    pthread_mutex_t swap_buffers_lock;
+    std::mutex swap_buffers_lock;
 
     enum gm_format depth_format;
 
@@ -305,7 +315,7 @@ static const char *rotation_names[] = {
 };
 
 #ifdef USE_TANGO
-static pthread_mutex_t jni_lock = PTHREAD_MUTEX_INITIALIZER;
+static std::mutex jni_lock;
 static jobject early_tango_service_binder;
 
 /* For our JNI callbacks we assume there can only be a single device...
@@ -318,15 +328,6 @@ static struct gm_device *tango_singleton_dev;
  */
 static enum gm_rotation tango_display_rotation;
 #endif
-
-static uint64_t
-get_time(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
-}
 
 static void
 log_intrinsics_summary(struct gm_device *dev,
@@ -486,9 +487,8 @@ device_frame_add_breadcrumb(struct gm_frame *self, const char *tag)
                                   1, // skip top stack frame
                                   10);
 
-    pthread_mutex_lock(&frame->trail_lock);
+    std::lock_guard<std::mutex> scope_lock(frame->trail_lock);
     frame->trail.push_back(crumb);
-    pthread_mutex_unlock(&frame->trail_lock);
 }
 
 static void *
@@ -503,8 +503,6 @@ device_frame_alloc(struct gm_mem_pool *pool, void *user_data)
     frame->pool = pool;
 
     frame->base.api = &frame->vtable;
-
-    pthread_mutex_init(&frame->trail_lock, NULL);
 
     return frame;
 }
@@ -537,9 +535,8 @@ device_buffer_add_breadcrumb(struct gm_buffer *self, const char *tag)
                                   1, // skip top stack frame
                                   10);
 
-    pthread_mutex_lock(&buffer->trail_lock);
+    std::lock_guard<std::mutex> scope_lock(buffer->trail_lock);
     buffer->trail.push_back(crumb);
-    pthread_mutex_unlock(&buffer->trail_lock);
 }
 
 static void *
@@ -573,8 +570,6 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         break;
     }
     buf->base.data = xmalloc(buf->base.len);
-
-    pthread_mutex_init(&buf->trail_lock, NULL);
 
     return buf;
 }
@@ -628,8 +623,6 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         break;
     }
     buf->base.data = xmalloc(buf->base.len);
-
-    pthread_mutex_init(&buf->trail_lock, NULL);
 
     return buf;
 }
@@ -695,36 +688,36 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
     if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_DEPTH))
         return;
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+        struct gm_device_buffer *old = dev->depth_buf_ready;
+        dev->depth_buf_ready = dev->depth_buf_back;
+        dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool, "kinect depth");
+        // TODO: Figure out the Kinect timestamp format to translate it into
+        //       nanoseconds
+        //dev->frame_time = (uint64_t)timestamp;
+        dev->frame_time = gm_os_get_time();
 
-    struct gm_device_buffer *old = dev->depth_buf_ready;
-    dev->depth_buf_ready = dev->depth_buf_back;
-    dev->depth_buf_back = mem_pool_acquire_buffer(dev->depth_buf_pool, "kinect depth");
-    // TODO: Figure out the Kinect timestamp format to translate it into
-    //       nanoseconds
-    //dev->frame_time = (uint64_t)timestamp;
-    dev->frame_time = get_time();
+        dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
 
-    dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
+        /* XXX: assuming that the kinect is stationary.... */
+        dev->frame_gravity_valid = true;
+        dev->frame_gravity[0] = dev->kinect.accel[0];
+        dev->frame_gravity[1] = dev->kinect.accel[1];
+        dev->frame_gravity[2] = dev->kinect.accel[2];
 
-    /* XXX: assuming that the kinect is stationary.... */
-    dev->frame_gravity_valid = true;
-    dev->frame_gravity[0] = dev->kinect.accel[0];
-    dev->frame_gravity[1] = dev->kinect.accel[1];
-    dev->frame_gravity[2] = dev->kinect.accel[2];
+        dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
 
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+        freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
+        if (old)
+            gm_buffer_unref(&old->base);
+    }
 
-    freenect_set_depth_buffer(fdev, dev->depth_buf_back->base.data);
-    if (old)
-        gm_buffer_unref(&old->base);
-
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 static void
@@ -735,25 +728,26 @@ kinect_rgb_frame_cb(freenect_device *fdev, void *video, uint32_t timestamp)
     if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_VIDEO))
         return;
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
-    struct gm_device_buffer *old = dev->video_buf_ready;
-    dev->video_buf_ready = dev->video_buf_back;
-    dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool, "kinect rgb");
-    //dev->frame_time = (uint64_t)timestamp;
-    dev->frame_time = get_time();
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
-    dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
+        struct gm_device_buffer *old = dev->video_buf_ready;
+        dev->video_buf_ready = dev->video_buf_back;
+        dev->video_buf_back = mem_pool_acquire_buffer(dev->video_buf_pool, "kinect rgb");
+        //dev->frame_time = (uint64_t)timestamp;
+        dev->frame_time = gm_os_get_time();
+        dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+        dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
 
-    freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
-    if (old)
-        gm_buffer_unref(&old->base);
+        freenect_set_video_buffer(fdev, dev->video_buf_back->base.data);
+        if (old)
+            gm_buffer_unref(&old->base);
+    }
 
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 static bool
@@ -790,6 +784,8 @@ kinect_open(struct gm_device *dev, const struct gm_device_config *config,
 
     freenect_set_user(dev->kinect.fdev, dev);
 
+    dev->kinect.registration = freenect_copy_registration(dev->kinect.fdev);
+
     dev->kinect.ir_brightness = freenect_get_ir_brightness(dev->kinect.fdev);
 
     freenect_raw_tilt_state *tilt_state;
@@ -807,8 +803,8 @@ kinect_open(struct gm_device *dev, const struct gm_device_config *config,
     dev->max_depth_pixels = 640 * 480;
     dev->depth_intrinsics.width = 640;
     dev->depth_intrinsics.height = 480;
-    dev->depth_intrinsics.cx = 339.30780975300314;
-    dev->depth_intrinsics.cy = 242.73913761751615;
+    dev->depth_intrinsics.cx = dev->kinect.registration.reg_info.cx / 2; // for 1280 x 720
+    dev->depth_intrinsics.cx = dev->kinect.registration.reg_info.cy / 2; // for 1280 x 720
     dev->depth_intrinsics.fx = 594.21434211923247;
     dev->depth_intrinsics.fy = 591.04053696870778;
     dev->depth_intrinsics.distortion_model = GM_DISTORTION_NONE;
@@ -953,13 +949,15 @@ kinect_close(struct gm_device *dev)
 {
     /* XXX: can assume the device has been stopped */
 
-    if (dev->kinect.fdev)
+    if (dev->kinect.fdev) {
+        freenect_destroy_registration(&dev->kinect.registration);
         freenect_close_device(dev->kinect.fdev);
+    }
     if (dev->kinect.fctx)
         freenect_shutdown(dev->kinect.fctx);
 }
 
-static void *
+static void
 kinect_io_thread_cb(void *data)
 {
     struct gm_device *dev = (struct gm_device *)data;
@@ -1007,8 +1005,6 @@ kinect_io_thread_cb(void *data)
 
     freenect_stop_depth(dev->kinect.fdev);
     freenect_stop_video(dev->kinect.fdev);
-
-    return NULL;
 }
 
 static void
@@ -1016,34 +1012,25 @@ kinect_start(struct gm_device *dev)
 {
     /* Set running before starting thread, otherwise it would exit immediately */
     dev->running = true;
-    pthread_create(&dev->kinect.io_thread,
-                   NULL, //attributes
-                   kinect_io_thread_cb,
-                   dev); //data
+    dev->io_thread = std::thread(kinect_io_thread_cb, dev);
 #ifdef __linux__
-    pthread_setname_np(dev->kinect.io_thread, "Kinect IO");
+    pthread_setname_np(dev->io_thread.native_handle(), "Kinect IO");
 #endif
 }
 
 static void
 kinect_stop(struct gm_device *dev)
 {
-    void *retval = NULL;
-
     /* After setting running = false we expect the thread to exit within a
      * finite amount of time */
     dev->running = false;
 
-    int ret = pthread_join(dev->kinect.io_thread, &retval);
-    if (ret < 0) {
+    try {
+        dev->io_thread.join();
+        gm_debug(dev->log, "Successfully joined io thread");
+    } catch (const std::system_error &e) {
         gm_error(dev->log, "Failed to wait for Kinect IO thread to exit: %s",
-                 strerror(ret));
-        return;
-    }
-
-    if (retval != NULL) {
-        gm_error(dev->log, "Kinect IO thread exited with error: %d",
-                 (int)(intptr_t)retval);
+                 e.what());
     }
 }
 #endif // USE_FREENECT
@@ -1320,7 +1307,7 @@ read_frame_buffer(struct gm_device *dev,
 
     size_t len = (size_t)json_object_get_number(frame, len_prop);
 
-    FILE *fp = fopen(abs_filename, "r");
+    FILE *fp = fopen(abs_filename, "rb");
     if (!fp) {
         gm_error(dev->log, "Failed to open recording frame '%s'",
                  abs_filename);
@@ -1373,7 +1360,9 @@ swap_recorded_frame(struct gm_device *dev,
                     bool discontinuity,
                     bool paused)
 {
-        pthread_mutex_lock(&dev->swap_buffers_lock);
+
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
         dev->frame_time = timestamp;
         dev->frame_rotation = calc_frame_rotation(dev, camera_rotation);
@@ -1437,10 +1426,10 @@ swap_recorded_frame(struct gm_device *dev,
                     gm_buffer_unref(&old->base);
             }
         }
+    }
 
-        pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-        pthread_mutex_lock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
 
         if (dev->frame_request_buffers_mask & dev->frame_ready_buffers_mask) {
             notify_frame_locked(dev);
@@ -1463,11 +1452,10 @@ swap_recorded_frame(struct gm_device *dev,
                 dev->frame_request_buffers_mask = 0;
             }
         }
-
-        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    }
 }
 
-static void *
+static void
 recording_io_thread_cb(void *userdata)
 {
     struct gm_device *dev = (struct gm_device *)userdata;
@@ -1502,7 +1490,7 @@ recording_io_thread_cb(void *userdata)
      * We pause updates to this clock when we reach the last/max frame and also
      * mark these frames as 'paused'.
      */
-    uint64_t monotonic_clock = get_time();
+    uint64_t monotonic_clock = gm_os_get_time();
 
     /* Our monotonic timestamps are derived by calculating the delta between
      * sequential frames. This tracks the previous frame's timestamp for
@@ -1521,7 +1509,7 @@ recording_io_thread_cb(void *userdata)
      * can compare the logical progress of time according to the recording vs
      * real time progress.
      */
-    uint64_t start_real_timestamp = get_time();
+    uint64_t start_real_timestamp = gm_os_get_time();
 
     /* Set each time the recording loops to inform the frame consumer that it
      * shouldn't do motion analysis between the last and first frame of a
@@ -1642,7 +1630,7 @@ recording_io_thread_cb(void *userdata)
              */
             gm_debug(dev->log, "Negative timestep (e.g. looped or steped backwards), reseting timer state");
 
-            start_real_timestamp = get_time();
+            start_real_timestamp = gm_os_get_time();
 
             /* 'recording_progress' is measured relative to this
              * start_frame_timestamp (considering playback might not initially
@@ -1689,7 +1677,7 @@ recording_io_thread_cb(void *userdata)
         {
             /* We froze the clock while paused so reset it... */
             start_frame_timestamp = prev_frame_timestamp;
-            start_real_timestamp = get_time() - frame_delta;
+            start_real_timestamp = gm_os_get_time() - frame_delta;
             paused = false;
         }
 
@@ -1701,7 +1689,7 @@ recording_io_thread_cb(void *userdata)
 
             prev_frame_timestamp = frame_timestamp;
 
-            real_progress = get_time() - start_real_timestamp;
+            real_progress = gm_os_get_time() - start_real_timestamp;
 
             if (dev->recording.frame_throttle) {
                 /* Throttle playback according to the timestamps in the recorded
@@ -1709,20 +1697,21 @@ recording_io_thread_cb(void *userdata)
                  */
                 while (recording_progress > real_progress) {
                     uint64_t delay_us = (recording_progress - real_progress) / 1000;
-                    usleep(delay_us);
-                    real_progress = get_time() - start_real_timestamp;
+                    gm_os_usleep(delay_us);
+                    real_progress = gm_os_get_time() - start_real_timestamp;
                 }
             }
         }
 
         // Wait until a frame has been requested before swapping buffers
-        pthread_mutex_lock(&dev->request_buffers_mask_lock);
-        while (dev->running && !dev->frame_request_buffers_mask) {
-            gm_debug(dev->log, "Waiting for next frame request");
-            pthread_cond_wait(&dev->request_buffers_cond,
-                              &dev->request_buffers_mask_lock);
+        {
+            std::unique_lock<std::mutex> cond_lock(dev->request_buffers_mask_lock);
+
+            while (dev->running && !dev->frame_request_buffers_mask) {
+                gm_debug(dev->log, "Waiting for next frame request");
+                dev->request_buffers_cond.wait(cond_lock);
+            }
         }
-        pthread_mutex_unlock(&dev->request_buffers_mask_lock);
 
 
 
@@ -1779,7 +1768,7 @@ recording_io_thread_cb(void *userdata)
          */
 
         // Update considering we may have blocked waiting for a frame request
-        real_progress = get_time() - start_real_timestamp;
+        real_progress = gm_os_get_time() - start_real_timestamp;
 
         /* Skip frames if we're > 33ms behind */
         if (dev->recording.frame_skip &&
@@ -1839,8 +1828,6 @@ recording_io_thread_cb(void *userdata)
 
         dev->recording.frame = next_frame;
     }
-
-    return NULL;
 }
 
 static void
@@ -1848,42 +1835,32 @@ recording_start(struct gm_device *dev)
 {
     /* Set running before starting thread, otherwise it would exit immediately */
     dev->running = true;
-    pthread_create(&dev->recording.io_thread,
-                   NULL,
-                   recording_io_thread_cb,
-                   dev);
+    dev->io_thread = std::thread(recording_io_thread_cb, dev);
 #ifdef __linux__
-    pthread_setname_np(dev->recording.io_thread, "Recording IO");
+    pthread_setname_np(dev->io_thread.native_handle(), "Recording IO");
 #endif
 }
 
 static void
 recording_stop(struct gm_device *dev)
 {
-    void *retval = NULL;
-
     /* After setting running = false we expect the thread to exit within a
      * finite amount of time */
     dev->running = false;
 
     // Signal that the request_buffers_mask has changed in case we're
     // waiting on it
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    pthread_cond_signal(&dev->request_buffers_cond);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
-
-    int ret = pthread_join(dev->recording.io_thread, &retval);
-    if (ret < 0) {
-        gm_error(dev->log, "Failed to wait for recording IO thread to exit: %s",
-                 strerror(ret));
-        return;
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        dev->request_buffers_cond.notify_one();
     }
 
-    if (retval != NULL) {
-        gm_error(dev->log, "Recording IO thread exited with error: %d",
-                 (int)(intptr_t)retval);
-    } else {
+    try {
+        dev->io_thread.join();
         gm_debug(dev->log, "Successfully joined recording io thread");
+    } catch (const std::system_error &e) {
+        gm_error(dev->log, "Failed to wait for recording IO thread to exit: %s",
+                 e.what());
     }
 }
 
@@ -1958,39 +1935,40 @@ tango_point_cloud_cb(void *context, const TangoPointCloud *point_cloud)
         (TangoSupportRotation)dev->tango.android_display_rotation,
         &pose);
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
-    struct gm_device_buffer *old = dev->depth_buf_ready;
-    dev->depth_buf_ready = depth_buf_back;
-    dev->frame_time = (uint64_t)(point_cloud->timestamp * 1e9);
-    if (error == TANGO_SUCCESS) {
-        dev->frame_pose = {
-            GM_POSE_TO_START,
-            { (float)-pose.orientation[0],
-              (float)pose.orientation[1],
-              (float)pose.orientation[2],
-              (float)pose.orientation[3] },
-            { (float)-pose.translation[0],
-              (float)pose.translation[1],
-              (float)pose.translation[2] }
-        };
-    } else {
-        gm_debug(dev->log, "tango_point_cloud_cb invalid pose");
-        dev->frame_pose.type = GM_POSE_INVALID;
+        struct gm_device_buffer *old = dev->depth_buf_ready;
+        dev->depth_buf_ready = depth_buf_back;
+        dev->frame_time = (uint64_t)(point_cloud->timestamp * 1e9);
+        if (error == TANGO_SUCCESS) {
+            dev->frame_pose = {
+                GM_POSE_TO_START,
+                { (float)-pose.orientation[0],
+                  (float)pose.orientation[1],
+                  (float)pose.orientation[2],
+                  (float)pose.orientation[3] },
+                { (float)-pose.translation[0],
+                  (float)pose.translation[1],
+                  (float)pose.translation[2] }
+            };
+        } else {
+            gm_debug(dev->log, "tango_point_cloud_cb invalid pose");
+            dev->frame_pose.type = GM_POSE_INVALID;
+        }
+        dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+        gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);
+
+        dev->frame_rotation = calc_frame_rotation(dev, dev->tango.android_display_rotation);
+
+        if (old)
+            gm_buffer_unref(&old->base);
     }
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
-    gm_debug(dev->log, "tango_point_cloud_cb depth ready = %p", dev->depth_buf_ready);
 
-    dev->frame_rotation = calc_frame_rotation(dev, dev->tango.android_display_rotation);
-
-    if (old)
-        gm_buffer_unref(&old->base);
-
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 // This function does nothing. TangoService_connectOnTextureAvailable
@@ -2056,24 +2034,25 @@ tango_frame_available_cb(void *context,
            buffer->data,
            buffer->width * buffer->height);
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
-    struct gm_device_buffer *old = dev->video_buf_ready;
-    dev->video_buf_ready = video_buf_back;
-    dev->frame_time = (uint64_t)(buffer->timestamp * 1e9);
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
-    dev->frame_rotation = calc_frame_rotation(dev, dev->tango.android_display_rotation);
+        struct gm_device_buffer *old = dev->video_buf_ready;
+        dev->video_buf_ready = video_buf_back;
+        dev->frame_time = (uint64_t)(buffer->timestamp * 1e9);
+        dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+        dev->frame_rotation = calc_frame_rotation(dev, dev->tango.android_display_rotation);
 
-    gm_debug(dev->log, "tango_frame_available_cb video ready = %p", dev->video_buf_ready);
+        gm_debug(dev->log, "tango_frame_available_cb video ready = %p", dev->video_buf_ready);
 
-    if (old)
-        gm_buffer_unref(&old->base);
+        if (old)
+            gm_buffer_unref(&old->base);
+    }
 
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 static bool
@@ -2532,27 +2511,27 @@ tango_configure(struct gm_device *dev, char **err)
      * notify changes via that device instead (or in addition) to setting the
      * global state.
      */
-    pthread_mutex_lock(&jni_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(jni_lock;
 
-    dev->configured = true;
+        dev->configured = true;
 
-    gm_debug(dev->log, "Tango Device Configure");
+        gm_debug(dev->log, "Tango Device Configure");
 
-    if (early_tango_service_binder) {
-        JNIEnv *jni_env = 0;
-        dev->jvm->AttachCurrentThread(&jni_env, 0);
+        if (early_tango_service_binder) {
+            JNIEnv *jni_env = 0;
+            dev->jvm->AttachCurrentThread(&jni_env, 0);
 
-        tango_set_service_binder(dev, jni_env, early_tango_service_binder);
+            tango_set_service_binder(dev, jni_env, early_tango_service_binder);
+        }
+
+        /* Now that the device is configured we set the global tango_singleton_dev
+         * pointer making the device visible to JNI callbacks...
+         */
+        gm_assert(dev->log, tango_singleton_dev == NULL,
+                  "Attempted to open multiple Tango devices");
+        tango_singleton_dev = dev;
     }
-
-    /* Now that the device is configured we set the global tango_singleton_dev
-     * pointer making the device visible to JNI callbacks...
-     */
-    gm_assert(dev->log, tango_singleton_dev == NULL,
-              "Attempted to open multiple Tango devices");
-    tango_singleton_dev = dev;
-
-    pthread_mutex_unlock(&jni_lock);
 
     return true;
 }
@@ -2612,27 +2591,28 @@ on_avf_video_cb(struct ios_av_session *session,
 
     memcpy(video_buf_back->base.data, video, stride * height);
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
-    dev->video_intrinsics = *intrinsics;
+        dev->video_intrinsics = *intrinsics;
 
-    struct gm_device_buffer *old = dev->video_buf_ready;
-    dev->video_buf_ready = video_buf_back;
-    // FIXME: get time from AVF
-    dev->frame_time = get_time();
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
-    dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
+        struct gm_device_buffer *old = dev->video_buf_ready;
+        dev->video_buf_ready = video_buf_back;
+        // FIXME: get time from AVF
+        dev->frame_time = gm_os_get_time();
+        dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+        dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
 
-    gm_debug(dev->log, "on_avf_video_cb video ready = %p", dev->video_buf_ready);
+        gm_debug(dev->log, "on_avf_video_cb video ready = %p", dev->video_buf_ready);
 
-    if (old)
-        gm_buffer_unref(&old->base);
+        if (old)
+            gm_buffer_unref(&old->base);
+    }
 
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 static void
@@ -2663,80 +2643,80 @@ on_avf_depth_cb(struct ios_av_session *session,
         }
     }
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
-    dev->depth_intrinsics = *intrinsics;
+        dev->depth_intrinsics = *intrinsics;
 
-    // TODO: get timestamp from avf
-    dev->frame_time = get_time();
-    dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
+        // TODO: get timestamp from avf
+        dev->frame_time = gm_os_get_time();
+        dev->frame_rotation = calc_frame_rotation(dev, ios_get_device_rotation());
 
-    float frame_accel[3];
+        float frame_accel[3];
 
-    /* We want to report our gravity vector in the coordinate space of our
-     * rotated frame, taking into account the orientation of the device...
-     *
-     * Note we flip the X axis of the accelerometer data because CoreMotion
-     * defines the coordinate space such that +X extends to the right of
-     * the phone (while portrait) as you look at the screen, whereas we want
-     * to match the point-of-view of the front-facing camera where +X extends
-     * to the right if looking at the back of the phone (in the direction
-     * of the camera).
-     *
-     * See here for more details about CoreMotion's defined axis:
-     *
-     *   https://developer.apple.com/documentation/coremotion/getting_raw_accelerometer_events
-     *
-     * Y+ being up and +Z extending in the viewing direction of the front-facing
-     * camera is consistent with what we want while the phone is in a portrait
-     * orientation (GM_ROTATION_270)
-     */
-    switch (dev->frame_rotation) {
-    case GM_ROTATION_0:
-        frame_accel[0] = -acceleration[1];
-        frame_accel[1] = -acceleration[0];
-        frame_accel[2] = acceleration[2];
-        break;
-    case GM_ROTATION_90:
-        frame_accel[0] = acceleration[0];
-        frame_accel[1] = -acceleration[1];
-        frame_accel[2] = acceleration[2];
-        break;
-    case GM_ROTATION_180:
-        frame_accel[0] = acceleration[1];
-        frame_accel[1] = acceleration[0];
-        frame_accel[2] = acceleration[2];
-        break;
-    case GM_ROTATION_270:
-        /* This corresponds to a portrait orientation where Y+ for the
-         * accelerometer matches the Y+ we want for the frame.
+        /* We want to report our gravity vector in the coordinate space of our
+         * rotated frame, taking into account the orientation of the device...
+         *
+         * Note we flip the X axis of the accelerometer data because CoreMotion
+         * defines the coordinate space such that +X extends to the right of
+         * the phone (while portrait) as you look at the screen, whereas we want
+         * to match the point-of-view of the front-facing camera where +X extends
+         * to the right if looking at the back of the phone (in the direction
+         * of the camera).
+         *
+         * See here for more details about CoreMotion's defined axis:
+         *
+         *   https://developer.apple.com/documentation/coremotion/getting_raw_accelerometer_events
+         *
+         * Y+ being up and +Z extending in the viewing direction of the front-facing
+         * camera is consistent with what we want while the phone is in a portrait
+         * orientation (GM_ROTATION_270)
          */
-        frame_accel[0] = -acceleration[0];
-        frame_accel[1] = acceleration[1];
-        frame_accel[2] = acceleration[2];
-        break;
+        switch (dev->frame_rotation) {
+        case GM_ROTATION_0:
+            frame_accel[0] = -acceleration[1];
+            frame_accel[1] = -acceleration[0];
+            frame_accel[2] = acceleration[2];
+            break;
+        case GM_ROTATION_90:
+            frame_accel[0] = acceleration[0];
+            frame_accel[1] = -acceleration[1];
+            frame_accel[2] = acceleration[2];
+            break;
+        case GM_ROTATION_180:
+            frame_accel[0] = acceleration[1];
+            frame_accel[1] = acceleration[0];
+            frame_accel[2] = acceleration[2];
+            break;
+        case GM_ROTATION_270:
+            /* This corresponds to a portrait orientation where Y+ for the
+             * accelerometer matches the Y+ we want for the frame.
+             */
+            frame_accel[0] = -acceleration[0];
+            frame_accel[1] = acceleration[1];
+            frame_accel[2] = acceleration[2];
+            break;
+        }
+
+        dev->frame_gravity_valid = true;
+        dev->frame_gravity[0] = frame_accel[0];
+        dev->frame_gravity[1] = frame_accel[1];
+        dev->frame_gravity[2] = frame_accel[2];
+
+        dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+
+        struct gm_device_buffer *old = dev->depth_buf_ready;
+        dev->depth_buf_ready = depth_buf_back;
+        if (old)
+            gm_buffer_unref(&old->base);
+
+        gm_debug(dev->log, "avf depth ready = %p", dev->depth_buf_ready);
     }
 
-    dev->frame_gravity_valid = true;
-    dev->frame_gravity[0] = frame_accel[0];
-    dev->frame_gravity[1] = frame_accel[1];
-    dev->frame_gravity[2] = frame_accel[2];
-
-    dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
-
-    struct gm_device_buffer *old = dev->depth_buf_ready;
-    dev->depth_buf_ready = depth_buf_back;
-    if (old)
-        gm_buffer_unref(&old->base);
-
-    gm_debug(dev->log, "avf depth ready = %p", dev->depth_buf_ready);
-
-
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
-
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 static bool
@@ -2846,10 +2826,6 @@ gm_device_open(struct gm_logger *log,
     struct gm_device *dev = new gm_device();
     bool status = false;
 
-    pthread_cond_init(&dev->request_buffers_cond, NULL);
-    pthread_mutex_init(&dev->request_buffers_mask_lock, NULL);
-    pthread_mutex_init(&dev->swap_buffers_lock, NULL);
-
     dev->log = log;
     dev->type = config->type;
 
@@ -2950,7 +2926,6 @@ gm_device_open(struct gm_logger *log,
     dev->properties.push_back(prop);
 
     dev->properties_state.n_properties = dev->properties.size();
-    pthread_mutex_init(&dev->properties_state.lock, NULL);
     dev->properties_state.properties = &dev->properties[0];
 
     return dev;
@@ -3150,10 +3125,6 @@ gm_device_close(struct gm_device *dev)
                      dev);
     mem_pool_free(dev->video_buf_pool);
 
-    pthread_cond_destroy(&dev->request_buffers_cond);
-    pthread_mutex_destroy(&dev->request_buffers_mask_lock);
-    pthread_mutex_destroy(&dev->swap_buffers_lock);
-
     delete dev;
 }
 
@@ -3215,7 +3186,7 @@ gm_device_start(struct gm_device *dev)
 static void
 device_flush(struct gm_device *dev)
 {
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
     if (dev->last_frame) {
         gm_frame_unref(dev->last_frame);
@@ -3246,8 +3217,6 @@ device_flush(struct gm_device *dev)
     dev->frame_rotation = GM_ROTATION_0;
     dev->frame_gravity_valid = false;
     dev->frame_pose.type = GM_POSE_INVALID;
-
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
 }
 
 void
@@ -3330,11 +3299,12 @@ gm_device_request_frame(struct gm_device *dev, uint64_t buffers_mask)
 
     gm_debug(dev->log, "frame request received");
 
-    pthread_mutex_lock(&dev->request_buffers_mask_lock);
-    dev->frame_request_buffers_mask |= buffers_mask;
-    pthread_cond_signal(&dev->request_buffers_cond);
-    maybe_notify_frame_locked(dev);
-    pthread_mutex_unlock(&dev->request_buffers_mask_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        dev->frame_request_buffers_mask |= buffers_mask;
+        dev->request_buffers_cond.notify_one();
+        maybe_notify_frame_locked(dev);
+    }
 }
 
 #if 0
@@ -3368,7 +3338,7 @@ gm_device_get_latest_frame(struct gm_device *dev)
     }
 #endif
 
-    pthread_mutex_lock(&dev->swap_buffers_lock);
+    std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
 
     if (dev->last_frame)
         gm_frame_unref(dev->last_frame);
@@ -3429,8 +3399,6 @@ gm_device_get_latest_frame(struct gm_device *dev)
 
     /* Get a ref() for the caller */
     gm_frame_ref(&frame->base);
-
-    pthread_mutex_unlock(&dev->swap_buffers_lock);
 
     /* We should have one ref for dev->last_frame and return a _ref() to the
      * caller so there's no race between the caller claiming a reference and us
@@ -3505,7 +3473,7 @@ handle_jni_OnDisplayRotate(jint rotation)
 #ifdef USE_TANGO
     // we might race with gm_device_configure which also wants to check the
     // latest display rotation
-    pthread_mutex_lock(&jni_lock);
+    std::lock_guard<std::mutex> scope_lock(jni_lock);
 
     tango_display_rotation = (enum gm_rotation)rotation;
 
@@ -3514,8 +3482,6 @@ handle_jni_OnDisplayRotate(jint rotation)
     } else {
         __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onDisplayRotate JNI");
     }
-
-    pthread_mutex_unlock(&jni_lock);
 #endif
 }
 
@@ -3541,7 +3507,7 @@ Java_com_impossible_glimpse_GlimpseJNI_onTangoServiceConnected(JNIEnv *env,
 {
     // we might race with gm_device_configure which also wants to know whether
     // the service is already connected...
-    pthread_mutex_lock(&jni_lock);
+    std::lock_guard<std::mutex> scope_lock(jni_lock);
 
     if (tango_singleton_dev) {
         tango_set_service_binder(tango_singleton_dev, env, binder);
@@ -3549,8 +3515,6 @@ Java_com_impossible_glimpse_GlimpseJNI_onTangoServiceConnected(JNIEnv *env,
         __android_log_print(ANDROID_LOG_WARN, "Glimpse Device", "Early onTangoServiceConnected JNI");
         early_tango_service_binder = env->NewWeakGlobalRef(binder);
     }
-
-    pthread_mutex_unlock(&jni_lock);
 }
 #endif
 

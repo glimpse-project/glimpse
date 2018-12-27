@@ -30,6 +30,10 @@
 #include <dlfcn.h>
 #include <unistd.h>
 
+#ifdef _WIN32
+#define strdup(X) _strdup(X)
+#endif
+
 #include <IUnityInterface.h>
 #include <IUnityGraphics.h>
 #include <IUnityRenderingExtensions.h>
@@ -248,62 +252,62 @@ logger_cb(struct gm_logger *logger,
     struct glimpse_data *data = (struct glimpse_data *)user_data;
     char *msg = NULL;
 
-    if (vasprintf(&msg, format, ap) > 0) {
+    xvasprintf(&msg, format, ap);
+
 #ifdef __ANDROID__
-        switch (level) {
-        case GM_LOG_ASSERT:
-            __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
-            break;
-        case GM_LOG_ERROR:
-            __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
-            break;
-        case GM_LOG_WARN:
-            __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
-            break;
-        case GM_LOG_INFO:
-            __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
-            break;
-        case GM_LOG_DEBUG:
-            __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
-            break;
-        }
+    switch (level) {
+    case GM_LOG_ASSERT:
+        __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
+        break;
+    case GM_LOG_ERROR:
+        __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
+        break;
+    case GM_LOG_WARN:
+        __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
+        break;
+    case GM_LOG_INFO:
+        __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
+        break;
+    case GM_LOG_DEBUG:
+        __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
+        break;
+    }
 #elif TARGET_OS_IOS == 1
-        ios_log(msg);
+    ios_log(msg);
 #else
-        if (unity_log_function)
-            unity_log_function(level, context, msg);
+    if (unity_log_function)
+        unity_log_function(level, context, msg);
 #endif
 
-        if (data->log_fp) {
-            switch (level) {
-            case GM_LOG_ERROR:
-                fprintf(data->log_fp, "%s: ERROR: ", context);
-                break;
-            case GM_LOG_WARN:
-                fprintf(data->log_fp, "%s: WARN: ", context);
-                break;
-            default:
-                fprintf(data->log_fp, "%s: ", context);
-            }
-
-            fprintf(data->log_fp, "%s\n", msg);
-
-            if (backtrace) {
-                int line_len = 100;
-                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-                gm_logger_get_backtrace_strings(logger, backtrace,
-                                                line_len, (char *)formatted);
-                for (int i = 0; i < backtrace->n_frames; i++) {
-                    char *line = formatted + line_len * i;
-                    fprintf(data->log_fp, "> %s\n", line);
-                }
-            }
-            fflush(data->log_fp);
+    if (data->log_fp) {
+        switch (level) {
+        case GM_LOG_ERROR:
+            fprintf(data->log_fp, "%s: ERROR: ", context);
+            break;
+        case GM_LOG_WARN:
+            fprintf(data->log_fp, "%s: WARN: ", context);
+            break;
+        default:
+            fprintf(data->log_fp, "%s: ", context);
         }
 
-        free(msg);
+        fprintf(data->log_fp, "%s\n", msg);
+
+        if (backtrace) {
+            int line_len = 100;
+            char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+            gm_logger_get_backtrace_strings(logger, backtrace,
+                                            line_len, (char *)formatted);
+            for (int i = 0; i < backtrace->n_frames; i++) {
+                char *line = formatted + line_len * i;
+                fprintf(data->log_fp, "> %s\n", line);
+            }
+        }
+        fflush(data->log_fp);
     }
+
+    xfree(msg);
 }
 
 static void

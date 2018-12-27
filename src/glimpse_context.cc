@@ -61,22 +61,37 @@
  *  POSSIBILITY OF SUCH DAMAGE.
  */
 
+#ifdef _WIN32
+#include <windows.h>
+#define strdup _strdup
+#endif
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#else
+#define TARGET_OS_MAC 0
+#define TARGET_OS_IOS 0
+#define TARGET_OS_OSX 0
+#endif
 
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 
 #include <fcntl.h>
 #include <stdlib.h>
 #include <time.h>
+#if defined(__unix__) || defined(__APPLE__)
 #include <unistd.h>
+#endif
 #include <inttypes.h>
 #include <string.h>
 #include <cmath>
 #include <list>
 #include <forward_list>
 
-#include <pthread.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include <glm/gtc/matrix_access.hpp>
 #include <glm/gtc/quaternion.hpp>
@@ -128,6 +143,7 @@
 #include "glimpse_assets.h"
 #include "glimpse_data.h"
 #include "glimpse_context.h"
+#include "glimpse_os.h"
 
 #undef GM_LOG_CONTEXT
 #ifdef __ANDROID__
@@ -509,7 +525,7 @@ struct gm_prediction_impl
 
     struct gm_skeleton skeleton;
 
-    pthread_mutex_t trail_lock;
+    std::mutex trail_lock;
     std::vector<struct trail_crumb> trail;
 
     /* If h2 == -1 then skeleton is a copy of tracking_history[h1]->skeleton
@@ -593,7 +609,7 @@ struct gm_tracking_impl
     /* Lets us debug when we've failed to release frame resources when
      * we come to destroy our resource pools
      */
-    pthread_mutex_t trail_lock;
+    std::mutex trail_lock;
     std::vector<struct trail_crumb> trail;
 
     std::vector<gm_pipeline_stage_data> stage_data;
@@ -615,7 +631,7 @@ struct gm_context
     /* E.g taken during the render hook to block the context from being stopped
      * or destroyed
      */
-    pthread_mutex_t liveness_lock;
+    std::mutex liveness_lock;
     /* A pre-requisite to destroying the context is to stop tracking, which
      * will stop  the tracking thread. It's possible to only stop tracking
      * without destroying the context via stop_tracking_thread()
@@ -640,7 +656,7 @@ struct gm_context
      */
     std::vector<struct gm_pipeline_stage> stages;
 
-    pthread_t tracking_thread;
+    std::thread tracking_thread;
     dlib::frontal_face_detector detector;
 
     dlib::shape_predictor face_feature_detector;
@@ -670,8 +686,8 @@ struct gm_context
     std::vector<glimpse::wrapped_image<unsigned char>> grey_face_detect_wrapped_layers;
 
     std::atomic<bool> need_new_scaled_frame;
-    pthread_mutex_t scaled_frame_cond_mutex;
-    pthread_cond_t scaled_frame_available_cond;
+    std::mutex scaled_frame_cond_mutex;
+    std::condition_variable scaled_frame_available_cond;
 
     GLuint yuv_frame_scale_program;
     GLuint scale_program;
@@ -709,7 +725,7 @@ struct gm_context
      * rate so throttling isn't a big concern but nevertheless...)
      */
 
-    pthread_mutex_t debug_viz_mutex;
+    std::mutex debug_viz_mutex;
     int grey_debug_width;
     int grey_debug_height;
     std::vector<uint8_t> grey_debug_buffer;
@@ -728,8 +744,8 @@ struct gm_context
 
     int codebook_debug_view;
 
-    pthread_mutex_t skel_track_cond_mutex;
-    pthread_cond_t skel_track_cond;
+    std::mutex skel_track_cond_mutex;
+    std::condition_variable skel_track_cond;
 
     struct gm_mem_pool *prediction_pool;
 
@@ -855,8 +871,8 @@ struct gm_context
     struct gm_ui_properties properties_state;
     std::vector<struct gm_ui_property> properties;
 
-    pthread_mutex_t frame_ready_mutex;
-    pthread_cond_t frame_ready_cond;
+    std::mutex frame_ready_mutex;
+    std::condition_variable frame_ready_cond;
     struct gm_frame *frame_ready;
 
     void (*event_callback)(struct gm_context *ctx,
@@ -890,7 +906,7 @@ struct gm_context
      * latest_tracking, even if we failed to detect a person.
      */
     struct gm_mem_pool *tracking_pool;
-    pthread_mutex_t tracking_swap_mutex;
+    std::mutex tracking_swap_mutex;
     struct gm_tracking_impl *tracking_history[TRACK_FRAMES];
     int n_tracking;
     uint64_t last_tracking_success_timestamp;
@@ -903,7 +919,7 @@ struct gm_context
      */
     struct gm_tracking_impl *latest_tracking;
 
-    pthread_mutex_t people_modify_mutex;
+    std::mutex people_modify_mutex;
     std::list<struct gm_person> tracked_people;
     int last_person_id;
 
@@ -941,7 +957,7 @@ struct gm_context
     std::vector<struct seg_codeword *> seg_codebook_bg;
 
     /* Note: this lock covers the aggregated metrics under ctx->stages[] too */
-    pthread_mutex_t aggregate_metrics_mutex;
+    std::mutex aggregate_metrics_mutex;
     int n_frames;
     uint64_t total_tracking_duration;
 
@@ -1121,15 +1137,6 @@ distance_between(const float *point1, const float *point2)
     return sqrtf(powf(point1[0] - point2[0], 2.f) +
                  powf(point1[1] - point2[1], 2.f) +
                  powf(point1[2] - point2[2], 2.f));
-}
-
-static uint64_t
-get_time(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-
-    return ((uint64_t)ts.tv_sec) * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
 // The overall intention here is that this transform should be used to limit
@@ -2427,9 +2434,10 @@ tracking_add_breadcrumb(struct gm_tracking *self, const char *tag)
                                   1, // skip top stack frame
                                   10);
 
-    pthread_mutex_lock(&tracking->trail_lock);
-    tracking->trail.push_back(crumb);
-    pthread_mutex_unlock(&tracking->trail_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(tracking->trail_lock);
+        tracking->trail.push_back(crumb);
+    }
 }
 
 static void *
@@ -3002,8 +3010,8 @@ tracking_add_debug_text(struct gm_tracking_impl *tracking,
 {
     va_list args;
     char *debug_text = NULL;
-    va_start (args, fmt);
-    vasprintf(&debug_text, fmt, args);
+    va_start(args, fmt);
+    xvasprintf(&debug_text, fmt, args);
     va_end(args);
     if (debug_text) {
         tracking->debug_text.push_back(debug_text);
@@ -3279,9 +3287,10 @@ prediction_add_breadcrumb(struct gm_prediction *self, const char *tag)
                                   1, // skip top stack frame
                                   10);
 
-    pthread_mutex_lock(&prediction->trail_lock);
-    prediction->trail.push_back(crumb);
-    pthread_mutex_unlock(&prediction->trail_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(prediction->trail_lock);
+        prediction->trail.push_back(crumb);
+    }
 }
 
 static void *
@@ -6584,8 +6593,7 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    // Begin modifications to tracked_people
-    pthread_mutex_lock(&ctx->people_modify_mutex);
+    std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
 
     // Add newly tracked people/history to tracked_people
     while (!state->new_history.empty()) {
@@ -6664,9 +6672,6 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
     // with more confident initial detections sorting first when multiple
     // people are detected in the same frame.
     ctx->tracked_people.sort(compare_people_age);
-
-    // We're done modifying tracked_people now
-    pthread_mutex_unlock(&ctx->people_modify_mutex);
 }
 
 static void
@@ -6957,11 +6962,11 @@ run_stage(struct gm_tracking_impl *tracking,
     uint64_t duration;
 
     if (stage_callback) {
-        uint64_t start = get_time();
+        uint64_t start = gm_os_get_time();
 
         stage_callback(tracking, state);
 
-        uint64_t end = get_time();
+        uint64_t end = gm_os_get_time();
         duration = end - start;
     } else {
         // so analytics at least see it was run if they only check the
@@ -7109,9 +7114,8 @@ context_track_skeleton(struct gm_context *ctx,
 
         gm_debug(ctx->log, "Clearing tracking history (frame discontinuity)");
 
-        pthread_mutex_lock(&ctx->tracking_swap_mutex);
+        std::lock_guard<std::mutex> scope_lock(ctx->tracking_swap_mutex);
         context_clear_tracking_history_locked(ctx);
-        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
     }
 
     float nan = std::numeric_limits<float>::quiet_NaN();
@@ -7595,9 +7599,9 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
                                                        rect.left()));
             gm_info(ctx->log, "Starting constrained face detection with %dx%d sub image",
                     (int)rect.width(), (int)rect.height());
-            start = get_time();
+            start = gm_os_get_time();
             std::vector<dlib::rectangle> dets = ctx->detector(grey_img);
-            end = get_time();
+            end = gm_os_get_time();
             duration_ns = end - start;
             gm_info(ctx->log, "Number of detected faces = %d, %.3f%s",
                     (int)dets.size(),
@@ -7634,9 +7638,9 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
         gm_info(ctx->log, "Starting face detection with %dx%d image",
                 (int)tracking->face_detect_buf_width,
                 (int)tracking->face_detect_buf_height);
-        start = get_time();
+        start = gm_os_get_time();
         face_rects = ctx->detector(grey_img);
-        end = get_time();
+        end = gm_os_get_time();
         duration_ns = end - start;
         gm_info(ctx->log, "Number of detected faces = %d, %.3f%s",
                 (int)face_rects.size(),
@@ -7653,9 +7657,9 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
         struct pt point;
         dlib::rectangle rect;
 
-        start = get_time();
+        start = gm_os_get_time();
         dlib::full_object_detection features = ctx->face_feature_detector(grey_img, ctx->last_faces[i]);
-        end = get_time();
+        end = gm_os_get_time();
         duration_ns = end - start;
 
         gm_info(ctx->log, "Detected %d face %d features in %.3f%s",
@@ -7849,21 +7853,22 @@ context_detect_faces(struct gm_context *ctx, struct gm_tracking_impl *tracking)
     /* XXX: This mutex is reused for the grey debug buffer and the
      * ctx->landmarks array
      */
-    pthread_mutex_lock(&ctx->debug_viz_mutex);
-    ctx->landmarks.swap(landmarks);
-    pthread_mutex_unlock(&ctx->debug_viz_mutex);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->debug_viz_mutex);
+        ctx->landmarks.swap(landmarks);
+    }
 
 #ifdef VISUALIZE_DETECT_FRAME
     {
-        uint64_t start = get_time();
-        pthread_mutex_lock(&ctx->debug_viz_mutex);
+        std::lock_guard<std::mutex> scope_lock(ctx->debug_viz_mutex);
+
+        uint64_t start = gm_os_get_time();
         /* Save the frame to display for debug too... */
         grey_debug_buffer_.resize(tracking->face_detect_buf_width * tracking->face_detect_buf_height);
         memcpy(&grey_debug_buffer_[0], tracking->face_detect_buf, grey_debug_buffer_.size());
         grey_debug_width_ = tracking->face_detect_buf_width;
         grey_debug_height_ = tracking->face_detect_buf_height;
-        pthread_mutex_unlock(&ctx->debug_viz_mutex);
-        uint64_t end = get_time();
+        uint64_t end = gm_os_get_time();
         uint64_t duration_ns = end - start;
         gm_error(ctx->log, "Copied face detect buffer for debug overlay in %.3f%s",
                  get_duration_ns_print_scale(duration_ns),
@@ -8023,20 +8028,20 @@ update_face_detect_luminance_buffer(struct gm_context *ctx,
 
 #ifdef DOWNSAMPLE_1_2
     gm_info(ctx->log, "Started resizing frame");
-    start = get_time();
+    start = gm_os_get_time();
     dlib::resize_image(orig_grey_img, grey_1_2_img,
                        dlib::interpolate_bilinear());
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
     gm_info(ctx->log, "Frame scaled to 1/2 size on CPU in %.3f%s",
             get_duration_ns_print_scale(duration_ns),
             get_duration_ns_print_scale_suffix(duration_ns));
 
 #ifdef DOWNSAMPLE_1_4
-    start = get_time();
+    start = gm_os_get_time();
     dlib::resize_image(grey_1_2_img, grey_1_4_img,
                        dlib::interpolate_bilinear());
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
 
     gm_info(ctx->log, "Frame scaled to 1/4 size on CPU in %.3f%s",
@@ -8092,7 +8097,7 @@ gm_context_rotate_intrinsics(struct gm_context *ctx,
     }
 }
 
-static void *
+static void
 detector_thread_cb(void *data)
 {
     struct gm_context *ctx = (struct gm_context *)data;
@@ -8104,9 +8109,9 @@ detector_thread_cb(void *data)
 
     /* FIXME: re-enable support for face detection */
 #if 0
-    uint64_t start = get_time();
+    uint64_t start = gm_os_get_time();
     ctx->detector = dlib::get_frontal_face_detector();
-    uint64_t end = get_time();
+    uint64_t end = gm_os_get_time();
     uint64_t duration = end - start;
 
     gm_debug(ctx->log, "Initialising Dlib frontal face detector took %.3f%s",
@@ -8143,13 +8148,15 @@ detector_thread_cb(void *data)
         struct gm_frame *frame = NULL;
 
         gm_info(ctx->log, "Waiting for new frame to start tracking\n");
-        pthread_mutex_lock(&ctx->frame_ready_mutex);
-        while (!ctx->frame_ready && !ctx->stopping) {
-            pthread_cond_wait(&ctx->frame_ready_cond, &ctx->frame_ready_mutex);
+        {
+            std::unique_lock<std::mutex> cond_lock(ctx->frame_ready_mutex);
+
+            while (!ctx->frame_ready && !ctx->stopping) {
+                ctx->frame_ready_cond.wait(cond_lock);
+            }
+            frame = ctx->frame_ready;
+            ctx->frame_ready = NULL;
         }
-        frame = ctx->frame_ready;
-        ctx->frame_ready = NULL;
-        pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
         if (ctx->stopping) {
             gm_debug(ctx->log, "Stopping tracking after frame acquire (context being destroyed)");
@@ -8158,7 +8165,7 @@ detector_thread_cb(void *data)
             break;
         }
 
-        start = get_time();
+        start = gm_os_get_time();
         gm_debug(ctx->log, "Starting tracking iteration (%" PRIu64 ")\n",
                  ctx->frame_counter);
 
@@ -8200,14 +8207,15 @@ detector_thread_cb(void *data)
          * when we are notified of a new frame.
          */
 #ifdef DOWNSAMPLE_ON_GPU
-        gm_debug(ctx->log, "Waiting for new scaled frame for face detection");
-        pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
-        ctx->need_new_scaled_frame = true;
-        while (ctx->need_new_scaled_frame && !ctx->stopping) {
-            pthread_cond_wait(&ctx->scaled_frame_available_cond,
-                              &ctx->scaled_frame_cond_mutex);
+        {
+            std::unique_lock<std::mutex> cond_lock(ctx->scaled_frame_cond_mutex);
+
+            gm_debug(ctx->log, "Waiting for new scaled frame for face detection");
+            ctx->need_new_scaled_frame = true;
+            while (ctx->need_new_scaled_frame && !ctx->stopping) {
+                ctx->scaled_frame_available_cond.wait(cond_lock);
+            }
         }
-        pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
 
         if (ctx->stopping) {
             gm_debug(ctx->log, "Stopping tracking after frame downsample (context being destroyed)");
@@ -8224,17 +8232,17 @@ detector_thread_cb(void *data)
 
         context_detect_faces(ctx, tracking);
 #endif
-        end = get_time();
+        end = gm_os_get_time();
         duration = end - start;
         gm_debug(ctx->log, "Tracking preparation took %.3f%s",
                  get_duration_ns_print_scale(duration),
                  get_duration_ns_print_scale_suffix(duration));
 
-        start = get_time();
+        start = gm_os_get_time();
 
         bool tracked = context_track_skeleton(ctx, tracking, state);
 
-        end = get_time();
+        end = gm_os_get_time();
         duration = end - start;
         gm_debug(ctx->log, "Skeletal tracking took %.3f%s",
                  get_duration_ns_print_scale(duration),
@@ -8246,67 +8254,67 @@ detector_thread_cb(void *data)
             gm_info(ctx->log, "Failed to track any people in frame");
         }
 
-        pthread_mutex_lock(&ctx->tracking_swap_mutex);
+        {
+            std::lock_guard<std::mutex> scope_lock(ctx->tracking_swap_mutex);
 
-        if (tracked && tracking->paused == false) {
-            if (ctx->n_tracking) {
-                gm_assert(ctx->log,
-                          tracking->frame->timestamp > ctx->tracking_history[0]->frame->timestamp,
-                          "Tracking can't be added to history with old timestamp");
-            }
+            if (tracked && tracking->paused == false) {
+                if (ctx->n_tracking) {
+                    gm_assert(ctx->log,
+                              tracking->frame->timestamp > ctx->tracking_history[0]->frame->timestamp,
+                              "Tracking can't be added to history with old timestamp");
+                }
 
-            for (int i = TRACK_FRAMES - 1; i > 0; i--)
-                std::swap(ctx->tracking_history[i], ctx->tracking_history[i - 1]);
-            if (ctx->tracking_history[0]) {
-                gm_debug(ctx->log, "pushing %p out of tracking history fifo (ref = %d)\n",
+                for (int i = TRACK_FRAMES - 1; i > 0; i--)
+                    std::swap(ctx->tracking_history[i], ctx->tracking_history[i - 1]);
+                if (ctx->tracking_history[0]) {
+                    gm_debug(ctx->log, "pushing %p out of tracking history fifo (ref = %d)\n",
+                             ctx->tracking_history[0],
+                             atomic_load(&ctx->tracking_history[0]->base.ref));
+                    gm_tracking_unref(&ctx->tracking_history[0]->base);
+                }
+                ctx->tracking_history[0] = (struct gm_tracking_impl *)
+                    gm_tracking_ref(&tracking->base);
+
+                gm_debug(ctx->log, "adding %p to tracking history fifo (ref = %d)\n",
                          ctx->tracking_history[0],
                          atomic_load(&ctx->tracking_history[0]->base.ref));
-                gm_tracking_unref(&ctx->tracking_history[0]->base);
-            }
-            ctx->tracking_history[0] = (struct gm_tracking_impl *)
-                gm_tracking_ref(&tracking->base);
 
-            gm_debug(ctx->log, "adding %p to tracking history fifo (ref = %d)\n",
-                     ctx->tracking_history[0],
-                     atomic_load(&ctx->tracking_history[0]->base.ref));
+                if (ctx->n_tracking < TRACK_FRAMES)
+                    ctx->n_tracking++;
 
-            if (ctx->n_tracking < TRACK_FRAMES)
-                ctx->n_tracking++;
+                gm_debug(ctx->log, "tracking history len = %d:", ctx->n_tracking);
+                for (int i = 0; i < ctx->n_tracking; i++) {
+                    gm_debug(ctx->log, "%d) %p (ref = %d)", i,
+                             ctx->tracking_history[i],
+                             atomic_load(&ctx->tracking_history[i]->base.ref));
+                }
 
-            gm_debug(ctx->log, "tracking history len = %d:", ctx->n_tracking);
-            for (int i = 0; i < ctx->n_tracking; i++) {
-                gm_debug(ctx->log, "%d) %p (ref = %d)", i,
-                         ctx->tracking_history[i],
-                         atomic_load(&ctx->tracking_history[i]->base.ref));
+                ctx->last_tracking_success_timestamp = frame->timestamp;
             }
 
-            ctx->last_tracking_success_timestamp = frame->timestamp;
-        }
+            /* Hold onto the latest tracking regardless of whether it was
+             * successful so that a user can still access all the information
+             * related to tracking.
+             *
+             * We don't want to touch ctx->latest_tracking if we've processed
+             * a paused frame since ctx->latest_tracking affects the behaviour
+             * of tracking which we don't want while we may be repeatedly
+             * re-processing the same frame over and over.
+             */
+            if (tracking->paused) {
+                if (ctx->latest_paused_tracking)
+                    gm_tracking_unref(&ctx->latest_paused_tracking->base);
+                ctx->latest_paused_tracking = tracking;
+            } else {
+                if (ctx->latest_paused_tracking)
+                    gm_tracking_unref(&ctx->latest_paused_tracking->base);
+                ctx->latest_paused_tracking = NULL;
 
-        /* Hold onto the latest tracking regardless of whether it was
-         * successful so that a user can still access all the information
-         * related to tracking.
-         *
-         * We don't want to touch ctx->latest_tracking if we've processed
-         * a paused frame since ctx->latest_tracking affects the behaviour
-         * of tracking which we don't want while we may be repeatedly
-         * re-processing the same frame over and over.
-         */
-        if (tracking->paused) {
-            if (ctx->latest_paused_tracking)
-                gm_tracking_unref(&ctx->latest_paused_tracking->base);
-            ctx->latest_paused_tracking = tracking;
-        } else {
-            if (ctx->latest_paused_tracking)
-                gm_tracking_unref(&ctx->latest_paused_tracking->base);
-            ctx->latest_paused_tracking = NULL;
-
-            if (ctx->latest_tracking)
-                gm_tracking_unref(&ctx->latest_tracking->base);
-            ctx->latest_tracking = tracking;
-        }
-
-        pthread_mutex_unlock(&ctx->tracking_swap_mutex);
+                if (ctx->latest_tracking)
+                    gm_tracking_unref(&ctx->latest_tracking->base);
+                ctx->latest_tracking = tracking;
+            }
+        } // tracking_swap_mutex scope
 
         run_stage_debug(tracking,
                         TRACKING_STAGE_UPDATE_HISTORY,
@@ -8324,68 +8332,67 @@ detector_thread_cb(void *data)
 
         /* Maintain running statistics about pipeline stage timings
          */
-        pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+        {
+            std::lock_guard<std::mutex> scope_lock(ctx->aggregate_metrics_mutex);
 
-        tracking->duration_ns = duration;
-        ctx->total_tracking_duration += duration;
-        ctx->n_frames++;
-        for (int i = 0; i < tracking->stage_data.size(); i++) {
-            const int max_hist_len = 30;
+            tracking->duration_ns = duration;
+            ctx->total_tracking_duration += duration;
+            ctx->n_frames++;
+            for (int i = 0; i < tracking->stage_data.size(); i++) {
+                const int max_hist_len = 30;
 
-            struct gm_pipeline_stage &stage = ctx->stages[i];
+                struct gm_pipeline_stage &stage = ctx->stages[i];
 
-            uint64_t frame_duration_ns = 0;
+                uint64_t frame_duration_ns = 0;
 
-            for (int invocation_duration_ns : tracking->stage_data[i].durations)
-            {
-                frame_duration_ns += invocation_duration_ns;
+                for (int invocation_duration_ns : tracking->stage_data[i].durations)
+                {
+                    frame_duration_ns += invocation_duration_ns;
 
-                stage.n_invocations++;
+                    stage.n_invocations++;
 
-                if (stage.invocation_duration_hist.size() < max_hist_len) {
-                    stage.invocation_duration_hist.push_back(invocation_duration_ns);
+                    if (stage.invocation_duration_hist.size() < max_hist_len) {
+                        stage.invocation_duration_hist.push_back(invocation_duration_ns);
+                    } else {
+                        int head = stage.invocation_duration_hist_head;
+                        stage.invocation_duration_hist[head] = invocation_duration_ns;
+                        stage.invocation_duration_hist_head++;
+                        stage.invocation_duration_hist_head %= max_hist_len;
+                    }
+                }
+
+                stage.n_frames++;
+                if (stage.frame_duration_hist.size() < max_hist_len) {
+                    stage.frame_duration_hist.push_back(frame_duration_ns);
                 } else {
-                    int head = stage.invocation_duration_hist_head;
-                    stage.invocation_duration_hist[head] = invocation_duration_ns;
-                    stage.invocation_duration_hist_head++;
-                    stage.invocation_duration_hist_head %= max_hist_len;
+                    int head = stage.frame_duration_hist_head;
+                    stage.frame_duration_hist[head] = frame_duration_ns;
+                    stage.frame_duration_hist_head++;
+                    stage.frame_duration_hist_head %= max_hist_len;
                 }
             }
-
-            stage.n_frames++;
-            if (stage.frame_duration_hist.size() < max_hist_len) {
-                stage.frame_duration_hist.push_back(frame_duration_ns);
-            } else {
-                int head = stage.frame_duration_hist_head;
-                stage.frame_duration_hist[head] = frame_duration_ns;
-                stage.frame_duration_hist_head++;
-                stage.frame_duration_hist_head %= max_hist_len;
-            }
-        }
-
-        pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+        } // aggregate_metrics_mutex scope
     }
-
-    return NULL;
 }
 
-static int
+static bool
 start_tracking_thread(struct gm_context *ctx, char **err)
 {
     /* XXX: maybe make it an explicit, public api to start running detection
      */
-    int ret = pthread_create(&ctx->tracking_thread,
-                             nullptr, /* default attributes */
-                             detector_thread_cb,
-                             ctx);
+    try {
+        ctx->tracking_thread = std::thread(detector_thread_cb, ctx);
+    } catch (const std::system_error &e) {
+        gm_throw(ctx->log, err, "Failed to start tracking thread: %s", e.what());
+        return false;
+    }
 
 #ifdef __linux__
-    if (ret == 0) {
-        pthread_setname_np(ctx->tracking_thread, "Glimpse Track");
-    }
+    if (ctx->tracking_thread.joinable())
+        pthread_setname_np(ctx->tracking_thread.native_handle(), "Glimpse Track");
 #endif
 
-    return ret;
+    return true;
 }
 
 static void
@@ -8393,49 +8400,39 @@ stop_tracking_thread(struct gm_context *ctx)
 {
     gm_debug(ctx->log, "stopping context tracking");
 
-    pthread_mutex_lock(&ctx->liveness_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->liveness_lock);
 
-    /* The tracking thread checks for this, such that we can now expect it to
-     * exit within a finite amount of time.
-     */
-    ctx->stopping = true;
+        /* The tracking thread checks for this, such that we can now expect it to
+         * exit within a finite amount of time.
+         */
+        ctx->stopping = true;
 
-    /* Note: we intentionally don't keep this lock for the duration of
-     * destruction because the assumption is that we only need to wait for
-     * the render hook or other entrypoints that were already running to
-     * finish the caller should otherwise ensure no further calls are made.
-     * Dropping the lock asap increases the chance of our debug assertions
-     * recognising any mistake made.
-     */
-    pthread_mutex_unlock(&ctx->liveness_lock);
+        /* Note: we intentionally don't keep this lock for the duration of
+         * destruction because the assumption is that we only need to wait for
+         * the render hook or other entrypoints that were already running to
+         * finish the caller should otherwise ensure no further calls are made.
+         * Dropping the lock asap increases the chance of our debug assertions
+         * recognising any mistake made.
+         */
+    }
 
     /* It's possible the tracker thread is waiting for a new frame in
-     * pthread_cond_wait, and we don't want it to wait indefinitely...
+     * frame_ready_cond.wait(), and we don't want it to wait indefinitely...
      */
-    pthread_mutex_lock(&ctx->frame_ready_mutex);
-    pthread_cond_signal(&ctx->frame_ready_cond);
-    pthread_mutex_unlock(&ctx->frame_ready_mutex);
+    ctx->frame_ready_cond.notify_one();
 
     /* It's also possible the tracker thread is waiting for a downsampled
-     * frame in pthread_cond_wait...
+     * frame in scaled_frame_available_cond.wait()...
      */
-    pthread_mutex_lock(&ctx->scaled_frame_cond_mutex);
-    pthread_cond_signal(&ctx->scaled_frame_available_cond);
-    pthread_mutex_unlock(&ctx->scaled_frame_cond_mutex);
+    ctx->scaled_frame_available_cond.notify_one();
 
-    if (ctx->tracking_thread) {
-        void *tracking_retval = NULL;
-        int ret = pthread_join(ctx->tracking_thread, &tracking_retval);
-        if (ret < 0) {
+    if (ctx->tracking_thread.joinable()) {
+        try {
+            ctx->tracking_thread.join();
+        } catch (const std::system_error &e) {
             gm_error(ctx->log, "Failed waiting for tracking thread to complete: %s",
-                     strerror(ret));
-        } else {
-            ctx->tracking_thread = 0;
-        }
-
-        if (tracking_retval != 0) {
-            gm_error(ctx->log, "Tracking thread exited with value = %d",
-                     (int)(intptr_t)tracking_retval);
+                     e.what());
         }
     }
 }
@@ -8470,18 +8467,19 @@ gm_context_destroy(struct gm_context *ctx)
      * during destruction.
      */
 
-    pthread_mutex_lock(&ctx->liveness_lock);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->liveness_lock);
 
-    ctx->destroying = true;
+        ctx->destroying = true;
 
-    /* Note: we intentionally don't keep this lock for the duration of
-     * destruction because the assumption is that we only need to wait for
-     * the render hook or other entrypoints that were already running to
-     * finish. The caller should otherwise ensure no further calls are made.
-     * Dropping the lock asap increases the chance of our debug assertions
-     * recognising any mistake made.
-     */
-    pthread_mutex_unlock(&ctx->liveness_lock);
+        /* Note: we intentionally don't keep this lock for the duration of
+         * destruction because the assumption is that we only need to wait for
+         * the render hook or other entrypoints that were already running to
+         * finish. The caller should otherwise ensure no further calls are made.
+         * Dropping the lock asap increases the chance of our debug assertions
+         * recognising any mistake made.
+         */
+    }
 
     stop_tracking_thread(ctx);
 
@@ -8508,12 +8506,14 @@ gm_context_destroy(struct gm_context *ctx)
      * gm_context_notify_frame() (to double check that we don't see any
      * notifications during destruction)...
      */
-    pthread_mutex_lock(&ctx->frame_ready_mutex);
-    if (ctx->frame_ready) {
-        gm_frame_unref(ctx->frame_ready);
-        ctx->frame_ready = NULL;
+
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->frame_ready_mutex);
+        if (ctx->frame_ready) {
+            gm_frame_unref(ctx->frame_ready);
+            ctx->frame_ready = NULL;
+        }
     }
-    pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
     free(ctx->depth_color_stops);
     free(ctx->heat_color_stops);
@@ -8633,7 +8633,7 @@ add_cluster_from_prev_props(struct gm_context *ctx,
     prop = gm_ui_property();
     prop.object = ctx;
     name = "cluster_from_prev";
-    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    xasprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
     prop.name = name_copy;
     prop.desc = "During naive segmentation, cluster from the positions of "
                 "tracked joints on previous frames";
@@ -8645,7 +8645,7 @@ add_cluster_from_prev_props(struct gm_context *ctx,
     prop = gm_ui_property();
     prop.object = ctx;
     name = "prev_use_prediction";
-    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    xasprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
     prop.name = name_copy;
     prop.desc = "Use a predicted skeleton to determine cluster start positions";
     prop.type = GM_PROPERTY_BOOL;
@@ -8656,7 +8656,7 @@ add_cluster_from_prev_props(struct gm_context *ctx,
     prop = gm_ui_property();
     prop.object = ctx;
     name = "prev_dist_threshold";
-    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    xasprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
     prop.name = name_copy;
     prop.desc = "The maximum distance between the point in an old frame "
                 "and new before not considering it for clustering.";
@@ -8670,7 +8670,7 @@ add_cluster_from_prev_props(struct gm_context *ctx,
     prop = gm_ui_property();
     prop.object = ctx;
     name = "prev_time_threshold";
-    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    xasprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
     prop.name = name_copy;
     prop.desc = "The maximum time difference when using a previous frame "
                 "to determine clustering start points, in seconds.";
@@ -8684,7 +8684,7 @@ add_cluster_from_prev_props(struct gm_context *ctx,
     prop = gm_ui_property();
     prop.object = ctx;
     name = "prev_bounds";
-    asprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
+    xasprintf(&name_copy, "%s###%s_%s", name, stage.name, name);
     prop.name = name_copy;
     prop.desc = "The pixel distance to search for matching depth points in "
                 "the current frame.";
@@ -8704,16 +8704,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     struct gm_context *ctx = new gm_context();
 
     ctx->log = logger;
-
-    pthread_mutex_init(&ctx->liveness_lock, NULL);
-    pthread_mutex_init(&ctx->debug_viz_mutex, NULL);
-    pthread_cond_init(&ctx->skel_track_cond, NULL);
-    pthread_mutex_init(&ctx->skel_track_cond_mutex, NULL);
-    pthread_mutex_init(&ctx->tracking_swap_mutex, NULL);
-    pthread_mutex_init(&ctx->people_modify_mutex, NULL);
-    pthread_mutex_init(&ctx->frame_ready_mutex, NULL);
-    pthread_cond_init(&ctx->frame_ready_cond, NULL);
-    pthread_mutex_init(&ctx->aggregate_metrics_mutex, NULL);
 
     ctx->tracking_pool = mem_pool_alloc(logger,
                                         "tracking",
@@ -8807,6 +8797,11 @@ gm_context_new(struct gm_logger *logger, char **err)
                         name);
             }
 
+            /* Try and automatically save an .rdt file for a faster load
+             * next time...
+             */
+            {
+            }
         }
 
         gm_asset_close(tree_asset);
@@ -8829,11 +8824,9 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     ctx->n_labels = ctx->decision_trees[0]->header.n_labels;
 
-    int ret = start_tracking_thread(ctx, err);
-    if (ret != 0) {
-        gm_throw(logger, err,
-                 "Failed to start tracking thread: %s", strerror(ret));
+    if (!start_tracking_thread(ctx, err)) {
         gm_context_destroy(ctx);
+        return NULL;
     }
 
     /* We *optionally* open a label map so that we can describe an _ENUM
@@ -9301,7 +9294,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9346,7 +9338,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9371,7 +9362,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9464,7 +9454,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
     {
         enum tracking_stage stage_id = TRACKING_STAGE_GROUND_SPACE;
@@ -9477,7 +9466,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9594,7 +9582,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9632,7 +9619,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9646,7 +9632,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9743,7 +9728,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9827,7 +9811,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9850,7 +9833,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -9955,7 +9937,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10047,7 +10028,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10061,7 +10041,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10075,7 +10054,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10113,7 +10091,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10127,7 +10104,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10150,7 +10126,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10187,7 +10162,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10323,7 +10297,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10382,7 +10355,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10421,7 +10393,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10458,7 +10429,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     {
@@ -10492,7 +10462,6 @@ gm_context_new(struct gm_logger *logger, char **err)
 
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
-        pthread_mutex_init(&stage.properties_state.lock, NULL);
     }
 
     for (int i = 1; i < N_TRACKING_STAGES; i++) {
@@ -10521,7 +10490,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();
-    pthread_mutex_init(&ctx->properties_state.lock, NULL);
     ctx->properties_state.properties = &ctx->properties[0];
 
     return ctx;
@@ -10612,12 +10580,14 @@ gm_context_get_stage_frame_duration_avg(struct gm_context *ctx,
 
     uint64_t ret;
 
-    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
-    if (stage.n_frames)
-        ret = stage.total_time_ns / stage.n_frames;
-    else
-        ret = 0;
-    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->aggregate_metrics_mutex);
+
+        if (stage.n_frames)
+            ret = stage.total_time_ns / stage.n_frames;
+        else
+            ret = 0;
+    }
 
     return ret;
 }
@@ -10634,12 +10604,17 @@ gm_context_get_stage_frame_duration_median(struct gm_context *ctx,
     if (stage.frame_duration_hist.size() <= 1)
         return stage.total_time_ns;
 
-    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    // Note: we don't use a scoped/raii lock here since we want to keep the
+    // sort() out of the locked scope but the size of the tmp array is
+    // determined within the locked scope
+    ctx->aggregate_metrics_mutex.lock();
+
     int len = stage.frame_duration_hist.size();
     uint32_t tmp[len]; // Assume durations less than 4.3 seconds
     for (int i = 0; i < len; i++)
         tmp[i] = (uint32_t)stage.frame_duration_hist[i];
-    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    ctx->aggregate_metrics_mutex.unlock();
 
     std::sort(tmp, tmp + len);
 
@@ -10657,12 +10632,14 @@ gm_context_get_stage_run_duration_avg(struct gm_context *ctx,
 
     uint64_t ret;
 
-    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
-    if (stage.n_frames)
-        ret = stage.total_time_ns / stage.n_invocations;
-    else
-        ret = 0;
-    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->aggregate_metrics_mutex);
+
+        if (stage.n_frames)
+            ret = stage.total_time_ns / stage.n_invocations;
+        else
+            ret = 0;
+    }
 
     return ret;
 }
@@ -10679,12 +10656,17 @@ gm_context_get_stage_run_duration_median(struct gm_context *ctx,
     if (stage.invocation_duration_hist.size() <= 1)
         return stage.total_time_ns;
 
-    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    // Note: we don't use a scoped/raii lock here since we want to keep the
+    // sort() out of the locked scope but the size of the tmp array is
+    // determined within the locked scope
+    ctx->aggregate_metrics_mutex.lock();
+
     int len = stage.invocation_duration_hist.size();
     uint32_t tmp[len]; // Assume durations less than 4.3 seconds
     for (int i = 0; i < len; i++)
         tmp[i] = (uint32_t)stage.invocation_duration_hist[i];
-    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+
+    ctx->aggregate_metrics_mutex.unlock();
 
     std::sort(tmp, tmp + len);
 
@@ -10756,12 +10738,14 @@ gm_context_get_average_frame_duration(struct gm_context *ctx)
 {
     uint64_t ret;
 
-    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
-    if (ctx->n_frames <= 1)
-        ret = ctx->total_tracking_duration;
-    else
-        ret = ctx->total_tracking_duration / ctx->n_frames;
-    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->aggregate_metrics_mutex);
+
+        if (ctx->n_frames <= 1)
+            ret = ctx->total_tracking_duration;
+        else
+            ret = ctx->total_tracking_duration / ctx->n_frames;
+    }
 
     return ret;
 }
@@ -10802,7 +10786,7 @@ gm_context_notify_frame(struct gm_context *ctx,
     if (frame->depth == NULL || frame->video == NULL)
         return false;
 
-    pthread_mutex_lock(&ctx->liveness_lock);
+    std::lock_guard<std::mutex> scope_lock(ctx->liveness_lock);
 
     gm_debug(ctx->log, "gm_context_notify_frame: frame = %p, depth=%p, video=%p (w=%d, h=%d)",
              frame, frame->depth, frame->video,
@@ -10812,16 +10796,16 @@ gm_context_notify_frame(struct gm_context *ctx,
     gm_assert(ctx->log, !ctx->destroying,
               "Spurious notification during tracking context destruction");
 
-    pthread_mutex_lock(&ctx->frame_ready_mutex);
-    gm_assert(ctx->log, !ctx->destroying, "Spurious frame notification during destruction");
-    gm_assert(ctx->log, ctx->frame_ready != frame, "Notified of the same frame");
-    if (ctx->frame_ready)
-        gm_frame_unref(ctx->frame_ready);
-    ctx->frame_ready = gm_frame_ref(frame);
-    pthread_cond_signal(&ctx->frame_ready_cond);
-    pthread_mutex_unlock(&ctx->frame_ready_mutex);
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->frame_ready_mutex);
 
-    pthread_mutex_unlock(&ctx->liveness_lock);
+        gm_assert(ctx->log, !ctx->destroying, "Spurious frame notification during destruction");
+        gm_assert(ctx->log, ctx->frame_ready != frame, "Notified of the same frame");
+        if (ctx->frame_ready)
+            gm_frame_unref(ctx->frame_ready);
+        ctx->frame_ready = gm_frame_ref(frame);
+        ctx->frame_ready_cond.notify_one();
+    }
 
     return true;
 }
@@ -10829,7 +10813,7 @@ gm_context_notify_frame(struct gm_context *ctx,
 static void
 context_clear_metrics(struct gm_context *ctx)
 {
-    pthread_mutex_lock(&ctx->aggregate_metrics_mutex);
+    std::lock_guard<std::mutex> scope_lock(ctx->aggregate_metrics_mutex);
 
     /* Clear all metrics */
     ctx->total_tracking_duration = 0;
@@ -10844,11 +10828,9 @@ context_clear_metrics(struct gm_context *ctx)
         stage.invocation_duration_hist.clear();
         stage.invocation_duration_hist_head = 0;
     }
-
-    pthread_mutex_unlock(&ctx->aggregate_metrics_mutex);
 }
 
-void
+bool
 gm_context_flush(struct gm_context *ctx, char **err)
 {
     stop_tracking_thread(ctx);
@@ -10861,21 +10843,22 @@ gm_context_flush(struct gm_context *ctx, char **err)
 
     context_clear_metrics(ctx);
 
-    pthread_mutex_lock(&ctx->frame_ready_mutex);
-    if (ctx->frame_ready) {
-        gm_frame_unref(ctx->frame_ready);
-        ctx->frame_ready = NULL;
+    {
+        std::lock_guard<std::mutex> scope_lock(ctx->frame_ready_mutex);
+
+        if (ctx->frame_ready) {
+            gm_frame_unref(ctx->frame_ready);
+            ctx->frame_ready = NULL;
+        }
     }
-    pthread_mutex_unlock(&ctx->frame_ready_mutex);
 
     ctx->stopping = false;
     gm_debug(ctx->log, "Glimpse context flushed, restarting tracking thread");
 
-    int ret = start_tracking_thread(ctx, NULL);
-    if (ret != 0) {
-        gm_throw(ctx->log, err,
-                 "Failed to start tracking thread: %s", strerror(ret));
-    }
+    if (!start_tracking_thread(ctx, err))
+        return false;
+
+    return true;
 }
 
 struct gm_tracking *
@@ -10883,7 +10866,8 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
 {
     struct gm_tracking *tracking = NULL;
 
-    pthread_mutex_lock(&ctx->tracking_swap_mutex);
+    std::lock_guard<std::mutex> scope_lock(ctx->tracking_swap_mutex);
+
     if (ctx->latest_paused_tracking) {
         tracking = gm_tracking_ref(&ctx->latest_paused_tracking->base);
 
@@ -10897,7 +10881,6 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
                  ctx->latest_tracking,
                  atomic_load(&ctx->latest_tracking->base.ref));
     }
-    pthread_mutex_unlock(&ctx->tracking_swap_mutex);
 
     return tracking;
 }
@@ -10905,7 +10888,7 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
 int *
 gm_context_get_people(struct gm_context *ctx, int *n_people)
 {
-    pthread_mutex_lock(&ctx->people_modify_mutex);
+    std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
 
     *n_people = ctx->tracked_people.size();
     int *people_ids = ((*n_people) > 0) ?
@@ -10916,8 +10899,6 @@ gm_context_get_people(struct gm_context *ctx, int *n_people)
         people_ids[i++] = person.id;
     }
 
-    pthread_mutex_unlock(&ctx->people_modify_mutex);
-
     return people_ids;
 }
 
@@ -10926,7 +10907,7 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
                                      uint64_t timestamp,
                                      int person_id)
 {
-    pthread_mutex_lock(&ctx->people_modify_mutex);
+    std::unique_lock<std::mutex> modify_lock(ctx->people_modify_mutex);
 
     for (auto &person : ctx->tracked_people) {
         if (person.id == person_id) {
@@ -10940,7 +10921,7 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
                                        person.history.begin(),
                                        person.history.end());
 
-            pthread_mutex_unlock(&ctx->people_modify_mutex);
+            modify_lock.unlock();
 
             prediction->skeleton =
                 predict_skeleton_for_history(ctx, prediction->history,
@@ -10950,8 +10931,6 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
             return &prediction->base;
         }
     }
-
-    pthread_mutex_unlock(&ctx->people_modify_mutex);
 
     // The person id wasn't found
     return NULL;
@@ -10967,7 +10946,7 @@ gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 void
 gm_context_render_thread_hook(struct gm_context *ctx)
 {
-    pthread_mutex_lock(&ctx->liveness_lock);
+    std::lock_guard<std::mutex> scope_lock(ctx->liveness_lock);
 
     gm_assert(ctx->log, !ctx->destroying,
               "Spurious render thread hook during tracking context destruction");
@@ -10977,7 +10956,6 @@ gm_context_render_thread_hook(struct gm_context *ctx)
      */
 
     if (!ctx->need_new_scaled_frame) {
-        pthread_mutex_unlock(&ctx->liveness_lock);
         return;
     }
 
@@ -11234,7 +11212,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     }
 
-    start = get_time();
+    start = gm_os_get_time();
     glBindTexture(GL_TEXTURE_2D, ctx->cam_tex);
 
     for (int y = 0; y < 40; y++) {
@@ -11254,7 +11232,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
                     GL_RED,
                     GL_UNSIGNED_BYTE, ctx->grey_buffer_1_1.data());
 
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
 
     gm_info(ctx->log,
@@ -11265,7 +11243,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
     glUseProgram(scale_program_);
 #endif
 
-    start = get_time();
+    start = gm_os_get_time();
 
     glEnableVertexAttribArray(ctx->attrib_quad_rot_scale_pos);
     glVertexAttribPointer(ctx->attrib_quad_rot_scale_pos,
@@ -11306,7 +11284,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
     glBindTexture(GL_TEXTURE_2D, downsample_tex2d_);
 
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
 
     gm_info(ctx->log, "Submitted level0 downsample in %.3f%s",
@@ -11325,11 +11303,11 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 2);
 
-    start = get_time();
+    start = gm_os_get_time();
     glGenerateMipmap(GL_TEXTURE_2D);
 
     glFinish();
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
 
     gm_info(ctx->log, "glGenerateMipmap took %.3f%s",
@@ -11373,13 +11351,13 @@ gm_context_render_thread_hook(struct gm_context *ctx)
      * TODO: investigate what options we might have on Android for a
      * zero copy path not needing a ReadPixels into a PBO.
      */
-    start = get_time();
+    start = gm_os_get_time();
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(0, 0,
                  rotated_frame_width / 4,
                  rotated_frame_height / 4,
                  GL_RED_EXT, GL_UNSIGNED_BYTE, 0);
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
 
     gm_info(ctx->log, "glReadPixels took %.3f%s",
@@ -11388,12 +11366,12 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 
-    start = get_time();
+    start = gm_os_get_time();
     void *pbo_ptr = glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0,
                                      ((rotated_frame_width / 4) *
                                       (rotated_frame_height / 4)),
                                      GL_MAP_READ_BIT);
-    end = get_time();
+    end = gm_os_get_time();
     duration_ns = end - start;
 
     gm_info(ctx->log, "glMapBufferRange took %.3f%s",
@@ -11431,9 +11409,7 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 #endif /* DOWNSAMPLE_ON_GPU */
 
     ctx->need_new_scaled_frame = false;
-    pthread_cond_signal(&ctx->scaled_frame_available_cond);
-
-    pthread_mutex_unlock(&ctx->liveness_lock);
+    ctx->scaled_frame_available_cond.notify_one();
 }
 
 struct gm_ui_properties *

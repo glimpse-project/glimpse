@@ -24,6 +24,7 @@
 
 #include <string.h>
 #include <vector>
+#include <algorithm>
 
 #include <glm/gtc/quaternion.hpp>
 

@@ -27,8 +27,11 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <dirent.h>
+#include <string.h>
 
 #include <vector>
+
+#include <getline-compat.h>
 
 #include "image_utils.h"
 #include "xalloc.h"
@@ -36,6 +39,10 @@
 
 #include "glimpse_log.h"
 #include "glimpse_data.h"
+
+#ifdef _WIN32
+#define strdup(X) _strdup(X)
+#endif
 
 using half_float::half;
 
@@ -316,7 +323,10 @@ gm_data_index_load_joints(struct gm_data_index* data_index,
             goto exit;
         }
         name_len = dot - name;
-        mapping.name = strndup(name, name_len);
+
+        //NB: we don't have strndup on Windows..
+        xasprintf(&mapping.name, "%.*s", name_len, name);
+
         mapping.end = name + name_len + 1;
         loader.joint_map.push_back(mapping);
     }
@@ -341,7 +351,7 @@ exit:
     // NB: might have failed part-way through parsing joint map so size might
     // not == n_joints
     for (int i = 0; i < (int)loader.joint_map.size(); i++) {
-        free(loader.joint_map[i].name);
+        xfree(loader.joint_map[i].name);
         // don't need to free .end which points to const string within json state
     }
 

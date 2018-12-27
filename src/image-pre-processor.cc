@@ -35,13 +35,13 @@
 #include <assert.h>
 #include <dirent.h>
 #include <stdint.h>
-#include <libgen.h>
 #include <assert.h>
 #include <pthread.h>
-#include <getopt.h>
 #include <inttypes.h>
+#include <math.h>
 
-#include <cmath>
+#include <basename-compat.h>
+#include <getopt-compat.h>
 
 #include <type_traits>
 #include <queue>
@@ -1367,7 +1367,6 @@ main(int argc, char **argv)
     properties.push_back(prop);
 
     properties_state.n_properties = properties.size();
-    pthread_mutex_init(&properties_state.lock, NULL);
     properties_state.properties = &properties[0];
 
 #define FULL_OPT (CHAR_MAX + 1)

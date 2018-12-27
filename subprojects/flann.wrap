@@ -1,10 +1,4 @@
-[wrap-file]
-directory = flann-1.9.1
-
-source_url = https://github.com/mariusmuja/flann/archive/1.9.1.tar.gz
-source_filename = 1.9.1.tar.gz
-source_hash = b23b5f4e71139faa3bcb39e6bbcc76967fbaf308c4ee9d4f5bfbeceaa76cc5d3
-
-patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
-patch_filename = flann-wrap-1.9.1.tar
-patch_hash = ab55865b80ac5819b8a31c318155186ab04e3fee622d0573f5dd4ff42d90b71d
+[wrap-git]
+directory = flann
+url = https://github.com/glimpse-project/flann.git
+revision = 5ecfc1c9be1d3e2add09e664e0ede308e439569a

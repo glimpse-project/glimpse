@@ -26,8 +26,10 @@
 #include <stdbool.h>
 #include <math.h>
 #include <thread>
-#include <pthread.h>
 #include <string.h>
+
+#include <thread>
+#include <system_error>
 
 #include "infer_labels.h"
 #include "xalloc.h"
@@ -48,7 +50,7 @@ typedef struct {
 
 typedef vector(int, 2) Int2D;
 
-static void*
+static void
 infer_label_probs_cb(void* userdata)
 {
     InferThreadData* data = (InferThreadData*)userdata;
@@ -188,13 +190,6 @@ infer_label_probs_cb(void* userdata)
             }
         }
     }
-
-    if (data->n_threads > 1)
-    {
-        pthread_exit(NULL);
-    }
-
-    return NULL;
 }
 
 float*
@@ -215,7 +210,7 @@ infer_labels(struct gm_logger* log,
 
     memset(output_pr, 0, output_size);
 
-    void* (*infer_labels_callback)(void* userdata);
+    void (*infer_labels_callback)(void* userdata);
     infer_labels_callback = infer_label_probs_cb;
 
     int n_threads = std::thread::hardware_concurrency();
@@ -229,18 +224,20 @@ infer_labels(struct gm_logger* log,
     }
     else
     {
-        pthread_t threads[n_threads];
+        std::thread threads[n_threads];
         InferThreadData data[n_threads];
 
         for (int i = 0; i < n_threads; ++i)
         {
             data[i] = { i, n_threads, forest, n_trees,
                 (void*)depth_image, width, height, output_pr, do_flip };
-            if (pthread_create(&threads[i], NULL, infer_labels_callback,
-                               (void*)(&data[i])) != 0)
-            {
+            try {
+                threads[i] = std::thread(infer_labels_callback,
+                                         (void*)(&data[i]));
+            } catch (const std::system_error &e) {
                 gm_error(log,
-                         "Error creating thread, results will be incomplete.\n");
+                         "Error creating thread, results will be incomplete: %s\n",
+                         e.what());
                 n_threads = i;
                 break;
             }
@@ -248,8 +245,12 @@ infer_labels(struct gm_logger* log,
 
         for (int i = 0; i < n_threads; ++i)
         {
-            if (pthread_join(threads[i], NULL) != 0)
-                gm_error(log, "Error joining thread, trying to continue...\n");
+            try {
+                threads[i].join();
+            } catch (const std::system_error &e) {
+                gm_error(log, "Error joining thread (%s), trying to continue...\n",
+                         e.what());
+            }
         }
     }
 

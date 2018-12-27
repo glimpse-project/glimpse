@@ -81,10 +81,19 @@ endif
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
 
+# Not sure why Meson doesn't support a way to append include directories :/
+if host_machine.system() == 'windows'
+inc = include_directories(
+	'src',
+	'src/win32',
+	'src/imgui',
+	'src/UnityPluginAPI')
+else
 inc = include_directories(
 	'src',
 	'src/imgui',
 	'src/UnityPluginAPI')
+endif
 
 dlib_sp = subproject('dlib')
 dlib_dep = dlib_sp.get_variable('dlib_dep')
@@ -155,16 +164,27 @@ if not freenect_dep.found()
 endif
 client_api_defines += [ '-DUSE_FREENECT' ]
 
-glfw_dep = dependency('glfw3', required: false)
+glfw_dep = dependency('glfw3', fallback: [ 'glfw', 'glfw_dep' ], required: false)
 snappy_dep = dependency('snappy', required: false)
 
 imgui_src = [
     'src/imgui/imgui.cpp',
     'src/imgui/imgui_demo.cpp',
     'src/imgui/imgui_draw.cpp',
+    'src/imgui/imgui_widgets.cpp',
     'src/imgui/profiler.cpp',
     'src/imgui/timer.cpp',
 ]
+
+if host_machine.system() == 'windows'
+getopt_src = [ 'src/getopt-compat.c' ]
+getline_src = [ 'src/getline-compat.c' ]
+basename_src = [ 'src/basename-compat.c' ]
+else
+getopt_src = []
+getline_src = []
+basename_src = []
+endif
 
 client_api_src = [
     'src/glimpse_properties.cc',
@@ -177,6 +197,8 @@ client_api_src = [
     'src/glimpse_log.c',
     'src/glimpse_gl.c',
     'src/glimpse_target.cc',
+    'src/glimpse_mutex.c',
+    'src/glimpse_os.c',
 
     'src/infer_labels.cc',
     'src/joints_inferrer.cc',
@@ -188,7 +210,7 @@ client_api_src = [
 
     'src/tinyexr.cc',
     'src/parson.c',
-]
+] + basename_src + getline_src
 
 client_api_deps = [
     glm_dep,
@@ -328,7 +350,10 @@ if platform_android == true
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
     viewer_deps = client_api_deps + [ glfm_dep ]
-    viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
+    viewer_defines = client_api_defines + [
+        '-DUSE_GLFM',
+        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
+    ]
 
     if tango_enabled
         viewer_deps += tango_deps
@@ -340,7 +365,8 @@ if platform_android == true
         viewer_defines += [ '-DUSE_ANDROID_ASSET_MANAGER_API' ]
     endif
 
-    imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
+    imgui_src += 'src/imgui/imgui_impl_glfm.cpp'
+    imgui_src += 'src/imgui/imgui_impl_opengl3.cpp'
 
     android_viewer = shared_library('glimpse_viewer_android',
         [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
@@ -359,9 +385,13 @@ if platform_ios == true
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
     viewer_deps = client_api_deps + [ glfm_dep ]
-    viewer_defines = client_api_defines + [ '-DUSE_GLFM' ]
+    viewer_defines = client_api_defines + [
+        '-DUSE_GLFM',
+        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
+    ]
 
-    imgui_src += 'src/imgui/imgui_impl_glfm_gles3.cpp'
+    imgui_src += 'src/imgui/imgui_impl_glfm.cpp'
+    imgui_src += 'src/imgui/imgui_impl_opengl3.cpp'
 
     executable('glimpse_viewer',
                [ 'src/glimpse_viewer.cc', 'src/ios_utils.m' ] + client_api_src + imgui_src,
@@ -379,7 +409,16 @@ if platform_ios == true
               ])
 endif
 
-if not meson.is_cross_build()
+if (
+    #host_machine.system() == 'windows' or
+    host_machine.system() == 'linux' or
+    (host_machine.system() == 'darwin' and platform_ios == false))
+        is_development_platform = true
+else
+        is_development_platform = false
+endif
+
+if is_development_platform
 
 executable('image-pre-processor',
            [ 'src/image-pre-processor.cc',
@@ -387,6 +426,7 @@ executable('image-pre-processor',
              'src/parson.c',
              'src/perlin.c',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/glimpse_properties.cc',
              'src/glimpse_data.cc',
              'src/image_utils.cc',
@@ -399,6 +439,7 @@ executable('train_rdt',
            [ 'src/train_rdt.c',
              'src/glimpse_rdt.cc',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/glimpse_properties.cc',
              'src/glimpse_data.cc',
              'src/image_utils.cc',
@@ -406,8 +447,8 @@ executable('train_rdt',
              'src/tinyexr.cc',
              'src/parson.c',
              'src/llist.c',
-             'src/xalloc.c',
-             'src/pthread_barrier/pthread_barrier.c' ],
+             'src/xalloc.c'
+           ],
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
@@ -415,6 +456,7 @@ executable('test_rdt',
            [ 'src/test_rdt.cc',
              'src/glimpse_rdt.cc',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/glimpse_properties.cc',
              'src/glimpse_data.cc',
              'src/image_utils.cc',
@@ -430,6 +472,7 @@ executable('test_rdt',
 executable('annotate_bone_map',
            [ 'src/annotate_bone_map.cc',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/glimpse_data.cc',
              'src/image_utils.cc',
              'src/tinyexr.cc',
@@ -442,6 +485,7 @@ executable('annotate_bone_map',
 executable('train_joint_params',
            [ 'src/train_joint_params.cc',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/glimpse_data.cc',
              'src/infer_labels.cc',
              'src/joints_inferrer.cc',
@@ -458,6 +502,7 @@ executable('train_joint_params',
 executable('depth2labels',
            [ 'src/depth2labels.cc',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/infer_labels.cc',
              'src/image_utils.cc',
              'src/rdt_tree.cc',
@@ -483,22 +528,16 @@ executable('pfm-to-exr',
              'src/tinyexr.cc' ],
            include_directories: inc)
 
-executable('json-to-rdt',
-           [ 'src/json-to-rdt.c',
-             'src/glimpse_log.c',
-             'src/rdt_tree.cc',
-             'src/parson.c',
-             'src/xalloc.c' ],
-           include_directories: inc)
-
 executable('jip-to-json',
            [ 'src/jip-to-json.c',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/jip.cc',
              'src/parson.c',
              'src/llist.c',
              'src/xalloc.c' ],
-           include_directories: inc)
+           include_directories: inc,
+           dependencies: [ threads_dep ])
 
 executable('pfm-debug',
            [ 'src/pfm-debug.c' ],
@@ -507,6 +546,7 @@ executable('pfm-debug',
 executable('index-to-recording',
            [ 'src/index-to-recording.cc',
              'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
              'src/glimpse_data.cc',
              'src/image_utils.cc',
              'src/rdt_tree.cc',
@@ -529,18 +569,34 @@ if snappy_dep.found()
                dependencies: [ snappy_dep, libpng_dep, threads_dep ])
 endif
 
+endif # is_development_platform
+
+executable('json-to-rdt',
+           [ 'src/json-to-rdt.c',
+             'src/glimpse_log.c',
+             'src/glimpse_mutex.c',
+             'src/rdt_tree.cc',
+             'src/parson.c',
+             'src/xalloc.c' ] + getopt_src,
+           include_directories: inc,
+           dependencies: [ threads_dep ])
+
+
 if glfw_dep.found() and epoxy_dep.found()
-    viewer_defines = client_api_defines + [ '-DUSE_GLFW' ]
-    imgui_src += 'src/imgui/imgui_impl_glfw_gles3.cpp'
+    viewer_defines = client_api_defines + [
+        '-DUSE_GLFW',
+        '-DGLFW_INCLUDE_NONE',
+        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
+    ]
+    imgui_src += 'src/imgui/imgui_impl_glfw.cpp'
+    imgui_src += 'src/imgui/imgui_impl_opengl3.cpp'
     executable('glimpse_viewer',
-               [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
+               [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src + getopt_src,
                include_directories: inc,
                dependencies: client_api_deps + [ glfw_dep ],
                c_args: viewer_defines,
                cpp_args: viewer_defines)
 endif
-
-endif # is_cross_build
 
 if unity_enabled
     install_args = [

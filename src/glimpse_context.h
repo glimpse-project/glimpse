@@ -404,7 +404,7 @@ struct gm_context *gm_context_new(struct gm_logger *logger, char **err);
  * references to context resources (e.g. tracking and prediction objects)
  * before calling this function.
  */
-void gm_context_flush(struct gm_context *ctx, char **err);
+bool gm_context_flush(struct gm_context *ctx, char **err);
 
 /* XXX: It's the user's/caller's responsibility to ensure they have dropped all
  * references to context resources (e.g. tracking and prediction objects)

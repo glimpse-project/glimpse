@@ -30,12 +30,20 @@
 
 #include <dirent.h>
 #include <string.h>
-#include <alloca.h>
 #include <time.h>
+
+#ifdef _WIN32
+#define strdup(X) _strdup(X)
+#endif
+
 #include <list>
 #include <deque>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
 
 #include "glimpse_record.h"
+#include "glimpse_os.h"
 #include "image_utils.h"
 
 #include "parson.h"
@@ -53,9 +61,9 @@ struct gm_recording {
 
     uint64_t frame_queue_max_size;
 
-    pthread_t io_thread;
-    pthread_mutex_t frame_queue_lock;
-    pthread_cond_t frame_notify_cond;
+    std::thread io_thread;
+    std::mutex frame_queue_lock;
+    std::condition_variable frame_notify_cond;
     std::deque<struct gm_frame *> frame_queue;
     uint64_t frame_queue_size_est;
     bool finished; // when we know no more frames will be appended
@@ -162,7 +170,7 @@ static void
 write_bin(struct gm_logger *log, const char *path,
           void *data, size_t len)
 {
-    FILE *bin_file = fopen(path, "w");
+    FILE *bin_file = fopen(path, "wb");
     if (bin_file) {
         if (fwrite(data, 1, len, bin_file) != len) {
             gm_error(log, "Error writing '%s'", path);
@@ -194,7 +202,7 @@ write_recording_json(struct gm_recording *r)
     json_serialize_to_file_pretty(r->json, json_path);
 }
 
-static void *
+static void
 io_thread_cb(void *data)
 {
     struct gm_recording *r = (struct gm_recording *)data;
@@ -204,32 +212,35 @@ io_thread_cb(void *data)
         struct gm_frame *frame = NULL;
         bool all_frames_written = false;
 
-        pthread_mutex_lock(&r->frame_queue_lock);
-        if (!r->frame_queue.empty()) {
-            frame = r->frame_queue.front();
-            r->frame_queue.pop_front();
-        } else {
-            while (!r->finished) {
-                pthread_cond_wait(&r->frame_notify_cond, &r->frame_queue_lock);
-                if (!r->frame_queue.empty()) {
-                    frame = r->frame_queue.front();
-                    r->frame_queue.pop_front();
-                    break;
+        {
+            std::unique_lock<std::mutex> scoped_cond_lock(r->frame_queue_lock);
+
+            if (!r->frame_queue.empty()) {
+                frame = r->frame_queue.front();
+                r->frame_queue.pop_front();
+            } else {
+                while (!r->finished) {
+                    r->frame_notify_cond.wait(scoped_cond_lock);
+                    if (!r->frame_queue.empty()) {
+                        frame = r->frame_queue.front();
+                        r->frame_queue.pop_front();
+                        break;
+                    }
                 }
             }
+            if (frame == NULL) {
+                all_frames_written = true;
+            }
         }
-        if (frame == NULL) {
-            all_frames_written = true;
-        }
-
-        pthread_mutex_unlock(&r->frame_queue_lock);
 
         if (all_frames_written) {
             write_recording_json(r);
-            pthread_mutex_lock(&r->frame_queue_lock);
-            r->io_thread_finished = true;
-            pthread_mutex_unlock(&r->frame_queue_lock);
-            return NULL;
+
+            {
+                std::lock_guard<std::mutex> scope_lock(r->frame_queue_lock);
+                r->io_thread_finished = true;
+            }
+            return;
         }
 
         JSON_Value *frame_meta = json_value_init_object();
@@ -357,8 +368,6 @@ io_thread_cb(void *data)
         r->frame_queue_size_est -= frame_bytes;
         gm_frame_unref(frame);
     }
-
-    return NULL;
 }
 
 struct gm_recording *
@@ -372,9 +381,12 @@ gm_recording_init(struct gm_logger *log,
 {
     char full_path[512];
 
-    int ret = mkdir(recordings_path, 0777);
-    if (ret < 0 && errno != EEXIST) {
-        gm_throw(log, err, "Failed to ensure top-level directory exists for recordings");
+    char *catch_err = NULL;
+    if (!gm_os_mkdir(log, recordings_path, &catch_err)) {
+        gm_throw(log, err,
+                 "Failed to ensure top-level directory exists for recordings: %s",
+                 catch_err);
+        free(catch_err);
         return NULL;
     }
 
@@ -403,9 +415,10 @@ gm_recording_init(struct gm_logger *log,
             return NULL;
         }
 
-        ret = mkdir(full_path, 0777);
-        if (ret < 0) {
-            gm_error(log, "Failed to create directory for recording");
+        if (!gm_os_mkdir(log, full_path, &catch_err)) {
+            gm_error(log, "Failed to create directory for recording: %s",
+                     catch_err);
+            free(catch_err);
             return NULL;
         }
     }
@@ -418,10 +431,10 @@ gm_recording_init(struct gm_logger *log,
     char *depth_path = (char *)alloca(depth_path_len + 1);
     snprintf(depth_path, depth_path_len + 1, "%s%s", full_path, depth_path_suffix);
 
-    ret = mkdir(depth_path, 0777);
-    if (ret < 0 && errno != EEXIST) {
+    if (!gm_os_mkdir(log, depth_path, &catch_err)) {
         gm_throw(log, err, "Unable to create directory '%s': %s",
-                 depth_path, strerror(errno));
+                 depth_path, catch_err);
+        free(catch_err);
         return nullptr;
     }
 
@@ -431,10 +444,10 @@ gm_recording_init(struct gm_logger *log,
     char *video_path = (char *)alloca(video_path_len + 1);
     snprintf(video_path, video_path_len+1, "%s%s", full_path, video_path_suffix);
 
-    ret = mkdir(video_path, 0777);
-    if (ret < 0 && errno != EEXIST) {
+    if (!gm_os_mkdir(log, video_path, &catch_err)) {
         gm_throw(log, err, "Unable to create directory '%s': %s",
-                 video_path, strerror(errno));
+                 video_path, catch_err);
+        free(catch_err);
         return nullptr;
     }
 
@@ -501,14 +514,12 @@ gm_recording_init(struct gm_logger *log,
     r->io_thread_finished = false;
     r->finished = false;
 
-    pthread_mutex_init(&r->frame_queue_lock, NULL);
-    pthread_cond_init(&r->frame_notify_cond, NULL);
-
-    if (pthread_create(&r->io_thread, NULL, io_thread_cb,
-                       (void*)(r)) != 0)
-    {
+    try {
+        r->io_thread = std::thread(io_thread_cb, (void*)(r));
+    } catch (const std::system_error &e) {
         gm_throw(log, err,
-                 "Error creating thread, results will be incomplete.\n");
+                 "Error creating thread, results will be incomplete: %s\n",
+                 e.what());
         gm_recording_close(r);
         return NULL;
     }
@@ -519,13 +530,9 @@ gm_recording_init(struct gm_logger *log,
 uint64_t
 gm_recording_get_io_buffer_size(struct gm_recording *r)
 {
-    uint64_t current_queue_size;
+    std::lock_guard<std::mutex> scope_lock(r->frame_queue_lock);
 
-    pthread_mutex_lock(&r->frame_queue_lock);
-    current_queue_size = r->frame_queue_size_est;
-    pthread_mutex_unlock(&r->frame_queue_lock);
-
-    return current_queue_size;
+    return r->frame_queue_size_est;
 }
 
 uint64_t
@@ -551,7 +558,7 @@ gm_recording_append_frame(struct gm_recording *r, struct gm_frame *frame)
     if (frame->depth)
         frame_bytes += frame->depth->len;
 
-    pthread_mutex_lock(&r->frame_queue_lock);
+    std::lock_guard<std::mutex> scope_lock(r->frame_queue_lock);
 
     if (r->frame_queue_size_est + frame_bytes > r->frame_queue_max_size) {
         gm_error(r->log,
@@ -562,10 +569,8 @@ gm_recording_append_frame(struct gm_recording *r, struct gm_frame *frame)
         gm_frame_ref(frame);
         r->frame_queue.push_back(frame);
         r->frame_queue_size_est += frame_bytes;
-        pthread_cond_signal(&r->frame_notify_cond);
+        r->frame_notify_cond.notify_one();
     }
-
-    pthread_mutex_unlock(&r->frame_queue_lock);
 }
 
 void
@@ -573,37 +578,29 @@ gm_recording_stop(struct gm_recording *r)
 {
     gm_debug(r->log, "gm_recording_stop");
 
+    std::lock_guard<std::mutex> scope_lock(r->frame_queue_lock);
+
     // Wake up the IO thread in case it's currently idle...
-    pthread_mutex_lock(&r->frame_queue_lock);
     if (!r->finished) {
         r->finished = true;
-        pthread_cond_signal(&r->frame_notify_cond);
+        r->frame_notify_cond.notify_one();
     }
-    pthread_mutex_unlock(&r->frame_queue_lock);
 }
 
 bool
 gm_recording_is_stopped(struct gm_recording *r)
 {
-    bool status;
+    std::lock_guard<std::mutex> scope_lock(r->frame_queue_lock);
 
-    pthread_mutex_lock(&r->frame_queue_lock);
-    status = r->finished;
-    pthread_mutex_unlock(&r->frame_queue_lock);
-
-    return status;
+    return r->finished;
 }
 
 bool
 gm_recording_is_async_io_finished(struct gm_recording *r)
 {
-    bool status;
+    std::lock_guard<std::mutex> scope_lock(r->frame_queue_lock);
 
-    pthread_mutex_lock(&r->frame_queue_lock);
-    status = r->io_thread_finished;
-    pthread_mutex_unlock(&r->frame_queue_lock);
-
-    return status;
+    return r->io_thread_finished;
 }
 
 bool
@@ -614,9 +611,12 @@ gm_recording_close(struct gm_recording *r)
     gm_recording_stop(r);
 
     gm_debug(r->log, "Waiting for recording IO to finish");
-    if (r->io_thread) {
-        if (pthread_join(r->io_thread, NULL) != 0)
+    if (r->io_thread.joinable()) {
+        try {
+            r->io_thread.join();
+        } catch (const std::system_error &e) {
             gm_error(r->log, "Error joining thread, trying to continue...\n");
+        }
     }
 
     bool error_status = r->error;

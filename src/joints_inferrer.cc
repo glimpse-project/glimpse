@@ -24,16 +24,16 @@
 
 
 #include <stdbool.h>
+#define _USE_MATH_DEFINES
 #include <math.h>
 #include <string.h>
-#include <pthread.h>
 
 #include <vector>
 #include <list>
 #include <forward_list>
 #include <thread>
-#include <cmath>
 #include <algorithm>
+#include <cmath>
 
 #include "glimpse_log.h"
 

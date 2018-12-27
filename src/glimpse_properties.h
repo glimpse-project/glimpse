@@ -24,13 +24,13 @@
 
 #pragma once
 
-#include <pthread.h>
 #include <stdbool.h>
 #include <string.h>
 
 #include "parson.h"
 
 #include "glimpse_log.h"
+#include "glimpse_mutex.h"
 
 enum gm_rotation {
   GM_ROTATION_0 = 0,
@@ -113,7 +113,6 @@ struct gm_ui_property {
 };
 
 struct gm_ui_properties {
-    pthread_mutex_t lock;
     int n_properties;
     struct gm_ui_property *properties;
 };
@@ -186,8 +185,13 @@ gm_prop_set_string(struct gm_ui_property *prop, const char *string)
     else {
         free(*prop->string_state.ptr);
         *prop->string_state.ptr = NULL;
-        if (string)
+        if (string) {
+#ifdef _WIN32
+            *prop->string_state.ptr = _strdup(string);
+#else
             *prop->string_state.ptr = strdup(string);
+#endif
+        }
     }
 }
 

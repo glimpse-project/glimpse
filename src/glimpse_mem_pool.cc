@@ -24,9 +24,14 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
+
+#ifdef _WIN32
+#define strdup(X) _strdup(X)
+#endif
 
 #include <vector>
+#include <mutex>
+#include <condition_variable>
 
 #include "glimpse_log.h"
 #include "glimpse_mem_pool.h"
@@ -37,8 +42,8 @@ struct gm_mem_pool {
 
     char *name;
 
-    pthread_mutex_t lock;
-    pthread_cond_t available_cond;
+    std::mutex lock;
+    std::condition_variable available_cond;
     unsigned max_size;
     std::vector<void *> available;
     std::vector<void *> busy;
@@ -65,9 +70,6 @@ mem_pool_alloc(struct gm_logger *log,
     pool->alloc_mem = alloc_mem;
     pool->free_mem = free_mem;
     pool->user_data = user_data;
-
-    pthread_mutex_init(&pool->lock, NULL);
-    pthread_cond_init(&pool->available_cond, NULL);
 
     return pool;
 }
@@ -101,7 +103,7 @@ mem_pool_acquire_resource(struct gm_mem_pool *pool)
 {
     void *resource;
 
-    pthread_mutex_lock(&pool->lock);
+    std::unique_lock<std::mutex> scoped_cond_lock(pool->lock);
 
     //gm_error(pool->log, "mem_pool_acquire_resource: lists before");
     //debug_print_busy_and_available_lists(pool);
@@ -130,7 +132,7 @@ mem_pool_acquire_resource(struct gm_mem_pool *pool)
                  pool->name, pool->name);
 
         while (!pool->available.size())
-            pthread_cond_wait(&pool->available_cond, &pool->lock);
+            pool->available_cond.wait(scoped_cond_lock);
 
         resource = pool->available.back();
         pool->available.pop_back();
@@ -143,15 +145,13 @@ mem_pool_acquire_resource(struct gm_mem_pool *pool)
     //gm_debug(pool->log, "mem_pool_acquire_resource %p: lists after", resource);
     //debug_print_busy_and_available_lists(pool);
 
-    pthread_mutex_unlock(&pool->lock);
-
     return resource;
 }
 
 void
 mem_pool_recycle_resource(struct gm_mem_pool *pool, void *resource)
 {
-    pthread_mutex_lock(&pool->lock);
+    std::lock_guard<std::mutex> scope_lock(pool->lock);
 
     //gm_error(pool->log, "mem_pool_recycle_resource %p: lists before", resource);
     //debug_print_busy_and_available_lists(pool);
@@ -176,8 +176,7 @@ mem_pool_recycle_resource(struct gm_mem_pool *pool, void *resource)
     //gm_debug(pool->log, "mem_pool_recycle_resource %p: lists after", resource);
     //debug_print_busy_and_available_lists(pool);
 
-    pthread_cond_broadcast(&pool->available_cond);
-    pthread_mutex_unlock(&pool->lock);
+    pool->available_cond.notify_all();
 }
 
 void
@@ -208,7 +207,7 @@ mem_pool_foreach(struct gm_mem_pool *pool,
                                   void *user_data),
                  void *user_data)
 {
-    pthread_mutex_lock(&pool->lock);
+    std::lock_guard<std::mutex> scope_lock(pool->lock);
 
     //debug_print_busy_and_available_lists(pool);
 
@@ -216,6 +215,4 @@ mem_pool_foreach(struct gm_mem_pool *pool,
     for (unsigned i = 0; i < size; i++) {
         callback(pool, pool->busy[i], user_data);
     }
-
-    pthread_mutex_unlock(&pool->lock);
 }

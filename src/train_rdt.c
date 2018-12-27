@@ -68,46 +68,46 @@ logger_cb(struct gm_logger *logger,
     if (verbose_opt == false && level < GM_LOG_INFO)
         return;
 
-    if (vasprintf(&msg, format, ap) > 0) {
-        switch (level) {
-        case GM_LOG_ERROR:
-            fprintf(fp, "%s: ERROR: ", context);
-            if (fp != stderr)
-                fprintf(stderr, "%s: ERROR: ", context);
-            break;
-        case GM_LOG_WARN:
-            fprintf(fp, "%s: WARN: ", context);
-            if (fp != stderr)
-                fprintf(stderr, "%s: WARN: ", context);
-            break;
-        default:
-            fprintf(fp, "%s: ", context);
-        }
+    xvasprintf(&msg, format, ap);
 
-        fprintf(fp, "%s\n", msg);
-        if (level >= GM_LOG_WARN && fp != stderr)
-            fprintf(stderr, "%s\n", msg);
-
-        if (backtrace) {
-            int line_len = 100;
-            char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-            gm_logger_get_backtrace_strings(logger, backtrace,
-                                            line_len, (char *)formatted);
-            for (int i = 0; i < backtrace->n_frames; i++) {
-                char *line = formatted + line_len * i;
-                fprintf(fp, "> %s\n", line);
-                if (fp != stderr)
-                    fprintf(stderr, "> %s\n", line);
-            }
-        }
-
-        fflush(fp);
+    switch (level) {
+    case GM_LOG_ERROR:
+        fprintf(fp, "%s: ERROR: ", context);
         if (fp != stderr)
-            fflush(stderr);
-
-        free(msg);
+            fprintf(stderr, "%s: ERROR: ", context);
+        break;
+    case GM_LOG_WARN:
+        fprintf(fp, "%s: WARN: ", context);
+        if (fp != stderr)
+            fprintf(stderr, "%s: WARN: ", context);
+        break;
+    default:
+        fprintf(fp, "%s: ", context);
     }
+
+    fprintf(fp, "%s\n", msg);
+    if (level >= GM_LOG_WARN && fp != stderr)
+        fprintf(stderr, "%s\n", msg);
+
+    if (backtrace) {
+        int line_len = 100;
+        char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+        gm_logger_get_backtrace_strings(logger, backtrace,
+                                        line_len, (char *)formatted);
+        for (int i = 0; i < backtrace->n_frames; i++) {
+            char *line = formatted + line_len * i;
+            fprintf(fp, "> %s\n", line);
+            if (fp != stderr)
+                fprintf(stderr, "> %s\n", line);
+        }
+    }
+
+    fflush(fp);
+    if (fp != stderr)
+        fflush(stderr);
+
+    xfree(msg);
 }
 
 static void

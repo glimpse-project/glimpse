@@ -1,10 +1,10 @@
 [wrap-file]
-directory = boost_1_65_1
+directory = boost_1_69_0
 
-source_url = https://dl.bintray.com/boostorg/release/1.65.1/source/boost_1_65_1.tar.bz2
-source_filename = boost_1_65_1.tar.bz2
-source_hash = 9807a5d16566c57fd74fb522764e0b134a8bbe6b6e8967b83afefd30dcd3be81
+source_url = https://dl.bintray.com/boostorg/release/1.69.0/source/boost_1_69_0.tar.bz2
+source_filename = boost_1_69_0.tar.bz2
+source_hash = 8f32d4617390d1c2d16f26a27ab60d97807b35440d45891fa340fc2648b04406
 
 patch_url = https://fake.url.to.please.meson.but.file.in.packagecache/
-patch_filename = boost-wrap-1.65.1.tar
-patch_hash = bc3f377e574f814171875cf13791cb6409a54e762431629f3a840ad0b9a97e90
+patch_filename = boost-wrap-1.69.0.tar
+patch_hash = 48d00adcb2b6569836263adbd863cfa8776593fa0f5f0b47dded8723a8677c98

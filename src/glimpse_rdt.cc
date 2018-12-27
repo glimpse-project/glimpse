@@ -2050,7 +2050,6 @@ gm_rdt_context_new(struct gm_logger *log)
     ctx->properties.push_back(prop);
 
     ctx->properties_state.n_properties = ctx->properties.size();
-    pthread_mutex_init(&ctx->properties_state.lock, NULL);
     ctx->properties_state.properties = &ctx->properties[0];
 
     return (struct gm_rdt_context *)ctx;

@@ -30,7 +30,8 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
-#include <getopt.h>
+
+#include <getopt-compat.h>
 
 #include <cmath>
 #include <vector>

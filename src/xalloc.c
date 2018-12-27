@@ -25,6 +25,14 @@
 #define _GNU_SOURCE         // vasprintf
 #define _XOPEN_SOURCE 600   // posix_memalign
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#else
+#define TARGET_OS_MAC 0
+#define TARGET_OS_IOS 0
+#define TARGET_OS_OSX 0
+#endif
+
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -45,7 +53,11 @@ xaligned_alloc(size_t alignment, size_t size)
 {
   void* mem = NULL;
 
+#ifdef _WIN32
+  mem = _aligned_malloc(size, alignment);
+#else
   posix_memalign(&mem, alignment, size);
+#endif
 
   return_if_valid(mem);
 }
@@ -75,36 +87,41 @@ xrealloc(void *ptr, size_t size)
 }
 
 void
+xvasprintf(char **strp, const char *fmt, va_list ap)
+{
+    if (!strp) {
+        fprintf(stderr, "NULL xvasprintf dest ptr, for string: '");
+        vfprintf(stderr, fmt, ap);
+        fprintf(stderr, "'\n");
+        abort();
+    }
+
+#if defined(__linux__)
+    if (vasprintf(strp, fmt, ap) < 0)
+        abort();
+#else
+    va_list len_ap;
+    va_copy(len_ap, ap);
+    int len = vsnprintf(NULL, 0, fmt, len_ap);
+    if (len < 0)
+        abort();
+
+    char *str = xmalloc(len + 1);
+    va_list copy_ap;
+    va_copy(copy_ap, ap);
+    vsnprintf(str, len + 1, fmt, copy_ap);
+    *strp = str;
+#endif
+}
+
+void
 xasprintf(char **strp, const char *fmt, ...)
 {
     va_list ap;
 
-    if (!strp) {
-        va_start(ap, fmt);
-        vfprintf(stderr, fmt, ap);
-        va_end(ap);
-        fprintf(stderr, "\n");
-        abort();
-    } else {
-#ifdef __linux__
-        va_start(ap, fmt);
-        if (vasprintf(strp, fmt, ap) < 0)
-            abort();
-        va_end(ap);
-#else
-        va_start(ap, fmt);
-        int len = vsnprintf(NULL, 0, fmt, ap);
-        if (len < 0)
-            abort();
-        va_end(ap);
-        va_start(ap, fmt);
-        char *str = xmalloc(len + 1);
-        vsnprintf(str, len + 1, fmt, ap);
-        va_end(ap);
-        *strp = str;
-#endif
-    }
-
+    va_start(ap, fmt);
+    xvasprintf(strp, fmt, ap);
+    va_end(ap);
 }
 
 

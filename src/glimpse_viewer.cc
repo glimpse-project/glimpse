@@ -25,7 +25,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <errno.h>
 #include <locale.h>
 #include <assert.h>
@@ -35,17 +34,19 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <sys/types.h>
-#include <libgen.h>
 
+#include <basename-compat.h>
+
+#define _USE_MATH_DEFINES
 #include <math.h>
-
-#include <pthread.h>
 
 #include <list>
 #include <vector>
 #include <string>
 #include <utility>
 #include <unordered_map>
+#include <mutex>
+#include <condition_variable>
 
 #include <epoxy/gl.h>
 
@@ -76,15 +77,16 @@
 #ifdef USE_GLFM
 #    define GLFM_INCLUDE_NONE
 #    include <glfm.h>
-#    include <imgui_impl_glfm_gles3.h>
+#    include <imgui_impl_glfm.h>
+#    include <imgui_impl_opengl3.h>
 #else
-#    define GLFW_INCLUDE_NONE
 #    include <GLFW/glfw3.h>
-#    include <imgui_impl_glfw_gles3.h>
-#    include <getopt.h>
+#    include <imgui_impl_glfw.h>
+#    include <imgui_impl_opengl3.h>
+#    include <getopt-compat.h>
 #endif
 
-#if TARGET_OS_OSX == 1
+#if TARGET_OS_OSX == 1 || defined(_WIN32)
 #define GLSL_SHADER_VERSION "#version 400\n"
 #else
 #define GLSL_SHADER_VERSION "#version 300 es\n"
@@ -106,6 +108,10 @@
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
 #include "glimpse_target.h"
+
+#ifdef _WIN32
+#define strdup(X) _strdup(X)
+#endif
 
 #undef GM_LOG_CONTEXT
 #ifdef __ANDROID__
@@ -280,8 +286,8 @@ struct _Data
      * the gm_ apis may not be reentrant due to locks held during event
      * notification
      */
-    pthread_mutex_t event_queue_lock;
-    pthread_cond_t event_notify_cond;
+    std::mutex event_queue_lock;
+    std::condition_variable event_notify_cond;
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
 
@@ -498,16 +504,17 @@ on_profiler_pause_cb(bool pause)
     pause_profile = pause;
 }
 
+// NB: windows.h defines near/far symbols
 static glm::mat4
 intrinsics_to_zoomed_project_matrix(const struct gm_intrinsics *intrinsics,
-                                    float near, float far,
+                                    float _near, float _far,
                                     float zoom)
 {
   float width = intrinsics->width;
   float height = intrinsics->height;
 
-  float scalex = near / intrinsics->fx;
-  float scaley = near / intrinsics->fy;
+  float scalex = _near / intrinsics->fx;
+  float scaley = _near / intrinsics->fy;
 
   float offsetx = (intrinsics->cx - width / 2.0) * scalex;
   float offsety = (intrinsics->cy - height / 2.0) * scaley;
@@ -518,7 +525,7 @@ intrinsics_to_zoomed_project_matrix(const struct gm_intrinsics *intrinsics,
                       inverse_zoom * (scalex *  width / 2.0f - offsetx), // right
                       inverse_zoom * (scaley * -height / 2.0f - offsety), // bottom
                       inverse_zoom * (scaley *  height / 2.0f - offsety), // top
-                      near, far);
+                      _near, _far);
 }
 
 static bool
@@ -2176,9 +2183,24 @@ draw_ui(Data *data)
 
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 uiScale = io.DisplayFramebufferScale;
-    ImVec2 origin = io.DisplayVisibleMin;
-    ImVec2 win_size = ImVec2(io.DisplayVisibleMax.x - io.DisplayVisibleMin.x,
-                             io.DisplayVisibleMax.y - io.DisplayVisibleMin.y);
+    ImVec2 origin;
+    ImVec2 win_size;
+
+    // Obsolete but may be necessary on iOS for dealing with iPhone notch...
+    if (io.DisplayVisibleMin.x ||
+        io.DisplayVisibleMin.y ||
+        io.DisplayVisibleMax.x ||
+        io.DisplayVisibleMax.y)
+    {
+        origin = io.DisplayVisibleMin;
+        win_size = ImVec2(io.DisplayVisibleMax.x - io.DisplayVisibleMin.x,
+                          io.DisplayVisibleMax.y - io.DisplayVisibleMin.y);
+    }
+    else
+    {
+        origin = ImVec2();
+        win_size = io.DisplaySize;
+    }
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
@@ -2900,9 +2922,11 @@ event_loop_iteration(Data *data)
 {
     {
         ProfileScopedSection(GlimpseEvents);
-        pthread_mutex_lock(&data->event_queue_lock);
-        std::swap(data->events_front, data->events_back);
-        pthread_mutex_unlock(&data->event_queue_lock);
+
+        {
+            std::lock_guard<std::mutex> scope_lock(data->event_queue_lock);
+            std::swap(data->events_front, data->events_back);
+        }
 
         for (unsigned i = 0; i < data->events_front->size(); i++) {
             struct event event = (*data->events_front)[i];
@@ -2998,12 +3022,18 @@ frame_cb(GLFMDisplay* display, double frameTime)
         {
             ProfileScopedSection(Redraw);
 
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfm_NewFrame(display, frameTime);
+            ImGui::NewFrame();
+
             glViewport(0, 0, data->win_width, data->win_height);
             glClear(GL_COLOR_BUFFER_BIT);
+
             if (data->realtime_ar_mode)
                 draw_ar_video(data);
-            ImGui_ImplGlfmGLES3_NewFrame(display, frameTime);
             draw_ui(data);
+
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
 
     } else if (permissions_check_failed) {
@@ -3037,16 +3067,24 @@ event_loop(Data *data)
         {
             ProfileScopedSection(Redraw);
 
+            ImGui_ImplOpenGL3_NewFrame();
+            ImGui_ImplGlfw_NewFrame();
+            ImGui::NewFrame();
+
+            glfwMakeContextCurrent(data->window);
             glViewport(0, 0, data->win_width, data->win_height);
             glClear(GL_COLOR_BUFFER_BIT);
+
             if (data->realtime_ar_mode)
                 draw_ar_video(data);
-            ImGui_ImplGlfwGLES3_NewFrame();
             draw_ui(data);
+
+            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         }
 
         {
             ProfileScopedSection(SwapBuffers);
+            glfwMakeContextCurrent(data->window);
             glfwSwapBuffers(data->window);
         }
     }
@@ -3067,7 +3105,7 @@ on_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mods)
 {
     Data *data = (Data *)glfwGetWindowUserPointer(window);
 
-    ImGui_ImplGlfwGLES3_KeyCallback(window, key, scancode, action, mods);
+    ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
 
     if (action != GLFW_PRESS)
         return;
@@ -3134,10 +3172,9 @@ on_event_cb(struct gm_context *ctx,
     event.type = EVENT_CONTEXT;
     event.context_event = context_event;
 
-    pthread_mutex_lock(&data->event_queue_lock);
+    std::lock_guard<std::mutex> scope_lock(data->event_queue_lock);
     data->events_back->push_back(event);
-    pthread_cond_signal(&data->event_notify_cond);
-    pthread_mutex_unlock(&data->event_queue_lock);
+    data->event_notify_cond.notify_one();
 }
 
 static void
@@ -3150,10 +3187,9 @@ on_device_event_cb(struct gm_device_event *device_event,
     event.type = EVENT_DEVICE;
     event.device_event = device_event;
 
-    pthread_mutex_lock(&data->event_queue_lock);
+    std::lock_guard<std::mutex> scope_lock(data->event_queue_lock);
     data->events_back->push_back(event);
-    pthread_cond_signal(&data->event_notify_cond);
-    pthread_mutex_unlock(&data->event_queue_lock);
+    data->event_notify_cond.notify_one();
 }
 
 /* Initialize enough OpenGL state to handle rendering before being
@@ -3184,7 +3220,7 @@ init_basic_opengl(Data *data)
     glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
 #endif
 
-#if TARGET_OS_OSX == 1
+#if TARGET_OS_OSX == 1 || defined(_WIN32)
     // In the forwards-compatible context, there's no default vertex array.
     GLuint vertex_array;
     glGenVertexArrays(1, &vertex_array);
@@ -3398,62 +3434,62 @@ logger_cb(struct gm_logger *logger,
     Data *data = (Data *)user_data;
     char *msg = NULL;
 
-    if (vasprintf(&msg, format, ap) > 0) {
+    xvasprintf(&msg, format, ap);
+
 #ifdef __ANDROID__
+    switch (level) {
+    case GM_LOG_ASSERT:
+        __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
+        break;
+    case GM_LOG_ERROR:
+        __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
+        break;
+    case GM_LOG_WARN:
+        __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
+        break;
+    case GM_LOG_INFO:
+        __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
+        break;
+    case GM_LOG_DEBUG:
+        __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
+        break;
+    }
+#endif
+
+    if (data->log_fp) {
         switch (level) {
-        case GM_LOG_ASSERT:
-            __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
-            break;
         case GM_LOG_ERROR:
-            __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
+            fprintf(data->log_fp, "%s: ERROR: ", context);
             break;
         case GM_LOG_WARN:
-            __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
+            fprintf(data->log_fp, "%s: WARN: ", context);
             break;
-        case GM_LOG_INFO:
-            __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
-            break;
-        case GM_LOG_DEBUG:
-            __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
-            break;
+        default:
+            fprintf(data->log_fp, "%s: ", context);
         }
-#endif
 
-        if (data->log_fp) {
-            switch (level) {
-            case GM_LOG_ERROR:
-                fprintf(data->log_fp, "%s: ERROR: ", context);
-                break;
-            case GM_LOG_WARN:
-                fprintf(data->log_fp, "%s: WARN: ", context);
-                break;
-            default:
-                fprintf(data->log_fp, "%s: ", context);
-            }
-
-            fprintf(data->log_fp, "%s\n", msg);
+        fprintf(data->log_fp, "%s\n", msg);
 #if TARGET_OS_IOS == 1
-            ios_log(msg);
+        ios_log(msg);
 #endif
 
-            if (backtrace) {
-                int line_len = 100;
-                char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+        if (backtrace) {
+            int line_len = 100;
+            char *formatted = (char *)alloca(backtrace->n_frames * line_len);
 
-                gm_logger_get_backtrace_strings(logger, backtrace,
-                                                line_len, (char *)formatted);
-                for (int i = 0; i < backtrace->n_frames; i++) {
-                    char *line = formatted + line_len * i;
-                    fprintf(data->log_fp, "> %s\n", line);
-                }
+            gm_logger_get_backtrace_strings(logger, backtrace,
+                                            line_len, (char *)formatted);
+            for (int i = 0; i < backtrace->n_frames; i++) {
+                char *line = formatted + line_len * i;
+                fprintf(data->log_fp, "> %s\n", line);
             }
-
-            fflush(data->log_fp);
-            fflush(stdout);
         }
 
-        free(msg);
+        fflush(data->log_fp);
+        fflush(stdout);
     }
+
+    xfree(msg);
 }
 
 static void
@@ -3491,7 +3527,8 @@ init_winsys_glfm(Data *data, GLFMDisplay *display)
     glfmSetMainLoopFunc(display, frame_cb);
 
     ImGui::CreateContext();
-    ImGui_ImplGlfmGLES3_Init(display, true);
+    ImGui_ImplGlfm_Init(display, true /* install callbacks */);
+    ImGui_ImplOpenGL3_Init(GLSL_SHADER_VERSION);
 
     // Quick hack to make scrollbars a bit more usable on small devices
     ImGui::GetStyle().ScrollbarSize *= 2;
@@ -3503,11 +3540,11 @@ static void
 init_winsys_glfw(Data *data)
 {
     if (!glfwInit()) {
-        fprintf(stderr, "Failed to init GLFW, OpenGL windows system library\n");
+        gm_error(data->log, "Failed to init GLFW, OpenGL windows system library\n");
         exit(1);
     }
 
-#if TARGET_OS_OSX == 1
+#if TARGET_OS_OSX == 1 || defined(_WIN32)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
@@ -3520,7 +3557,7 @@ init_winsys_glfw(Data *data)
 
     data->window = glfwCreateWindow(1280, 720, "Glimpse Viewer", NULL, NULL);
     if (!data->window) {
-        fprintf(stderr, "Failed to create window\n");
+        gm_error(data->log, "Failed to create window\n");
         exit(1);
     }
 
@@ -3536,18 +3573,19 @@ init_winsys_glfw(Data *data)
     glfwSetErrorCallback(on_glfw_error_cb);
 
     ImGui::CreateContext();
-    ImGui_ImplGlfwGLES3_Init(data->window, false /* don't install callbacks */);
+    ImGui_ImplGlfw_InitForOpenGL(data->window, false /* don't install callbacks */);
+    ImGui_ImplOpenGL3_Init(GLSL_SHADER_VERSION);
 
     ImGuiIO& io = ImGui::GetIO();
     ImVec2 ui_scale = io.DisplayFramebufferScale;
     ImGui::GetStyle().ScaleAllSizes(ui_scale.x);
 
-    /* will chain on to ImGui_ImplGlfwGLES3_KeyCallback... */
+    /* will chain on to ImGui_ImplGlfw_KeyCallback... */
     glfwSetKeyCallback(data->window, on_key_input_cb);
     glfwSetMouseButtonCallback(data->window,
-                               ImGui_ImplGlfwGLES3_MouseButtonCallback);
-    glfwSetScrollCallback(data->window, ImGui_ImplGlfwGLES3_ScrollCallback);
-    glfwSetCharCallback(data->window, ImGui_ImplGlfwGLES3_CharCallback);
+                               ImGui_ImplGlfw_MouseButtonCallback);
+    glfwSetScrollCallback(data->window, ImGui_ImplGlfw_ScrollCallback);
+    glfwSetCharCallback(data->window, ImGui_ImplGlfw_CharCallback);
 
     init_basic_opengl(data);
 }
@@ -3607,7 +3645,8 @@ viewer_destroy(Data *data)
     delete data->events_back;
 
 #ifdef USE_GLFW
-    ImGui_ImplGlfwGLES3_Shutdown();
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
     glfwDestroyWindow(data->window);
     glfwTerminate();
@@ -3884,6 +3923,9 @@ main(int argc, char **argv)
 
     const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
     char *assets_root = strdup(assets_root_env ? assets_root_env : "");
+    if (assets_root_env) {
+        fprintf(stderr, "GLIMPSE_ASSETS_ROOT=%s\n", assets_root_env);
+    }
 
     if (log_filename_opt) {
         data->log_fp = fopen(log_filename_opt, "w");
@@ -3903,10 +3945,20 @@ main(int argc, char **argv)
     gm_set_assets_root(data->log, assets_root);
 
     if (!getenv("FAKENECT_PATH")) {
-        char fakenect_path[PATH_MAX];
+        char fakenect_path[14 + PATH_MAX];
+        struct stat sb;
+
         snprintf(fakenect_path, sizeof(fakenect_path),
                  "%s/FakeRecording", assets_root);
-        setenv("FAKENECT_PATH", fakenect_path, true);
+
+        if (stat(fakenect_path, &sb) != -1 && S_ISDIR(sb.st_mode))
+        {
+#ifdef _WIN32
+            _putenv_s("FAKENECT_PATH", fakenect_path);
+#else
+            setenv("FAKENECT_PATH", fakenect_path, true);
+#endif
+        }
     }
 
     char path_tmp[PATH_MAX];
@@ -3917,23 +3969,27 @@ main(int argc, char **argv)
              "%s/Targets", assets_root);
     glimpse_targets_path = strdup(path_tmp);
 
+    gm_info(data->log, "Indexing recordings...");
     index_recordings(data);
+    gm_info(data->log, "Indexing targets...");
     index_targets(data);
 
-    pthread_mutex_init(&data->event_queue_lock, NULL);
-    pthread_cond_init(&data->event_notify_cond, NULL);
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
 
     reset_view(data);
 
 #ifdef USE_GLFM
+    gm_info(data->log, "Initializing GLFM...");
     init_winsys_glfm(data, display);
 #else // USE_GLFW
+    gm_info(data->log, "Initializing GLFW...");
     init_winsys_glfw(data);
 
+    gm_info(data->log, "Initializing view state...");
     viewer_init(data);
 
+    gm_info(data->log, "Starting GLFW event loop...");
     event_loop(data);
 
     viewer_destroy(data);

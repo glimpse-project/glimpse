@@ -26,6 +26,7 @@
 #pragma once
 
 #include <stdlib.h>
+#include <stdarg.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +37,7 @@ void* xaligned_alloc(size_t alignment, size_t size);
 void xfree(void *ptr);
 void* xcalloc(size_t nmemb, size_t size);
 void* xrealloc(void *ptr, size_t size);
+void xvasprintf(char **strp, const char *fmt, va_list ap);
 void xasprintf(char **strp, const char *fmt, ...);
 
 #ifdef __cplusplus

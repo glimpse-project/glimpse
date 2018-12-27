@@ -23,23 +23,44 @@
  */
 
 
+#include <fcntl.h>
 #include <sys/types.h>
 #include <sys/stat.h>
-#include <sys/mman.h>
 
-#include <fcntl.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#else
+#define TARGET_OS_MAC 0
+#define TARGET_OS_IOS 0
+#define TARGET_OS_OSX 0
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <sys/mman.h>
+#include <unistd.h>
+#endif
+
+#ifdef _WIN32
+#include <windows.h>
+#include <io.h>
+#define strdup(X) _strdup(X)
+#define open _open
+#define close _close
+#define fdopen _fdopen
+#endif
+
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <errno.h>
 #include <string.h>
-#include <unistd.h>
 #include <assert.h>
 
 #include "xalloc.h"
 #include "glimpse_log.h"
 #include "glimpse_assets.h"
+#include "glimpse_os.h"
 
 
 struct gm_asset
@@ -53,10 +74,14 @@ struct gm_asset
 #else
     char *path;
     uint8_t *buf;
+    bool buf_is_mmaped;
     int mode;
     int fd;
     off_t file_len;
     bool mapped;
+#ifdef _WIN32
+    HANDLE mapping;
+#endif
 #endif
 };
 
@@ -145,6 +170,10 @@ gm_asset_open(struct gm_logger *log,
     int fd;
     struct stat sb;
     uint8_t *buf = NULL;
+    bool buf_is_mmaped = false;
+#ifdef _WIN32
+    HANDLE mapping = NULL;
+#endif
     struct gm_asset *asset;
     char *root = NULL;
 
@@ -156,7 +185,14 @@ gm_asset_open(struct gm_logger *log,
     char *full_path = alloca(max_len);
     xsnprintf(full_path, max_len, "%s/%s", root, path);
 
-    fd = open(full_path, O_RDONLY|O_CLOEXEC);
+    int oflags = O_RDONLY;
+#ifdef _WIN32
+    oflags |= O_BINARY;
+#endif
+#if defined(__unix__) || defined(__APPLE__)
+    oflags |= O_CLOEXEC;
+#endif
+    fd = open(full_path, oflags);
     if (fd < 0) {
         gm_throw(log, err, "Failed to open %s: %s",
                  full_path, strerror(errno));
@@ -171,12 +207,46 @@ gm_asset_open(struct gm_logger *log,
 
     switch (mode) {
     case GM_ASSET_MODE_BUFFER:
+#ifdef __unix__
         buf = (uint8_t *)mmap(NULL, sb.st_size, PROT_READ, MAP_SHARED, fd, 0);
+        if (buf)
+            buf_is_mmaped = true;
+#elif defined(_WIN32)
+        mapping = CreateFileMapping(_get_osfhandle(fd),
+                                    NULL, 
+                                    PAGE_READONLY,
+                                    0, // high 32 bits of max file size
+                                    0, // low 32 bits of max file size (both 0 = full size)
+                                    NULL); // un-named mapping
+        if (mapping) {
+            buf = MapViewOfFile(mapping,
+                                FILE_MAP_READ,
+                                0, // high 32 bits of file offset
+                                0, // low 32 bits of file offset
+                                0); // end of mapping (0 = end of file)
+            if (buf)
+                buf_is_mmaped = true;
+            else {
+                CloseHandle(mapping);
+                mapping = NULL;
+            }
+        }
+#endif
         if (!buf) {
-            close(fd);
-            gm_throw(log, err, "Failed to mmap %s: %s",
-                     full_path, strerror(errno));
-            return NULL;
+            FILE *fp = fdopen(fd, "r");
+            if (!fp) {
+                close(fd);
+                gm_throw(log, err, "Failed to open buffered IO stream");
+                return NULL;
+            }
+            buf = xmalloc(sb.st_size);
+            if (fread(buf, sb.st_size, 1, fp) != 1) {
+                xfree(buf);
+                close(fd);
+                gm_throw(log, err, "Failed to read %d bytes from buffered IO stream %p for file %s",
+                         (int)sb.st_size, fp, full_path);
+                return NULL;
+            }
         }
         break;
     }
@@ -187,6 +257,10 @@ gm_asset_open(struct gm_logger *log,
     asset->file_len = sb.st_size;
     asset->path = strdup(path);
     asset->buf = buf;
+    asset->buf_is_mmaped = buf_is_mmaped;
+#ifdef _WIN32
+    asset->mapping = mapping;
+#endif
 
     return asset;
 }
@@ -208,8 +282,24 @@ gm_asset_close(struct gm_asset *asset)
 {
     switch (asset->mode) {
     case GM_ASSET_MODE_BUFFER:
-        if (asset->buf)
-            munmap(asset->buf, asset->file_len);
+        if (asset->buf) {
+#if defined(__unix__) || defined(__APPLE__)
+            if (asset->buf_is_mmaped) {
+                munmap(asset->buf, asset->file_len);
+                asset->buf = NULL;
+            }
+#elif defined(_WIN32)
+            if (asset->buf_is_mmaped) {
+                UnmapViewOfFile(asset->buf);
+                CloseHandle(asset->mapping);
+                asset->buf = NULL;
+            }
+#endif
+            if (asset->buf) {
+                xfree(asset->buf);
+                asset->buf = NULL;
+            }
+        }
         break;
     }
     close(asset->fd);

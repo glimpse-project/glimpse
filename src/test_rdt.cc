@@ -188,35 +188,35 @@ logger_cb(struct gm_logger *logger,
     if (verbose_opt == false && level < GM_LOG_ERROR)
         return;
 
-    if (vasprintf(&msg, format, ap) > 0) {
-        switch (level) {
-        case GM_LOG_ERROR:
-            fprintf(log_fp, "%s: ERROR: ", context);
-            break;
-        case GM_LOG_WARN:
-            fprintf(log_fp, "%s: WARN: ", context);
-            break;
-        default:
-            fprintf(log_fp, "%s: ", context);
-        }
+    xvasprintf(&msg, format, ap);
 
-        fprintf(log_fp, "%s\n", msg);
-
-        if (backtrace) {
-            int line_len = 100;
-            char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-            gm_logger_get_backtrace_strings(logger, backtrace,
-                                            line_len, (char *)formatted);
-            for (int i = 0; i < backtrace->n_frames; i++) {
-                char *line = formatted + line_len * i;
-                fprintf(log_fp, "> %s\n", line);
-            }
-        }
-
-        fflush(log_fp);
-        free(msg);
+    switch (level) {
+    case GM_LOG_ERROR:
+        fprintf(log_fp, "%s: ERROR: ", context);
+        break;
+    case GM_LOG_WARN:
+        fprintf(log_fp, "%s: WARN: ", context);
+        break;
+    default:
+        fprintf(log_fp, "%s: ", context);
     }
+
+    fprintf(log_fp, "%s\n", msg);
+
+    if (backtrace) {
+        int line_len = 100;
+        char *formatted = (char *)alloca(backtrace->n_frames * line_len);
+
+        gm_logger_get_backtrace_strings(logger, backtrace,
+                                        line_len, (char *)formatted);
+        for (int i = 0; i < backtrace->n_frames; i++) {
+            char *line = formatted + line_len * i;
+            fprintf(log_fp, "> %s\n", line);
+        }
+    }
+
+    fflush(log_fp);
+    xfree(msg);
 }
 
 static void

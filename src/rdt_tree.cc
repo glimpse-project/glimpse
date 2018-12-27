@@ -26,10 +26,13 @@
 #include <sys/stat.h>
 
 #include <limits.h>
-#include <unistd.h>
 #include <string.h>
 #include <math.h>
-#include <cstddef>
+#include <stddef.h>
+
+#ifdef _WIN32
+#define fileno(X) _fileno(X)
+#endif
 
 #include "rdt_tree.h"
 #include "glimpse_data.h"
@@ -41,7 +44,16 @@ assert_rdt_abi()
 {
     static_assert(sizeof(RDTHeader) == 272, "RDT ABI Breakage");
     static_assert(sizeof(Node) == 32,       "RDT ABI Breakage");
+
+    // The MSVC 2017 headers define offsetof using reinterpret_cast which
+    // isn't allowed in const expressions. A future version will apparently
+    // implement in terms of __builtin_offsetof:
+    //
+    // Ref: https://developercommunity.visualstudio.com/content/problem/22196/
+    //          static-assert-cannot-compile-constexprs-method-tha.html
+#ifndef _MSC_VER
     static_assert(offsetof(Node, t) == 16,  "RDT ABI Breakage");
+#endif
 }
 
 static int

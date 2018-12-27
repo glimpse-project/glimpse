@@ -28,7 +28,8 @@
 #include <string.h>
 #include <thread>
 #include <pthread.h>
-#include <getopt.h>
+
+#include <getopt-compat.h>
 
 #include <cmath>
 #include <queue>

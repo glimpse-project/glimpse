@@ -1,0 +1,4 @@
+[wrap-git]
+directory = glfw
+url = https://github.com/rib/glfw
+revision = 70fab1f0eb504032845481cd142fe01dc6f62a55

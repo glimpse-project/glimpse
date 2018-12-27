@@ -24,8 +24,6 @@
 
 #pragma once
 
-#include <pthread.h>
-
 struct gm_mem_pool;
 
 #ifdef __cplusplus

@@ -26,7 +26,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
-#include <pthread.h>
 #include <limits.h>
 
 #ifdef USE_LIBUNWIND
@@ -37,9 +36,11 @@
 #include "xalloc.h"
 
 #include "glimpse_log.h"
+#include "glimpse_os.h"
+#include "glimpse_mutex.h"
 
 struct gm_logger {
-    pthread_mutex_t lock;
+    gm_mutex_t lock;
     void (*callback)(struct gm_logger *logger,
                      enum gm_log_level level,
                      const char *context,
@@ -124,7 +125,7 @@ gm_logger_new(void (*log_cb)(struct gm_logger *logger,
 {
     struct gm_logger *logger = (struct gm_logger *)xcalloc(sizeof(*logger), 1);
 
-    pthread_mutex_init(&logger->lock, NULL);
+    gm_mutex_init(&logger->lock);
     if (log_cb)
         logger->callback = log_cb;
     else
@@ -276,19 +277,19 @@ gm_logv(struct gm_logger *logger,
         bt.n_frames  = get_backtrace(frame_pointers, 1, 10);
         bt.frame_pointers = (const void **)frame_pointers;
 
-        pthread_mutex_lock(&logger->lock);
+        gm_mutex_lock(&logger->lock);
         logger->callback(logger, level, context,
                          &bt,
                          format, ap, logger->callback_data);
-        pthread_mutex_unlock(&logger->lock);
+        gm_mutex_unlock(&logger->lock);
     } else
 #endif
     {
-        pthread_mutex_lock(&logger->lock);
+        gm_mutex_lock(&logger->lock);
         logger->callback(logger, level, context,
                          NULL, // TODO: support (optional) backtraces
                          format, ap, logger->callback_data);
-        pthread_mutex_unlock(&logger->lock);
+        gm_mutex_unlock(&logger->lock);
     }
 }
 
