@@ -501,6 +501,7 @@ struct gm_prediction_impl
 
     struct gm_context *ctx;
 
+    int person_id;
     uint64_t timestamp;
 
     std::deque<skeleton_history> history;
@@ -3313,6 +3314,14 @@ prediction_alloc(struct gm_mem_pool *pool, void *user_data)
     prediction->ctx = ctx;
 
     return (void *)prediction;
+}
+
+int
+gm_prediction_get_person_id(struct gm_prediction *_prediction)
+{
+    struct gm_prediction_impl *prediction =
+        (struct gm_prediction_impl *)_prediction;
+    return prediction->person_id;
 }
 
 uint64_t
@@ -10867,6 +10876,7 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
             struct gm_prediction_impl *prediction =
                 mem_pool_acquire_prediction(ctx->prediction_pool);
 
+            prediction->person_id = person_id;
             prediction->history.insert(prediction->history.begin(),
                                        person.history.begin(),
                                        person.history.end());

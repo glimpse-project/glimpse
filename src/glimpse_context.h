@@ -570,6 +570,9 @@ float
 gm_context_get_skeleton_distance(struct gm_context *ctx,
                                  const struct gm_skeleton *skeleton);
 
+int
+gm_prediction_get_person_id(struct gm_prediction *prediction);
+
 uint64_t
 gm_prediction_get_timestamp(struct gm_prediction *prediction);
 
