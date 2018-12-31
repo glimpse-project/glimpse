@@ -5111,43 +5111,37 @@ get_closest_skeleton_history(std::deque<skeleton_history> &history, uint64_t tim
     return closest_frame;
 }
 
-static struct gm_prediction *
-gm_context_get_prediction_for_person(struct gm_context *ctx,
-                                     uint64_t timestamp,
-                                     struct gm_person *person)
+struct gm_skeleton
+predict_skeleton_for_history(struct gm_context *ctx,
+                             std::deque<struct skeleton_history> &history,
+                             uint64_t timestamp,
+                             int *out_h1 = NULL,
+                             int *out_h2 = NULL)
 {
-    struct gm_prediction_impl *prediction =
-        mem_pool_acquire_prediction(ctx->prediction_pool);
-
-    // Copy the current skeleton history from the person
-    pthread_mutex_lock(&ctx->people_modify_mutex);
-
-    prediction->history.insert(prediction->history.begin(),
-                               person->history.begin(),
-                               person->history.end());
-
-    pthread_mutex_unlock(&ctx->people_modify_mutex);
-
     // Pre-fill the skeleton with the closest history
     int closest =
-        get_closest_skeleton_history(prediction->history, timestamp);
+        get_closest_skeleton_history(history, timestamp);
     struct gm_skeleton &closest_skeleton =
-        prediction->history[closest].skeleton_corrected;
-    prediction->skeleton = closest_skeleton;
+        history[closest].skeleton_corrected;
+
+    struct gm_skeleton skeleton = closest_skeleton;
 
     if (ctx->prediction_dampen_large_deltas) {
         timestamp = calculate_decayed_timestamp(
-            prediction->history[closest].timestamp,
+            history[closest].timestamp,
             timestamp, ctx->max_prediction_delta, ctx->prediction_decay);
     }
-    prediction->timestamp = timestamp;
 
-    uint64_t closest_timestamp =
-        prediction->history[closest].timestamp;
-    if (timestamp == closest_timestamp || prediction->history.size() <= 1) {
-        prediction->h1 = closest;
-        prediction->h2 = -1;
-        return &prediction->base;
+    uint64_t closest_timestamp = history[closest].timestamp;
+    if (timestamp == closest_timestamp || history.size() <= 1) {
+        if (out_h1) {
+            *out_h1 = closest;
+        }
+        if (out_h2) {
+            *out_h2 = -1;
+        }
+
+        return skeleton;
     }
 
     // Work out the two nearest frames and the interpolation value
@@ -5161,7 +5155,7 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
             h1 = closest - 1;
         }
     } else {
-        if (closest == prediction->history.size() - 1) {
+        if (closest == history.size() - 1) {
             h1 = closest - 1;
             interpolate_angles = false;
         } else {
@@ -5170,11 +5164,15 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
     }
     int h2 = h1 + 1;
 
-    prediction->h1 = h1;
-    prediction->h2 = h2;
+    if (out_h1) {
+        *out_h1 = h1;
+    }
+    if (out_h2) {
+        *out_h2 = h2;
+    }
 
-    struct skeleton_history &history1 = prediction->history[h1];
-    struct skeleton_history &history2 = prediction->history[h2];
+    struct skeleton_history &history1 = history[h1];
+    struct skeleton_history &history2 = history[h2];
     float t = (timestamp - history2.timestamp) /
               (float)(history1.timestamp - history2.timestamp);
 
@@ -5195,11 +5193,11 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
             interpolate_joints(
                 history2.skeleton_corrected.joints[bone_info.head],
                 history1.skeleton_corrected.joints[bone_info.head],
-                t, prediction->skeleton.joints[bone_info.head]);
+                t, skeleton.joints[bone_info.head]);
             interpolate_joints(
                 history2.skeleton_corrected.joints[bone_info.tail],
                 history1.skeleton_corrected.joints[bone_info.tail],
-                t, prediction->skeleton.joints[bone_info.tail]);
+                t, skeleton.joints[bone_info.tail]);
             continue;
         }
 
@@ -5215,10 +5213,8 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
         glm::mat3 rotate = glm::mat3_cast(
             glm::slerp(bone2.angle, bone1.angle, t));
 
-        struct gm_joint &parent_head =
-            prediction->skeleton.joints[parent_bone_info.head];
-        struct gm_joint &parent_tail =
-            prediction->skeleton.joints[parent_bone_info.tail];
+        struct gm_joint &parent_head = skeleton.joints[parent_bone_info.head];
+        struct gm_joint &parent_tail = skeleton.joints[parent_bone_info.tail];
 
         glm::vec3 parent_vec = glm::normalize(
             glm::vec3(parent_tail.x - parent_head.x,
@@ -5227,16 +5223,40 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
         float length = bone2.length +
             (bone1.length - bone2.length) * t;
         glm::vec3 new_tail = ((parent_vec * rotate) * length);
-        new_tail.x += prediction->skeleton.joints[bone_info.head].x;
-        new_tail.y += prediction->skeleton.joints[bone_info.head].y;
-        new_tail.z += prediction->skeleton.joints[bone_info.head].z;
+        new_tail.x += skeleton.joints[bone_info.head].x;
+        new_tail.y += skeleton.joints[bone_info.head].y;
+        new_tail.z += skeleton.joints[bone_info.head].z;
 
-        prediction->skeleton.joints[bone_info.tail].x = new_tail.x;
-        prediction->skeleton.joints[bone_info.tail].y = new_tail.y;
-        prediction->skeleton.joints[bone_info.tail].z = new_tail.z;
+        skeleton.joints[bone_info.tail].x = new_tail.x;
+        skeleton.joints[bone_info.tail].y = new_tail.y;
+        skeleton.joints[bone_info.tail].z = new_tail.z;
     }
 
-    update_bones(ctx, prediction->skeleton);
+    update_bones(ctx, skeleton);
+
+    return skeleton;
+}
+
+static struct gm_prediction *
+gm_context_get_prediction_for_person(struct gm_context *ctx,
+                                     uint64_t timestamp,
+                                     struct gm_person *person)
+{
+    struct gm_prediction_impl *prediction =
+        mem_pool_acquire_prediction(ctx->prediction_pool);
+
+    // Copy the current skeleton history from the person
+    pthread_mutex_lock(&ctx->people_modify_mutex);
+
+    prediction->history.insert(prediction->history.begin(),
+                               person->history.begin(),
+                               person->history.end());
+
+    pthread_mutex_unlock(&ctx->people_modify_mutex);
+
+    prediction->skeleton =
+        predict_skeleton_for_history(ctx, prediction->history, timestamp,
+                                     &prediction->h1, &prediction->h2);
 
     return &prediction->base;
 }
@@ -5268,9 +5288,11 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        struct gm_prediction *prediction = use_prediction ?
-            gm_context_get_prediction_for_person(
-                ctx, tracking->frame->timestamp, &person) : NULL;
+        struct gm_skeleton skeleton;
+        if (use_prediction) {
+            skeleton = predict_skeleton_for_history(ctx, person.history,
+                                                    tracking->frame->timestamp);
+        }
 
         for (int j = 0; j < ctx->n_joints; ++j) {
             struct gm_joint *joint =
@@ -5306,11 +5328,9 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             // Project the joint position into the space of the new frame.
             // Use a predicted position instead of the old position if that feature
             // is enabled and we were able to get a prediction.
-            if (prediction) {
-                struct gm_skeleton *skeleton =
-                    gm_prediction_get_skeleton(prediction);
-                if (skeleton->joints[j].valid) {
-                    joint = &skeleton->joints[j];
+            if (use_prediction) {
+                if (skeleton.joints[j].valid) {
+                    joint = &skeleton.joints[j];
                 }
             }
 
@@ -5346,10 +5366,6 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
                     }
                 }
             }
-        }
-
-        if (prediction) {
-            gm_prediction_unref(prediction);
         }
     }
 }
