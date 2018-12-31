@@ -209,7 +209,7 @@ using Random = effolkronium::random_thread_local;
 
 #endif
 
-#define TRACK_FRAMES 12
+#define TRACK_FRAMES 4
 #define PERSON_HISTORY_SIZE 12
 
 enum debug_cloud_mode {
