@@ -480,6 +480,7 @@ struct gm_person
 {
     struct gm_context *ctx;
 
+    int id;
     uint64_t time_detected;
     float initial_confidence;
     uint64_t time_last_tracked;
@@ -899,6 +900,7 @@ struct gm_context
 
     pthread_mutex_t people_modify_mutex;
     std::list<struct gm_person> tracked_people;
+    int last_person_id;
 
     /* Tracking objects resulting from processing paused frames will never
      * update ctx->latest_tracking, since tracking itself may refer to
@@ -5237,30 +5239,6 @@ predict_skeleton_for_history(struct gm_context *ctx,
     return skeleton;
 }
 
-static struct gm_prediction *
-gm_context_get_prediction_for_person(struct gm_context *ctx,
-                                     uint64_t timestamp,
-                                     struct gm_person *person)
-{
-    struct gm_prediction_impl *prediction =
-        mem_pool_acquire_prediction(ctx->prediction_pool);
-
-    // Copy the current skeleton history from the person
-    pthread_mutex_lock(&ctx->people_modify_mutex);
-
-    prediction->history.insert(prediction->history.begin(),
-                               person->history.begin(),
-                               person->history.end());
-
-    pthread_mutex_unlock(&ctx->people_modify_mutex);
-
-    prediction->skeleton =
-        predict_skeleton_for_history(ctx, prediction->history, timestamp,
-                                     &prediction->h1, &prediction->h2);
-
-    return &prediction->base;
-}
-
 static void
 get_prev_cluster_positions(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state,
@@ -7442,6 +7420,7 @@ context_track_skeleton(struct gm_context *ctx,
             person->ctx = ctx;
             person->time_detected = tracking->frame->timestamp;
             person->initial_confidence = history.confidence;
+            person->id = ctx->last_person_id++;
         }
 
         person->history.push_front(history);
@@ -10855,24 +10834,65 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     return tracking;
 }
 
-struct gm_skeleton *
-gm_person_predict_skeleton(struct gm_person *person, uint64_t timestamp)
+int *
+gm_context_get_people(struct gm_context *ctx, int *n_people)
 {
-    struct gm_skeleton *skeleton = new struct gm_skeleton;
-    skeleton->joints.resize(person->ctx->n_joints);
+    pthread_mutex_lock(&ctx->people_modify_mutex);
 
-    return skeleton;
+    *n_people = ctx->tracked_people.size();
+    int *people_ids = ((*n_people) > 0) ?
+        (int *)malloc(sizeof(int) * (*n_people)) : NULL;
+
+    int i = 0;
+    for (auto &person : ctx->tracked_people) {
+        people_ids[i++] = person.id;
+    }
+
+    pthread_mutex_unlock(&ctx->people_modify_mutex);
+
+    return people_ids;
+}
+
+struct gm_prediction *
+gm_context_get_prediction_for_person(struct gm_context *ctx,
+                                     uint64_t timestamp,
+                                     int person_id)
+{
+    pthread_mutex_lock(&ctx->people_modify_mutex);
+
+    for (auto &person : ctx->tracked_people) {
+        if (person.id == person_id) {
+            // Copy the current skeleton history from the person and create
+            // a prediction from it.
+            struct gm_prediction_impl *prediction =
+                mem_pool_acquire_prediction(ctx->prediction_pool);
+
+            prediction->history.insert(prediction->history.begin(),
+                                       person.history.begin(),
+                                       person.history.end());
+
+            pthread_mutex_unlock(&ctx->people_modify_mutex);
+
+            prediction->skeleton =
+                predict_skeleton_for_history(ctx, prediction->history,
+                                             timestamp, &prediction->h1,
+                                             &prediction->h2);
+
+            return &prediction->base;
+        }
+    }
+
+    pthread_mutex_unlock(&ctx->people_modify_mutex);
+
+    // The person id wasn't found
+    return NULL;
 }
 
 struct gm_prediction *
 gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
 {
-    if (!ctx->tracked_people.size()) {
-        return NULL;
-    }
-
     return gm_context_get_prediction_for_person(ctx, timestamp,
-                                                &ctx->tracked_people.front());
+                                                ctx->tracked_people.front().id);
 }
 
 void

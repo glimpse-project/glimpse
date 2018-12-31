@@ -547,6 +547,18 @@ gm_context_get_average_frame_duration(struct gm_context *ctx);
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
 
+int *
+gm_context_get_people(struct gm_context *ctx, int *n_people);
+
+struct gm_prediction *
+gm_context_get_prediction_for_person(struct gm_context *ctx,
+                                     uint64_t timestamp,
+                                     int person_id);
+
+/* Legacy API, this returns a prediction for the oldest tracked person. If
+ * multiple people were tracked in the same frame, it returns a prediction
+ * for the most confident of those people.
+ */
 struct gm_prediction *
 gm_context_get_prediction(struct gm_context *ctx,
                           uint64_t timestamp);
