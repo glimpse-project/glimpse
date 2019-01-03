@@ -1474,7 +1474,7 @@ main(int argc, char **argv)
         JSON_Array *pp_noise = json_object_get_array(json_object(pp_config),
                                                      "noise");
         if (pp_noise) {
-            for (int i = 0; i < json_array_get_count(pp_noise); i++) {
+            for (int i = 0; i < (int)json_array_get_count(pp_noise); i++) {
                 JSON_Object *js_op = json_array_get_object(pp_noise, i);
                 struct noise_op op = {};
                 const char *type_str = json_object_get_string(js_op, "type");
