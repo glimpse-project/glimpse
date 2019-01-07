@@ -7549,7 +7549,8 @@ context_track_skeleton(struct gm_context *ctx,
     if (tracked_person) {
         tracking->has_skeleton = true;
         tracking->skeleton = tracked_person->history[0].skeleton;
-        tracking->skeleton = tracked_person->history[0].skeleton_corrected;
+        tracking->skeleton_corrected =
+            tracked_person->history[0].skeleton_corrected;
     }
 
 #warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
