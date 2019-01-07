@@ -821,6 +821,8 @@ struct gm_context
 
     bool fast_clustering;
     int max_people;
+    float max_frame_joint_diff;
+    float person_invalidation_time;
 
     bool joint_refinement;
     float max_joint_refinement_delta;
@@ -6499,11 +6501,13 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
             }
         }
 
+        if (best_diff > ctx->max_frame_joint_diff) {
+            continue;
+        }
+
         struct gm_skeleton &skeleton = (*best_skeleton_iter).first;
         auto &person_data = (*best_skeleton_iter).second;
 
-        // TODO: Introduce a maximum skeleton difference threshold
-        // TODO: Introduce a maximum time difference threshold
         state->new_history.push_front({{}, &person});
         struct skeleton_history &history = state->new_history.front().first;
         history.skeleton = history.skeleton_corrected = skeleton;
@@ -6616,6 +6620,20 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
         state->new_history.pop_front();
     }
 
+    // Remove any people that haven't been tracked in too long
+    for (auto iter = ctx->tracked_people.begin();
+         iter != ctx->tracked_people.end();)
+    {
+        struct gm_person &person = *iter;
+        float time_diff = (float)((double)(tracking->frame->timestamp -
+                                           person.time_last_tracked) / 1e9);
+        if (time_diff > ctx->person_invalidation_time) {
+            iter = ctx->tracked_people.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
+
     // Sort the list of tracked people and remove any over the limit of people
     // we want to track.
     ctx->tracked_people.sort(compare_people_confidence);
@@ -6623,9 +6641,8 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
         ctx->tracked_people.pop_back();
     }
 
-    int max_bone_length_samples = ctx->max_bone_length_samples;
-
     // Cull old history and update bone lengths
+    int max_bone_length_samples = ctx->max_bone_length_samples;
     for (auto &person : ctx->tracked_people) {
         while (person.history.size() > PERSON_HISTORY_SIZE) {
             // Calculate current average bone lengths
@@ -10380,6 +10397,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.properties.push_back(prop);
 #endif
 
+        ctx->max_frame_joint_diff = 0.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_frame_joint_diff";
+        prop.desc = "Maximum average joint difference in meters between frames "
+                    "for a detected person to be classed as an existing person.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->max_frame_joint_diff;
+        prop.float_state.min = 0.05f;
+        prop.float_state.max = 1.f;
+        stage.properties.push_back(prop);
+
         ctx->max_bone_length_samples = 50;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -10389,6 +10418,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.int_state.ptr = &ctx->max_bone_length_samples;
         prop.int_state.min = PERSON_HISTORY_SIZE;
         prop.int_state.max = 1800;
+        stage.properties.push_back(prop);
+
+        ctx->person_invalidation_time = 5.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "person_invalidation_time";
+        prop.desc = "Maximum time in seconds a tracked person can go untracked "
+                    "before being invalidated.";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->person_invalidation_time;
+        prop.float_state.min = 0.5f;
+        prop.float_state.max = 10.f;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
