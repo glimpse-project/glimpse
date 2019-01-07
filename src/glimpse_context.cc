@@ -263,6 +263,7 @@ enum tracking_stage {
     TRACKING_STAGE_SANITIZE_SKELETON,
     TRACKING_STAGE_VALIDATE_SKELETON,
 
+    TRACKING_STAGE_UPDATE_PEOPLE,
     TRACKING_STAGE_UPDATE_CODEBOOK,
 
     TRACKING_STAGE_UPDATE_HISTORY,
@@ -830,6 +831,9 @@ struct gm_context
     bool skeleton_validation;
     float skeleton_min_confidence;
     float skeleton_max_distance;
+
+    int max_bone_length_samples;
+
     float codebook_update_delay;
 
     bool debug_predictions;
@@ -1945,31 +1949,14 @@ sanitise_bone_lengths(struct gm_person *person,
         struct gm_joint &tail = skeleton.joints[bone_info.tail];
 
         // Look at the length of each bone and the average length of that
-        // bone in tracking history. If it deviates too far from the mean,
+        // bone for the person. If it deviates too far from the mean,
         // use the last non-outlier length.
 
-        // Find the average length for this bone and see if this new length
-        // conforms.
-        float avg_bone_length = bone.length;
-        int n_lengths = 1;
-        for (int i = 0; i < history.size(); ++i) {
-            if (history[i].timestamp < time_threshold) {
-                break;
-            }
-            const struct gm_bone &prev_bone =
-                history[i].skeleton.bones[bone.idx];
-            if (ctx->use_bone_map_annotation) {
-                struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
-                if (bone.length < bone_info.min_length ||
-                    bone.length > bone_info.max_length) {
-                    continue;
-                }
-            }
-            avg_bone_length += prev_bone.length;
-            ++n_lengths;
+        if (!person->bone_lengths[bone.idx].n_samples) {
+            continue;
         }
-        avg_bone_length /= n_lengths;
 
+        float avg_bone_length = person->bone_lengths[bone.idx].length;
         if (!is_bone_length_valid(ctx, bone, avg_bone_length)) {
             for (int i = 0; i < history.size(); ++i) {
                 struct gm_bone &prev_bone =
@@ -6592,6 +6579,97 @@ stage_select_best_person_cloud_debug_cb(struct gm_tracking_impl *tracking,
 }
 
 static void
+stage_update_people_cb(struct gm_tracking_impl *tracking,
+                       struct pipeline_scratch_state *state)
+{
+    struct gm_context *ctx = tracking->ctx;
+
+    // Begin modifications to tracked_people
+    pthread_mutex_lock(&ctx->people_modify_mutex);
+
+    // Add newly tracked people/history to tracked_people
+    while (!state->new_history.empty()) {
+        struct skeleton_history &history = state->new_history.front().first;
+        struct gm_person *person = state->new_history.front().second;
+
+        if (!person) {
+            // Add the newly tracked person
+            ctx->tracked_people.push_back({});
+            person = &ctx->tracked_people.back();
+            person->ctx = ctx;
+            person->time_detected = tracking->frame->timestamp;
+            person->initial_confidence = history.confidence;
+            person->id = ctx->last_person_id++;
+            person->bone_lengths.resize(ctx->n_bones, {0});
+        }
+
+        person->history.push_front(history);
+        person->time_last_tracked = tracking->frame->timestamp;
+        state->new_history.pop_front();
+    }
+
+    // Sort the list of tracked people and remove any over the limit of people
+    // we want to track.
+    ctx->tracked_people.sort(compare_people_confidence);
+    while (ctx->tracked_people.size() > ctx->max_people) {
+        ctx->tracked_people.pop_back();
+    }
+
+    int max_bone_length_samples = ctx->max_bone_length_samples;
+
+    // Cull old history and update bone lengths
+    for (auto &person : ctx->tracked_people) {
+        while (person.history.size() > PERSON_HISTORY_SIZE) {
+            // Calculate current average bone lengths
+            std::vector<int> n_lengths(ctx->n_bones, 0);
+            std::vector<float> avg_lengths(ctx->n_bones, 0.f);
+            for (auto &history : person.history) {
+                for (int b = 0; b < ctx->n_bones; ++b) {
+                    if (!person.history.back().skeleton.bones[b].valid ||
+                        !history.skeleton.bones[b].valid) {
+                        continue;
+                    }
+
+                    ++n_lengths[b];
+                    avg_lengths[b] += history.skeleton.bones[b].length;
+                }
+            }
+
+            // Add valid bone lengths to the running total
+            struct gm_skeleton &skeleton = person.history.back().skeleton;
+            for (int b = 0; b < ctx->n_bones; ++b) {
+                if (!n_lengths[b]) {
+                    continue;
+                }
+
+                avg_lengths[b] /= (float)n_lengths[b];
+
+                if (is_bone_length_valid(ctx, skeleton.bones[b],
+                                         avg_lengths[b]))
+                {
+                    struct average_length &avg = person.bone_lengths[b];
+                    avg.length = ((avg.length * avg.n_samples) +
+                        skeleton.bones[b].length) / (++avg.n_samples);
+                    if (avg.n_samples > max_bone_length_samples) {
+                        avg.n_samples = max_bone_length_samples;
+                    }
+                }
+            }
+
+            person.history.pop_back();
+        }
+    }
+
+    // We want to maintain a stable sort order, keep it in order of detection,
+    // with more confident initial detections sorting first when multiple
+    // people are detected in the same frame.
+    ctx->tracked_people.sort(compare_people_age);
+
+    // We're done modifying tracked_people now
+    pthread_mutex_unlock(&ctx->people_modify_mutex);
+}
+
+static void
 stage_update_codebook_cb(struct gm_tracking_impl *tracking,
                          struct pipeline_scratch_state *state)
 {
@@ -7397,11 +7475,6 @@ context_track_skeleton(struct gm_context *ctx,
               stage_refine_skeleton_debug_cb,
               &state);
 
-    //tracking_add_debug_text(tracking, "Skeleton confidence: %f", state.confidence);
-
-    // TODO: We just take the most confident skeleton above, but we should
-    //       probably establish some thresholds and spit out multiple
-    //       skeletons.
     run_stage(tracking,
               TRACKING_STAGE_SANITIZE_SKELETON,
               stage_sanitize_skeleton_cb,
@@ -7414,50 +7487,11 @@ context_track_skeleton(struct gm_context *ctx,
               NULL,
               &state);
 
-    // Begin modifications to tracked_people
-    pthread_mutex_lock(&ctx->people_modify_mutex);
-
-    // Add newly tracked people/history to tracked_people
-    while (!state.new_history.empty()) {
-        struct skeleton_history &history = state.new_history.front().first;
-        struct gm_person *person = state.new_history.front().second;
-
-        if (!person) {
-            // Add the newly tracked person
-            ctx->tracked_people.push_back({});
-            person = &ctx->tracked_people.back();
-            person->ctx = ctx;
-            person->time_detected = tracking->frame->timestamp;
-            person->initial_confidence = history.confidence;
-            person->id = ctx->last_person_id++;
-        }
-
-        person->history.push_front(history);
-        person->time_last_tracked = tracking->frame->timestamp;
-        state.new_history.pop_front();
-    }
-
-    // Sort the list of tracked people and remove any over the limit of people
-    // we want to track.
-    ctx->tracked_people.sort(compare_people_confidence);
-    while (ctx->tracked_people.size() > ctx->max_people) {
-        ctx->tracked_people.pop_back();
-    }
-
-    // Cull old history
-    for (auto &person : ctx->tracked_people) {
-        while (person.history.size() > PERSON_HISTORY_SIZE) {
-            person.history.pop_back();
-        }
-    }
-
-    // We want to maintain a stable sort order, keep it in order of detection,
-    // with more confident initial detections sorting first when multiple
-    // people are detected in the same frame.
-    ctx->tracked_people.sort(compare_people_age);
-
-    // We're done modifying tracked_people now
-    pthread_mutex_unlock(&ctx->people_modify_mutex);
+    run_stage(tracking,
+              TRACKING_STAGE_UPDATE_PEOPLE,
+              stage_update_people_cb,
+              NULL,
+              &state);
 
     // If we failed to track a person, delay updates to the motion detection
     // codebook for a short period so as not to pollute what may actually be
@@ -10039,20 +10073,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.desc = "Select cluster to run label inference on (points before projection into depth image)";
         stage.toggle_property = -1;
 
-        // TODO: We aren't ready to expose more than 1 person quite yet
-        ctx->max_people = 1;
-#if 0
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "max_people";
-        prop.desc = "Maximum number of people to track at once";
-        prop.type = GM_PROPERTY_INT;
-        prop.int_state.ptr = &ctx->max_people;
-        prop.int_state.min = 1;
-        prop.int_state.max = 4;
-        stage.properties.push_back(prop);
-#endif
-
         stage.properties_state.n_properties = stage.properties.size();
         stage.properties_state.properties = stage.properties.data();
         pthread_mutex_init(&stage.properties_state.lock, NULL);
@@ -10358,6 +10378,45 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.float_state.ptr = &ctx->codebook_update_delay;
         prop.float_state.min = 0.f;
         prop.float_state.max = 10.f;
+        stage.properties.push_back(prop);
+
+        stage.properties_state.n_properties = stage.properties.size();
+        stage.properties_state.properties = stage.properties.data();
+        pthread_mutex_init(&stage.properties_state.lock, NULL);
+    }
+
+    {
+        enum tracking_stage stage_id = TRACKING_STAGE_UPDATE_PEOPLE;
+        struct gm_pipeline_stage &stage = ctx->stages[stage_id];
+
+        stage.stage_id = stage_id;
+        stage.name = "update_people";
+        stage.desc = "Update tracked people with data from this frame";
+        stage.toggle_property = -1;
+
+        // TODO: We aren't ready to expose more than 1 person quite yet
+        ctx->max_people = 1;
+#if 0
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_people";
+        prop.desc = "Maximum number of people to track at once";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->max_people;
+        prop.int_state.min = 1;
+        prop.int_state.max = 4;
+        stage.properties.push_back(prop);
+#endif
+
+        ctx->max_bone_length_samples = 50;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_bone_length_samples";
+        prop.desc = "Maximum weight of previously collected bone length samples";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->max_bone_length_samples;
+        prop.int_state.min = PERSON_HISTORY_SIZE;
+        prop.int_state.max = 1800;
         stage.properties.push_back(prop);
 
         stage.properties_state.n_properties = stage.properties.size();
