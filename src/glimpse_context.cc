@@ -991,6 +991,18 @@ struct InferredPerson {
     float confidence;
 };
 
+struct PersonHistory {
+    // An index into pipeline_scratch_state.person_clusters
+    int person_cluster;
+
+    // A pointer to the person to add the history to, or NULL if no existing
+    // person was matched
+    struct gm_person *person;
+
+    // The history item to add
+    struct skeleton_history history;
+};
+
 /* As a general rule anything that's needed from the ctx for tracking that
  * might need modifying will be copied over to this scratch_state object and
  * becomes the authority for that state for tracking. At the end of tracking we
@@ -1054,9 +1066,8 @@ struct pipeline_scratch_state
     // into person_clusters for them.
     std::list<std::pair<InferredPerson&, int>> people;
 
-    // A list of new person history to add and a pointer to the person to add
-    // them to. If the pointer is NULL, a new person has been detected.
-    std::list<std::pair<struct skeleton_history, struct gm_person*>> new_history;
+    // A list of new person history inferred from the associated tracking frame.
+    std::list<struct PersonHistory> new_history;
 
     // per-cluster inference
     bool done_label_inference;
@@ -6463,7 +6474,7 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
-    std::list<std::pair<struct gm_skeleton, std::pair<InferredPerson&, int>>>
+    std::list<std::pair<struct gm_skeleton, std::pair<InferredPerson&, int>&>>
         skeletons;
 
     for (auto &person_data : state->people) {
@@ -6508,22 +6519,28 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         struct gm_skeleton &skeleton = (*best_skeleton_iter).first;
         auto &person_data = (*best_skeleton_iter).second;
 
-        state->new_history.push_front({{}, &person});
-        struct skeleton_history &history = state->new_history.front().first;
+        state->new_history.push_front({});
+        struct PersonHistory &person_history = state->new_history.front();
+        person_history.person_cluster = person_data.second;
+        person_history.person = &person;
+
+        struct skeleton_history &history = person_history.history;
         history.skeleton = history.skeleton_corrected = skeleton;
-        history.timestamp = person.time_last_tracked =
-            tracking->frame->timestamp;
+        history.timestamp = tracking->frame->timestamp;
         history.confidence = person_data.first.confidence;
 
         refine_latest_skeleton(person, person_data.first.joints);
-        state->person_clusters[person_data.second].tracked = true;
         skeletons.erase(best_skeleton_iter);
     }
 
     // Create new people for any unmatched skeletons
     while (!skeletons.empty()) {
-        state->new_history.push_front({{}, NULL});
-        struct skeleton_history &history = state->new_history.front().first;
+        state->new_history.push_front({});
+        struct PersonHistory &person_history = state->new_history.front();
+        person_history.person_cluster = skeletons.back().second.second;
+        person_history.person = NULL;
+
+        struct skeleton_history &history = person_history.history;
         history.skeleton = history.skeleton_corrected = skeletons.back().first;
         history.timestamp = tracking->frame->timestamp;
         history.confidence = skeletons.back().second.first.confidence;
@@ -6543,13 +6560,9 @@ static void
 stage_sanitize_skeleton_cb(struct gm_tracking_impl *tracking,
                            struct pipeline_scratch_state *state)
 {
-    struct gm_context *ctx = tracking->ctx;
-
     for (auto &new_history : state->new_history) {
-        struct skeleton_history &history = new_history.first;
-        struct gm_person *person = new_history.second;
-        if (person) {
-            sanitise_skeleton(person, history);
+        if (new_history.person) {
+            sanitise_skeleton(new_history.person, new_history.history);
         }
     }
 }
@@ -6567,7 +6580,7 @@ stage_validate_skeleton_cb(struct gm_tracking_impl *tracking,
     for (auto iter = state->new_history.begin();
          iter != state->new_history.end();)
     {
-        struct skeleton_history &history = (*iter).first;
+        struct skeleton_history &history = (*iter).history;
         float skel_dist = calc_skeleton_distance(ctx, &history.skeleton_corrected);
         if (skel_dist > ctx->skeleton_max_distance) {
             iter = state->new_history.erase(iter);
@@ -6600,24 +6613,22 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
     std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
 
     // Add newly tracked people/history to tracked_people
-    while (!state->new_history.empty()) {
-        struct skeleton_history &history = state->new_history.front().first;
-        struct gm_person *person = state->new_history.front().second;
+    for (auto &person_history : state->new_history) {
+        struct skeleton_history &history = person_history.history;
 
-        if (!person) {
+        if (!person_history.person) {
             // Add the newly tracked person
             ctx->tracked_people.push_back({});
-            person = &ctx->tracked_people.back();
-            person->ctx = ctx;
-            person->time_detected = tracking->frame->timestamp;
-            person->initial_confidence = history.confidence;
-            person->id = ctx->last_person_id++;
-            person->bone_lengths.resize(ctx->n_bones, {0});
+            person_history.person = &ctx->tracked_people.back();
+            person_history.person->ctx = ctx;
+            person_history.person->time_detected = tracking->frame->timestamp;
+            person_history.person->initial_confidence = history.confidence;
+            person_history.person->id = ctx->last_person_id++;
+            person_history.person->bone_lengths.resize(ctx->n_bones, {0});
         }
 
-        person->history.push_front(history);
-        person->time_last_tracked = tracking->frame->timestamp;
-        state->new_history.pop_front();
+        person_history.person->history.push_front(history);
+        person_history.person->time_last_tracked = tracking->frame->timestamp;
     }
 
     // Remove any people that haven't been tracked in too long
@@ -6639,6 +6650,17 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
     ctx->tracked_people.sort(compare_people_confidence);
     while (ctx->tracked_people.size() > ctx->max_people) {
         ctx->tracked_people.pop_back();
+    }
+
+    // Mark tracked people as tracked
+    for (auto &person_history : state->new_history) {
+        for (auto &person : ctx->tracked_people) {
+            if (person_history.person == &person) {
+                state->person_clusters[person_history.person_cluster].tracked =
+                    true;
+                break;
+            }
+        }
     }
 
     // Cull old history and update bone lengths
