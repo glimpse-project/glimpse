@@ -39,56 +39,38 @@ parser.add_argument('plugin_libdir',
 args = parser.parse_args()
 
 introspect_cmd = os.environ['MESONINTROSPECT'].split()
-targets_json = subprocess.check_output(introspect_cmd + [ '--targets', '.' ])
+targets_json = subprocess.check_output(introspect_cmd + ['--targets', '.'])
 
 targets = json.loads(targets_json)
-libs_blacklist = {
-    'flann', # We only need libflann_cpp.so
+shared_libs_blacklist = {
+    'flann',  # We only need libflann_cpp.so
     'glimpse_viewer_android'
 }
+static_libs_whitelist = {
+    'glimpse-unity-plugin',
+    'epoxy',
+}
+
 if args.tango_libs:
-    libs_blacklist.union({'fakenect'})
+    shared_libs_blacklist.union({'fakenect'})
 
 lib_strip_args = []
 if args.buildtype == "release":
     # XXX: strip is failing with OSX builds currently so don't try and
     # strip for now...
     if sys.platform != 'darwin':
-        lib_strip_args = [ '-s' ]
+        lib_strip_args = ['-s']
         if args.strip and args.strip != 'strip':
-            lib_strip_args += [ '--strip-program', args.strip ]
+            lib_strip_args += ['--strip-program', args.strip]
 
 
 def do_install(src, dst, extra_args=[]):
     install_cmd = [
             'install',
-            ] + extra_args + [ src, dst ]
+            ] + extra_args + [src, dst]
 
     print(" ".join(install_cmd))
     subprocess.check_call(install_cmd)
-
-
-def install_shared_lib_targets(dst, blacklist):
-    for target in targets:
-        if target['name'] in blacklist:
-            continue
-
-        if target['type'] == 'shared library':
-            basename = os.path.basename(target['filename'])
-            parts = basename.split('.')
-
-            if parts[-1] == 'dylib':
-                do_install(os.path.join(build_dir, target['filename']),
-                           os.path.join(dst, parts[0][3:] + '.bundle'), lib_strip_args)
-            else:
-                do_install(os.path.join(build_dir, target['filename']),
-                           os.path.join(dst, parts[0] + '.so'), lib_strip_args)
-
-                if len(parts) > 2:
-                    os.chdir(dst)
-                    ln_cmd = [ 'ln', '-sf', parts[0] + '.so', parts[0] + '.so.' + parts[2] ]
-                    print(" ".join(ln_cmd))
-                    subprocess.check_call(ln_cmd)
 
 
 def install_jar_target(jar_target_name, dst):
@@ -99,69 +81,123 @@ def install_jar_target(jar_target_name, dst):
                        os.path.join(dst, basename))
 
 
-def install_unity_plugin__linux_so(dst, unity_project):
-    install_shared_lib_targets(dst, libs_blacklist)
+def install_unity_plugin__linux(dst, unity_project):
+    for target in targets:
 
-    # To avoid needing to set LD_LIBRARY_PATH for the plugin to load its
-    # dependencies we update the RPATH to look in the same directory as
-    # the plugin itself...
-    os.chdir(dst)
-    chrpath_cmd = [ 'chrpath', '-r', '$ORIGIN', 'libglimpse-unity-plugin.so' ]
-    print(" ".join(chrpath_cmd))
-    subprocess.check_call(chrpath_cmd)
+        if target['type'] == 'shared library' and target['name'] not in shared_libs_blacklist:
+            basename = os.path.basename(target['filename'])
+            parts = basename.split('.')
+
+            dst_filename = os.path.join(dst, parts[0] + '.so')
+            do_install(os.path.join(build_dir, target['filename']),
+                       dst_filename, lib_strip_args)
+
+            if len(parts) > 2:
+                os.chdir(dst)
+                ln_cmd = ['ln', '-sf', parts[0] + '.so', parts[0] + '.so.' + parts[2]]
+                print(" ".join(ln_cmd))
+                subprocess.check_call(ln_cmd)
+
+            # To avoid needing to set LD_LIBRARY_PATH for the plugin to load
+            # its dependencies we update the RPATH to look in the same
+            # directory as the plugin itself...
+            chrpath_cmd = ['chrpath', '-r', '$ORIGIN', dst_filename]
+            print(" ".join(chrpath_cmd))
+            subprocess.check_call(chrpath_cmd)
+
+        elif target['type'] == 'static library' and target['name'] in static_libs_whitelist:
+            basename = os.path.basename(target['filename'])
+            do_install(os.path.join(build_dir, target['filename']),
+                       os.path.join(dst, basename), lib_strip_args)
 
 
 def install_unity_plugin__android(dst, unity_project):
-    install_shared_lib_targets(dst, libs_blacklist)
+    for target in targets:
+
+        if target['type'] == 'shared library' and target['name'] not in shared_libs_blacklist:
+            basename = os.path.basename(target['filename'])
+            assert(basename.split('.') == 2)  # Android doesn't support shared lib versioning
+
+            do_install(os.path.join(build_dir, target['filename']),
+                       os.path.join(dst, basename), lib_strip_args)
+
+        elif target['type'] == 'static library' and target['name'] in static_libs_whitelist:
+            do_install(os.path.join(build_dir, target['filename']),
+                       os.path.join(dst, target['filename']), lib_strip_args)
 
     unity_plugin_jar_dir = os.path.join(unity_project, args.plugin_jardir)
     os.makedirs(unity_plugin_jar_dir, exist_ok=True)
     install_jar_target('GlimpseUnity', unity_plugin_jar_dir)
 
     libcxx_shared_path = os.path.join(args.android_ndk,
-            'sources/cxx-stl/llvm-libc++/libs',
-            args.android_ndk_arch, 'libc++_shared.so')
+                                      'sources/cxx-stl/llvm-libc++/libs',
+                                      args.android_ndk_arch, 'libc++_shared.so')
     do_install(libcxx_shared_path, dst)
 
     if args.tango_libs:
-        tango_libs = [ 'libtango_support_api.so' ]
+        tango_libs = ['libtango_support_api.so']
         for lib in tango_libs:
             do_install(os.path.join(args.tango_libs, 'lib', args.android_ndk_arch, lib),
                        dst)
 
 
 def install_unity_plugin__osx(dst, unity_project):
-    install_shared_lib_targets(dst, libs_blacklist)
-
-
-def install_unity_plugin_a(dst, target_name):
     for target in targets:
-        if target['name'] == target_name:
+
+        if target['type'] == 'shared library' and target['name'] not in shared_libs_blacklist:
             basename = os.path.basename(target['filename'])
             parts = basename.split('.')
+            assert(parts[-1] == 'dylib')
 
+            new_id = None
+            if target['name'] == "glimpse-unity-plugin":
+                new_id = parts[0][3:] + '.bundle'
+                dst_filename = os.path.join(dst, new_id)
+            else:
+                dst_filename = os.path.join(dst, basename)
             do_install(os.path.join(build_dir, target['filename']),
-                       os.path.join(dst, parts[0] + '.a'), lib_strip_args)
-            return
+                       dst_filename, lib_strip_args)
+
+            # Meson adds a relative rpath according to the (private) layout of the
+            # build directory but the libraries will all be in the same Assets/
+            # Plugins/ directory so, as for Linux we want an rpath that will
+            # check for dependencies adjacent to the plugin...
+            chrpath_cmd = [ 'install_name_tool', '-add_rpath', '@loader_path', dst_filename ]
+            print(" ".join(chrpath_cmd))
+            subprocess.check_call(chrpath_cmd)
+
+            if new_id:
+                chrpath_cmd = [ 'install_name_tool', '-id', new_id, dst_filename ]
+                print(" ".join(chrpath_cmd))
+                subprocess.check_call(chrpath_cmd)
+
+        elif target['type'] == 'static library' and target['name'] in static_libs_whitelist:
+            basename = os.path.basename(target['filename'])
+            do_install(os.path.join(build_dir, target['filename']),
+                       os.path.join(dst, basename), lib_strip_args)
 
 
-shared_plugin = True
-for target in targets:
-    if target['name'] == "glimpse-unity-plugin" and target['type'] == 'static library':
-        shared_plugin = False
-        break
+def install_unity_plugin__ios(dst, unity_project):
+    for target in targets:
+
+        assert(target['type'] != 'shared library')
+
+        if target['type'] == 'static library' and target['name'] in static_libs_whitelist:
+            basename = os.path.basename(target['filename'])
+            do_install(os.path.join(build_dir, target['filename']),
+                       os.path.join(dst, basename), lib_strip_args)
+
 
 unity_plugin_libs_dir = os.path.join(args.unity_project, args.plugin_libdir)
 os.makedirs(unity_plugin_libs_dir, exist_ok=True)
-if shared_plugin:
-    if args.android_ndk_arch:
-        install_unity_plugin__android(unity_plugin_libs_dir, args.unity_project)
-    elif sys.platform == 'linux':
-        install_unity_plugin__linux_so(unity_plugin_libs_dir, args.unity_project)
-    elif sys.platform == 'darwin':
-        install_unity_plugin__osx(unity_plugin_libs_dir, args.unity_project)
-    else:
-        sys.exit('Unhandled platform: %s' % sys.platform)
+
+if args.android_ndk_arch:
+    install_unity_plugin__android(unity_plugin_libs_dir, args.unity_project)
+elif sys.platform == 'linux':
+    install_unity_plugin__linux(unity_plugin_libs_dir, args.unity_project)
+elif os.path.basename(args.plugin_libdir) == 'iOS':
+    install_unity_plugin__ios(unity_plugin_libs_dir, args.unity_project)
+elif sys.platform == 'darwin':
+    install_unity_plugin__osx(unity_plugin_libs_dir, args.unity_project)
 else:
-    install_unity_plugin_a(unity_plugin_libs_dir, "glimpse-unity-plugin")
-    install_unity_plugin_a(unity_plugin_libs_dir, "epoxy")
+    sys.exit('Unhandled platform: %s' % sys.platform)
