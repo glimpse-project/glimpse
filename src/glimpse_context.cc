@@ -485,6 +485,7 @@ struct skeleton_history
     struct gm_skeleton skeleton_corrected;
     uint64_t timestamp;
     float confidence;
+    pcl::PointXYZL bounds[2];
 };
 
 struct average_length
@@ -6529,6 +6530,15 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         history.timestamp = tracking->frame->timestamp;
         history.confidence = person_data.first.confidence;
 
+        struct candidate_cluster &cluster =
+            state->person_clusters[person_history.person_cluster];
+        history.bounds[0].x = cluster.min_x;
+        history.bounds[0].y = cluster.min_y;
+        history.bounds[0].z = cluster.min_z;
+        history.bounds[1].x = cluster.max_x;
+        history.bounds[1].y = cluster.max_y;
+        history.bounds[1].z = cluster.max_z;
+
         refine_latest_skeleton(person, person_data.first.joints);
         skeletons.erase(best_skeleton_iter);
     }
@@ -6544,6 +6554,15 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         history.skeleton = history.skeleton_corrected = skeletons.back().first;
         history.timestamp = tracking->frame->timestamp;
         history.confidence = skeletons.back().second.first.confidence;
+
+        struct candidate_cluster &cluster =
+            state->person_clusters[person_history.person_cluster];
+        history.bounds[0].x = cluster.min_x;
+        history.bounds[0].y = cluster.min_y;
+        history.bounds[0].z = cluster.min_z;
+        history.bounds[1].x = cluster.max_x;
+        history.bounds[1].y = cluster.max_y;
+        history.bounds[1].z = cluster.max_z;
 
         skeletons.pop_back();
     }
@@ -6717,6 +6736,27 @@ static void
 stage_update_codebook_cb(struct gm_tracking_impl *tracking,
                          struct pipeline_scratch_state *state)
 {
+#warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+    std::vector<candidate_cluster> &person_clusters = state->person_clusters;
+
+    for (int i = 0; i < state->person_clusters.size(); i++) {
+        struct candidate_cluster &cluster = person_clusters[i];
+        std::vector<int> &indices = cluster_indices[cluster.label].indices;
+
+        if (cluster.tracked) {
+            for (auto &idx : indices) {
+                tracking->downsampled_cloud->points[idx].label =
+                    CODEBOOK_CLASS_TRACKED;
+            }
+        } else {
+            for (auto &idx : indices) {
+                tracking->downsampled_cloud->points[idx].label =
+                    CODEBOOK_CLASS_FAILED_CANDIDATE;
+            }
+        }
+    }
+
     if (state->codebook_frozen)
         return;
 
@@ -6735,6 +6775,28 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
 
     struct gm_intrinsics codebook_intrinsics = tracking->downsampled_intrinsics;
 
+    // If we failed to track a person, delay updates to the motion detection
+    // codebook in that area for a short period so as not to pollute what may
+    // actually be valid human depth data.
+    std::vector<std::pair<pcl::PointXYZL, pcl::PointXYZL>> delay_bounds;
+    for (auto &person : ctx->tracked_people) {
+        if (person.time_last_tracked >= frame_time) {
+            continue;
+        }
+
+        float last_update = (float)
+            ((frame_time - person.time_last_tracked) / 1e9);
+        if (last_update > ctx->codebook_update_delay) {
+            continue;
+        }
+
+        // TODO: Note, we don't check if intrinsics have changed between this
+        //       historical point and now to know if the bounds are still valid.
+        // TODO: Add a configurable expansion factor for these bounds?
+        delay_bounds.push_back({person.history[0].bounds[0],
+                                person.history[0].bounds[1]});
+    }
+
     unsigned downsampled_cloud_size = tracking->downsampled_cloud->points.size();
     for (unsigned depth_off = 0; depth_off < downsampled_cloud_size; ++depth_off)
     {
@@ -6750,6 +6812,17 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
         // Falls outside of codebook so we can't classify...
         if (off < 0)
             continue;
+
+        bool delay_update = false;
+        for (auto &bounds : delay_bounds) {
+            if (point.x >= bounds.first.x && point.x <= bounds.second.x &&
+                point.y >= bounds.first.y && point.y <= bounds.second.y &&
+                point.z >= bounds.first.z && point.z <= bounds.second.z)
+            {
+                delay_update = true;
+                break;
+            }
+        }
 
         // At this point z has been projected into the coordinate space of
         // the codebook
@@ -6801,8 +6874,12 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             }
         }
         // NB: ->codebook_bg_threshold = Segmentation bucket threshold
-        if (best_codeword_distance > ctx->codebook_bg_threshold)
+        if (best_codeword_distance > ctx->codebook_bg_threshold) {
+            if (delay_update) {
+                continue;
+            }
             codeword = NULL;
+        }
 
         if (!codeword) {
             struct seg_codeword new_codeword = {};
@@ -6827,29 +6904,31 @@ stage_update_codebook_cb(struct gm_tracking_impl *tracking,
             if (!inserted)
                 codewords.push_back(new_codeword);
         } else {
-            // NB: codeword_mean_n_max = Segmentation max existing mean weight
-            // ->n is the number of depth values that the mean is based on
-            //
-            // We clamp the 'n' value used to update the mean so that we limit
-            // the dampening effect that large n values have on the influence
-            // of newer depth values...
-            float effective_n = (float)std::min(ctx->codeword_mean_n_max, codeword->n);
-            codeword->mean = (((effective_n * codeword->mean) + depth) /
-                              (effective_n + 1.f));
-            codeword->n++;
+            if (!delay_update) {
+                // NB: codeword_mean_n_max = Segmentation max existing mean weight
+                // ->n is the number of depth values that the mean is based on
+                //
+                // We clamp the 'n' value used to update the mean so that we limit
+                // the dampening effect that large n values have on the influence
+                // of newer depth values...
+                float effective_n = (float)std::min(ctx->codeword_mean_n_max, codeword->n);
+                codeword->mean = (((effective_n * codeword->mean) + depth) /
+                                  (effective_n + 1.f));
+                codeword->n++;
 
-            /* Here we are counting the breaks in (or start of) consecutive
-             * updates to a codeword.
-             *
-             * E.g. over 10 frames if a point matches the same codeword
-             * on frames 1,2 - 4,5,6 - and 8 then there are three consecutive
-             * update runs...
-             *
-             * 'consecutive' is bit of a misnomer since we count 'runs' of one
-             * update.
-             */
-            if (codeword->last_update_timestamp != ctx->last_codebook_update_time)
-                codeword->n_consecutive_update_runs++;
+                /* Here we are counting the breaks in (or start of) consecutive
+                 * updates to a codeword.
+                 *
+                 * E.g. over 10 frames if a point matches the same codeword
+                 * on frames 1,2 - 4,5,6 - and 8 then there are three consecutive
+                 * update runs...
+                 *
+                 * 'consecutive' is bit of a misnomer since we count 'runs' of one
+                 * update.
+                 */
+                if (codeword->last_update_timestamp != ctx->last_codebook_update_time)
+                    codeword->n_consecutive_update_runs++;
+            }
 
             codeword->last_update_timestamp = frame_time;
             codeword->last_update_frame_count = update_frame_count;
@@ -7536,34 +7615,21 @@ context_track_skeleton(struct gm_context *ctx,
               NULL,
               &state);
 
-    // If we failed to track a person, delay updates to the motion detection
-    // codebook for a short period so as not to pollute what may actually be
-    // valid human depth data.
-    // TODO: Delay updates to the bounding cube of the person's last skeleton.
-    //       Delaying all updates will likely interfere somewhat with any
-    //       successful tracking that was happening.
-    uint64_t last_tracked = 0;
+    if (motion_detection) {
+        run_stage(tracking,
+                  TRACKING_STAGE_UPDATE_CODEBOOK,
+                  stage_update_codebook_cb,
+                  NULL,
+                  &state);
+    }
+
     struct gm_person *tracked_person = NULL;
     for (auto &person : ctx->tracked_people) {
         if (person.time_last_tracked == tracking->frame->timestamp) {
-            if (!tracked_person) {
-                // Given the current sort order, this will be the most
-                // confident tracked person for this tracking frame.
-                tracked_person = &person;
-            }
-        } else if (person.time_last_tracked > last_tracked) {
-            last_tracked = person.time_last_tracked;
-        }
-    }
-
-    if (!tracked_person &&
-        ctx->codebook_update_delay > 0.f &&
-        ctx->tracked_people.size())
-    {
-        float delay = (float)
-            ((tracking->frame->timestamp - last_tracked) / 1e9);
-        if (delay < ctx->codebook_update_delay) {
-            motion_detection = false;
+            // Given the current sort order, this will be the most
+            // confident tracked person for this tracking frame.
+            tracked_person = &person;
+            break;
         }
     }
 
@@ -7573,35 +7639,6 @@ context_track_skeleton(struct gm_context *ctx,
         tracking->skeleton = tracked_person->history[0].skeleton;
         tracking->skeleton_corrected =
             tracked_person->history[0].skeleton_corrected;
-    }
-
-#warning "XXX: Setting codebook labels by mapping inference points to downsampled points (potentially different resolutions) seems like a bad idea"
-    if (motion_detection) {
-        std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-        std::vector<candidate_cluster> &person_clusters = state.person_clusters;
-
-        for (int i = 0; i < state.person_clusters.size(); i++) {
-            struct candidate_cluster &cluster = person_clusters[i];
-            std::vector<int> &indices = cluster_indices[cluster.label].indices;
-
-            if (cluster.tracked) {
-                for (auto &idx : indices) {
-                    tracking->downsampled_cloud->points[idx].label =
-                        CODEBOOK_CLASS_TRACKED;
-                }
-            } else {
-                for (auto &idx : indices) {
-                    tracking->downsampled_cloud->points[idx].label =
-                        CODEBOOK_CLASS_FAILED_CANDIDATE;
-                }
-            }
-        }
-
-        run_stage(tracking,
-                  TRACKING_STAGE_UPDATE_CODEBOOK,
-                  stage_update_codebook_cb,
-                  NULL,
-                  &state);
     }
 
     return tracked_person != NULL;
