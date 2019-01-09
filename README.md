@@ -153,18 +153,30 @@ ninja
 
 # Building for Android
 
-We've only tested cross-compiling with NDK r16 and have certainly had problems
-with earlier versions so would strongly recommend using a version >= r16.
+We've only tested cross-compiling with NDK r16b and r18b and have certainly had
+problems with earlier versions so would strongly recommend using a version >=
+r16.
 
 For ease of integration with Meson we create a standalone toolchain like so:
 
 ```
-$ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py --install-dir ~/local/android-arm-toolchain-24 --arch arm --api 24 --stl libc++
-export PATH=~/local/android-arm-toolchain-24/bin:$PATH
+$ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py \
+        --install-dir ~/local/android-arm-toolchain-28 \
+        --arch arm \
+        --api 28 \
+        --stl libc++
+export PATH=~/local/android-arm-toolchain-28/bin:$PATH
 ```
 *Note: we can't build for arm64 when building the libglimpse-unity-plugin.so since Unity doesn't natively support arm64 on Android*
 *Note: while building for 32bit arm we have to use api level >= 24 otherwise we hit build issues with -D_FILE_OFFSET_BITS=64 usage*
 
+
+Make sure the Android SDK tools are in the path and make sure the build-tools
+and platform are installed. They can be installed with the following commands:
+```
+sdkmanager "platforms;android-28"
+sdkmanager "build-tools;28.0.3"
+```
 
 
 Then to compile Glimpse:
@@ -187,11 +199,6 @@ ninja
 
 * Android commands fail
 
-Make sure the platform tools are in the path and make sure the build-tools and platform are installed. They can be installed with the following commands:
-```
-sdkmanager "platforms;android-23"
-sdkmanager "build-tools;26.0.2"
-```
 
 * Java commands fail
 

@@ -37,17 +37,24 @@ RUN sed -i 's/pcl_2d-1.8//' /usr/lib/x86_64-linux-gnu/pkgconfig/pcl_features-1.8
     sed -i 's/Requires:/Requires: eigen3 /g' /usr/lib/x86_64-linux-gnu/pkgconfig/pcl_common-1.8.pc
 
 # Installs Android NDK and creates the toolchain
-ENV ANDROID_NDK_VERSION r16b
+ENV ANDROID_NDK_VERSION r18b
+ENV ANDROID_TARGET_API 28
+ENV ANDROID_BUILD_TOOLS 28.0.3
 ENV ANDROID_NDK_HOME /android-ndk-${ANDROID_NDK_VERSION}
 ENV ANDROID_NDK_FILENAME android-ndk-${ANDROID_NDK_VERSION}-linux-x86_64.zip
-ENV ANDROID_TOOLCHAIN /android-arm-toolchain-24
+ENV ANDROID_TOOLCHAIN /android-arm-toolchain-${ANDROID_TARGET_API}
 ENV PATH ${ANDROID_TOOLCHAIN}/bin:$PATH
 RUN echo "Downloading android-ndk" >&2 && \
     wget --no-check-certificate --no-verbose https://dl.google.com/android/repository/${ANDROID_NDK_FILENAME} && \
     echo "Extracting android-ndk" >&2 && \
     unzip ${ANDROID_NDK_FILENAME} && \
     mkdir -p ${ANDROID_TOOLCHAIN} && \
-    ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py --force --install-dir ${ANDROID_TOOLCHAIN} --arch arm --api 24 --stl libc++ && \
+    ${ANDROID_NDK_HOME}/build/tools/make_standalone_toolchain.py \
+        --force \
+        --install-dir ${ANDROID_TOOLCHAIN} \
+        --arch arm \
+        --api ${ANDROID_TARGET_API} \
+        --stl libc++ && \
     rm ${ANDROID_NDK_FILENAME}
 
 # Installs Android SDK
@@ -66,9 +73,8 @@ RUN mkdir -p ${ANDROID_HOME} && \
 RUN yes | sdkmanager --licenses
 RUN sdkmanager "tools" "platform-tools"
 RUN yes | sdkmanager \
-    "platforms;android-27" \
-    "platforms;android-23" \
-    "build-tools;27.0.3"
+    "platforms;android-${ANDROID_TARGET_API}" \
+    "build-tools;${ANDROID_BUILD_TOOLS}"
 
 RUN apt-get clean
 

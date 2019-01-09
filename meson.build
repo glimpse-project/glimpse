@@ -10,9 +10,8 @@ endif
 compiler = meson.get_compiler('c')
 python3 = import('python3').find_python()
 
-client_api_defines = [
-    '-DGLM_ENABLE_EXPERIMENTAL'
-]
+client_api_defines = []
+client_api_deps = []
 
 if compiler.get_define('__ANDROID__') != ''
     add_languages('java')
@@ -26,7 +25,7 @@ if compiler.get_define('__ANDROID__') != ''
         error('Failed to find Android SDK via -Dandroid_sdk option or $ANDROID_HOME environment variable')
     endif
 
-    android_api = '23'
+    android_api = '28'
     android_sdk_jar = join_paths(android_sdk_home, 'platforms', 'android-' + android_api, 'android.jar')
 
     android_build_tools = get_option('android_sdk_build_tools')
@@ -78,6 +77,14 @@ else
     platform_ios = false
 endif
 
+platform_mobile = false
+platform_pc = false
+if platform_ios or platform_android
+    platform_mobile = true
+else
+    platform_pc = true
+endif
+
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
 
@@ -97,6 +104,9 @@ endif
 
 dlib_sp = subproject('dlib')
 dlib_dep = dlib_sp.get_variable('dlib_dep')
+client_api_deps += dlib_dep
+
+client_api_defines += ['-DGLM_ENABLE_EXPERIMENTAL']
 
 # It's convenient to be able to link with distro packages, but also somewhat
 # unpredictable.  We want a way of pinning down our dependencies to subprojects
@@ -152,20 +162,29 @@ else
     epoxy_sp = subproject('libepoxy')
     epoxy_dep = epoxy_sp.get_variable('libepoxy_dep')
 endif
+client_api_deps += [
+    glm_dep,
+    libpng_dep,
+    pcl_deps,
+    epoxy_dep,
+]
 
 uw_dep = dependency('libunwind', required: false)
-
-# For now we even use freenect (fakenect) on Android so it's
-# not currently optional...
-freenect_dep = dependency('libfreenect', required: false)
-if not freenect_dep.found()
-    freenect_sp = subproject('libfreenect')
-    freenect_dep = freenect_sp.get_variable('fakenect_dep')
+if uw_dep.found()
+    client_api_defines += ['-DUSE_LIBUNWIND=1']
+    client_api_deps += uw_dep
 endif
-client_api_defines += [ '-DUSE_FREENECT' ]
 
-glfw_dep = dependency('glfw3', fallback: [ 'glfw', 'glfw_dep' ], required: false)
-snappy_dep = dependency('snappy', required: false)
+if platform_pc
+    freenect_dep = dependency('libfreenect', fallback: ['libfreenect', 'fakenect_dep'], required: false)
+    if freenect_dep.found()
+        client_api_defines += [ '-DUSE_FREENECT' ]
+        client_api_deps += freenect_dep
+    endif
+
+    glfw_dep = dependency('glfw3', fallback: [ 'glfw', 'glfw_dep' ], required: false)
+    snappy_dep = dependency('snappy', required: false)
+endif
 
 imgui_src = [
     'src/imgui/imgui.cpp',
@@ -177,13 +196,13 @@ imgui_src = [
 ]
 
 if host_machine.system() == 'windows'
-getopt_src = [ 'src/getopt-compat.c' ]
-getline_src = [ 'src/getline-compat.c' ]
-basename_src = [ 'src/basename-compat.c' ]
+    getopt_src = [ 'src/getopt-compat.c' ]
+    getline_src = [ 'src/getline-compat.c' ]
+    basename_src = [ 'src/basename-compat.c' ]
 else
-getopt_src = []
-getline_src = []
-basename_src = []
+    getopt_src = []
+    getline_src = []
+    basename_src = []
 endif
 
 client_api_src = [
@@ -212,14 +231,6 @@ client_api_src = [
     'src/parson.c',
 ] + basename_src + getline_src
 
-client_api_deps = [
-    glm_dep,
-    libpng_dep,
-    dlib_dep,
-    pcl_deps,
-    freenect_dep,
-    epoxy_dep,
-]
 
 # When building the Unity plugin for iOS we have to explicitly make
 # sure to link a monolithic static library instead of declaring
@@ -237,11 +248,6 @@ if platform_ios
     ios_client_api_libs += pcl_sp.get_variable('segmentation_lib')
 #ios_client_api_libs += epoxy_sp.get_variable('libepoxy_static')
 
-endif
-
-if uw_dep.found()
-    client_api_deps += uw_dep
-    client_api_defines += '-DUSE_LIBUNWIND=1'
 endif
 
 unity_enabled = false
@@ -278,7 +284,7 @@ if get_option('unity_project') != ''
 endif
 
 tango_enabled = false
-if compiler.get_define('__ANDROID__') != ''
+if platform_android
     android_log_dep = declare_dependency(link_args: [ '-llog' ])
     client_api_deps += android_log_dep
 
@@ -345,7 +351,7 @@ if unity_enabled
 endif
 
 need_glimpse_native_jar = false
-if platform_android == true
+if platform_android
     glfm_sp = subproject('glfm')
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
@@ -380,7 +386,7 @@ endif
 
 subdir('src/java')
 
-if platform_ios == true
+if platform_ios
     glfm_sp = subproject('glfm')
     glfm_dep = glfm_sp.get_variable('glfm_dep')
 
@@ -409,16 +415,9 @@ if platform_ios == true
               ])
 endif
 
-if (
-    #host_machine.system() == 'windows' or
-    host_machine.system() == 'linux' or
-    (host_machine.system() == 'darwin' and platform_ios == false))
-        is_development_platform = true
-else
-        is_development_platform = false
-endif
+if platform_pc
 
-if is_development_platform
+if host_machine.system() != 'windows'  # not ported yet
 
 executable('image-pre-processor',
            [ 'src/image-pre-processor.cc',
@@ -569,7 +568,7 @@ if snappy_dep.found()
                dependencies: [ snappy_dep, libpng_dep, threads_dep ])
 endif
 
-endif # is_development_platform
+endif # !windows (non-ported tools)
 
 executable('json-to-rdt',
            [ 'src/json-to-rdt.c',
@@ -580,7 +579,6 @@ executable('json-to-rdt',
              'src/xalloc.c' ] + getopt_src,
            include_directories: inc,
            dependencies: [ threads_dep ])
-
 
 if glfw_dep.found() and epoxy_dep.found()
     viewer_defines = client_api_defines + [
@@ -597,6 +595,9 @@ if glfw_dep.found() and epoxy_dep.found()
                c_args: viewer_defines,
                cpp_args: viewer_defines)
 endif
+
+endif # platform_pc
+
 
 if unity_enabled
     install_args = [
@@ -633,7 +634,7 @@ if unity_enabled
                depends: install_deps)
 endif
 
-if compiler.get_define('__ANDROID__') != ''
+if platform_android
     build_apk_args = [
         '--buildtype', get_option('buildtype'),
         '--android-sdk', android_sdk_home,

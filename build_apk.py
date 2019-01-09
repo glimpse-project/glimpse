@@ -24,13 +24,15 @@ if 'MESON_SOURCE_ROOT' in os.environ:
 else:
     src_dir = os.path.abspath('..')
 
+default_build_tools='28.0.3'
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--buildtype',
                     help="The Meson configured buildtype",
                     default='debug')
 parser.add_argument('--android-build-tools',
-                    default='26.0.2',
-                    help='The Android SDK Build Tools version to use (default is 26.0.2)')
+                    default=default_build_tools,
+                    help='The Android SDK Build Tools version to use (default is %s)' % default_build_tools)
 parser.add_argument('--tango-libs',
                     help='Location of Tango libraries')
 parser.add_argument('--android-ndk',
