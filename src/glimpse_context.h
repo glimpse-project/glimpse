@@ -660,6 +660,12 @@ struct gm_skeleton *
 gm_skeleton_new(struct gm_context *ctx,
                 struct gm_joint *joints);
 
+float
+gm_skeleton_diff(struct gm_context *ctx,
+                 struct gm_skeleton *skeleton,
+                 struct gm_skeleton *ref_skeleton,
+                 float *out_joint_differences);
+
 struct gm_skeleton *
 gm_skeleton_resize(struct gm_context *ctx,
                    struct gm_skeleton *skeleton,

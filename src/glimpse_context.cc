@@ -1486,27 +1486,6 @@ is_bone_angle_diff(struct gm_context *ctx,
 }
 
 static float
-calc_cumulative_joint_difference(struct gm_context *ctx,
-                                 struct gm_skeleton &skel,
-                                 struct gm_skeleton &ref)
-{
-    float diff = 0.f;
-
-    for (int i = 0; i < ctx->n_joints; ++i) {
-        struct gm_joint &joint = skel.joints[i];
-        struct gm_joint &ref_joint = ref.joints[i];
-
-        if (joint.valid != ref_joint.valid) {
-            continue;
-        }
-
-        diff += distance_between(&joint.x, &ref_joint.x);
-    }
-
-    return diff;
-}
-
-static float
 calc_average_joint_difference(struct gm_context *ctx,
                               struct gm_skeleton &skel,
                               struct gm_skeleton &ref)
@@ -1726,8 +1705,8 @@ refine_latest_skeleton(struct gm_person &person,
     }
 
     float joint_diff =
-        calc_cumulative_joint_difference(ctx, person.history[0].skeleton,
-                                         person.history[1].skeleton_corrected);
+        gm_skeleton_diff(ctx, &person.history[0].skeleton,
+                         &person.history[1].skeleton_corrected, NULL);
 
     // For each joint, we look at the cumulative distance between joints using
     // each joint cluster and if the distance is lower, we replace that joint
@@ -1756,8 +1735,8 @@ refine_latest_skeleton(struct gm_person &person,
             update_bones(ctx, candidate_skeleton);
 
             float cand_joint_diff =
-                calc_cumulative_joint_difference(ctx, candidate_skeleton,
-                                                 person.history[1].skeleton_corrected);
+                gm_skeleton_diff(ctx, &candidate_skeleton,
+                                 &person.history[1].skeleton_corrected, NULL);
             if (cand_joint_diff <= joint_diff) {
                 std::swap(person.history[0].skeleton_corrected,
                           candidate_skeleton);
@@ -11724,6 +11703,35 @@ void
 gm_skeleton_free(struct gm_skeleton *skeleton)
 {
     delete skeleton;
+}
+
+float
+gm_skeleton_diff(struct gm_context *ctx,
+                 struct gm_skeleton *skeleton,
+                 struct gm_skeleton *ref_skeleton,
+                 float *out_joint_differences)
+{
+    float diff = 0.f;
+
+    for (int j = 0; j < ctx->n_joints; ++j) {
+        struct gm_joint &joint = skeleton->joints[j];
+        struct gm_joint &ref_joint = ref_skeleton->joints[j];
+
+        if (joint.valid != ref_joint.valid) {
+            if (out_joint_differences) {
+                out_joint_differences[j] = -1.f;
+            }
+            continue;
+        }
+
+        float joint_diff = distance_between(&joint.x, &ref_joint.x);
+        if (out_joint_differences) {
+            out_joint_differences[j] = joint_diff;
+        }
+        diff += joint_diff;
+    }
+
+    return diff;
 }
 
 int

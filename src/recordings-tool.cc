@@ -37,6 +37,7 @@
 
 #include "glimpse_assets.h"
 #include "glimpse_context.h"
+#include "glimpse_data.h"
 #include "glimpse_device.h"
 #include "glimpse_log.h"
 
@@ -127,6 +128,13 @@ typedef struct {
             JSON_Value *targets;
             JSON_Value *frames;
         } make_targets;
+        struct {
+            int n_frames;
+            int n_joints;
+            float *joint_data;
+            uint64_t *n_invalid_joints;
+            double *cumulative_diff;
+        } benchmark_ji;
     };
 } Data;
 
@@ -160,10 +168,10 @@ make_target_sequence_argparse(Data *data, int argc, char **argv)
         switch (opt) {
         case 'h':
             make_target_sequence_print_usage(stdout);
-            return 0;
+            return false;
         default:
             make_target_sequence_print_usage(stderr);
-            return 1;
+            return false;
         }
     }
 
@@ -308,6 +316,182 @@ make_target_sequence_end(Data *data)
     json_serialize_to_file_pretty(data->make_targets.targets, out_name);
 }
 
+static void
+benchmark_joint_inference_print_usage(FILE* stream)
+{
+    fprintf(stream,
+"Usage: benchmark_joint_inference [options...] <recording directory> <data directory> <index name> <joint map path>\n"
+"\n"
+"Measures accuracy of joint inference against the ground truth of the given data-set.\n"
+"\n"
+"  -h, --help             Display this help\n"
+"\n"
+    );
+}
+
+static bool
+benchmark_joint_inference_argparse(Data *data, int argc, char **argv)
+{
+    optind = 0; // reset getopt parser state
+
+    const char *short_opts = "h";
+    const struct option long_opts[] = {
+        {"help",            no_argument,        0, 'h'},
+        {0, 0, 0, 0}
+    };
+
+    int opt;
+    while ((opt = getopt_long(argc, argv, short_opts, long_opts, NULL)) != -1) {
+        switch (opt) {
+        case 'h':
+            benchmark_joint_inference_print_usage(stdout);
+            return false;
+        default:
+            benchmark_joint_inference_print_usage(stderr);
+            return false;
+        }
+    }
+
+    if (argc != 5) {
+        benchmark_joint_inference_print_usage(stderr);
+        return false;
+    }
+
+    data->recording_dir = strdup(argv[1]);
+
+    const char *datadir = argv[2];
+    const char *index = argv[3];
+    const char *jointmap = argv[4];
+
+    JSON_Value *meta =
+        gm_data_load_simple(data->log,
+                            datadir,
+                            index,
+                            jointmap,
+                            &data->benchmark_ji.n_frames,
+                            &data->benchmark_ji.n_joints,
+                            NULL, NULL, // width, height
+                            NULL, // depth images
+                            NULL, // label images
+                            &data->benchmark_ji.joint_data,
+                            NULL); // simply abort on error
+    json_value_free(meta);
+
+    return true;
+}
+
+static bool
+benchmark_joint_inference_start(Data *data)
+{
+    int n_joints = gm_context_get_n_joints(data->ctx);
+    gm_assert(data->log, data->benchmark_ji.n_joints == n_joints,
+              "Joint number mismatch. Data has %d joints, context has %d",
+              data->benchmark_ji.n_joints, n_joints);
+
+    data->benchmark_ji.n_invalid_joints = (uint64_t*)
+        xcalloc(n_joints, sizeof(uint64_t));
+    data->benchmark_ji.cumulative_diff = (double *)
+        xcalloc(n_joints, sizeof(double));
+
+    return true;
+}
+
+static void
+benchmark_joint_inference_tracking_ready(Data *data)
+{
+    gm_assert(data->log, data->benchmark_ji.n_frames ==
+              data->recording_frame_prop->int_state.max + 1,
+              "Frame number mismatch. Data has %d frames, recording has %d",
+              data->benchmark_ji.n_frames,
+              data->recording_frame_prop->int_state.max);
+
+    int recording_frame_no = data->last_tracking_frame_depth_no;
+
+    gm_message(data->log, "Processing frame %d/%d",
+               recording_frame_no,
+               data->recording_frame_prop->int_state.max);
+
+    struct gm_tracking *tracking = gm_context_get_latest_tracking(data->ctx);
+    gm_assert(data->log, tracking != NULL,
+              "Spurious NULL tracking after _TRACKING_READY notification");
+
+    if (gm_tracking_was_successful(tracking))
+    {
+        struct gm_joint joints[data->benchmark_ji.n_joints];
+        for (int j = 0; j < data->benchmark_ji.n_joints; ++j)
+        {
+            float *joint = &data->benchmark_ji.joint_data[
+                ((recording_frame_no * data->benchmark_ji.n_joints) + j) * 3];
+
+            joints[j].valid = true;
+            joints[j].x = joint[0];
+            joints[j].y = joint[1];
+            // TODO: Explain why this is negated.
+            joints[j].z = -joint[2];
+        }
+
+        struct gm_skeleton *skeleton = gm_skeleton_new(data->ctx, joints);
+
+        float diffs[data->benchmark_ji.n_joints];
+        gm_skeleton_diff(data->ctx, skeleton, (struct gm_skeleton *)
+                         gm_tracking_get_skeleton(tracking), diffs);
+
+        for (int j = 0; j < data->benchmark_ji.n_joints; ++j)
+        {
+            if (diffs[j] < 0.f) {
+                ++data->benchmark_ji.n_invalid_joints[j];
+            } else {
+                data->benchmark_ji.cumulative_diff[j] += (double)diffs[j];
+            }
+        }
+
+        gm_skeleton_free(skeleton);
+    }
+    else
+    {
+        for (int j = 0; j < data->benchmark_ji.n_joints; ++j)
+        {
+            ++data->benchmark_ji.n_invalid_joints[j];
+        }
+    }
+
+    gm_tracking_unref(tracking);
+}
+
+static void
+benchmark_joint_inference_end(Data *data)
+{
+    int total_errors = 0;
+    float average_distance = 0.f;
+
+    for (int j = 0; j < data->benchmark_ji.n_joints; ++j)
+    {
+        float avg_dist = (float)(data->benchmark_ji.cumulative_diff[j] /
+                                 (data->benchmark_ji.n_frames -
+                                  data->benchmark_ji.n_invalid_joints[j]));
+        gm_message(data->log,
+                   "Joint '%s': Average distance: %.2fm, Track rate: %.0lf%%",
+                   gm_context_get_joint_name(data->ctx, j),
+                   avg_dist, 100.0 -
+                   (((double)data->benchmark_ji.n_invalid_joints[j]) /
+                   data->benchmark_ji.n_frames) * 100.0);
+
+        total_errors += data->benchmark_ji.n_invalid_joints[j];
+        average_distance += avg_dist;
+    }
+
+    average_distance /= data->benchmark_ji.n_joints;
+    double track_rate = total_errors / (double)(data->benchmark_ji.n_frames *
+                                                data->benchmark_ji.n_joints);
+    gm_message(data->log,
+               "Total track rate: %.0lf%%, average distance: %.2fm",
+               100.0 - track_rate * 100.0, average_distance);
+
+    xfree(data->benchmark_ji.joint_data);
+    xfree(data->benchmark_ji.n_invalid_joints);
+    xfree(data->benchmark_ji.cumulative_diff);
+}
+
 static struct command {
     const char *name;
     const char *desc;
@@ -340,8 +524,8 @@ static struct command {
      * This is called before passing a new frame to gm_context via
      * gm_context_notify_frame, but if time_step time has not yet
      * elapsed then the frame will be skipped. Some false positives
-     * may be ok (they will result in redundtly tracking a frame) if
-     * if simplifies the tool (the tool should also handle
+     * may be ok (they will result in redundantly tracking a frame) if
+     * it simplifies the tool (the tool should also handle
      * data->time_step checks in its on_tracking_ready callback).
      *
      * If NULL, then true is assumed.
@@ -361,6 +545,15 @@ static struct command {
         make_target_sequence_tracking_ready,
         make_target_sequence_has_time_step_elapsed,
         make_target_sequence_end,
+    },
+    {
+        "benchmark_joint_inference",
+        "Benchmark joint inference performance against a ground truth",
+        benchmark_joint_inference_argparse,
+        benchmark_joint_inference_start,
+        benchmark_joint_inference_tracking_ready,
+        NULL,
+        benchmark_joint_inference_end,
     },
 };
 
@@ -913,6 +1106,10 @@ main(int argc, char **argv)
         }
     }
 
+    if (commands[data.command_index].end) {
+        commands[data.command_index].end(&data);
+    }
+
     gm_context_destroy(data.ctx);
 
     if (data.last_depth_frame) {
@@ -926,10 +1123,6 @@ main(int argc, char **argv)
 
     delete data.events_front;
     delete data.events_back;
-
-    if (commands[data.command_index].end) {
-        commands[data.command_index].end(&data);
-    }
 
     gm_logger_destroy(data.log);
 
