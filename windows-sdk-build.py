@@ -135,9 +135,9 @@ template = """\
 name = 'clang-{llvm_version}-windows-{arch}-{build_type}'
 c = 'clang-{llvm_version}'
 cpp = 'clang++-{llvm_version}'
-ar = 'ar'
+ar = 'llvm-ar'
 ld = 'ldd-{llvm_version}'
-strip = 'strip'
+strip = 'llvm-strip'
 
 [host_machine]
 system = 'windows'
