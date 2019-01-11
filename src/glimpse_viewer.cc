@@ -3913,11 +3913,14 @@ main(int argc, char **argv)
     data->log_fp = fopen(log_filename_tmp, "w");
     permissions_check_passed = true;
 #elif defined(__ANDROID__)
-    char *assets_root = strdup("/sdcard/Glimpse");
+    char *assets_root = strdup("/sdcard/GlimpseViewer");
     char log_filename_tmp[PATH_MAX];
     snprintf(log_filename_tmp, sizeof(log_filename_tmp),
              "%s/glimpse.log", assets_root);
     data->log_fp = fopen(log_filename_tmp, "w");
+#ifndef USE_TANGO
+    permissions_check_passed = true;
+#endif
 #else
     parse_args(data, argc, argv);
 
