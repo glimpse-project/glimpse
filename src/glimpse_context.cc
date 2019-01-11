@@ -10422,9 +10422,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.desc = "Update tracked people with data from this frame";
         stage.toggle_property = -1;
 
-        // TODO: We aren't ready to expose more than 1 person quite yet
         ctx->max_people = 1;
-#if 0
         prop = gm_ui_property();
         prop.object = ctx;
         prop.name = "max_people";
@@ -10434,7 +10432,6 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.int_state.min = 1;
         prop.int_state.max = 4;
         stage.properties.push_back(prop);
-#endif
 
         ctx->max_frame_joint_diff = 0.5f;
         prop = gm_ui_property();
@@ -10980,6 +10977,48 @@ gm_context_get_people(struct gm_context *ctx, int *n_people)
     }
 
     return people_ids;
+}
+
+bool
+gm_context_has_person(struct gm_context *ctx, int person_id)
+{
+    std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
+
+    for (auto &person : ctx->tracked_people) {
+        if (person.id == person_id) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+uint64_t
+gm_context_get_first_detected(struct gm_context *ctx, int person_id)
+{
+    std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
+
+    for (auto &person : ctx->tracked_people) {
+        if (person.id == person_id) {
+            return person.time_detected;
+        }
+    }
+
+    return 0;
+}
+
+uint64_t
+gm_context_get_last_detected(struct gm_context *ctx, int person_id)
+{
+    std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
+
+    for (auto &person : ctx->tracked_people) {
+        if (person.id == person_id) {
+            return person.time_last_tracked;
+        }
+    }
+
+    return 0;
 }
 
 struct gm_prediction *

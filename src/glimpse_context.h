@@ -550,6 +550,15 @@ gm_context_get_latest_tracking(struct gm_context *ctx);
 int *
 gm_context_get_people(struct gm_context *ctx, int *n_people);
 
+bool
+gm_context_has_person(struct gm_context *ctx, int person_id);
+
+uint64_t
+gm_context_get_first_detected(struct gm_context *ctx, int person_id);
+
+uint64_t
+gm_context_get_last_detected(struct gm_context *ctx, int person_id);
+
 struct gm_prediction *
 gm_context_get_prediction_for_person(struct gm_context *ctx,
                                      uint64_t timestamp,

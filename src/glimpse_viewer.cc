@@ -174,6 +174,8 @@ struct stage_textures {
 };
 
 typedef struct {
+    int person_id;
+    uint64_t last_detected;
     GLuint joints_bo;
     GLuint bones_bo;
     int n_joints;
@@ -217,7 +219,7 @@ struct _Data
      */
     bool realtime_ar_mode;
 
-    bool show_skeleton;
+    bool show_skeletons;
     bool show_view_cam_controls;
     bool show_profiler;
     bool show_joint_summary;
@@ -327,7 +329,7 @@ struct _Data
     GLint lines_attr_col;
     int n_lines;
 
-    GLSkeleton skel_gl;
+    std::list<GLSkeleton> skeletons;
 
     struct gm_target *target;
     float target_error;
@@ -967,50 +969,55 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
 }
 
 static bool
-update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
+update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t timestamp)
 {
-    data->skel_gl.n_bones = 0;
-    data->target_skel_gl.n_bones = 0;
+    // XXX: Why do we do this? This will cause skeletons to disappear when
+    //      tracking temporarily fails, do we want this?
+    skel_gl->n_bones = 0;
+    //data->target_skel_gl.n_bones = 0;
 
-    if (!data->latest_tracking ||
-        !gm_tracking_was_successful(data->latest_tracking))
-    {
+    // Check if the person has been updated first
+    uint64_t last_update = gm_context_get_last_detected(data->ctx,
+                                                        skel_gl->person_id);
+    if (last_update <= skel_gl->last_detected && last_update < timestamp) {
         return false;
     }
+    skel_gl->last_detected = last_update;
 
     /*
      * Update labelled point cloud
      */
     struct gm_prediction *prediction =
-        gm_context_get_prediction(data->ctx, timestamp);
+        gm_context_get_prediction_for_person(data->ctx, timestamp,
+                                             skel_gl->person_id);
     if (!prediction) {
         return false;
     }
     struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
 
     int n_joints = gm_skeleton_get_n_joints(skeleton);
-    data->skel_gl.n_joints = 0;
+    skel_gl->n_joints = 0;
 
     // Reformat and copy over joint data
     XYZRGBA colored_joints[n_joints];
     for (int i = 0; i < n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
         if (joint) {
-            int pos = data->skel_gl.n_joints;
+            int pos = skel_gl->n_joints;
             colored_joints[pos].x = joint->x;
             colored_joints[pos].y = joint->y;
             colored_joints[pos].z = joint->z;
             colored_joints[pos].rgba = LOOP_INDEX(joint_palette, i);
-            data->skel_gl.n_joints++;
+            skel_gl->n_joints++;
         }
     }
-    glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.joints_bo);
+    glBindBuffer(GL_ARRAY_BUFFER, skel_gl->joints_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * data->skel_gl.n_joints,
+                 sizeof(XYZRGBA) * skel_gl->n_joints,
                  colored_joints, GL_DYNAMIC_DRAW);
 
     int n_bones = gm_skeleton_get_n_bones(skeleton);
-    data->skel_gl.n_bones = 0;
+    skel_gl->n_bones = 0;
     XYZRGBA colored_bones[n_bones * 2];
     for (int b = 0; b < n_bones; ++b) {
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
@@ -1021,7 +1028,7 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
             const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
             gm_assert(data->log, head && tail, "Valid bone with invalid joints!");
 
-            int pos = data->skel_gl.n_bones;
+            int pos = skel_gl->n_bones;
             XYZRGBA head_rgba = {
                 head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
             };
@@ -1030,19 +1037,16 @@ update_skeleton_wireframe_gl_bos(Data *data, uint64_t timestamp)
             };
             colored_bones[pos*2] = head_rgba;
             colored_bones[pos*2+1] = tail_rgba;
-            data->skel_gl.n_bones++;
+            skel_gl->n_bones++;
         }
     }
-    glBindBuffer(GL_ARRAY_BUFFER, data->skel_gl.bones_bo);
+    glBindBuffer(GL_ARRAY_BUFFER, skel_gl->bones_bo);
     glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * data->skel_gl.n_bones * 2,
+                 sizeof(XYZRGBA) * skel_gl->n_bones * 2,
                  colored_bones, GL_DYNAMIC_DRAW);
 
     // Clean-up
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    if (data->target)
-        update_target_skeleton_wireframe_gl_bos(data, skeleton);
 
     gm_prediction_unref(prediction);
 
@@ -1468,7 +1472,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                          !data->realtime_ar_mode);
     }
 
-    ImGui::Checkbox("Show skeleton", &data->show_skeleton);
+    ImGui::Checkbox("Show skeletons", &data->show_skeletons);
     ImGui::Checkbox("Show view camera controls", &data->show_view_cam_controls);
     ImGui::Checkbox("Show profiler", &data->show_profiler);
     ImGui::Checkbox("Show joint summary", &data->show_joint_summary);
@@ -1968,6 +1972,61 @@ draw_debug_lines(Data *data, glm::mat4 mvp)
 }
 
 static void
+update_and_render_skeletons(Data *data, uint64_t timestamp,
+                            glm::mat4 &mvp, float pt_size)
+{
+    int n_people = 0;
+    int *people_ids = gm_context_get_people(data->ctx, &n_people);
+    for (int p = 0; p < n_people; ++p) {
+        int id = people_ids[p];
+
+        GLSkeleton *skel_gl = NULL;
+        for (auto &skel : data->skeletons) {
+            if (skel.person_id == id) {
+                skel_gl = &skel;
+                break;
+            }
+        }
+
+        if (!skel_gl) {
+            // Allocate GL resources for new skeleton
+            data->skeletons.push_back({0,});
+            skel_gl = &data->skeletons.back();
+            skel_gl->person_id = id;
+            glGenBuffers(1, &skel_gl->bones_bo);
+            glGenBuffers(1, &skel_gl->joints_bo);
+        }
+
+        if (update_skeleton_wireframe_gl_bos(data, skel_gl, timestamp)) {
+            draw_skeleton_wireframe(data, skel_gl, mvp, pt_size);
+        }
+    }
+
+    if (data->target) {
+        // TODO: Add ability to select a particular skeleton to focus on and
+        //       use that here (and elsewhere...)
+        struct gm_skeleton *skeleton = NULL;
+        if (data->latest_tracking) {
+            skeleton = (struct gm_skeleton *)
+                gm_tracking_get_skeleton(data->latest_tracking);
+        }
+        update_target_skeleton_wireframe_gl_bos(data, skeleton);
+    }
+
+    // Clean up old skeletons whose people are no longer tracked
+    for (auto it = data->skeletons.begin(); it != data->skeletons.end();) {
+        auto &skel_gl = *it;
+        if (!gm_context_has_person(data->ctx, skel_gl.person_id)) {
+            glDeleteBuffers(1, &skel_gl.bones_bo);
+            glDeleteBuffers(1, &skel_gl.joints_bo);
+            it = data->skeletons.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void
 draw_tracking_scene_to_texture(Data *data,
                                struct gm_tracking *tracking,
                                ImVec2 win_size, ImVec2 uiScale)
@@ -2081,10 +2140,12 @@ draw_tracking_scene_to_texture(Data *data,
         glBindBuffer(GL_ARRAY_BUFFER, 0);
         glUseProgram(0);
 
-        if (data->show_skeleton &&
-            update_skeleton_wireframe_gl_bos(data,
-                                             gm_tracking_get_timestamp(data->latest_tracking)))
-        {
+        if (data->show_skeletons) {
+            uint64_t timestamp =
+                gm_tracking_get_timestamp(data->latest_tracking);
+
+            update_and_render_skeletons(data, timestamp, mvp, pt_size);
+
             if (data->target) {
                 if (data->puppet_target) {
                     glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
@@ -2094,7 +2155,6 @@ draw_tracking_scene_to_texture(Data *data,
                     draw_skeleton_wireframe(data, &data->target_skel_gl, mvp, pt_size);
                 }
             }
-            draw_skeleton_wireframe(data, &data->skel_gl, mvp, pt_size);
         }
 
         draw_debug_lines(data, mvp);
@@ -2429,7 +2489,7 @@ draw_ar_video(Data *data)
 
     glUseProgram(0);
 
-    if (data->show_skeleton && data->latest_tracking) {
+    if (data->show_skeletons && data->latest_tracking) {
         struct gm_intrinsics rotated_intrinsics;
 
         gm_context_rotate_intrinsics(data->ctx,
@@ -2443,17 +2503,13 @@ draw_ar_video(Data *data)
                                                              data->view_zoom);
         glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, aspect_y_scale, -1.0));
 
-        if (update_skeleton_wireframe_gl_bos(data,
-                                             data->last_video_frame->timestamp -
-                                             data->prediction_delay))
-        {
-            if (data->target) {
-                glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
-                mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
-                draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
-            }
-            draw_skeleton_wireframe(data, &data->skel_gl, mvp, pt_size);
+        if (data->target) {
+            glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
+            mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
+            draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
         }
+        update_and_render_skeletons(data, data->last_video_frame->timestamp -
+                                    data->prediction_delay, mvp, pt_size);
     }
 }
 
@@ -3273,8 +3329,6 @@ init_viewer_opengl(Data *data)
     glUseProgram(0);
 
     glGenBuffers(1, &data->lines_bo);
-    glGenBuffers(1, &data->skel_gl.bones_bo);
-    glGenBuffers(1, &data->skel_gl.joints_bo);
 
     glGenBuffers(1, &data->target_skel_gl.bones_bo);
     glGenBuffers(1, &data->target_skel_gl.joints_bo);
@@ -3787,7 +3841,7 @@ viewer_init(Data *data)
 
     update_ar_video_queue_len(data, 6);
 
-    data->show_skeleton = true;
+    data->show_skeletons = true;
     data->show_view_cam_controls = false;
 
     data->target_error = 0.25f;
