@@ -48,12 +48,16 @@ jobs:
           env: _="Quick Debug Build (distro provided dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CC=clang-8.0
+            -e CXX=clang++-8.0
             -e CONFIG_OPTS="--buildtype=debug -Duse_system_libs=true"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: quick checks
           env: _="Quick Release Build (distro provided dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CC=clang-8.0
+            -e CXX=clang++-8.0
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
             -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
@@ -65,6 +69,8 @@ jobs:
           #env: _="Mini Training Run"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CC=clang-8.0
+            -e CXX=clang++-8.0
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
             -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
@@ -77,12 +83,16 @@ jobs:
           env: _="Debug Build (subproject dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CC=clang-8.0
+            -e CXX=clang++-8.0
             -e CONFIG_OPTS="--buildtype=debug -Duse_system_libs=false"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
           env: _="Release Build (subproject dependencies)"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CC=clang-8.0
+            -e CXX=clang++-8.0
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
             -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=false"

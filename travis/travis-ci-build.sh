@@ -10,8 +10,6 @@ ninja --version
 pip3 install git+https://github.com/glimpse-project/meson
 export PATH=$HOME/.local/bin:$PATH
 
-export CC=clang-5.0 CXX=clang++-5.0
-
 mkdir build
 cd build
 
