@@ -153,12 +153,17 @@ ninja
 
 # Building for Android
 
-We've only tested cross-compiling with NDK r16b and r18b and have certainly had
-problems with earlier versions so would strongly recommend using a version >=
-r16.
+We currently only test building with NDK r18b, though later versions may work.
 
+From here it's assumed you have set up an environment something like:
+```
+export ANDROID_NDK_HOME="path/to/android-ndk-r18b"
+export ANDROID_HOME="path/to/android-sdk"
+export PATH="$ANDROID_HOME/tools:$PATH"
+export PATH="$ANDROID_HOME/tools/bin:$PATH"
+export PATH="$ANDROID_HOME/platform-tools:$PATH"
+```
 For ease of integration with Meson we create a standalone toolchain like so:
-
 ```
 $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py \
         --install-dir ~/local/android-arm-toolchain-28 \
@@ -171,16 +176,15 @@ export PATH=~/local/android-arm-toolchain-28/bin:$PATH
 since Unity doesn't natively support arm64 on Android*
 *Note: while building for 32bit arm we have to use api level >= 24 otherwise we
 hit build issues with -D_FILE_OFFSET_BITS=64 usage*
+*Note: it's not recommended to add the above toolchain path to your default PATH
+considering that it includes a minimal installation of python2.*
 
-
-Make sure the Android SDK tools are in the path and make sure the build-tools
-and platform are installed. They can be installed with the following commands:
+The following SDK components should be downloaded:
 ```
 sdkmanager "platforms;android-28"
 sdkmanager "build-tools;28.0.3"
 sdkmanager "platform-tools"
 ```
-
 
 Then to compile Glimpse:
 ```
