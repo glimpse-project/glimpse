@@ -167,8 +167,10 @@ $ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py \
         --stl libc++
 export PATH=~/local/android-arm-toolchain-28/bin:$PATH
 ```
-*Note: we can't build for arm64 when building the libglimpse-unity-plugin.so since Unity doesn't natively support arm64 on Android*
-*Note: while building for 32bit arm we have to use api level >= 24 otherwise we hit build issues with -D_FILE_OFFSET_BITS=64 usage*
+*Note: we can't build for arm64 when building the libglimpse-unity-plugin.so
+since Unity doesn't natively support arm64 on Android*
+*Note: while building for 32bit arm we have to use api level >= 24 otherwise we
+hit build issues with -D_FILE_OFFSET_BITS=64 usage*
 
 
 Make sure the Android SDK tools are in the path and make sure the build-tools
@@ -176,6 +178,7 @@ and platform are installed. They can be installed with the following commands:
 ```
 sdkmanager "platforms;android-28"
 sdkmanager "build-tools;28.0.3"
+sdkmanager "platform-tools"
 ```
 
 
@@ -195,21 +198,45 @@ meson --cross-file ../android-armeabi-v7a-cross-file.txt --buildtype=release ..
 ninja
 ```
 
-## Common issues
-
-* Android commands fail
-
-
-* Java commands fail
-
-Make sure that Java SDK 8 is installed and not a more recent version.
-
-* debug.keystore not found when creating APKs
-
-This will be created by Android Studio, but can be created manually with the following command:
+To build an .apk first check ~/.android/debug.keystore exists and if not create
+the keystore and and debug signing key with:
 ```
-keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+keytool -genkey -v \
+        -keystore ~/.android/debug.keystore \
+        -alias androiddebugkey \
+        -storepass android \
+        -keypass android \
+        -keyalg RSA \
+        -keysize 2048 \
+        -validity 10000 \
+        -dname "CN=Android Debug,O=Android,C=US"
 ```
+
+Build an .apk and install with:
+```
+ninja viewer_apk
+adb install -r glimpse_viewer_apk_stage/glimpse_viewer.apk
+```
+
+Upload all the required assets to `/sdcard/GlimpseViewer/`:
+```
+adb shell mkdir -p /sdcard/GlimpseViewer/ViewerRecording
+cd path/to/glimpse-assets
+adb push \
+        bone-map.json \
+        glimpse-config.json \
+        joint-dist.json \
+        joint-map.json \
+        joint-params.json \
+        label-map.json \
+        tree?.rdt \
+        /sdcard/GlimpseViewer/
+```
+(assuming .rdt files have been generated with `json-to-rdt`)
+
+_Note: It's currently only possible to use the recordings backend on Android
+since Google stopped developing Tango we are no longer actively maintaining the
+Tango backend for Glimpse._
 
 # Building for OSX
 
@@ -262,7 +289,7 @@ not:
 
 If you run `xcrun --sdk iphoneos --show-sdk-path` you should see something like:
 ```
-/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS11.4.sdk
+/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS12.1.sdk
 ```
 (If not then it's expected that the build of glimpse will fail because the build
  script uses the same command to locate the correct headers for cross compiling)
