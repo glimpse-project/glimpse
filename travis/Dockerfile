@@ -10,6 +10,7 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --
     wget
 
 RUN echo "deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic main" >> /etc/apt/sources.list
+RUN echo "deb http://apt.llvm.org/bionic/ llvm-toolchain-bionic-6.0 main" >> /etc/apt/sources.list
 RUN wget --no-check-certificate -O - https://apt.llvm.org/llvm-snapshot.gpg.key|sudo apt-key add -
 RUN apt-get update -qq
 RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --no-install-suggests \
@@ -17,8 +18,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --
     unzip \
     build-essential \
     ninja-build \
+    clang-6.0 \
+    lld-6.0 \
     clang-8 \
-    lldb-8 \
     lld-8 \
     python3-minimal \
     python3-pip \
