@@ -13,9 +13,6 @@ export PATH=$HOME/.local/bin:$PATH
 mkdir build
 cd build
 
-# Udates the meson -cross-file.txt paths
-../windows-sdk-build.py --out /windows-sdk
-
 # Have had builds fail just because Meson hasn't been able to download
 # subproject tarballs, so we allow configurations to fail and back off
 # for five seconds before testing that configuration succeeds (at

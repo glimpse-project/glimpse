@@ -82,6 +82,6 @@ RUN yes | sdkmanager \
     "build-tools;${ANDROID_BUILD_TOOLS}" \
     "platform-tools"
 
-ADD windows-sdk-10.0.17134.0.tar.bz2 /
+ADD windows-sdk /
 
 CMD ["/bin/bash"]
