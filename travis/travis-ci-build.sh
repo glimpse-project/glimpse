@@ -14,7 +14,7 @@ mkdir build
 cd build
 
 # Udates the meson -cross-file.txt paths
-./windows-sdk-build.py --out /windows-sdk
+../windows-sdk-build.py --out /windows-sdk
 
 # Have had builds fail just because Meson hasn't been able to download
 # subproject tarballs, so we allow configurations to fail and back off
