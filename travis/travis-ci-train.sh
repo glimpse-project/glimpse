@@ -31,7 +31,7 @@ git clone --depth=1 https://github.com/glimpse-project/glimpse-training-data
 #    ./unpack.sh
 #popd
 
-export CC=clang-5.0 CXX=clang++-5.0
+export CC=clang-8 CXX=clang++-8
 
 mkdir build
 pushd build
