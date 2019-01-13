@@ -140,6 +140,20 @@ jobs:
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
             -e CONFIG_OPTS="--cross-file=/windows-sdk/meson/windows-x64-release-cross-file.txt --buildtype=release"
             final-travis-ci-image ./travis/travis-ci-build.sh
+        - stage: build
+          env: _="Windows Static Debug Build"
+          script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
+            -e TRAVIS_BUILD_DIR="/home/$USER/build"
+            -e CONFIG_OPTS="--cross-file=/windows-sdk/meson/windows-x64-debug-cross-file.txt --buildtype=debug --default-library=static"
+            final-travis-ci-image ./travis/travis-ci-build.sh
+          deploy:
+                provider: releases
+                api_key:
+                    secure: VssYn4jVY4jTo9rzUeBzsFZRKd5K6JM9YwqkAWTd6ytbyMKtYfHTUXN7/FYIhPNwrZMjsuHFm6+DjY3TYtei8P2wvXYzuGfRJG6404WOtL5PfWT1DooQ3+Ekbl1ozy8FpuaELophgyYKtpZ7BZ/rEJYoK3/in2tCwPEWRRUCg7Kb79eAj9ReqNBYcJHBUGSpzrI7UEccWoLVfnPOHTnC/rCiH8ikN88T+vJc4sYUzxbtjrt7C5uD/7uN1SllAMIOIZnWBoSsV83xpHg9bBAlS8TEBzLxD9MQi0K8DR4FTjDEIMZ047V2+e6VCDDlFsFkfK4IpJLwcfEdUEMwiRarEn2mpCsHZiost6rDD8bLke0nxFyplALgYPL7Naauf9FlUbQzwWsUZqvTobl2NTlnbm2uB0kM6T5fRe/IEwsK5qUvCBXW/JVOgFYAGnOQKP/woEPuJX9dBZdpxaMhu4hsDL1z200WATHibcsKpnv6D0U1saS8+Y0OUA65fg9mtgUJRDDXZkm7JZ1zS0c0IPhL1tVBAYhR0pJGHCXmAqkFwYBUgcq7o2jtR3BiVg7FYcxmmS37vi062QT7FtxjN4eC9W4LkEZfRyZxfCvkGn4YruZx2eLptG1dJn/hh5rgd2zeSVcoWG+TcgWdbvpVdowezfKZjVXdirdzO9pFsfr/IkY=
+                file: 'build/glimpse_viewer.exe'
+                on:
+                    repo: glimpse-project/glimpse
+                    branch: wip/rib/travis
 
 cache:
     directories:
