@@ -84,6 +84,6 @@ RUN yes | sdkmanager \
     "build-tools;${ANDROID_BUILD_TOOLS}" \
     "platform-tools"
 
-ADD windows-sdk /
+ADD windows-sdk /windows-sdk
 
 CMD ["/bin/bash"]
