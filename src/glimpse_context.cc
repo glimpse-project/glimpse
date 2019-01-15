@@ -383,6 +383,12 @@ struct joint_dist
 
 #define MAX_BONE_CHILDREN 4
 
+struct bone_joint
+{
+    int index;      // Joint index
+    float weight;   // Weight this joint contributes to the bone head/tail
+};
+
 struct gm_bone_info
 {
     int idx; // For indexing into ctx->bone_info[]
@@ -391,8 +397,8 @@ struct gm_bone_info
     int children[MAX_BONE_CHILDREN];
     int n_children;
 
-    int head; // joint index
-    int tail; // joint index
+    std::vector<struct bone_joint> head_joints;
+    std::vector<struct bone_joint> tail_joints;
 
     float min_length;
     float mean_length;
@@ -409,8 +415,11 @@ struct gm_bone
 
     bool valid;
 
+    float head[3];
+    float tail[3];
+
     // Cached distance between bone's head and tail joints
-    // (see update_bones())
+    // (see update_bone_metadata())
     float length;
 
     // XXX:
@@ -1443,23 +1452,15 @@ is_bone_length_diff(const struct gm_bone &ref_bone,
 }
 
 static inline float
-bone_angle_diff(struct gm_context *ctx,
-                struct gm_bone *bone,
-                struct gm_skeleton *ref_skel,
-                struct gm_skeleton *skel)
+bone_angle_diff(struct gm_bone *ref_bone,
+                struct gm_bone *bone)
 {
-    struct gm_bone_info &bone_info = ctx->bone_info[bone->idx];
-    struct gm_joint &ref_head = ref_skel->joints[bone_info.head];
-    struct gm_joint &ref_tail = ref_skel->joints[bone_info.tail];
-    struct gm_joint &head = skel->joints[bone_info.head];
-    struct gm_joint &tail = skel->joints[bone_info.tail];
-
-    glm::vec3 ref_vec = glm::vec3(ref_tail.x - ref_head.x,
-                                  ref_tail.y - ref_head.y,
-                                  ref_tail.z - ref_head.z);
-    glm::vec3 bone_vec = glm::vec3(tail.x - head.x,
-                                   tail.y - head.y,
-                                   tail.z - head.z);
+    glm::vec3 ref_vec = glm::vec3(ref_bone->tail[0] - ref_bone->head[0],
+                                  ref_bone->tail[1] - ref_bone->head[1],
+                                  ref_bone->tail[2] - ref_bone->head[2]);
+    glm::vec3 bone_vec = glm::vec3(bone->tail[0] - bone->head[0],
+                                   bone->tail[1] - bone->head[1],
+                                   bone->tail[2] - bone->head[2]);
 
     float angle = glm::degrees(acosf(
         glm::dot(glm::normalize(bone_vec), glm::normalize(ref_vec))));
@@ -1469,17 +1470,12 @@ bone_angle_diff(struct gm_context *ctx,
 }
 
 static inline bool
-is_bone_angle_diff(struct gm_context *ctx,
+is_bone_angle_diff(struct gm_bone &ref_bone,
                    struct gm_bone &bone,
-                   struct gm_skeleton &ref_skel,
-                   struct gm_skeleton &skel,
                    float time_delta,
                    float max_angle)
 {
-    float angle = bone_angle_diff(ctx, &bone, &ref_skel, &skel);
-    /*float time = skel.timestamp > ref_skel.timestamp ?
-        (float)((skel.timestamp - ref_skel.timestamp) / 1e9) :
-        (float)((ref_skel.timestamp - skel.timestamp) / 1e9);*/
+    float angle = bone_angle_diff(&ref_bone, &bone);
     float angle_delta = fabsf(angle) / time_delta;
 
     return angle_delta > max_angle;
@@ -1547,7 +1543,7 @@ calc_mismatched_bones(struct gm_context *ctx,
 
         // Don't check for angle missmatches for the root bone...
         if (bone_info.parent >= 0) {
-            if (is_bone_angle_diff(ctx, bone, ref, skel, time_delta,
+            if (is_bone_angle_diff(ref_bone, bone, time_delta,
                                    ctx->bone_rotation_variance))
             {
                 violations++;
@@ -1556,6 +1552,54 @@ calc_mismatched_bones(struct gm_context *ctx,
     }
 
     return violations;
+}
+
+static void
+update_bone_metadata(struct gm_context *ctx, struct gm_skeleton &skeleton)
+{
+    for (auto &bone : skeleton.bones) {
+        if (!bone.valid) {
+            continue;
+        }
+
+        bone.length = distance_between(bone.tail, bone.head);
+
+        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
+        if (bone_info.parent < 0 || !skeleton.bones[bone_info.parent].valid) {
+            bone.angle = glm::quat();
+            continue;
+        }
+
+        struct gm_bone &parent_bone = skeleton.bones[bone_info.parent];
+
+        glm::vec3 bone_vec = glm::normalize(
+            glm::vec3(bone.tail[0] - bone.head[0],
+                      bone.tail[1] - bone.head[1],
+                      bone.tail[2] - bone.head[2]));
+
+        glm::vec3 parent_vec = glm::normalize(
+            glm::vec3(parent_bone.tail[0] - parent_bone.head[0],
+                      parent_bone.tail[1] - parent_bone.head[1],
+                      parent_bone.tail[2] - parent_bone.head[2]));
+
+        glm::vec3 axis = glm::normalize(glm::cross(bone_vec, parent_vec));
+        float angle = acosf(glm::dot(bone_vec, parent_vec));
+
+        bone.angle = glm::angleAxis(angle, axis);
+
+#if 0
+        {
+            // Debugging
+            glm::vec3 tb = (parent_vec * glm::mat3_cast(bone.angle)) * dist;
+            gm_debug(ctx->log, "XXX tail: %.2f, %.2f, %.2f, "
+                     "transformed parent: %.2f, %.2f, %.2f",
+                     bone.tail[0], bone.tail[1], bone.tail[2],
+                     tb.x + bone.head[0],
+                     tb.y + bone.head[1],
+                     tb.z + bone.head[2]);
+        }
+#endif
+    }
 }
 
 static void
@@ -1569,70 +1613,57 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
         struct gm_bone_info &bone_info = ctx->bone_info[i];
         struct gm_bone &bone = skeleton.bones[i];
         bone.idx = i;
-        bone.valid = false;
+        bone.valid = true;
+        memset(bone.head, 0, sizeof(float) * 3);
+        memset(bone.tail, 0, sizeof(float) * 3);
 
-        struct gm_joint &head = skeleton.joints[bone_info.head];
-        struct gm_joint &tail = skeleton.joints[bone_info.tail];
-        if (!head.valid || !tail.valid) {
+        // Check that all the joints that contribute to this bone are valid
+        // and calculate the position of the head and tail.
+        float weight = 0;
+        for (auto &joint_info : bone_info.head_joints) {
+            struct gm_joint &joint = skeleton.joints[joint_info.index];
+            if (!joint.valid) {
+                bone.valid = false;
+                break;
+            }
+
+            weight += joint_info.weight;
+            bone.head[0] += joint.x * joint_info.weight;
+            bone.head[1] += joint.y * joint_info.weight;
+            bone.head[2] += joint.z * joint_info.weight;
+        }
+        if (bone.valid) {
+            bone.head[0] /= weight;
+            bone.head[1] /= weight;
+            bone.head[2] /= weight;
+            weight = 0;
+
+            for (auto &joint_info : bone_info.tail_joints) {
+                struct gm_joint &joint = skeleton.joints[joint_info.index];
+                if (!joint.valid) {
+                    bone.valid = false;
+                    break;
+                }
+
+                weight += joint_info.weight;
+                bone.tail[0] += joint.x * joint_info.weight;
+                bone.tail[1] += joint.y * joint_info.weight;
+                bone.tail[2] += joint.z * joint_info.weight;
+            }
+        }
+
+        if (!bone.valid) {
             bone.length = 0;
             bone.angle = glm::quat();
             continue;
-        }
-
-        bone.length = distance_between(&tail.x, &head.x);
-
-        int bone_parent_idx = bone_info.parent;
-        if (bone_parent_idx >= 0) {
-            struct gm_bone_info &parent_info = ctx->bone_info[bone_parent_idx];
-            struct gm_joint &parent_head = skeleton.joints[parent_info.head];
-            struct gm_joint &parent_tail = skeleton.joints[parent_info.tail];
-
-            if (!parent_head.valid || !parent_tail.valid) {
-                bone.length = 0;
-                bone.angle = glm::quat();
-                continue;
-            }
-
-            glm::vec3 bone_vec = glm::normalize(
-                glm::vec3(tail.x - head.x,
-                          tail.y - head.y,
-                          tail.z - head.z));
-
-            gm_assert(ctx->log,
-                      (parent_tail.x == head.x &&
-                       parent_tail.y == head.y &&
-                       parent_tail.z == head.z),
-                      "Expected bone[%d] head to == parent bone[%d] tail: head=(%f,%f,%f), parent tail=(%f,%f,%f)",
-                      i, bone_parent_idx,
-                      head.x, head.y, head.z,
-                      parent_tail.x, parent_tail.y, parent_tail.z);
-
-            glm::vec3 parent_vec = glm::normalize(
-                glm::vec3(parent_tail.x - parent_head.x,
-                          parent_tail.y - parent_head.y,
-                          parent_tail.z - parent_head.z));
-
-            glm::vec3 axis = glm::normalize(glm::cross(bone_vec, parent_vec));
-            float angle = acosf(glm::dot(bone_vec, parent_vec));
-
-            bone.angle = glm::angleAxis(angle, axis);
-
-#if 0
-            {
-                // Debugging
-                glm::vec3 tb = (parent_vec * glm::mat3_cast(bone.angle)) * dist;
-                gm_debug(ctx->log, "XXX tail: %.2f, %.2f, %.2f, "
-                         "transformed parent: %.2f, %.2f, %.2f",
-                         tail.x, tail.y, tail.z,
-                         tb.x + head.x, tb.y + head.y, tb.z + head.z);
-            }
-#endif
         } else {
-            bone.angle = glm::quat();
+            bone.tail[0] /= weight;
+            bone.tail[1] /= weight;
+            bone.tail[2] /= weight;
         }
-
-        bone.valid = true;
     }
+
+    update_bone_metadata(ctx, skeleton);
 }
 
 static float
@@ -1804,29 +1835,12 @@ sanitise_joint_velocities(struct gm_person *person,
         return;
     }
 
-    // We process the skeleton with regards to the 'parent' joint. At the
-    // parent, we just have absolute position to look at, so we make sure it
-    // hasn't moved too far too quickly and use the last good position if it
-    // has.
     bool changed = false;
     auto &history = person->history;
 
-    for (int b = 0; b <= ctx->n_bones; ++b) {
-        // When b == 0, look at the bone head joint, otherwise look at the tail
-        // of bone b - 1.
-        // TODO: We assume bone 0 is the parent bone
-        int joint;
-        struct gm_bone_info *bone;
-        if (b == 0) {
-            bone = &ctx->bone_info[0];
-            joint = bone->head;
-        } else {
-            bone = &ctx->bone_info[b - 1];
-            joint = bone->tail;
-        }
-
+    for (int joint = 0; joint < ctx->n_joints; ++joint) {
         // Find the last valid joint in history
-        struct gm_joint &parent_joint = skeleton.joints[joint];
+        struct gm_joint &cur_joint = skeleton.joints[joint];
         struct gm_joint *prev_joint = NULL;
         int last_valid = -1;
         for (int i = 0; i < history.size(); ++i) {
@@ -1845,7 +1859,7 @@ sanitise_joint_velocities(struct gm_person *person,
         // Calculate the current joint velocity and if it falls below a
         // particular threshold, don't bother with sanitisation
         float time = (float)((timestamp - history[last_valid].timestamp) / 1e9);
-        float velocity = distance_between(&parent_joint.x,
+        float velocity = distance_between(&cur_joint.x,
                                           &prev_joint->x) / time;
 
         if (velocity < ctx->joint_velocity_threshold) {
@@ -1853,21 +1867,28 @@ sanitise_joint_velocities(struct gm_person *person,
         }
 
         // Check the velocity of the joint at each previous tracking frame
-        float velocities[history.size()];
+        std::vector<float> velocities(history.size(), FLT_MAX);
         float avg_velocity = velocity;
         int n_velocities = 1;
         for (int j = 0; j < history.size() - 1; ++j) {
             struct gm_joint &joint1 = history[j].skeleton.joints[joint];
-            struct gm_joint &joint2 = history[j+1].skeleton.joints[joint];
-            if (!joint1.valid || !joint2.valid ||
-                history[j+1].timestamp < time_threshold)
-            {
-                velocities[j] = FLT_MAX;
+            if (!joint1.valid) {
                 continue;
             }
 
+            int j2;
+            for (j2 = j + 1; j2 < history.size(); ++j2) {
+                if (history[j2].skeleton.joints[joint].valid) {
+                    break;
+                }
+            }
+            if (j2 >= history.size()) {
+                continue;
+            }
+
+            struct gm_joint &joint2 = history[j2].skeleton.joints[joint];
             time = (float)((history[j].timestamp -
-                            history[j+1].timestamp) / 1e9);
+                            history[j2].timestamp) / 1e9);
             velocities[j] = distance_between(&joint1.x,
                                              &joint2.x) / time;
             avg_velocity += velocities[j];
@@ -1875,48 +1896,41 @@ sanitise_joint_velocities(struct gm_person *person,
         }
         avg_velocity /= n_velocities;
 
-        // If this new joint is an outlier, use the last non-outlier position
+        // If this new joint velocity is an outlier, use the last non-outlier
+        // displacement.
         float outlier_threshold = avg_velocity * ctx->joint_outlier_factor;
         if (n_velocities > 1 && velocity > outlier_threshold) {
             for (int j = 0; j < history.size() - 1; ++j) {
                 if (velocities[j] <= outlier_threshold) {
-                    gm_debug(ctx->log, "Bone joint (%s) average velocity: "
+                    gm_debug(ctx->log, "Joint (%s) average velocity: "
                              "%.2f, correction: %.2f -> %.2f",
                              ctx->joint_names[joint],
                              avg_velocity, velocity, velocities[j]);
-                    struct gm_joint &prev_joint =
+
+                    struct gm_joint &history_joint =
                         history[j].skeleton.joints[joint];
 
-                    bool canUseDisplacement = false;
-                    if (b != 0) {
-                        // If this isn't the parent joint, find the bone that
-                        // has it as a tail and use the displacement instead of
-                        // the absolute position.
-                        if (skeleton.joints[bone->head].valid &&
-                            history[j].skeleton.joints[bone->head].valid) {
-                            canUseDisplacement = true;
+                    int j2;
+                    for (j2 = j + 1; j2 < history.size(); ++j2) {
+                        if (history[j2].skeleton.joints[joint].valid) {
+                            break;
                         }
                     }
 
-                    if (canUseDisplacement) {
-                        struct gm_joint &head_joint =
-                            skeleton.joints[bone->head];
-                        struct gm_joint &prev_head_joint =
-                            history[j].skeleton.joints[bone->head];
-                        parent_joint.x =
-                            head_joint.x + (prev_joint.x - prev_head_joint.x);
-                        parent_joint.y =
-                            head_joint.y + (prev_joint.y - prev_head_joint.y);
-                        parent_joint.z =
-                            head_joint.z + (prev_joint.z - prev_head_joint.z);
-                    } else {
-                        // If we can't correct the joint position wrt its
-                        // displacement from a head joint, use the absolute
-                        // position.
-                        parent_joint = prev_joint;
-                    }
+                    struct gm_joint &prev_history_joint =
+                        history[j2].skeleton.joints[joint];
+                    float history_time = (float)((history[j].timestamp -
+                                                  history[j2].timestamp) / 1e9);
+                    float scale = (time / history_time);
 
-                    parent_joint.valid = true;
+                    cur_joint.x = prev_joint->x +
+                        (history_joint.x - prev_history_joint.x) * scale;
+                    cur_joint.y = prev_joint->y +
+                        (history_joint.y - prev_history_joint.y) * scale;
+                    cur_joint.z = prev_joint->z +
+                        (history_joint.z - prev_history_joint.z) * scale;
+
+                    cur_joint.valid = true;
                     changed = true;
                     break;
                 }
@@ -1924,7 +1938,7 @@ sanitise_joint_velocities(struct gm_person *person,
         }
     }
 
-    // Update the bone metadata
+    // Re-calculate bones now joints have changed
     if (changed) {
         update_bones(ctx, skeleton);
     }
@@ -1945,8 +1959,6 @@ sanitise_bone_lengths(struct gm_person *person,
 
     for (auto &bone : skeleton.bones) {
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
-        struct gm_joint &head = skeleton.joints[bone_info.head];
-        struct gm_joint &tail = skeleton.joints[bone_info.tail];
 
         // Look at the length of each bone and the average length of that
         // bone for the person. If it deviates too far from the mean,
@@ -1971,25 +1983,39 @@ sanitise_bone_lengths(struct gm_person *person,
                 float new_length = prev_bone.length;
 
                 gm_debug(ctx->log,
-                         "Bone (%s->%s) average length: %.2f, "
+                         "Bone (%d) average length: %.2f, "
                          "correction: %.2f -> %.2f",
-                         ctx->joint_names[bone_info.head],
-                         ctx->joint_names[bone_info.tail],
+                         bone_info.idx,
                          avg_bone_length, bone.length, new_length);
 
                 glm::vec3 new_tail =
-                    glm::vec3(head.x, head.y, head.z) +
+                    glm::vec3(bone.head[0], bone.head[1], bone.head[2]) +
                     (glm::normalize(
-                         glm::vec3(tail.x - head.x,
-                                   tail.y - head.y,
-                                   tail.z - head.z)) * new_length);
+                         glm::vec3(bone.tail[0] - bone.head[0],
+                                   bone.tail[1] - bone.head[1],
+                                   bone.tail[2] - bone.head[2])) * new_length);
 
-                tail.x = new_tail.x;
-                tail.y = new_tail.y;
-                tail.z = new_tail.z;
+                float offset[3] = {
+                    new_tail.x - bone.tail[0],
+                    new_tail.y - bone.tail[1],
+                    new_tail.z - bone.tail[2]
+                };
 
-                // Refresh bone info now the joint has changed
-                update_bones(ctx, skeleton);
+                bone.tail[0] = new_tail.x;
+                bone.tail[1] = new_tail.y;
+                bone.tail[2] = new_tail.z;
+
+                // Update child bones
+                for (int c = 0; c < bone_info.n_children; ++c) {
+                    int child_idx = bone_info.children[c];
+                    struct gm_bone &child = skeleton.bones[child_idx];
+                    child.head[0] += offset[0];
+                    child.head[1] += offset[1];
+                    child.head[2] += offset[2];
+                }
+
+                // Refresh bone metadata now the bone position has changed
+                update_bone_metadata(ctx, skeleton);
                 break;
             }
         }
@@ -2013,24 +2039,23 @@ sanitise_bone_rotations(struct gm_person *person,
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
 
         // If this bone has no parent bone, we can't correct its angle
-        int parent_bone_idx = bone_info.parent;
-        if (parent_bone_idx < 0)
+        if (bone_info.parent < 0)
             continue;
 
-        struct gm_bone_info &parent_bone_info = ctx->bone_info[parent_bone_idx];
+        struct gm_bone &parent_bone = skeleton.bones[bone_info.parent];
+        struct gm_bone &ref_bone = history[0].skeleton.bones[bone.idx];
 
         // Look at the change of the angle of rotation of each bone in
         // tracking history and compare the average of this to the current
         // change. If it exceeds it by too much, use the last rotation that
         // doesn't exceed this value.
 
-        // Record which bones were derived from valid joints
+        // Record which bones are valid and within the time threshold.
         // If bone-map-annotation is being used, record bones as invalid if
         // their rotation doesn't lie within the annotated rotation constraints.
         bool bone_validity[history.size()];
         for (int i = 0; i < history.size(); ++i) {
-            if (!history[i].skeleton.joints[bone_info.head].valid ||
-                !history[i].skeleton.joints[bone_info.tail].valid ||
+            if (!history[i].skeleton.bones[bone.idx].valid ||
                 history[i].timestamp < time_threshold)
             {
                 bone_validity[i] = false;
@@ -2042,10 +2067,7 @@ sanitise_bone_rotations(struct gm_person *person,
 
         // Find the average rotation change magnitude
         float bone_rots[history.size() - 1];
-        float bone_rot = fabsf(bone_angle_diff(ctx,
-                                               &bone,
-                                               &skeleton,
-                                               &history[0].skeleton));
+        float bone_rot = fabsf(bone_angle_diff(&ref_bone, &bone));
         float avg_bone_rot = bone_rot;
         int n_rots = 1;
         for (int i = 0; i < history.size() - 1; ++i) {
@@ -2055,36 +2077,34 @@ sanitise_bone_rotations(struct gm_person *person,
               continue;
             }
 
-            bone_rots[i] = fabsf(bone_angle_diff(ctx,
-                                                 &bone,
-                                                 &history[i].skeleton,
-                                                 &history[i+1].skeleton));
+            struct gm_bone &history_bone = history[i].skeleton.bones[bone.idx];
+            struct gm_bone &prev_history_bone = history[i+1].skeleton.bones[bone.idx];
+            bone_rots[i] = fabsf(bone_angle_diff(&history_bone,
+                                                 &prev_history_bone));
             gm_assert(ctx->log, !std::isnan(bone_rots[i]),
-                      "Bone (%s->%s) angle diff is NaN "
+                      "Bone (%d) angle diff is NaN "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f) v "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f)",
-                      ctx->joint_names[bone_info.head],
-                      ctx->joint_names[bone_info.tail],
-                      history[i].skeleton.joints[bone_info.head].x,
-                      history[i].skeleton.joints[bone_info.head].y,
-                      history[i].skeleton.joints[bone_info.head].z,
-                      history[i].skeleton.joints[bone_info.tail].x,
-                      history[i].skeleton.joints[bone_info.tail].y,
-                      history[i].skeleton.joints[bone_info.tail].z,
-                      history[i+1].skeleton.joints[bone_info.head].x,
-                      history[i+1].skeleton.joints[bone_info.head].y,
-                      history[i+1].skeleton.joints[bone_info.head].z,
-                      history[i+1].skeleton.joints[bone_info.tail].x,
-                      history[i+1].skeleton.joints[bone_info.tail].y,
-                      history[i+1].skeleton.joints[bone_info.tail].z);
+                      bone.idx,
+                      history_bone.head[0],
+                      history_bone.head[1],
+                      history_bone.head[2],
+                      history_bone.tail[0],
+                      history_bone.tail[1],
+                      history_bone.tail[2],
+                      prev_history_bone.head[0],
+                      prev_history_bone.head[1],
+                      prev_history_bone.head[2],
+                      prev_history_bone.tail[0],
+                      prev_history_bone.tail[1],
+                      prev_history_bone.tail[2]);
             avg_bone_rot += bone_rots[i];
             ++n_rots;
         }
         avg_bone_rot /= n_rots;
 
-        gm_debug(ctx->log, "Bone (%s->%s) average rot-mag: %.2f",
-                 ctx->joint_names[bone_info.head],
-                 ctx->joint_names[bone_info.tail],
+        gm_debug(ctx->log, "Bone (%d) average rot-mag: %.2f",
+                 bone.idx,
                  avg_bone_rot);
 
         float bone_rot_factor = avg_bone_rot *
@@ -2095,10 +2115,9 @@ sanitise_bone_rotations(struct gm_person *person,
                     continue;
                 }
 
-                gm_debug(ctx->log, "Bone (%s->%s) average rot-mag: %.2f, "
+                gm_debug(ctx->log, "Bone (%d) average rot-mag: %.2f, "
                          "correction: %.2f -> %.2f",
-                         ctx->joint_names[bone_info.head],
-                         ctx->joint_names[bone_info.tail],
+                         bone.idx,
                          avg_bone_rot, bone_rot, bone_rots[i]);
 
                 const struct gm_bone *abs_prev_bone =
@@ -2107,24 +2126,36 @@ sanitise_bone_rotations(struct gm_person *person,
                 glm::mat3 rotate = glm::mat3_cast(abs_prev_bone->angle);
 
                 glm::vec3 parent_vec = glm::normalize(
-                    glm::vec3(skeleton.joints[parent_bone_info.tail].x -
-                              skeleton.joints[parent_bone_info.head].x,
-                              skeleton.joints[parent_bone_info.tail].y -
-                              skeleton.joints[parent_bone_info.head].y,
-                              skeleton.joints[parent_bone_info.tail].z -
-                              skeleton.joints[parent_bone_info.head].z));
+                    glm::vec3(parent_bone.tail[0] - parent_bone.head[0],
+                              parent_bone.tail[1] - parent_bone.head[1],
+                              parent_bone.tail[2] - parent_bone.head[2]));
 
                 glm::vec3 new_tail = ((parent_vec * rotate) * bone.length);
-                new_tail.x += skeleton.joints[bone_info.head].x;
-                new_tail.y += skeleton.joints[bone_info.head].y;
-                new_tail.z += skeleton.joints[bone_info.head].z;
+                new_tail.x += bone.head[0];
+                new_tail.y += bone.head[1];
+                new_tail.z += bone.head[2];
 
-                skeleton.joints[bone_info.tail].x = new_tail.x;
-                skeleton.joints[bone_info.tail].y = new_tail.y;
-                skeleton.joints[bone_info.tail].z = new_tail.z;
+                float offset[3] = {
+                    new_tail.x - bone.tail[0],
+                    new_tail.y - bone.tail[1],
+                    new_tail.z - bone.tail[2]
+                };
 
-                // Refresh bone info now the joint has changed
-                update_bones(ctx, skeleton);
+                bone.tail[0] = new_tail.x;
+                bone.tail[1] = new_tail.y;
+                bone.tail[2] = new_tail.z;
+
+                // Update child bones
+                for (int c = 0; c < bone_info.n_children; ++c) {
+                    int child_idx = bone_info.children[c];
+                    struct gm_bone &child = skeleton.bones[child_idx];
+                    child.head[0] += offset[0];
+                    child.head[1] += offset[1];
+                    child.head[2] += offset[2];
+                }
+
+                // Refresh bone metadata now the bone position has changed
+                update_bone_metadata(ctx, skeleton);
                 break;
             }
         }
@@ -5178,32 +5209,50 @@ predict_skeleton_for_history(struct gm_context *ctx,
 
     int n_bones = ctx->n_bones;
 
+    // First, use linear interpolation to fill joint positions
     for (int b = 0; b < n_bones; b++) {
         struct gm_bone &bone = closest_skeleton.bones[b];
         struct gm_bone_info &bone_info = ctx->bone_info[b];
 
         if (!history2.skeleton_corrected.bones[b].valid ||
             !history1.skeleton_corrected.bones[b].valid) {
+            bone.valid = false;
             continue;
         }
 
-        // As a special case; use linear interpolation to place the root bone
-        if (bone_info.parent < 0 || !interpolate_angles)
-        {
+        // Use linear interpolation to fill joint positions
+        for (auto &joint_info : bone_info.head_joints) {
             interpolate_joints(
-                history2.skeleton_corrected.joints[bone_info.head],
-                history1.skeleton_corrected.joints[bone_info.head],
-                t, skeleton.joints[bone_info.head]);
+                  history2.skeleton_corrected.joints[joint_info.index],
+                  history1.skeleton_corrected.joints[joint_info.index],
+                  t, skeleton.joints[joint_info.index]);
+        }
+        for (auto &joint_info : bone_info.tail_joints) {
             interpolate_joints(
-                history2.skeleton_corrected.joints[bone_info.tail],
-                history1.skeleton_corrected.joints[bone_info.tail],
-                t, skeleton.joints[bone_info.tail]);
+                  history2.skeleton_corrected.joints[joint_info.index],
+                  history1.skeleton_corrected.joints[joint_info.index],
+                  t, skeleton.joints[joint_info.index]);
+        }
+    }
+
+    update_bones(ctx, skeleton);
+
+    if (!interpolate_angles) {
+        return skeleton;
+    }
+
+    // Use angle interpolation to get better-looking results for bone
+    // positions.
+    for (auto &bone : skeleton.bones) {
+        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
+
+        if (bone_info.parent < 0 ||
+            !history2.skeleton_corrected.bones[bone.idx].valid ||
+            !history1.skeleton_corrected.bones[bone.idx].valid) {
             continue;
         }
 
         struct gm_bone &parent_bone = closest_skeleton.bones[bone_info.parent];
-        struct gm_bone_info &parent_bone_info = ctx->bone_info[parent_bone.idx];
-
         struct gm_bone &bone1 = history1.skeleton_corrected.bones[bone.idx];
         struct gm_bone &bone2 = history2.skeleton_corrected.bones[bone.idx];
 
@@ -5213,26 +5262,39 @@ predict_skeleton_for_history(struct gm_context *ctx,
         glm::mat3 rotate = glm::mat3_cast(
             glm::slerp(bone2.angle, bone1.angle, t));
 
-        struct gm_joint &parent_head = skeleton.joints[parent_bone_info.head];
-        struct gm_joint &parent_tail = skeleton.joints[parent_bone_info.tail];
-
         glm::vec3 parent_vec = glm::normalize(
-            glm::vec3(parent_tail.x - parent_head.x,
-                      parent_tail.y - parent_head.y,
-                      parent_tail.z - parent_head.z));
+            glm::vec3(parent_bone.tail[0] - parent_bone.head[0],
+                      parent_bone.tail[1] - parent_bone.head[1],
+                      parent_bone.tail[2] - parent_bone.head[2]));
         float length = bone2.length +
             (bone1.length - bone2.length) * t;
         glm::vec3 new_tail = ((parent_vec * rotate) * length);
-        new_tail.x += skeleton.joints[bone_info.head].x;
-        new_tail.y += skeleton.joints[bone_info.head].y;
-        new_tail.z += skeleton.joints[bone_info.head].z;
+        new_tail.x += bone.head[0];
+        new_tail.y += bone.head[1];
+        new_tail.z += bone.head[2];
 
-        skeleton.joints[bone_info.tail].x = new_tail.x;
-        skeleton.joints[bone_info.tail].y = new_tail.y;
-        skeleton.joints[bone_info.tail].z = new_tail.z;
+        float offset[3] = {
+            new_tail.x - bone.tail[0],
+            new_tail.y - bone.tail[1],
+            new_tail.z - bone.tail[2]
+        };
+
+        bone.tail[0] = new_tail.x;
+        bone.tail[1] = new_tail.y;
+        bone.tail[2] = new_tail.z;
+
+        // Update child bones
+        for (int c = 0; c < bone_info.n_children; ++c) {
+            int child_idx = bone_info.children[c];
+            struct gm_bone &child = skeleton.bones[child_idx];
+            child.head[0] += offset[0];
+            child.head[1] += offset[1];
+            child.head[2] += offset[2];
+        }
     }
 
-    update_bones(ctx, skeleton);
+    // Update bone lengths and angles after doing rotation interpolation
+    update_bone_metadata(ctx, skeleton);
 
     return skeleton;
 }
@@ -6963,8 +7025,6 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
         skeleton_history = &ctx->tracked_people.front().history;
     }
 
-    int n_bones = ctx->n_bones;
-
     for (int i = 0; i < skeleton_history->size(); i++) {
         struct skeleton_history &historic = (*skeleton_history)[i];
 
@@ -6978,15 +7038,10 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
             rgba = 0xff0000ff;
         }
 
-        for (int b = 0; b < n_bones; b++) {
-            struct gm_bone_info &bone_info = ctx->bone_info[b];
-
-            struct gm_joint &joint0 = historic.skeleton_corrected.joints[bone_info.head];
-            struct gm_joint &joint1 = historic.skeleton_corrected.joints[bone_info.tail];
-
+        for (auto &bone : historic.skeleton_corrected.bones) {
             tracking_draw_line(tracking,
-                               joint0.x, joint0.y, joint0.z,
-                               joint1.x, joint1.y, joint1.z,
+                               bone.head[0], bone.head[1], bone.head[2],
+                               bone.tail[0], bone.tail[1], bone.tail[2],
                                rgba);
         }
     }
@@ -6994,15 +7049,10 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
     if (ctx->debug_predictions) {
         struct gm_skeleton *skel = gm_prediction_get_skeleton(prediction);
 
-        for (int b = 0; b < n_bones; b++) {
-            struct gm_bone_info &bone_info = ctx->bone_info[b];
-
-            struct gm_joint &joint0 = skel->joints[bone_info.head];
-            struct gm_joint &joint1 = skel->joints[bone_info.tail];
-
+        for (auto &bone : skel->bones) {
             tracking_draw_line(tracking,
-                               joint0.x, joint0.y, joint0.z,
-                               joint1.x, joint1.y, joint1.z,
+                               bone.head[0], bone.head[1], bone.head[2],
+                               bone.tail[0], bone.tail[1], bone.tail[2],
                                0xffffffff);
         }
 
@@ -8610,30 +8660,65 @@ parse_bone_info(struct gm_context *ctx,
                 int bone_parent_idx,
                 char **err)
 {
-    JSON_Object *bone = json_object(bone_value);
-    const char *head_name = json_object_get_string(bone, "head");
-    const char *tail_name = json_object_get_string(bone, "tail");
-
     struct gm_bone_info info = {};
     info.idx = ctx->bone_info.size();
     info.parent = bone_parent_idx;
-    info.head = -1;
-    info.tail = -1;
 
     int n_joints = ctx->n_joints;
-    for (int i = 0; i < n_joints; i++) {
-        if (strcmp(ctx->joint_blender_names[i], head_name) == 0)
-            info.head = i;
-        else if (strcmp(ctx->joint_blender_names[i], tail_name) == 0)
-            info.tail = i;
+    JSON_Object *bone = json_object(bone_value);
 
-        if (info.head > 0 && info.tail > 0)
-            break;
+    if (json_object_has_value_of_type(bone, "heads", JSONArray)) {
+        JSON_Array *array = json_object_get_array(bone, "heads");
+        for (int i = 0; i < json_array_get_count(array); ++i) {
+            JSON_Object *joint_info = json_array_get_object(array, i);
+            const char *head_name = json_object_get_string(joint_info, "name");
+            float weight = json_object_get_number(joint_info, "weight");
+
+            for (int j = 0; j < n_joints; ++j) {
+                if (strcmp(ctx->joint_blender_names[j], head_name) == 0) {
+                    info.head_joints.push_back({j, weight});
+                    break;
+                }
+            }
+        }
+    } else {
+        const char *head_name = json_object_get_string(bone, "head");
+        for (int i = 0; i < n_joints; ++i) {
+            if (strcmp(ctx->joint_blender_names[i], head_name) == 0) {
+                info.head_joints.push_back({i, 1.f});
+                break;
+            }
+        }
     }
-    if (info.head < 0 || info.tail < 0) {
+
+    if (json_object_has_value_of_type(bone, "tails", JSONArray)) {
+        JSON_Array *array = json_object_get_array(bone, "tails");
+        for (int i = 0; i < json_array_get_count(array); ++i) {
+            JSON_Object *joint_info = json_array_get_object(array, i);
+            const char *tail_name = json_object_get_string(joint_info, "name");
+            float weight = json_object_get_number(joint_info, "weight");
+
+            for (int j = 0; j < n_joints; ++j) {
+                if (strcmp(ctx->joint_blender_names[j], tail_name) == 0) {
+                    info.tail_joints.push_back({j, weight});
+                    break;
+                }
+            }
+        }
+    } else {
+        const char *tail_name = json_object_get_string(bone, "tail");
+        for (int i = 0; i < n_joints; ++i) {
+            if (strcmp(ctx->joint_blender_names[i], tail_name) == 0) {
+                info.tail_joints.push_back({i, 1.f});
+                break;
+            }
+        }
+    }
+
+    if (info.head_joints.empty() || info.tail_joints.empty()) {
         gm_throw(ctx->log, err,
-                 "Failed to resolve head (%s) and tail (%s) joints for bone",
-                 head_name, tail_name);
+                 "Failed to resolve head or tail joints for bone %d",
+                 (int)ctx->bone_info.size());
         return false;
     }
 
@@ -11564,14 +11649,28 @@ int
 gm_bone_get_head(struct gm_context *ctx,
                  const struct gm_bone *bone)
 {
-    return ctx->bone_info[bone->idx].head;
+    return ctx->bone_info[bone->idx].head_joints[0].index;
 }
 
 int
 gm_bone_get_tail(struct gm_context *ctx,
                  const struct gm_bone *bone)
 {
-    return ctx->bone_info[bone->idx].tail;
+    return ctx->bone_info[bone->idx].tail_joints[0].index;
+}
+
+const float *
+gm_bone_get_head_position(struct gm_context *ctx,
+                          const struct gm_bone *bone)
+{
+    return (const float *)bone->head;
+}
+
+const float *
+gm_bone_get_tail_position(struct gm_context *ctx,
+                          const struct gm_bone *bone)
+{
+    return (const float *)bone->tail;
 }
 
 float
@@ -11613,7 +11712,6 @@ gm_skeleton_new(struct gm_context *ctx, struct gm_joint *joints)
 
 static void
 resize_bone_and_children(struct gm_context *ctx,
-                         struct gm_skeleton *original_skeleton,
                          struct gm_skeleton *ref_skeleton,
                          struct gm_skeleton *resized_skeleton,
                          int bone_idx)
@@ -11621,12 +11719,9 @@ resize_bone_and_children(struct gm_context *ctx,
     struct gm_bone_info &bone_info = ctx->bone_info[bone_idx];
 
     float length_scale = ref_skeleton->bones[bone_idx].length /
-        original_skeleton->bones[bone_idx].length;
+        resized_skeleton->bones[bone_idx].length;
 
     resized_skeleton->bones[bone_idx].length = ref_skeleton->bones[bone_idx].length;
-
-    struct gm_joint &orig_head = original_skeleton->joints[bone_info.head];
-    struct gm_joint &orig_tail = original_skeleton->joints[bone_info.tail];
 
     // NB: when we modify this tail joint we will also be moving the
     // head of child bones.
@@ -11634,15 +11729,32 @@ resize_bone_and_children(struct gm_context *ctx,
     // We are careful to ignore the relative positions of joints in
     // the skeleton being resized due to this temporarily inconsistent
     // state.
-    struct gm_joint &head = resized_skeleton->joints[bone_info.head];
-    struct gm_joint &tail = resized_skeleton->joints[bone_info.tail];
-    tail.x = head.x + (orig_tail.x - orig_head.x) * length_scale;
-    tail.y = head.y + (orig_tail.y - orig_head.y) * length_scale;
-    tail.z = head.z + (orig_tail.z - orig_head.z) * length_scale;
+    float *head = resized_skeleton->bones[bone_idx].head;
+    float *tail = resized_skeleton->bones[bone_idx].tail;
+
+    float new_tail[3] = {
+        head[0] + (tail[0] - head[0]) * length_scale,
+        head[1] + (tail[1] - head[1]) * length_scale,
+        head[2] + (tail[2] - head[2]) * length_scale
+    };
+
+    float offset[3] = {
+        new_tail[0] - tail[0],
+        new_tail[1] - tail[1],
+        new_tail[2] - tail[2]
+    };
+
+    tail[0] = new_tail[0];
+    tail[1] = new_tail[1];
+    tail[2] = new_tail[2];
 
     for (int i = 0; i < bone_info.n_children; i++) {
+        int child_idx = bone_info.children[i];
+        float *child_head = resized_skeleton->bones[child_idx].head;
+        child_head[0] += offset[0];
+        child_head[1] += offset[1];
+        child_head[2] += offset[2];
         resize_bone_and_children(ctx,
-                                 original_skeleton,
                                  ref_skeleton,
                                  resized_skeleton,
                                  bone_info.children[i]);
@@ -11675,7 +11787,6 @@ gm_skeleton_resize(struct gm_context *ctx,
               "Expected the first bone to be the root bone");
 
     resize_bone_and_children(ctx,
-                             skeleton,
                              ref_skeleton,
                              resized,
                              0); // root bone index
@@ -11684,24 +11795,58 @@ gm_skeleton_resize(struct gm_context *ctx,
     // the resize so now just translate the resized skeleton so it's anchor
     // joint matches the ref_skeleton's corresponding anchor joint
 
-    struct gm_joint &ref_anchor_joint = ref_skeleton->joints[anchor_joint_idx];
-    struct gm_joint &resized_anchor_joint = resized->joints[anchor_joint_idx];
-    float anchor_delta[3] = {
-        ref_anchor_joint.x - resized_anchor_joint.x,
-        ref_anchor_joint.y - resized_anchor_joint.y,
-        ref_anchor_joint.z - resized_anchor_joint.z,
-    };
+    // Find the first bone that includes the anchor joint and use that bone's
+    // corresponding position.
+    int n_bones = ctx->n_bones;
+    for (int b = 0; b < n_bones; ++b) {
+        if (!ref_skeleton->bones[b].valid || !skeleton->bones[b].valid) {
+            continue;
+        }
 
-    int n_joints = ctx->n_joints;
-    for (int i = 0; i < n_joints; i++) {
-        struct gm_joint &joint = resized->joints[i];
+        struct gm_bone_info &bone_info = ctx->bone_info[b];
+        float *ref_position = NULL;
+        float *resized_position = NULL;
 
-        joint.x += anchor_delta[0];
-        joint.y += anchor_delta[1];
-        joint.z += anchor_delta[2];
+        for (auto &joint_info : bone_info.head_joints) {
+            if (joint_info.index == b) {
+                ref_position = ref_skeleton->bones[b].head;
+                resized_position = resized->bones[b].head;
+                break;
+            }
+        }
+        if (!ref_position) {
+            for (auto &joint_info : bone_info.tail_joints) {
+                if (joint_info.index == b) {
+                    ref_position = ref_skeleton->bones[b].tail;
+                    resized_position = resized->bones[b].tail;
+                    break;
+                }
+            }
+        }
+
+        if (!ref_position) {
+            continue;
+        }
+
+        float anchor_delta[3] = {
+            ref_position[0] - resized_position[0],
+            ref_position[1] - resized_position[1],
+            ref_position[2] - resized_position[2]
+        };
+
+        for (auto &bone : resized->bones) {
+            bone.head[0] += anchor_delta[0];
+            bone.head[1] += anchor_delta[1];
+            bone.head[2] += anchor_delta[2];
+            bone.tail[0] += anchor_delta[0];
+            bone.tail[1] += anchor_delta[1];
+            bone.tail[2] += anchor_delta[2];
+        }
+
+        break;
     }
 
-    update_bones(ctx, *resized);
+    update_bone_metadata(ctx, *resized);
 
     return resized;
 }

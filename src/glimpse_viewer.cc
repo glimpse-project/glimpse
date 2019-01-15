@@ -941,15 +941,15 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
         if (bone) {
             int head_idx = gm_bone_get_head(data->ctx, bone);
-            const struct gm_joint *head = gm_skeleton_get_joint(skeleton, head_idx);
+            const float *head = gm_bone_get_head_position(data->ctx, bone);
             int tail_idx = gm_bone_get_tail(data->ctx, bone);
-            const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
+            const float *tail = gm_bone_get_tail_position(data->ctx, bone);
             int pos = data->target_skel_gl.n_bones;
             XYZRGBA head_rgba = {
-                head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
+                head[0], head[1], head[2], LOOP_INDEX(joint_palette, head_idx)
             };
             XYZRGBA tail_rgba = {
-                tail->x, tail->y, tail->z, LOOP_INDEX(joint_palette, tail_idx)
+                tail[0], tail[1], tail[2], LOOP_INDEX(joint_palette, tail_idx)
             };
             colored_bones[pos*2] = head_rgba;
             colored_bones[pos*2+1] = tail_rgba;
@@ -1023,17 +1023,15 @@ update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t times
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
         if (bone) {
             int head_idx = gm_bone_get_head(data->ctx, bone);
-            const struct gm_joint *head = gm_skeleton_get_joint(skeleton, head_idx);
+            const float *head = gm_bone_get_head_position(data->ctx, bone);
             int tail_idx = gm_bone_get_tail(data->ctx, bone);
-            const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
-            gm_assert(data->log, head && tail, "Valid bone with invalid joints!");
-
+            const float *tail = gm_bone_get_tail_position(data->ctx, bone);
             int pos = skel_gl->n_bones;
             XYZRGBA head_rgba = {
-                head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
+                head[0], head[1], head[2], LOOP_INDEX(joint_palette, head_idx)
             };
             XYZRGBA tail_rgba = {
-                tail->x, tail->y, tail->z, LOOP_INDEX(joint_palette, tail_idx)
+                tail[0], tail[1], tail[2], LOOP_INDEX(joint_palette, tail_idx)
             };
             colored_bones[pos*2] = head_rgba;
             colored_bones[pos*2+1] = tail_rgba;
