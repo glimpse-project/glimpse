@@ -427,6 +427,9 @@ gm_context_get_joint_name(struct gm_context *ctx, int joint_id);
 const enum gm_joint_semantic
 gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id);
 
+const char *
+gm_context_get_bone_name(struct gm_context *ctx, int bone_id);
+
 void
 gm_context_set_max_depth_pixels(struct gm_context *ctx, int max_pixels);
 

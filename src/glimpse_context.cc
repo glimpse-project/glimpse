@@ -392,6 +392,7 @@ struct bone_joint
 struct gm_bone_info
 {
     int idx; // For indexing into ctx->bone_info[]
+    char *name;
 
     int parent; // parent bone index
     int children[MAX_BONE_CHILDREN];
@@ -1983,9 +1984,9 @@ sanitise_bone_lengths(struct gm_person *person,
                 float new_length = prev_bone.length;
 
                 gm_debug(ctx->log,
-                         "Bone (%d) average length: %.2f, "
+                         "Bone (%s) average length: %.2f, "
                          "correction: %.2f -> %.2f",
-                         bone_info.idx,
+                         gm_context_get_bone_name(ctx, bone_info.idx),
                          avg_bone_length, bone.length, new_length);
 
                 glm::vec3 new_tail =
@@ -2082,10 +2083,10 @@ sanitise_bone_rotations(struct gm_person *person,
             bone_rots[i] = fabsf(bone_angle_diff(&history_bone,
                                                  &prev_history_bone));
             gm_assert(ctx->log, !std::isnan(bone_rots[i]),
-                      "Bone (%d) angle diff is NaN "
+                      "Bone (%s) angle diff is NaN "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f) v "
                       "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f)",
-                      bone.idx,
+                      gm_context_get_bone_name(ctx, bone.idx),
                       history_bone.head[0],
                       history_bone.head[1],
                       history_bone.head[2],
@@ -2103,8 +2104,8 @@ sanitise_bone_rotations(struct gm_person *person,
         }
         avg_bone_rot /= n_rots;
 
-        gm_debug(ctx->log, "Bone (%d) average rot-mag: %.2f",
-                 bone.idx,
+        gm_debug(ctx->log, "Bone (%s) average rot-mag: %.2f",
+                 gm_context_get_bone_name(ctx, bone.idx),
                  avg_bone_rot);
 
         float bone_rot_factor = avg_bone_rot *
@@ -2115,9 +2116,9 @@ sanitise_bone_rotations(struct gm_person *person,
                     continue;
                 }
 
-                gm_debug(ctx->log, "Bone (%d) average rot-mag: %.2f, "
+                gm_debug(ctx->log, "Bone (%s) average rot-mag: %.2f, "
                          "correction: %.2f -> %.2f",
-                         bone.idx,
+                         gm_context_get_bone_name(ctx, bone.idx),
                          avg_bone_rot, bone_rot, bone_rots[i]);
 
                 const struct gm_bone *abs_prev_bone =
@@ -8651,6 +8652,10 @@ gm_context_destroy(struct gm_context *ctx)
         ctx->label_map = NULL;
     }
 
+    for (auto &bone_info : ctx->bone_info) {
+        free(bone_info.name);
+    }
+
     delete ctx;
 }
 
@@ -8666,6 +8671,12 @@ parse_bone_info(struct gm_context *ctx,
 
     int n_joints = ctx->n_joints;
     JSON_Object *bone = json_object(bone_value);
+
+    if (json_object_has_value_of_type(bone, "name", JSONString)) {
+        info.name = strdup(json_object_get_string(bone, "name"));
+    } else {
+        info.name = strdup("Unnamed");
+    }
 
     if (json_object_has_value_of_type(bone, "heads", JSONArray)) {
         JSON_Array *array = json_object_get_array(bone, "heads");
@@ -10936,6 +10947,15 @@ gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id)
               "Invalid joint index");
 
     return ctx->joint_semantics[joint_id];
+}
+
+const char *
+gm_context_get_bone_name(struct gm_context *ctx, int bone_id)
+{
+    gm_assert(ctx->log, bone_id >= 0 && bone_id < ctx->bone_info.size(),
+              "Invalid bone index");
+
+    return ctx->bone_info[bone_id].name;
 }
 
 /* Note this may be called via any arbitrary thread
