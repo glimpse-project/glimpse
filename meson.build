@@ -514,6 +514,8 @@ executable('depth2labels',
 
 executable('recordings-tool',
            [ 'src/recordings-tool.cc' ] + client_api_src,
+           c_args: client_api_defines,
+           cpp_args: client_api_defines,
            include_directories: inc,
            dependencies: client_api_deps)
 
