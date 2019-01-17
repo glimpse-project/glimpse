@@ -44,6 +44,13 @@
 #include <libfreenect_registration.h>
 #endif
 
+#ifdef USE_REALSENSE
+#include <librealsense2/rs.h>
+#include <librealsense2/h/rs_pipeline.h>
+#include <librealsense2/h/rs_option.h>
+#include <librealsense2/h/rs_frame.h>
+#endif
+
 #ifdef __ANDROID__
 #include <jni.h>
 #include <android/log.h>
@@ -90,7 +97,7 @@
 #endif
 
 #define xsnprintf(dest, n, fmt, ...) do { \
-        if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
+        if (snprintf(dest, n, fmt,  ##__VA_ARGS__) >= (int)(n)) \
             exit(1); \
     } while(0)
 
@@ -228,6 +235,22 @@ struct gm_device
         struct {
             struct ios_av_session *session;
         } avf;
+#endif
+
+#ifdef USE_REALSENSE
+        struct {
+            // set/unset by open/close...
+            rs2_context *ctx;
+
+            // set/unset by _configure...
+            rs2_pipeline *pipeline;
+            rs2_config *config;
+            float depth_scale;
+
+            // set/unset by start/stop...
+            rs2_pipeline_profile* pipeline_profile;
+            rs2_device *dev;
+        } realsense;
 #endif
     };
 
@@ -559,6 +582,7 @@ device_video_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         break;
     case GM_DEVICE_TANGO:
     case GM_DEVICE_KINECT:
+    case GM_DEVICE_REALSENSE:
         /* Allocated large enough for RGB data */
         buf->base.len = dev->max_video_pixels * 3;
         break;
@@ -621,6 +645,10 @@ device_depth_buf_alloc(struct gm_mem_pool *pool, void *user_data)
         /* Allocated large enough for _U16_MM data */
         buf->base.len = dev->max_depth_pixels * 2;
         break;
+    case GM_DEVICE_REALSENSE:
+        /* Allocated large enough for _U16_MM data */
+        buf->base.len = dev->max_depth_pixels * 2;
+        break;
     }
     buf->base.data = xmalloc(buf->base.len);
 
@@ -668,6 +696,14 @@ maybe_notify_frame_locked(struct gm_device *dev)
     }
 }
 
+static void
+notify_device_ready(struct gm_device *dev)
+{
+    struct gm_device_event *event = device_event_alloc(dev, GM_DEV_EVENT_READY);
+
+    dev->event_callback(event, dev->callback_data);
+}
+
 static enum gm_rotation
 calc_frame_rotation(struct gm_device *dev,
                     enum gm_rotation device_rotation)
@@ -701,7 +737,6 @@ kinect_depth_frame_cb(freenect_device *fdev, void *depth, uint32_t timestamp)
 
         dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
 
-        /* XXX: assuming that the kinect is stationary.... */
         dev->frame_gravity_valid = true;
         dev->frame_gravity[0] = dev->kinect.accel[0];
         dev->frame_gravity[1] = dev->kinect.accel[1];
@@ -795,16 +830,14 @@ kinect_open(struct gm_device *dev, const struct gm_device_config *config,
     dev->kinect.phys_tilt = freenect_get_tilt_degs(tilt_state);
     dev->kinect.req_tilt = dev->kinect.phys_tilt;
 
-    /* libfreenect doesn't give us a way to query camera intrinsics so just
-     * using these random/plausible intrinsics found on the internet to avoid
-     * manually calibrating for now :)
-     */
     dev->depth_format = GM_FORMAT_Z_U16_MM;
     dev->max_depth_pixels = 640 * 480;
     dev->depth_intrinsics.width = 640;
     dev->depth_intrinsics.height = 480;
     dev->depth_intrinsics.cx = dev->kinect.registration.reg_info.cx / 2; // for 1280 x 720
     dev->depth_intrinsics.cx = dev->kinect.registration.reg_info.cy / 2; // for 1280 x 720
+
+    /* FIXME: derive from the device-reported intrinsics... */
     dev->depth_intrinsics.fx = 594.21434211923247;
     dev->depth_intrinsics.fy = 591.04053696870778;
     dev->depth_intrinsics.distortion_model = GM_DISTORTION_NONE;
@@ -829,44 +862,6 @@ kinect_open(struct gm_device *dev, const struct gm_device_config *config,
     dev->depth_to_video_extrinsics.translation[0] = 0.f;
     dev->depth_to_video_extrinsics.translation[1] = 0.f;
     dev->depth_to_video_extrinsics.translation[2] = 0.f;
-
-    /* Alternative video intrinsics/extrinsics when not using registered mode.
-     * Note, these unfortunately don't actually work.
-     */
-#if 0
-    dev->video_intrinsics.width = 640;
-    dev->video_intrinsics.height = 480;
-    dev->video_intrinsics.cx = 328.94272028759258;
-    dev->video_intrinsics.cy = 267.48068171871557;
-    dev->video_intrinsics.fx = 529.21508098293293;
-    dev->video_intrinsics.fy = 525.56393630057437;
-
-    dev->depth_to_video_extrinsics.rotation[0] = 0.99984628826577793;
-    dev->depth_to_video_extrinsics.rotation[1] = 0.0012635359098409581;
-    dev->depth_to_video_extrinsics.rotation[2] = -0.017487233004436643;
-    dev->depth_to_video_extrinsics.rotation[3] = -0.0014779096108364480;
-    dev->depth_to_video_extrinsics.rotation[4] = 0.99992385683542895;
-    dev->depth_to_video_extrinsics.rotation[5] = -0.012251380107679535;
-    dev->depth_to_video_extrinsics.rotation[6] = 0.017470421412464927;
-    dev->depth_to_video_extrinsics.rotation[7] = 0.012275341476520762;
-    dev->depth_to_video_extrinsics.rotation[8] = 0.99977202419716948;
-
-    dev->depth_to_video_extrinsics.translation[0] = 0.019985242312092553;
-    dev->depth_to_video_extrinsics.translation[1] = -0.00074423738761617583;
-    dev->depth_to_video_extrinsics.translation[2] = -0.010916736334336222;
-#endif
-
-    /* Some alternative intrinsics
-     *
-     * TODO: we should allow explicit calibrarion and loading these at runtime
-     */
-#if 0
-    dev->depth_intrinsics.cx = 322.515987;
-    dev->depth_intrinsics.cy = 259.055966;
-    dev->depth_intrinsics.fx = 521.179233;
-    dev->depth_intrinsics.fy = 493.033034;
-
-#endif
 
     freenect_set_video_callback(dev->kinect.fdev, kinect_rgb_frame_cb);
     freenect_set_video_mode(dev->kinect.fdev,
@@ -1034,6 +1029,646 @@ kinect_stop(struct gm_device *dev)
     }
 }
 #endif // USE_FREENECT
+
+#ifdef USE_REALSENSE
+static void
+realsense_frame_cb(rs2_frame *composite, void *user_data)
+{
+    struct gm_device *dev = (struct gm_device *)user_data;
+    rs2_error *rs_err = NULL;
+    bool new_buffers = false;
+
+#define continue_on_rs_error_with_cleanup(code, fmt, ...) \
+    ({ \
+        if (rs_err) { \
+            gm_error(dev->log, fmt, ##__VA_ARGS__); \
+            code; \
+            rs2_free_error(rs_err); \
+            rs_err = NULL; \
+            continue; \
+        } \
+    })
+#define continue_on_rs_error(fmt, ...) \
+    continue_on_rs_error_with_cleanup(({}), fmt, ##__VA_ARGS__)
+
+    gm_info(dev->log, "RealSense frame callback");
+
+    /* XXX: Can we unconditionally query the frame count and iterate frames
+     * like this or do we have to check we have a composite frame first?
+     */
+    int n_frames = rs2_embedded_frames_count(composite, &rs_err);
+    for (int i = 0; i < n_frames; i++)
+    {
+        rs2_frame *frame = rs2_extract_frame(composite, i, &rs_err);
+        continue_on_rs_error("Failed to extract composite frame %d: %s",
+                             i, rs2_get_error_message(rs_err));
+
+        bool is_video = false;
+        bool is_depth = rs2_is_frame_extendable_to(frame, RS2_EXTENSION_DEPTH_FRAME, &rs_err);
+        if (!rs_err && !is_depth)
+            is_video = rs2_is_frame_extendable_to(frame, RS2_EXTENSION_VIDEO_FRAME, &rs_err);
+        continue_on_rs_error("Failed to query frame type: %s",
+                             rs2_get_error_message(rs_err));
+
+        if (is_depth)
+        {
+            if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_DEPTH)) {
+                rs2_release_frame(frame);
+                continue;
+            }
+
+            //uint64_t frame_time = gm_os_get_time();
+            uint64_t frame_time = (uint64_t)(rs2_get_frame_timestamp(frame, &rs_err) * 1e6);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame timestamp: %s",
+                rs2_get_error_message(rs_err));
+
+            //int width = rs2_get_frame_width(frame);
+            int height = rs2_get_frame_height(frame, &rs_err);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame height: %s",
+                rs2_get_error_message(rs_err));
+
+            int stride_bytes = rs2_get_frame_stride_in_bytes(frame, &rs_err);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame stride: %s",
+                rs2_get_error_message(rs_err));
+
+            const void *frame_data = rs2_get_frame_data(frame, &rs_err);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame data: %s",
+                rs2_get_error_message(rs_err));
+
+            struct gm_device_buffer *depth_buf_back =
+                mem_pool_acquire_buffer(dev->depth_buf_pool, "realsense depth");
+            memcpy(depth_buf_back->base.data,
+                   frame_data, height * stride_bytes);
+
+            std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
+
+            /* XXX: librealsense (and libuvc) doesn't support user allocated
+             * frame storage so we're forced to copy the contents of the
+             * frame before we return if we don't want to handle the processing
+             * synchronously (we don't) and want to manage the (ref-counted)
+             * lifetime of glimpse framebuffers ourselves.
+             *
+             * Note: it looks like it would at least be quite easy to extend
+             * libuvc to allow externally allocated framebuffers, but I'm
+             * not sure about the corresponding librealsense changes.
+             */
+
+            struct gm_device_buffer *old = dev->depth_buf_ready;
+            dev->depth_buf_ready = depth_buf_back;
+            dev->frame_time = frame_time;
+            dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_DEPTH;
+            dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
+
+            gm_debug(dev->log, "realsense_frame_cb depth ready = %p", dev->depth_buf_ready);
+
+            if (old)
+                gm_buffer_unref(&old->base);
+
+            new_buffers = true;
+        }
+        else if (is_video)
+        {
+            if (!(dev->frame_request_buffers_mask & GM_REQUEST_FRAME_VIDEO)) {
+                rs2_release_frame(frame);
+                continue;
+            }
+
+            //uint64_t frame_time = gm_os_get_time();
+            uint64_t frame_time = (uint64_t)(rs2_get_frame_timestamp(frame, &rs_err) * 1e6);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame timestamp: %s",
+                rs2_get_error_message(rs_err));
+
+            //int width = rs2_get_frame_width(frame);
+            int height = rs2_get_frame_height(frame, &rs_err);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame height: %s",
+                rs2_get_error_message(rs_err));
+
+            int stride_bytes = rs2_get_frame_stride_in_bytes(frame, &rs_err);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame stride: %s",
+                rs2_get_error_message(rs_err));
+
+            const void *frame_data = rs2_get_frame_data(frame, &rs_err);
+            continue_on_rs_error_with_cleanup(
+                ({ rs2_release_frame(frame); }),
+                "Failed to query frame data: %s",
+                rs2_get_error_message(rs_err));
+
+            struct gm_device_buffer *video_buf_back =
+                mem_pool_acquire_buffer(dev->video_buf_pool, "realsense video");
+            memcpy(video_buf_back->base.data,
+                   frame_data, height * stride_bytes);
+
+            std::lock_guard<std::mutex> scope_lock(dev->swap_buffers_lock);
+
+            /* XXX: librealsense (and libuvc) doesn't support user allocated
+             * frame storage so we're forced to copy the contents of the
+             * frame before we return if we don't want to handle the processing
+             * synchronously (we don't) and want to manage the (ref-counted)
+             * lifetime of glimpse framebuffers ourselves.
+             *
+             * Note: it looks like it would at least be quite easy to extend
+             * libuvc to allow externally allocated framebuffers, but I'm
+             * not sure about the corresponding librealsense changes.
+             */
+
+            struct gm_device_buffer *old = dev->video_buf_ready;
+            dev->video_buf_ready = video_buf_back;
+            dev->frame_time = frame_time;
+            dev->frame_ready_buffers_mask |= GM_REQUEST_FRAME_VIDEO;
+            dev->frame_rotation = calc_frame_rotation(dev, GM_ROTATION_0);
+
+            gm_debug(dev->log, "realsense_frame_cb video ready = %p", dev->video_buf_ready);
+
+            if (old)
+                gm_buffer_unref(&old->base);
+
+            new_buffers = true;
+        }
+
+        rs2_release_frame(frame);
+    }
+
+    if (new_buffers) {
+        std::lock_guard<std::mutex> scope_lock(dev->request_buffers_mask_lock);
+        maybe_notify_frame_locked(dev);
+    }
+
+    rs2_release_frame(composite);
+
+#undef continue_on_rs_error
+#undef continue_on_rs_error_with_cleanup
+}
+
+static void
+_realsense_unconfigure(struct gm_device *dev)
+{
+    if (dev->realsense.config) {
+        rs2_delete_config(dev->realsense.config);
+        dev->realsense.config = NULL;
+    }
+    if (dev->realsense.pipeline) {
+        rs2_delete_pipeline(dev->realsense.pipeline);
+        dev->realsense.pipeline = NULL;
+    }
+}
+
+static void
+realsense_close(struct gm_device *dev)
+{
+    gm_assert(dev->log, dev->realsense.pipeline_profile == NULL,
+              "Starting RealSense device while we still have a pipeline profile reference");
+
+    _realsense_unconfigure(dev);
+
+    if (dev->realsense.ctx) {
+        rs2_delete_context(dev->realsense.ctx);
+        dev->realsense.ctx = NULL;
+    }
+}
+
+static bool
+realsense_open(struct gm_device *dev,
+               const struct gm_device_config *config,
+               char **err)
+{
+#define raise_rs_error_with_cleanup(code, fmt, ...) ({ \
+        if (rs_err) { \
+            gm_throw(dev->log, err, fmt, ##__VA_ARGS__); \
+            code; \
+            realsense_close(dev); \
+            rs2_free_error(rs_err); \
+            return false; \
+        } \
+    })
+#define raise_rs_error(fmt, ...) \
+    raise_rs_error_with_cleanup(({}), fmt, ##__VA_ARGS__)
+
+    rs2_error *rs_err = NULL;
+
+    dev->realsense.ctx = rs2_create_context(RS2_API_VERSION, &rs_err);
+    raise_rs_error("Failed to create librealsense context: %s",
+                   rs2_get_error_message(rs_err));
+
+    rs2_device_list *device_list = rs2_query_devices(dev->realsense.ctx, &rs_err);
+    raise_rs_error("Failed to query a list of RealSense devices: %s",
+                   rs2_get_error_message(rs_err));
+
+    int dev_count = rs2_get_device_count(device_list, &rs_err);
+    raise_rs_error_with_cleanup(({ rs2_delete_device_list(device_list); }),
+                                "Failed to determine RealSense device count: %s",
+                                rs2_get_error_message(rs_err));
+    rs2_delete_device_list(device_list);
+
+    if (!dev_count) {
+        gm_throw(dev->log, err, "Failed to find any RealSense devices");
+        realsense_close(dev);
+        return false;
+    }
+
+    return true;
+
+#undef raise_rs_error
+#undef raise_rs_error_with_cleanup
+}
+
+static void
+init_intrinsics_from_realsense(struct gm_intrinsics *intrinsics,
+                               const rs2_intrinsics *rs_intrinsics)
+{
+    intrinsics->width = rs_intrinsics->width;
+    intrinsics->height = rs_intrinsics->height;
+    intrinsics->fx = rs_intrinsics->fx;
+    intrinsics->fy = rs_intrinsics->fy;
+    intrinsics->cx = rs_intrinsics->ppx;
+    intrinsics->cy = rs_intrinsics->ppy;
+
+    switch (rs_intrinsics->model) {
+    case RS2_DISTORTION_NONE:
+        intrinsics->distortion_model =
+            GM_DISTORTION_NONE;
+        break;
+    case RS2_DISTORTION_MODIFIED_BROWN_CONRADY:
+        // TODO: check the details
+        intrinsics->distortion_model =
+            GM_DISTORTION_BROWN_K1_K2_P1_P2_K3;
+        break;
+    case RS2_DISTORTION_INVERSE_BROWN_CONRADY:
+        // TODO: check the details
+        intrinsics->distortion_model =
+            GM_DISTORTION_BROWN_K1_K2_P1_P2_K3;
+        break;
+    case RS2_DISTORTION_FTHETA:
+        intrinsics->distortion_model =
+            GM_DISTORTION_FOV_MODEL;
+        break;
+    case RS2_DISTORTION_BROWN_CONRADY:
+        // TODO: check the details
+        intrinsics->distortion_model =
+            GM_DISTORTION_BROWN_K1_K2_P1_P2_K3;
+        break;
+
+    case RS2_DISTORTION_COUNT:
+        break;
+    }
+
+    for (int i = 0; i < 5; i++)
+        intrinsics->distortion[i] = rs_intrinsics->coeffs[i];
+}
+
+static float
+_realsense_device_get_depth_units(struct gm_logger *log,
+                                  const rs2_device* const dev,
+                                  char **err)
+{
+#define raise_rs_error_with_cleanup(code) ({ \
+        if (rs_err) { \
+            gm_throw(log, err, "Failed to query RealSense depth scale factor: %s", \
+                     rs2_get_error_message(rs_err)); \
+            code; \
+            return 0; \
+        } \
+        })
+#define raise_rs_error() \
+    raise_rs_error_with_cleanup(({}))
+
+    rs2_error *rs_err = NULL;
+    float depth_scale = 0;
+
+    rs2_sensor_list *sensors = rs2_query_sensors(dev, &rs_err);
+    raise_rs_error();
+
+    int n_sensors = rs2_get_sensors_count(sensors, &rs_err);
+    raise_rs_error_with_cleanup( ({ rs2_delete_sensor_list(sensors); }) );
+
+    for (int i = 0; i < n_sensors; i++) {
+        bool found = false;
+        rs2_sensor *sensor = rs2_create_sensor(sensors, i, &rs_err);
+        raise_rs_error_with_cleanup( ({ rs2_delete_sensor_list(sensors); }) );
+
+        found = rs2_is_sensor_extendable_to(sensor, RS2_EXTENSION_DEPTH_SENSOR, &rs_err);
+        raise_rs_error_with_cleanup( ({
+            rs2_delete_sensor(sensor);
+            rs2_delete_sensor_list(sensors);
+        }) );
+
+        if (found) {
+            depth_scale = rs2_get_option((const rs2_options*)sensor,
+                                         RS2_OPTION_DEPTH_UNITS, &rs_err);
+            rs2_delete_sensor(sensor);
+            raise_rs_error_with_cleanup( ({ rs2_delete_sensor_list(sensors); }) );
+            break;
+        }
+        rs2_delete_sensor(sensor);
+    }
+    rs2_delete_sensor_list(sensors);
+
+    return depth_scale;
+
+#undef raise_rs_error
+#undef raise_rs_error_with_cleanup
+}
+
+static bool
+realsense_configure(struct gm_device *dev, char **err)
+{
+#define raise_rs_error_with_cleanup(code, fmt, ...) ({ \
+        if (rs_err) { \
+            gm_throw(dev->log, err, fmt, ##__VA_ARGS__); \
+            code; \
+            _realsense_unconfigure(dev); \
+            rs2_free_error(rs_err); \
+            return false; \
+        } \
+    })
+#define raise_rs_error(fmt, ...) \
+    raise_rs_error_with_cleanup(({}), fmt, ##__VA_ARGS__)
+
+    rs2_error *rs_err = NULL;
+
+    gm_debug(dev->log, "RealSense Device Configure");
+
+    dev->realsense.pipeline = rs2_create_pipeline(dev->realsense.ctx, &rs_err);
+    raise_rs_error("Failed to create default RealSense pipeline: %s",
+                   rs2_get_error_message(rs_err));
+
+    dev->realsense.config = rs2_create_config(&rs_err);
+    raise_rs_error("Failed to create RealSense pipeline config: %s",
+                   rs2_get_error_message(rs_err));
+
+
+    {
+        rs2_device_list *device_list = rs2_query_devices(dev->realsense.ctx, &rs_err);
+        raise_rs_error("Failed to query a list of RealSense devices: %s",
+                       rs2_get_error_message(rs_err));
+
+        int dev_count = rs2_get_device_count(device_list, &rs_err);
+        raise_rs_error_with_cleanup(({ rs2_delete_device_list(device_list); }),
+                                    "Failed to determine RealSense device count: %s",
+                                    rs2_get_error_message(rs_err));
+        if (!dev_count) {
+            gm_throw(dev->log, err, "No RealSense devices found");
+            rs2_delete_device_list(device_list);
+            return false;
+        }
+
+        rs2_device *rs_dev = rs2_create_device(device_list, 0, &rs_err);
+        raise_rs_error_with_cleanup(({ rs2_delete_device_list(device_list); }),
+                                    "Failed to init first RealSense device: %s",
+                                    rs2_get_error_message(rs_err));
+        const char *serial = rs2_get_device_info(rs_dev, RS2_CAMERA_INFO_SERIAL_NUMBER, &rs_err);
+        raise_rs_error_with_cleanup(({
+                                        rs2_delete_device(rs_dev);
+                                        rs2_delete_device_list(device_list);
+                                     }),
+                                    "Failed to init first RealSense device: %s",
+                                    rs2_get_error_message(rs_err));
+
+        rs2_config_enable_device(dev->realsense.config,
+                                 serial,
+                                 &rs_err);
+
+        dev->realsense.depth_scale = _realsense_device_get_depth_units(dev->log,
+                                                                       rs_dev,
+                                                                       err);
+        if (!dev->realsense.depth_scale) {
+            rs2_delete_device(rs_dev);
+            rs2_delete_device_list(device_list);
+            return false;
+        }
+        gm_info(dev->log, "RealSense depth scale factor = %f",
+                dev->realsense.depth_scale);
+        gm_assert(dev->log,
+                  (dev->realsense.depth_scale > 0.001 - 1e-6 &&
+                   dev->realsense.depth_scale < 0.001 + 1e-6),
+                  "TODO: support non-millimeter RealSense depth units (to-meters-scale = %f)",
+                  dev->realsense.depth_scale);
+
+        // XXX: we wait until we've used the serial number string since it's
+        // not documented if the lifetime of that string might be tied to
+        // the lifetime of the rs2_device that was queried.
+        rs2_delete_device(rs_dev);
+        rs_dev = NULL;
+        rs2_delete_device_list(device_list);
+        device_list = NULL;
+
+        raise_rs_error("Failed to enable device on RealSense pipeline config: %s",
+                       rs2_get_error_message(rs_err));
+    }
+
+
+    // XXX: librealsense reports a scale factor that needs to be used to scale
+    // 16bit depth values into meters - and I guess it's not just 1e-3
+    dev->depth_format = GM_FORMAT_Z_U16_MM;
+    dev->max_depth_pixels = 640 * 480;
+    rs2_config_enable_stream(dev->realsense.config,
+                             RS2_STREAM_DEPTH,
+                             0, // stream index,
+                             640,
+                             480,
+                             RS2_FORMAT_Z16,
+                             30, // fps
+                             &rs_err);
+    raise_rs_error("Failed to enable depth stream on RealSense pipeline config: %s",
+                   rs2_get_error_message(rs_err));
+
+    dev->video_format = GM_FORMAT_RGB_U8;
+    dev->max_video_pixels = 640 * 480;
+    rs2_config_enable_stream(dev->realsense.config,
+                             RS2_STREAM_COLOR,
+                             0, // stream index,
+                             640,
+                             480,
+                             RS2_FORMAT_RGB8,
+                             30, // fps
+                             &rs_err);
+    raise_rs_error("Failed to enable video stream on RealSense pipeline config: %s",
+                   rs2_get_error_message(rs_err));
+
+    rs2_pipeline_profile *pipeline_profile =
+        rs2_config_resolve(dev->realsense.config, dev->realsense.pipeline, &rs_err);
+    raise_rs_error("Failed to resolve RealSense pipeline config: %s",
+                   rs2_get_error_message(rs_err));
+    if (!pipeline_profile) {
+        gm_throw(dev->log, err, "Failed to resolve any RealSense pipeline config");
+        return false;
+    }
+
+    rs2_stream_profile_list *profile_list =
+        rs2_pipeline_profile_get_streams(pipeline_profile,
+                                         &rs_err);
+
+    // librealsense2 docs don't clarify lifetime requirements for the profile
+    // list but hopefully it's ok to release the pipeline_profile that we
+    // don't need anymore...
+    rs2_delete_pipeline_profile(pipeline_profile);
+    pipeline_profile = NULL;
+
+    const rs2_stream_profile *depth_stream_profile = NULL;
+    const rs2_stream_profile *video_stream_profile = NULL;
+    int n_profiles = rs2_get_stream_profiles_count(profile_list, &rs_err);
+    gm_info(dev->log, "RealSense pipeline profile has %d stream profiles",
+            n_profiles);
+    for (int i = 0; i < n_profiles; i++) {
+        const rs2_stream_profile *profile =
+            rs2_get_stream_profile(profile_list, i, &rs_err);
+        raise_rs_error_with_cleanup(
+            ({ rs2_delete_stream_profiles_list(profile_list); }),
+            "Failed to query RealSense profile %d from profile list: %s",
+            i, rs2_get_error_message(rs_err));
+
+        rs2_stream stream_type;
+        rs2_format stream_format;
+        int stream_profile_idx;
+        int stream_id;
+        int stream_fps;
+
+        rs2_get_stream_profile_data(profile,
+                                    &stream_type,
+                                    &stream_format,
+                                    &stream_profile_idx,
+                                    &stream_id,
+                                    &stream_fps,
+                                    &rs_err);
+        raise_rs_error_with_cleanup(
+            ({ rs2_delete_stream_profiles_list(profile_list); }),
+            "Failed to query RealSense stream info: %s",
+            rs2_get_error_message(rs_err));
+
+        if (stream_type == RS2_STREAM_DEPTH || stream_type == RS2_STREAM_COLOR) {
+            rs2_intrinsics intrinsics;
+            rs2_get_video_stream_intrinsics(profile,
+                                            &intrinsics,
+                                            &rs_err);
+            raise_rs_error_with_cleanup(
+                ({ rs2_delete_stream_profiles_list(profile_list); }),
+                "Failed to query RealSense video intrinsics: %s",
+                rs2_get_error_message(rs_err));
+
+            gm_assert(dev->log,
+                      intrinsics.width == 640 && intrinsics.height == 480,
+                      "Expected RealSense stream resolution of 640x480");
+
+            if (stream_type == RS2_STREAM_DEPTH) {
+                depth_stream_profile = profile;
+                init_intrinsics_from_realsense(&dev->depth_intrinsics,
+                                               &intrinsics);
+            } else {
+                video_stream_profile = profile;
+                init_intrinsics_from_realsense(&dev->video_intrinsics,
+                                               &intrinsics);
+            }
+        }
+    }
+
+    rs2_delete_stream_profiles_list(profile_list);
+    profile_list = NULL;
+
+    if (!depth_stream_profile) {
+        gm_throw(dev->log, err, "Failed to find depth stream profile");
+        _realsense_unconfigure(dev);
+        return false;
+    }
+    if (!video_stream_profile) {
+        gm_throw(dev->log, err, "Failed to find video stream profile");
+        _realsense_unconfigure(dev);
+        return false;
+    }
+
+    rs2_extrinsics extrinsics;
+    rs2_get_extrinsics(depth_stream_profile,
+                       video_stream_profile,
+                       &extrinsics,
+                       &rs_err);
+    raise_rs_error("Failed to query RealSense depth->video stream extrinsics: %s",
+                   rs2_get_error_message(rs_err));
+
+    static_assert(sizeof(gm_extrinsics) == sizeof(rs2_extrinsics),
+                  "RealSense extrinsics struct doesn't match Glimpse struct");
+    static_assert(sizeof(extrinsics.rotation) == sizeof(float) * 9,
+                  "RealSense extrinsics struct doesn't match Glimpse struct");
+    static_assert(sizeof(extrinsics.translation) == sizeof(float) * 3,
+                  "RealSense extrinsics struct doesn't match Glimpse struct");
+
+    memcpy(&dev->depth_to_video_extrinsics,
+           &extrinsics,
+           sizeof(extrinsics));
+
+    dev->configured = true;
+
+#undef raise_rs_error
+#undef raise_rs_error_with_cleanup
+
+    gm_info(dev->log, "Configured RealSense device");
+
+    notify_device_ready(dev);
+
+    return true;
+}
+
+static void
+realsense_start(struct gm_device *dev)
+{
+    rs2_error *rs_err = NULL;
+
+    gm_assert(dev->log, dev->realsense.pipeline_profile == NULL,
+              "Starting RealSense device while we already have a pipeline profile reference");
+
+    dev->running = true;
+
+    dev->realsense.pipeline_profile =
+        rs2_pipeline_start_with_config_and_callback(dev->realsense.pipeline,
+                                                    dev->realsense.config,
+                                                    realsense_frame_cb,
+                                                    dev, // user data
+                                                    &rs_err);
+    if (rs_err) {
+        gm_error(dev->log, "Error when starting RealSense pipeline: %s",
+                 rs2_get_error_message(rs_err));
+        rs2_free_error(rs_err);
+        rs_err = NULL;
+    }
+}
+
+static void
+realsense_stop(struct gm_device *dev)
+{
+    rs2_error *rs_err = NULL;
+
+    gm_assert(dev->log, dev->realsense.pipeline_profile != NULL,
+              "Stopping RealSense device while we don't have a pipeline profile reference");
+
+    rs2_pipeline_stop(dev->realsense.pipeline, &rs_err);
+    if (rs_err) {
+        gm_error(dev->log, "Error when stopping RealSense pipeline: %s",
+                 rs2_get_error_message(rs_err));
+        rs2_free_error(rs_err);
+        rs_err = NULL;
+
+        /* Nothing obvious we can do in response to a miscellaneous error
+         * here so, just log and plough on...
+         */
+    }
+
+    rs2_delete_pipeline_profile(dev->realsense.pipeline_profile);
+    dev->realsense.pipeline_profile = NULL;
+
+    dev->running = false;
+}
+#endif // USE_REALSENSE
 
 static void
 read_json_intrinsics(JSON_Object *json_intrinsics,
@@ -1862,14 +2497,6 @@ recording_stop(struct gm_device *dev)
         gm_error(dev->log, "Failed to wait for recording IO thread to exit: %s",
                  e.what());
     }
-}
-
-static void
-notify_device_ready(struct gm_device *dev)
-{
-    struct gm_device_event *event = device_event_alloc(dev, GM_DEV_EVENT_READY);
-
-    dev->event_callback(event, dev->callback_data);
 }
 
 #ifdef USE_TANGO
@@ -2892,7 +3519,13 @@ gm_device_open(struct gm_logger *log,
         gm_assert(log, 0, "AVFoundation support not enabled");
 #endif
         break;
-
+    case GM_DEVICE_REALSENSE:
+#ifdef USE_REALSENSE
+        status = realsense_open(dev, config, err);
+#else
+        gm_assert(log, 0, "RealSense support not enabled");
+#endif
+        break;
     }
 
     if (!status) {
@@ -2979,6 +3612,11 @@ gm_device_commit_config(struct gm_device *dev, char **err)
     case GM_DEVICE_AVF_DUAL_BACK:
 #ifdef USE_AVF
         status = avf_configure(dev, err);
+#endif
+        break;
+    case GM_DEVICE_REALSENSE:
+#ifdef USE_REALSENSE
+        status = realsense_configure(dev, err);
 #endif
         break;
     default:
@@ -3092,7 +3730,12 @@ gm_device_close(struct gm_device *dev)
         avf_close(dev);
 #endif
         break;
-
+    case GM_DEVICE_REALSENSE:
+#ifdef USE_REALSENSE
+        gm_debug(dev->log, "Closing RealSense device");
+        realsense_close(dev);
+#endif
+        break;
     }
 
     /* gm_device_stop() should also imply a device_flush()
@@ -3174,6 +3817,11 @@ gm_device_start(struct gm_device *dev)
         avf_start(dev);
 #endif
         break;
+    case GM_DEVICE_REALSENSE:
+#ifdef USE_REALSENSE
+        realsense_start(dev);
+#endif
+        break;
     }
 
 #if TARGET_OS_IOS == 1
@@ -3253,6 +3901,12 @@ gm_device_stop(struct gm_device *dev)
 #ifdef USE_AVF
         gm_debug(dev->log, "avf_stop");
         avf_stop(dev);
+#endif
+        break;
+    case GM_DEVICE_REALSENSE:
+#ifdef USE_REALSENSE
+        gm_debug(dev->log, "realsense_stop");
+        realsense_stop(dev);
 #endif
         break;
     }

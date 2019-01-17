@@ -1,0 +1,4 @@
+[wrap-git]
+directory = librealsense
+url = https://github.com/glimpse-project/librealsense
+revision = c88e2f84a8a859d7c27a06b4a246d2e1e6e3692b

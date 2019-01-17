@@ -176,7 +176,9 @@ if uw_dep.found()
 endif
 
 if platform_pc
-    freenect_dep = dependency('libfreenect', fallback: ['libfreenect', 'fakenect_dep'], required: false)
+    freenect_dep = dependency('libfreenect',
+                              fallback: ['libfreenect', 'fakenect_dep'],
+                              required: false)
     if freenect_dep.found()
         client_api_defines += [ '-DUSE_FREENECT' ]
         client_api_deps += freenect_dep
@@ -184,6 +186,14 @@ if platform_pc
 
     glfw_dep = dependency('glfw3', fallback: [ 'glfw', 'glfw_dep' ], required: false)
     snappy_dep = dependency('snappy', required: false)
+
+    rs_dep = dependency('librealsense',
+                        fallback: ['librealsense', 'rs_dep'],
+                        required: get_option('realsense'))
+    if rs_dep.found()
+        client_api_defines += [ '-DUSE_REALSENSE' ]
+        client_api_deps += rs_dep
+    endif
 endif
 
 imgui_src = [

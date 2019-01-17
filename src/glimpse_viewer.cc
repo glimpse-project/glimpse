@@ -395,11 +395,27 @@ static bool permissions_check_passed;
 
 static const char *log_filename_opt = NULL;
 
-#ifdef USE_FREENECT
-static enum gm_device_type device_type_opt = GM_DEVICE_KINECT;
-#else
-static enum gm_device_type device_type_opt = GM_DEVICE_NULL;
+static enum gm_device_type device_type_options[] = {
+#ifdef USE_TANGO
+    GM_DEVICE_TANGO,
 #endif
+#ifdef USE_AVF
+    GM_DEVICE_AVF_TRUEDEPTH_FRONT,
+    GM_DEVICE_AVF_DUAL_BACK,
+#endif
+#ifdef USE_REALSENSE
+    GM_DEVICE_REALSENSE,
+#endif
+#ifdef USE_KINECT
+    GM_DEVICE_KINECT,
+#endif
+    GM_DEVICE_NULL,
+    // The NULL device can't fail but we want to ensure there are at least two
+    // entries in the array, so when the device type is specified on the
+    // command line this array can be updated to hold
+    // { GM_DEVICE_<TYPE>, GM_DEVICE_NULL }
+    GM_DEVICE_NULL,
+};
 
 static char *device_recording_opt;
 
@@ -3774,70 +3790,64 @@ viewer_init(Data *data)
         free(open_err);
     }
 
-    struct gm_device_config config = {};
-#ifdef USE_TANGO
-    config.type = GM_DEVICE_TANGO;
-#elif TARGET_OS_IOS == 1
-    config.type = GM_DEVICE_AVF_TRUEDEPTH_FRONT;
-    //config.type = GM_DEVICE_AVF_DUAL_BACK;
-#else
-    config.type = device_type_opt;
-    char rec_path[1024];
-    if (config.type == GM_DEVICE_RECORDING) {
-        xsnprintf(rec_path, sizeof(rec_path), "%s/%s",
-                  glimpse_recordings_path, device_recording_opt);
-        config.recording.path = rec_path;
-    }
-#endif
-    char *catch_err = NULL;
-    data->recording_device = gm_device_open(data->log, &config, &catch_err);
-    data->active_device = data->recording_device;
-    if (data->recording_device) {
-        configure_recording_device(data);
-
+    for (int i = 0; i < ARRAY_LEN(device_type_options); i++) {
+        struct gm_device_config config = {};
+        config.type = device_type_options[i];
+        if (config.type == GM_DEVICE_RECORDING) {
+            char rec_path[1024];
+            if (config.type == GM_DEVICE_RECORDING) {
+                xsnprintf(rec_path, sizeof(rec_path), "%s/%s",
+                          glimpse_recordings_path, device_recording_opt);
+                config.recording.path = rec_path;
+            }
+        }
         char *catch_err = NULL;
-        if (!gm_device_commit_config(data->recording_device, &catch_err)) {
-            gm_error(data->log, "Failed to common device config: %s (falling back to opening NULL device)",
+        data->recording_device = gm_device_open(data->log, &config, &catch_err);
+        data->active_device = data->recording_device;
+        if (data->recording_device) {
+            configure_recording_device(data);
+
+            if (!gm_device_commit_config(data->recording_device, &catch_err)) {
+                gm_error(data->log, "Failed to commit device config: %s",
+                         catch_err);
+                free(catch_err);
+                catch_err = NULL;
+
+                gm_device_close(data->recording_device);
+                data->recording_device = nullptr;
+                continue;
+            }
+        } else {
+            gm_error(data->log, "Failed to open device: %s (falling back)",
                      catch_err);
             free(catch_err);
             catch_err = NULL;
-
-            gm_device_close(data->recording_device);
-            data->recording_device = nullptr;
+            continue;
         }
-    } else {
-        gm_error(data->log, "Failed to open device: %s (falling back to opening NULL device)",
-                 catch_err);
-        free(catch_err);
-        catch_err = NULL;
+
+        break;
     }
+
+    // At the very least we should have opened a NULL device.
+    gm_assert(data->log, data->active_device != NULL, "No device was opened");
 
     data->max_recording_io_buf_gb = 0.7;
 
-    if (!data->recording_device) {
-        config.type = GM_DEVICE_NULL;
-        data->recording_device =
-            gm_device_open(data->log, &config, NULL); // abort on error
-        data->active_device = data->recording_device;
-
-        configure_recording_device(data);
-
-        gm_device_commit_config(data->recording_device, NULL); // abort on error
-    }
-
-    if (config.type == GM_DEVICE_TANGO ||
-        config.type == GM_DEVICE_AVF_TRUEDEPTH_FRONT ||
-        config.type == GM_DEVICE_AVF_DUAL_BACK)
-    {
+    switch (gm_device_get_type(data->active_device)) {
+    case GM_DEVICE_TANGO:
+    case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
+    case GM_DEVICE_AVF_DUAL_BACK:
         data->realtime_ar_mode = true;
-    } else {
+    default:
         data->realtime_ar_mode = false;
     }
+
     struct gm_ui_properties *ctx_props =
         gm_context_get_ui_properties(data->ctx);
     gm_prop_set_bool(find_prop(ctx_props, "debug_enable"),
                      !data->realtime_ar_mode);
-    gm_prop_set_enum(find_prop(ctx_props, "debug_stage"), data->current_stage);
+    gm_prop_set_enum(find_prop(ctx_props, "debug_stage"),
+                     data->current_stage);
 
     update_ar_video_queue_len(data, 6);
 
@@ -3885,8 +3895,9 @@ usage(void)
 "Usage glimpse_viewer [options]\n"
 "\n"
 "    -d,--device=DEV            Device type to use\n\n"
+"                               - realsense: An Intel RealSense camera\n"
 "                               - kinect:    Either a Kinect camera or Fakenect\n"
-"                                            recording (default)\n"
+"                                            recording\n"
 "                               - recording: A glimpse_viewer recording (must\n"
 "                                            pass -r/--recording option too)\n"
 "                               - null:      A stub device that doesn't support\n"
@@ -3930,13 +3941,16 @@ parse_args(Data *data, int argc, char **argv)
                 log_filename_opt = strdup(optarg);
                 break;
             case 'd':
-                if (strcmp(optarg, "kinect") == 0)
-                    device_type_opt = GM_DEVICE_KINECT;
-                else if (strcmp(optarg, "recording") == 0)
-                    device_type_opt = GM_DEVICE_RECORDING;
-                else if (strcmp(optarg, "null") == 0)
-                    device_type_opt = GM_DEVICE_NULL;
-                else
+                device_type_options[1] = GM_DEVICE_NULL;
+                if (strcmp(optarg, "realsense") == 0) {
+                    device_type_options[0] = GM_DEVICE_REALSENSE;
+                } else if (strcmp(optarg, "kinect") == 0) {
+                    device_type_options[0] = GM_DEVICE_KINECT;
+                } else if (strcmp(optarg, "recording") == 0) {
+                    device_type_options[0] = GM_DEVICE_RECORDING;
+                } else if (strcmp(optarg, "null") == 0) {
+                    device_type_options[0] = GM_DEVICE_NULL;
+                } else
                     usage();
                 break;
             case 'r':

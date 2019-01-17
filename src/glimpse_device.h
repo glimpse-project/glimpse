@@ -62,6 +62,7 @@ enum gm_device_type {
     GM_DEVICE_TANGO,
     GM_DEVICE_AVF_TRUEDEPTH_FRONT,
     GM_DEVICE_AVF_DUAL_BACK,
+    GM_DEVICE_REALSENSE,
 };
 
 struct gm_device_config {
