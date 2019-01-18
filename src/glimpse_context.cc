@@ -401,6 +401,7 @@ struct gm_bone_info
     std::vector<struct bone_joint> head_joints;
     std::vector<struct bone_joint> tail_joints;
 
+    bool has_length_constraint;
     float min_length;
     float mean_length;
     float max_length;
@@ -1683,10 +1684,13 @@ calc_skeleton_distance(struct gm_context *ctx,
         }
 
         float length = bone.length;
-        if (length < bone_info.min_length) {
-            distance += powf(bone_info.min_length - length, 2.f);
-        } else if (length > bone_info.max_length) {
-            distance += powf(length - bone_info.max_length, 2.f);
+
+        if (bone_info.has_length_constraint) {
+            if (length < bone_info.min_length) {
+                distance += powf(bone_info.min_length - length, 2.f);
+            } else if (length > bone_info.max_length) {
+                distance += powf(length - bone_info.max_length, 2.f);
+            }
         }
     }
     return distance;
@@ -1794,8 +1798,10 @@ is_bone_length_valid(struct gm_context *ctx,
 {
     if (ctx->use_bone_map_annotation) {
         struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
-        if (bone.length < bone_info.min_length ||
-            bone.length > bone_info.max_length) {
+        if (bone_info.has_length_constraint &&
+            (bone.length < bone_info.min_length ||
+             bone.length > bone_info.max_length))
+        {
             return false;
         }
     }
@@ -8743,9 +8749,16 @@ parse_bone_info(struct gm_context *ctx,
         parent_info.children[parent_info.n_children++] = info.idx;
     }
 
-    info.min_length = (float)json_object_get_number(bone, "min_length");
-    info.mean_length = (float)json_object_get_number(bone, "mean_length");
-    info.max_length = (float)json_object_get_number(bone, "max_length");
+    info.has_length_constraint =
+        json_object_has_value_of_type(bone, "min_length", JSONNumber) &&
+        json_object_has_value_of_type(bone, "mean_length", JSONNumber) &&
+        json_object_has_value_of_type(bone, "max_length", JSONNumber);
+
+    if (info.has_length_constraint) {
+        info.min_length = (float)json_object_get_number(bone, "min_length");
+        info.mean_length = (float)json_object_get_number(bone, "mean_length");
+        info.max_length = (float)json_object_get_number(bone, "max_length");
+    }
 
     if (json_object_has_value(bone, "rotation_constraint")) {
         info.has_rotation_constraint = true;
