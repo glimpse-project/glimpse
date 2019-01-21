@@ -10962,6 +10962,12 @@ gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id)
     return ctx->joint_semantics[joint_id];
 }
 
+int
+gm_context_get_n_bones(struct gm_context *ctx)
+{
+    return ctx->n_bones;
+}
+
 const char *
 gm_context_get_bone_name(struct gm_context *ctx, int bone_id)
 {
@@ -11690,6 +11696,13 @@ gm_bone_get_tail(struct gm_context *ctx,
                  const struct gm_bone *bone)
 {
     return ctx->bone_info[bone->idx].tail_joints[0].index;
+}
+
+int
+gm_bone_get_id(struct gm_context *ctx,
+               const struct gm_bone *bone)
+{
+    return bone->idx;
 }
 
 const float *

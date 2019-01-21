@@ -427,6 +427,9 @@ gm_context_get_joint_name(struct gm_context *ctx, int joint_id);
 const enum gm_joint_semantic
 gm_context_get_joint_semantic(struct gm_context *ctx, int joint_id);
 
+int
+gm_context_get_n_bones(struct gm_context *ctx);
+
 const char *
 gm_context_get_bone_name(struct gm_context *ctx, int bone_id);
 
@@ -714,6 +717,10 @@ gm_bone_get_head(struct gm_context *ctx,
 int
 gm_bone_get_tail(struct gm_context *ctx,
                  const struct gm_bone *bone);
+
+int
+gm_bone_get_id(struct gm_context *ctx,
+               const struct gm_bone *bone);
 
 const float *
 gm_bone_get_head_position(struct gm_context *ctx,
