@@ -1668,10 +1668,12 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         int n_images = gm_context_get_stage_n_images(data->ctx, i);
         bool any_created_images = false;
 
-        for (int n = 0; n < n_images; n++) {
-            if (stage_textures.images[n].gl_tex) {
-                any_created_images = true;
-                break;
+        if (data->gl_initialized) {
+            for (int n = 0; n < n_images; n++) {
+                if (stage_textures.images[n].gl_tex) {
+                    any_created_images = true;
+                    break;
+                }
             }
         }
 
