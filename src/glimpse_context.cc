@@ -100,6 +100,8 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 
+#include <glm/gtx/functions.hpp>
+
 #include <dlib/image_processing/frontal_face_detector.h>
 #include <dlib/image_processing/shape_predictor.h>
 #include <dlib/image_transforms/interpolation.h>
@@ -520,6 +522,9 @@ struct gm_person
     // Running average of bone lengths, paired with the number of samples
     // they were collected over
     std::vector<struct average_length> bone_lengths;
+
+    // Same for joint connection lengths
+    std::vector<std::vector<struct average_length>> connection_lengths;
 };
 
 struct gm_prediction_impl
@@ -770,6 +775,7 @@ struct gm_context
     std::vector<const char *> joint_blender_names; // (pointers into joint_map data)
     std::vector<const char *> joint_names;
     std::vector<enum gm_joint_semantic> joint_semantics;
+    std::vector<std::vector<int>> joint_connections;
     struct joints_inferrer *joints_inferrer;
 
     int n_bones;
@@ -839,6 +845,15 @@ struct gm_context
     bool joint_refinement;
     float max_joint_refinement_delta;
 
+    int r_behaviour_frames;
+    float r_behaviour_min_displacement;
+    float r_behaviour_floor;
+    float r_behaviour_roof;
+
+    int reliability_frames;
+    float reliability_variance_2;
+    float reliability_threshold;
+
     float bone_length_variance;
     float bone_rotation_variance;
 
@@ -863,6 +878,7 @@ struct gm_context
     float skeleton_max_distance;
 
     int max_bone_length_samples;
+    int max_joint_connection_samples;
 
     float codebook_update_delay;
 
@@ -1668,6 +1684,124 @@ update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
     update_bone_metadata(ctx, skeleton);
 }
 
+static void
+update_reliability(struct gm_context *ctx,
+                   struct gm_skeleton &skeleton,
+                   struct gm_person &person)
+{
+    int r_behaviour_frames = ctx->r_behaviour_frames;
+    float r_behaviour_floor = glm::radians(ctx->r_behaviour_floor);
+    float r_behaviour_roof = glm::radians(ctx->r_behaviour_roof);
+
+    for (int joint = 0; joint < ctx->n_joints; ++joint) {
+        // Calculate behaviour reliability term
+        skeleton.joints[joint].terms.behaviour = 0.f;
+        if (skeleton.joints[joint].valid &&
+            person.history.size() > r_behaviour_frames &&
+            r_behaviour_roof > r_behaviour_floor)
+        {
+            auto &history = person.history;
+
+            glm::vec3 pf0(skeleton.joints[joint].x,
+                          skeleton.joints[joint].y,
+                          skeleton.joints[joint].z);
+            glm::vec3 pf1(history[0].skeleton.joints[joint].x,
+                          history[0].skeleton.joints[joint].y,
+                          history[0].skeleton.joints[joint].z);
+            bool v0 = true;
+            bool v1 = history[0].skeleton.joints[joint].valid;
+
+            float sum_angle = 0.f;
+            for (int i = 1; i <= r_behaviour_frames; ++i) {
+                glm::vec3 pf2(history[i].skeleton.joints[joint].x,
+                              history[i].skeleton.joints[joint].y,
+                              history[i].skeleton.joints[joint].z);
+                bool v2 = history[i].skeleton.joints[joint].valid;
+
+                if (v0 && v1 && v2) {
+                    glm::vec3 df0 = pf1 - pf0;
+                    glm::vec3 df1 = pf2 - pf1;
+                    float mdf0 = glm::length(df0);
+                    float mdf1 = glm::length(df1);
+                    if (mdf0 > ctx->r_behaviour_min_displacement &&
+                        mdf1 > ctx->r_behaviour_min_displacement)
+                    {
+                        float angle = glm::dot(df0, df1);
+                        sum_angle += angle / (mdf0 * mdf1);
+                    }
+                }
+
+                v0 = v1;
+                pf0 = pf1;
+                v1 = v2;
+                pf1 = pf2;
+            }
+            sum_angle /= r_behaviour_frames;
+
+            skeleton.joints[joint].terms.behaviour =
+                1.f - (std::max(std::min(sum_angle, r_behaviour_roof) -
+                                r_behaviour_floor, 0.f) /
+                       (r_behaviour_roof - r_behaviour_floor));
+
+            gm_assert(ctx->log, skeleton.joints[joint].terms.behaviour <= 1.f,
+                      "Invalid behavioural joint reliability: %f",
+                      skeleton.joints[joint].terms.behaviour);
+        }
+
+        // Calculate kinematics reliability term
+        skeleton.joints[joint].terms.kinematic = 0.f;
+        if (skeleton.joints[joint].valid) {
+            int n_parts = 0;
+            float sum_difference = 0.f;
+            for (int i = 0; i < ctx->joint_connections[joint].size(); ++i) {
+                int connection = ctx->joint_connections[joint][i];
+                if (!person.connection_lengths[joint][i].n_samples ||
+                    !skeleton.joints[connection].valid) {
+                    continue;
+                }
+
+                float ref_length = person.connection_lengths[joint][i].length;
+                float length = distance_between(&skeleton.joints[joint].x,
+                                                &skeleton.joints[connection].x);
+                sum_difference += std::min(fabsf(length - ref_length) /
+                                           ref_length, 1.f);
+                ++n_parts;
+            }
+            if (n_parts) {
+                skeleton.joints[joint].terms.kinematic =
+                    1.f - (sum_difference / n_parts);
+            }
+
+            gm_assert(ctx->log, skeleton.joints[joint].terms.kinematic <= 1.f,
+                      "Invalid kinematic joint reliability: %f",
+                      skeleton.joints[joint].terms.kinematic);
+        }
+
+        // Calculate tracking reliability term
+        skeleton.joints[joint].terms.tracking = skeleton.joints[joint].valid ?
+            1.f : 0.f;
+
+        // Calculate reliability rate
+        int limit = std::min(ctx->reliability_frames, (int)person.history.size());
+        float variance = sqrtf(ctx->reliability_variance_2);
+
+        skeleton.joints[joint].reliability = 0.f;
+        for (int i = 0; i < limit; ++i) {
+            float joint_reliability =
+                  std::min(skeleton.joints[joint].terms.tracking,
+                           std::min(skeleton.joints[joint].terms.behaviour,
+                                    skeleton.joints[joint].terms.kinematic));
+            skeleton.joints[joint].reliability +=
+                glm::gauss((float)i, 0.f, variance) * joint_reliability;
+        }
+
+        gm_assert(ctx->log, skeleton.joints[joint].reliability <= 1.f,
+                  "Invalid joint reliability: %s - %f",
+                  gm_context_get_joint_name(ctx, joint),
+                  skeleton.joints[joint].reliability);
+    }
+}
+
 static float
 calc_skeleton_distance(struct gm_context *ctx,
                        struct gm_skeleton *skeleton)
@@ -1727,26 +1861,40 @@ copy_inferred_joints_to_skel_except(struct gm_skeleton &dest,
     }
 }
 
+static float
+calc_mean_reliability(struct gm_skeleton &skeleton)
+{
+    int n_joints = 0;
+    float reliability = 0.f;
+    for (auto &joint : skeleton.joints) {
+        ++n_joints;
+        if (joint.valid) {
+            reliability += joint.reliability;
+        }
+    }
+
+    return reliability / n_joints;
+}
+
 static void
-refine_latest_skeleton(struct gm_person &person,
-                       InferredJoints *joints)
+refine_skeleton(struct gm_person &person,
+                struct gm_skeleton &skeleton,
+                InferredJoints *joints)
 {
     struct gm_context *ctx = person.ctx;
     uint64_t time_threshold = person.time_last_tracked -
         (uint64_t)((double)ctx->max_joint_refinement_delta * 1e9);
 
-    if (!ctx->joint_refinement || person.history.size() < 2 ||
-        person.history[1].timestamp < time_threshold) {
+    if (!ctx->joint_refinement || !person.history.size() ||
+        person.history[0].timestamp < time_threshold) {
         return;
     }
 
-    float joint_diff =
-        gm_skeleton_diff(ctx, &person.history[0].skeleton,
-                         &person.history[1].skeleton_corrected, NULL);
+    float reliability = calc_mean_reliability(skeleton);
 
-    // For each joint, we look at the cumulative distance between joints using
-    // each joint cluster and if the distance is lower, we replace that joint
-    // and continue.
+    // For each joint, we replace the joint with the other candidate, less
+    // confident joint positions and see if the mean reliability of the
+    // skeleton improves. If it does, we use that candidate and continue.
     for (int j = 0; j < ctx->n_joints; ++j) {
         if (!joints->joints[j] ||
             !joints->joints[j]->next) {
@@ -1768,15 +1916,13 @@ refine_latest_skeleton(struct gm_person &person,
             copy_inferred_joints_to_skel_except(candidate_skeleton, // dest
                                                 joints, // src
                                                 j); // Don't overwrite this joint
+            update_reliability(ctx, candidate_skeleton, person);
             update_bones(ctx, candidate_skeleton);
 
-            float cand_joint_diff =
-                gm_skeleton_diff(ctx, &candidate_skeleton,
-                                 &person.history[1].skeleton_corrected, NULL);
-            if (cand_joint_diff <= joint_diff) {
-                std::swap(person.history[0].skeleton_corrected,
-                          candidate_skeleton);
-                joint_diff = cand_joint_diff;
+            float cand_reliability = calc_mean_reliability(candidate_skeleton);
+            if (cand_reliability > reliability) {
+                std::swap(skeleton, candidate_skeleton);
+                reliability = cand_reliability;
             }
         }
     }
@@ -1789,6 +1935,7 @@ interpolate_joints(struct gm_joint &a, struct gm_joint &b, float t,
     out.x = a.x + (b.x - a.x) * t;
     out.y = a.y + (b.y - a.y) * t;
     out.z = a.z + (b.z - a.z) * t;
+    out.reliability = a.reliability + (b.reliability - a.reliability) * t;
 }
 
 static bool
@@ -1848,10 +1995,13 @@ sanitise_joint_velocities(struct gm_person *person,
     for (int joint = 0; joint < ctx->n_joints; ++joint) {
         // Find the last valid joint in history
         struct gm_joint &cur_joint = skeleton.joints[joint];
+
         struct gm_joint *prev_joint = NULL;
         int last_valid = -1;
         for (int i = 0; i < history.size(); ++i) {
-            if (history[i].skeleton_corrected.joints[joint].valid) {
+            if (history[i].skeleton_corrected.joints[joint].reliability >
+                ctx->reliability_threshold)
+            {
                 prev_joint = &history[i].skeleton_corrected.joints[joint];
                 last_valid = i;
                 break;
@@ -1863,20 +2013,29 @@ sanitise_joint_velocities(struct gm_person *person,
             continue;
         }
 
-        // Calculate the current joint velocity and if it falls below a
-        // particular threshold, don't bother with sanitisation
-        float time = (float)((timestamp - history[last_valid].timestamp) / 1e9);
-        float velocity = distance_between(&cur_joint.x,
-                                          &prev_joint->x) / time;
+        // If the joint is valid, calculate the current joint velocity and if it
+        // falls below a particular threshold, don't bother with sanitisation
+        int n_velocities;
+        float velocity, avg_velocity;
+        if (cur_joint.valid) {
+            float time = (float)((timestamp -
+                                  history[last_valid].timestamp) / 1e9);
+            velocity = distance_between(&cur_joint.x, &prev_joint->x) / time;
 
-        if (velocity < ctx->joint_velocity_threshold) {
-            continue;
+            if (velocity < ctx->joint_velocity_threshold) {
+                continue;
+            }
+
+            avg_velocity = velocity;
+            n_velocities = 1;
+        } else {
+            velocity = FLT_MAX;
+            avg_velocity = 0.f;
+            n_velocities = 0;
         }
 
         // Check the velocity of the joint at each previous tracking frame
         std::vector<float> velocities(history.size(), FLT_MAX);
-        float avg_velocity = velocity;
-        int n_velocities = 1;
         for (int j = 0; j < history.size() - 1; ++j) {
             struct gm_joint &joint1 = history[j].skeleton.joints[joint];
             if (!joint1.valid) {
@@ -1894,19 +2053,24 @@ sanitise_joint_velocities(struct gm_person *person,
             }
 
             struct gm_joint &joint2 = history[j2].skeleton.joints[joint];
-            time = (float)((history[j].timestamp -
-                            history[j2].timestamp) / 1e9);
+            float time = (float)((history[j].timestamp -
+                                  history[j2].timestamp) / 1e9);
             velocities[j] = distance_between(&joint1.x,
                                              &joint2.x) / time;
             avg_velocity += velocities[j];
             ++n_velocities;
         }
+
+        if (!n_velocities) {
+            continue;
+        }
+
         avg_velocity /= n_velocities;
 
         // If this new joint velocity is an outlier, use the last non-outlier
         // displacement.
         float outlier_threshold = avg_velocity * ctx->joint_outlier_factor;
-        if (n_velocities > 1 && velocity > outlier_threshold) {
+        if (velocity > outlier_threshold) {
             for (int j = 0; j < history.size() - 1; ++j) {
                 if (velocities[j] <= outlier_threshold) {
                     gm_debug(ctx->log, "Joint (%s) average velocity: "
@@ -1926,10 +2090,13 @@ sanitise_joint_velocities(struct gm_person *person,
 
                     struct gm_joint &prev_history_joint =
                         history[j2].skeleton.joints[joint];
+                    float time = (float)((timestamp -
+                                          history[last_valid].timestamp) / 1e9);
                     float history_time = (float)((history[j].timestamp -
                                                   history[j2].timestamp) / 1e9);
                     float scale = (time / history_time);
 
+                    cur_joint.valid = true;
                     cur_joint.x = prev_joint->x +
                         (history_joint.x - prev_history_joint.x) * scale;
                     cur_joint.y = prev_joint->y +
@@ -1937,7 +2104,6 @@ sanitise_joint_velocities(struct gm_person *person,
                     cur_joint.z = prev_joint->z +
                         (history_joint.z - prev_history_joint.z) * scale;
 
-                    cur_joint.valid = true;
                     changed = true;
                     break;
                 }
@@ -1947,6 +2113,7 @@ sanitise_joint_velocities(struct gm_person *person,
 
     // Re-calculate bones now joints have changed
     if (changed) {
+        update_reliability(ctx, skeleton, *person);
         update_bones(ctx, skeleton);
     }
 }
@@ -2181,8 +2348,11 @@ sanitise_skeleton(struct gm_person *person, struct skeleton_history &history)
         return;
     }
 
+    // TODO: We should replace this ad-hoc sanitisation code with a more robust
+    //       method that better takes joint reliability into account.
     struct gm_skeleton &skeleton = history.skeleton_corrected;
-    sanitise_joint_velocities(person, skeleton, history.timestamp, time_threshold);
+    sanitise_joint_velocities(person, skeleton, history.timestamp,
+                              time_threshold);
     sanitise_bone_lengths(person, skeleton, time_threshold);
     sanitise_bone_rotations(person, skeleton, time_threshold);
 }
@@ -5342,7 +5512,7 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
         for (int j = 0; j < ctx->n_joints; ++j) {
             struct gm_joint *joint =
                 &person.history[0].skeleton_corrected.joints[j];
-            if (!joint->valid) {
+            if (joint->reliability < ctx->reliability_threshold) {
                 continue;
             }
 
@@ -5371,10 +5541,12 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
                 points[doy * intrinsics->width + dox].z;
 
             // Project the joint position into the space of the new frame.
-            // Use a predicted position instead of the old position if that feature
-            // is enabled and we were able to get a prediction.
+            // Use a predicted position instead of the old position if that
+            // feature is enabled and we were able to get a prediction.
             if (use_prediction) {
-                if (skeleton.joints[j].valid) {
+                if (skeleton.joints[j].reliability >=
+                    ctx->reliability_threshold)
+                {
                     joint = &skeleton.joints[j];
                 }
             }
@@ -6537,7 +6709,6 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         skeleton.ctx = ctx;
         skeleton.joints.resize(ctx->n_joints);
         copy_inferred_joints_to_skel_except(skeleton, person.joints);
-        update_bones(ctx, skeleton);
     }
 
     // Based on skeleton distance, try to match up newly inferred skeletons
@@ -6574,7 +6745,7 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         person_history.person = &person;
 
         struct skeleton_history &history = person_history.history;
-        history.skeleton = history.skeleton_corrected = skeleton;
+        history.skeleton = skeleton;
         history.timestamp = tracking->frame->timestamp;
         history.confidence = person_data.first.confidence;
 
@@ -6587,7 +6758,13 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         history.bounds[1].y = cluster.max_y;
         history.bounds[1].z = cluster.max_z;
 
-        refine_latest_skeleton(person, person_data.first.joints);
+        update_reliability(ctx, history.skeleton, person);
+        update_bones(ctx, history.skeleton);
+
+        history.skeleton_corrected = history.skeleton;
+        refine_skeleton(person, history.skeleton_corrected,
+                        person_data.first.joints);
+
         skeletons.erase(best_skeleton_iter);
     }
 
@@ -6599,7 +6776,7 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         person_history.person = NULL;
 
         struct skeleton_history &history = person_history.history;
-        history.skeleton = history.skeleton_corrected = skeletons.back().first;
+        history.skeleton = skeletons.back().first;
         history.timestamp = tracking->frame->timestamp;
         history.confidence = skeletons.back().second.first.confidence;
 
@@ -6613,6 +6790,16 @@ stage_refine_skeleton_cb(struct gm_tracking_impl *tracking,
         history.bounds[1].z = cluster.max_z;
 
         skeletons.pop_back();
+
+        // Reliability will be zero for a new person as there's no history.
+        for (int i = 0; i < ctx->n_joints; ++i) {
+            float tracking_term = history.skeleton.joints[i].valid ? 1.f : 0.f;
+            history.skeleton.joints[i].terms = { 0.f, 0.f, tracking_term };
+            history.skeleton.joints[i].reliability = 0.f;
+        }
+        update_bones(ctx, history.skeleton);
+
+        history.skeleton_corrected = history.skeleton;
     }
 }
 
@@ -6677,9 +6864,15 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
 {
     struct gm_context *ctx = tracking->ctx;
 
+    if (state->paused) {
+        return;
+    }
+
     std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
 
     // Add newly tracked people/history to tracked_people
+    int max_bone_length_samples = ctx->max_bone_length_samples;
+    int max_joint_connection_samples = ctx->max_joint_connection_samples;
     for (auto &person_history : state->new_history) {
         struct skeleton_history &history = person_history.history;
 
@@ -6692,10 +6885,56 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
             person_history.person->initial_confidence = history.confidence;
             person_history.person->id = ctx->last_person_id++;
             person_history.person->bone_lengths.resize(ctx->n_bones, {0});
+            person_history.person->connection_lengths.resize(ctx->n_joints);
+            for (int i = 0; i < ctx->n_joints; ++i) {
+                person_history.person->connection_lengths[i].resize(
+                    ctx->joint_connections[i].size(), {0});
+            }
         }
 
         person_history.person->history.push_front(history);
         person_history.person->time_last_tracked = tracking->frame->timestamp;
+
+        // Update bone length and joint connection running averages
+        for (int b = 0; b < ctx->n_bones; ++b) {
+            if (!history.skeleton.bones[b].valid) {
+                continue;
+            }
+
+            struct average_length &avg = person_history.person->bone_lengths[b];
+            avg.length = ((avg.length * avg.n_samples) +
+                         history.skeleton.bones[b].length) / (++avg.n_samples);
+
+            if (avg.n_samples > max_bone_length_samples) {
+                avg.n_samples = max_bone_length_samples;
+            }
+        }
+
+        for (int joint = 0; joint < ctx->n_joints; ++joint) {
+            if (!history.skeleton.joints[joint].valid) {
+                continue;
+            }
+
+            for (int i = 0; i < (int)ctx->joint_connections[joint].size(); ++i)
+            {
+                int connection = ctx->joint_connections[joint][i];
+                if (!history.skeleton.joints[connection].valid) {
+                    continue;
+                }
+
+                float length =
+                    distance_between(&history.skeleton.joints[joint].x,
+                                     &history.skeleton.joints[connection].x);
+                struct average_length &avg =
+                    person_history.person->connection_lengths[joint][i];
+                avg.length = ((avg.length * avg.n_samples) + length) /
+                             (++avg.n_samples);
+
+                if (avg.n_samples > max_joint_connection_samples) {
+                    avg.n_samples = max_joint_connection_samples;
+                }
+            }
+        }
     }
 
     // Remove any people that haven't been tracked in too long
@@ -6730,46 +6969,9 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
         }
     }
 
-    // Cull old history and update bone lengths
-    int max_bone_length_samples = ctx->max_bone_length_samples;
+    // Cull old history
     for (auto &person : ctx->tracked_people) {
         while (person.history.size() > PERSON_HISTORY_SIZE) {
-            // Calculate current average bone lengths
-            std::vector<int> n_lengths(ctx->n_bones, 0);
-            std::vector<float> avg_lengths(ctx->n_bones, 0.f);
-            for (auto &history : person.history) {
-                for (int b = 0; b < ctx->n_bones; ++b) {
-                    if (!person.history.back().skeleton.bones[b].valid ||
-                        !history.skeleton.bones[b].valid) {
-                        continue;
-                    }
-
-                    ++n_lengths[b];
-                    avg_lengths[b] += history.skeleton.bones[b].length;
-                }
-            }
-
-            // Add valid bone lengths to the running total
-            struct gm_skeleton &skeleton = person.history.back().skeleton;
-            for (int b = 0; b < ctx->n_bones; ++b) {
-                if (!n_lengths[b]) {
-                    continue;
-                }
-
-                avg_lengths[b] /= (float)n_lengths[b];
-
-                if (is_bone_length_valid(ctx, skeleton.bones[b],
-                                         avg_lengths[b]))
-                {
-                    struct average_length &avg = person.bone_lengths[b];
-                    avg.length = ((avg.length * avg.n_samples) +
-                        skeleton.bones[b].length) / (++avg.n_samples);
-                    if (avg.n_samples > max_bone_length_samples) {
-                        avg.n_samples = max_bone_length_samples;
-                    }
-                }
-            }
-
             person.history.pop_back();
         }
     }
@@ -9087,8 +9289,11 @@ gm_context_new(struct gm_logger *logger, char **err)
     ctx->joint_names.resize(n_joints);
     ctx->joint_semantics.resize(n_joints);
     for (int i = 0; i < n_joints; i++) {
-        const char *blender_name = json_object_get_string(
-            json_array_get_object(json_array(ctx->joint_map), i), "joint");
+        JSON_Object *joint_object =
+            json_array_get_object(json_array(ctx->joint_map), i);
+
+        const char *blender_name =
+            json_object_get_string(joint_object, "joint");
         ctx->joint_blender_names[i] = blender_name;
         ctx->joint_names[i] = "Unknown";
         ctx->joint_semantics[i] = GM_JOINT_UNKNOWN;
@@ -9131,6 +9336,30 @@ gm_context_new(struct gm_logger *logger, char **err)
          */
         gm_assert(ctx->log, ctx->joint_semantics[i] != GM_JOINT_UNKNOWN,
                   "Unknown joint semantic");
+    }
+
+    // Read joint connections
+    ctx->joint_connections.resize(n_joints);
+    for (int i = 0; i < ctx->n_joints; ++i) {
+        JSON_Object *joint_object =
+            json_array_get_object(json_array(ctx->joint_map), i);
+
+        JSON_Array *connections = json_object_get_array(joint_object,
+                                                        "connections");
+        if (!connections) {
+            continue;
+        }
+
+        for (int j = 0; j < json_array_get_count(connections); ++j) {
+            const char *joint_name = json_array_get_string(connections, j);
+            for (int k = 0; k < n_joints; ++k) {
+                if (strcmp(ctx->joint_blender_names[k], joint_name) == 0) {
+                    ctx->joint_connections[i].push_back(k);
+                    ctx->joint_connections[k].push_back(i);
+                    break;
+                }
+            }
+        }
     }
 
     struct gm_asset *bone_map_asset = gm_asset_open(logger,
@@ -10302,6 +10531,90 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.desc = "Try to verify the best inferred skeleton joints "
                      "have been chosen";
 
+        ctx->r_behaviour_frames = 3;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_behaviour_frames";
+        prop.desc = "Number of frames to consider when calculating "
+                    "behavioural joint reliability";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->r_behaviour_frames;
+        prop.int_state.min = 1;
+        prop.int_state.max = PERSON_HISTORY_SIZE - 2;
+        stage.properties.push_back(prop);
+
+        ctx->r_behaviour_min_displacement = 0.03f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_behaviour_min_displacement";
+        prop.desc = "Minimum joint displacement before calculating "
+                    "behavioural joint reliability, in meters";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->r_behaviour_min_displacement;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 1.f;
+        stage.properties.push_back(prop);
+
+        ctx->r_behaviour_floor = 90.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_behaviour_floor";
+        prop.desc = "Acceptable amount of rotation of joints between frames, "
+                    "in degrees";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->r_behaviour_floor;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 180.f;
+        stage.properties.push_back(prop);
+
+        ctx->r_behaviour_roof = 135.f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_behaviour_floor";
+        prop.desc = "Unacceptable amount of rotation of joints between frames, "
+                    "in degrees";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->r_behaviour_roof;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 180.f;
+        stage.properties.push_back(prop);
+
+        ctx->reliability_frames = 6;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_behaviour_frames";
+        prop.desc = "Number of frames to consider when calculating "
+                    "joint reliability rate";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->reliability_frames;
+        prop.int_state.min = 1;
+        prop.int_state.max = PERSON_HISTORY_SIZE - 2;
+        stage.properties.push_back(prop);
+
+        ctx->reliability_variance_2 = 0.25f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_variance^2";
+        prop.desc = "Squared variance to use for Gaussian function when "
+                    "calculating joint reliability rate";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->reliability_variance_2;
+        prop.float_state.min = 0.1f;
+        prop.float_state.max = 5.f;
+        stage.properties.push_back(prop);
+
+        ctx->reliability_threshold = 0.5f;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "reliability_threshold";
+        prop.desc = "Joint reliability threshold under which joints will be "
+                    "considered for replacement by a prediction";
+        prop.type = GM_PROPERTY_FLOAT;
+        prop.float_state.ptr = &ctx->reliability_threshold;
+        prop.float_state.min = 0.f;
+        prop.float_state.max = 1.f;
+        stage.properties.push_back(prop);
+
         ctx->joint_refinement = true;
         prop = gm_ui_property();
         prop.object = ctx;
@@ -10561,6 +10874,18 @@ gm_context_new(struct gm_logger *logger, char **err)
         prop.desc = "Maximum weight of previously collected bone length samples";
         prop.type = GM_PROPERTY_INT;
         prop.int_state.ptr = &ctx->max_bone_length_samples;
+        prop.int_state.min = PERSON_HISTORY_SIZE;
+        prop.int_state.max = 1800;
+        stage.properties.push_back(prop);
+
+        ctx->max_joint_connection_samples = 50;
+        prop = gm_ui_property();
+        prop.object = ctx;
+        prop.name = "max_joint_connection_samples";
+        prop.desc = "Maximum weight of previously collected joint connection "
+                    "length samples";
+        prop.type = GM_PROPERTY_INT;
+        prop.int_state.ptr = &ctx->max_joint_connection_samples;
         prop.int_state.min = PERSON_HISTORY_SIZE;
         prop.int_state.max = 1800;
         stage.properties.push_back(prop);
@@ -11905,8 +12230,9 @@ gm_skeleton_save(const struct gm_skeleton *skeleton,
 
     for (int i = 0; i < n_joints; i++) {
         const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        if (!joint || !joint->valid)
+        if (!joint || !joint->valid) {
             return false;
+        }
     }
 
     JSON_Value *root = json_value_init_object();
@@ -11919,6 +12245,8 @@ gm_skeleton_save(const struct gm_skeleton *skeleton,
         json_object_set_number(json_object(joint_js), "x", joint->x);
         json_object_set_number(json_object(joint_js), "y", joint->y);
         json_object_set_number(json_object(joint_js), "z", joint->z);
+        json_object_set_number(json_object(joint_js), "reliability",
+                               joint->reliability);
         json_array_append_value(json_array(joints), joint_js);
     }
 

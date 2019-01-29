@@ -352,11 +352,19 @@ enum gm_joint_semantic
     GM_JOINT_RIGHT_ANKLE,
 };
 
+struct gm_joint_reliability {
+    float behaviour;
+    float kinematic;
+    float tracking;
+};
+
 struct gm_joint {
     bool valid;
     float x;
     float y;
     float z;
+    struct gm_joint_reliability terms;
+    float reliability;
 };
 
 struct gm_bone;
