@@ -982,8 +982,19 @@ update_target_skeleton_wireframe_gl_bos(Data *data,
 static bool
 update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t timestamp)
 {
-    // XXX: Why do we do this? This will cause skeletons to disappear when
-    //      tracking temporarily fails, do we want this?
+    // NB: The number of bones we can get for any individual tracking skeleton
+    // can vary based on tracking confidence and occlusions, so we can't assume
+    // that n_bones == gm_context_get_n_bones()
+    //
+    // It doesn't really make sense for the viewer to try and make up for the
+    // lack of knowledge by e.g. showing old bone state since it's unlikely
+    // they will be consistent with changing tracking poses. If there were any
+    // meaningful heuristic for predicting those bones then we should rely
+    // on those being reported to us via the tracking context.
+    //
+    // For now we do this up-front, unconditionally which means the skeleton
+    // will disappear if we failed to track which at least helps make tracking
+    // failures apparent though may be more visually jarring.
     skel_gl->n_bones = 0;
     //data->target_skel_gl.n_bones = 0;
 
