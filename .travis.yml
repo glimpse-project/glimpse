@@ -60,7 +60,7 @@ jobs:
             -e CXX=clang++-6.0
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
-            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
+            -e CONFIG_OPTS="--buildtype=release --optimization=0 -Duse_system_libs=true"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: quick checks
           env: _="Quick Debug Build (gcc, distro provided dependencies)"
@@ -78,7 +78,7 @@ jobs:
             -e CXX=g++
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
-            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=true"
+            -e CONFIG_OPTS="--buildtype=release --optimization=0 -Duse_system_libs=true"
             final-travis-ci-image ./travis/travis-ci-build.sh
 
 
@@ -114,7 +114,7 @@ jobs:
             -e CXX=clang++-6.0
             -e CFLAGS="-march=native -mtune=native"
             -e CXXFLAGS="-march=native -mtune=native"
-            -e CONFIG_OPTS="--buildtype=release -Duse_system_libs=false"
+            -e CONFIG_OPTS="--buildtype=release --optimization=0 -Duse_system_libs=false"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
           env: _="Android Debug Build"
@@ -126,7 +126,7 @@ jobs:
           env: _="Android Release Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=release"
+            -e CONFIG_OPTS="--cross-file=../android-armeabi-v7a-cross-file.txt --buildtype=release --optimization=0"
             final-travis-ci-image ./travis/travis-ci-build.sh
         - stage: build
           env: _="Windows Debug Build"
@@ -138,7 +138,7 @@ jobs:
           env: _="Windows Release Build"
           script: sudo docker run -t -i -v $TRAVIS_BUILD_DIR:/home/$USER/build
             -e TRAVIS_BUILD_DIR="/home/$USER/build"
-            -e CONFIG_OPTS="--cross-file=/windows-sdk/meson/windows-x64-release-cross-file.txt --buildtype=release"
+            -e CONFIG_OPTS="--cross-file=/windows-sdk/meson/windows-x64-release-cross-file.txt --buildtype=release --optimization=0"
             final-travis-ci-image ./travis/travis-ci-build.sh
 
 cache:
