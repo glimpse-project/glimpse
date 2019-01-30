@@ -107,7 +107,6 @@
 #include "glimpse_record.h"
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
-#include "glimpse_target.h"
 
 #ifdef _WIN32
 #define strdup(X) _strdup(X)
@@ -326,17 +325,6 @@ struct _Data
 
     std::list<GLSkeleton> skeletons;
 
-    struct gm_target *target;
-    float target_error;
-    bool target_progress;
-    bool target_resize;
-    GLSkeleton target_skel_gl;
-    bool puppet_target;
-
-    int selected_target;
-    std::vector<char *> targets;
-    std::vector<char *> target_names;
-
     GLuint ar_video_tex_sampler;
     std::vector<GLuint> ar_video_queue;
     int ar_video_queue_len;
@@ -379,7 +367,6 @@ static uint32_t joint_palette[] = {
 };
 
 char *glimpse_recordings_path;
-char *glimpse_targets_path;
 
 static bool pause_profile;
 
@@ -611,26 +598,6 @@ index_recordings(Data *data)
                 &index_err);
     if (index_err) {
         gm_error(data->log, "Failed to index recordings: %s", index_err);
-        free(index_err);
-    }
-}
-
-static void
-index_targets(Data *data)
-{
-    data->targets.clear();
-    data->target_names.clear();
-
-    char *index_err = NULL;
-    index_files(data,
-                "glimpse_target.json",
-                glimpse_targets_path,
-                "",
-                data->targets,
-                data->target_names,
-                &index_err);
-    if (index_err) {
-        gm_error(data->log, "Failed to index targets: %s", index_err);
         free(index_err);
     }
 }
@@ -901,84 +868,6 @@ get_oldest_ar_video_tex(Data *data)
     }
 }
 
-static void
-update_target_skeleton_wireframe_gl_bos(Data *data,
-                                        struct gm_skeleton *ref_skeleton)
-{
-    data->target_skel_gl.n_bones = 0;
-
-    if (!data->target ||
-        gm_target_get_n_frames(data->target) == 0)
-    {
-        return;
-    }
-
-    struct gm_skeleton *skeleton = gm_target_get_skeleton(data->target);
-    int anchor_joint = gm_target_get_anchor_joint(data->target);
-    struct gm_skeleton *resized_skeleton = NULL;
-    if (ref_skeleton && data->target_resize) {
-        resized_skeleton = gm_skeleton_resize(data->ctx,
-                                              skeleton,
-                                              ref_skeleton,
-                                              anchor_joint);
-        if (resized_skeleton)
-            skeleton = (struct gm_skeleton *)resized_skeleton;
-    }
-
-    int n_joints = gm_skeleton_get_n_joints(skeleton);
-    data->target_skel_gl.n_joints = 0;
-
-    XYZRGBA colored_joints[data->target_skel_gl.n_joints];
-    for (int i = 0; i < n_joints; i++) {
-        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        if (joint) {
-            int pos = data->target_skel_gl.n_joints;
-            colored_joints[pos].x = joint->x;
-            colored_joints[pos].y = joint->y;
-            colored_joints[pos].z = joint->z;
-            colored_joints[pos].rgba = LOOP_INDEX(joint_palette, i);
-            data->target_skel_gl.n_joints++;
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.joints_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * data->target_skel_gl.n_joints,
-                 colored_joints, GL_DYNAMIC_DRAW);
-
-    int n_bones = gm_skeleton_get_n_bones(skeleton);
-    data->target_skel_gl.n_bones = 0;
-    XYZRGBA colored_bones[n_bones * 2];
-    for (int b = 0; b < n_bones; ++b) {
-        const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
-        if (bone) {
-            int head_idx = gm_bone_get_head(data->ctx, bone);
-            const float *head = gm_bone_get_head_position(data->ctx, bone);
-            int tail_idx = gm_bone_get_tail(data->ctx, bone);
-            const float *tail = gm_bone_get_tail_position(data->ctx, bone);
-            int pos = data->target_skel_gl.n_bones;
-            XYZRGBA head_rgba = {
-                head[0], head[1], head[2], LOOP_INDEX(joint_palette, head_idx)
-            };
-            XYZRGBA tail_rgba = {
-                tail[0], tail[1], tail[2], LOOP_INDEX(joint_palette, tail_idx)
-            };
-            colored_bones[pos*2] = head_rgba;
-            colored_bones[pos*2+1] = tail_rgba;
-            data->target_skel_gl.n_bones++;
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, data->target_skel_gl.bones_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * data->target_skel_gl.n_bones * 2,
-                 colored_bones, GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    if (resized_skeleton) {
-        gm_skeleton_free(resized_skeleton);
-    }
-}
-
 static bool
 update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t timestamp)
 {
@@ -996,7 +885,6 @@ update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t times
     // will disappear if we failed to track which at least helps make tracking
     // failures apparent though may be more visually jarring.
     skel_gl->n_bones = 0;
-    //data->target_skel_gl.n_bones = 0;
 
     // Check if the person has been updated first
     uint64_t last_update = gm_context_get_last_detected(data->ctx,
@@ -1094,79 +982,6 @@ viewer_close_playback_device(Data *data)
 
     data->active_device = data->recording_device;
     deinit_device_opengl(data);
-}
-
-static void
-draw_target_controls(Data *data)
-{
-    ImGui::Combo("Skeleton target",
-                 &data->selected_target,
-                 data->target_names.data(),
-                 data->target_names.size());
-
-    if (ImGui::Button(data->target ? "Unload###target_load" :
-                                     "Load###target_load")) {
-        if (data->target) {
-            gm_target_free(data->target);
-            data->target = NULL;
-        } else {
-            char *err = NULL;
-            char path_tmp[PATH_MAX];
-            snprintf(path_tmp, sizeof(path_tmp),
-                     "Targets/%s",
-                     data->targets.at(data->selected_target));
-            data->target =
-                gm_target_new_from_file(data->ctx, data->log, path_tmp, &err);
-            if (!data->target) {
-                gm_error(data->log, "Failed to load target: %s", err);
-                free(err);
-            } else {
-                gm_info(data->log, "Target loaded with %u frames",
-                        gm_target_get_n_frames(data->target));
-            }
-        }
-    }
-
-    if (!data->target) {
-        return;
-    }
-
-    ImGui::SliderFloat("Error target", &data->target_error, 0.f, 1.f);
-    if (ImGui::Button("<<###target_prev")) {
-        unsigned int frame = gm_target_get_frame(data->target);
-        if (frame > 0) {
-            gm_target_set_frame(data->target, frame - 1);
-        } else {
-            gm_target_set_frame(data->target,
-                                gm_target_get_n_frames(data->target) - 1);
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(data->target_progress ? "||###target_pause" :
-                                              ">###target_play")) {
-        data->target_progress = !data->target_progress;
-    }
-    ImGui::SameLine();
-    if (ImGui::Button(">>###target_next")) {
-        unsigned int frame = gm_target_get_frame(data->target);
-        if (frame < gm_target_get_n_frames(data->target) - 1) {
-            gm_target_set_frame(data->target, frame + 1);
-        } else {
-            gm_target_set_frame(data->target, 0);
-        }
-    }
-
-    int n_frames = gm_target_get_n_frames(data->target);
-    int current_frame = gm_target_get_frame(data->target);
-    int current_val = current_frame;
-    ImGui::SliderInt("Frame", &current_val, 0, n_frames - 1);
-    if (current_val != current_frame)
-        gm_target_set_frame(data->target, current_val);
-
-    ImGui::TextDisabled("Frame %d of %d", current_val, n_frames);
-
-    ImGui::Checkbox("Resize target skeleton", &data->target_resize);
-    ImGui::Checkbox("Puppet view", &data->puppet_target);
 }
 
 static void
@@ -1528,16 +1343,6 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     ImGui::Spacing();
 
     draw_playback_controls(data);
-
-    if (!data->targets.empty()) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::TextDisabled("Target controls...");
-        ImGui::Separator();
-        ImGui::Spacing();
-
-        draw_target_controls(data);
-    }
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -1921,17 +1726,6 @@ update_and_render_skeletons(Data *data, uint64_t timestamp,
         }
     }
 
-    if (data->target) {
-        // TODO: Add ability to select a particular skeleton to focus on and
-        //       use that here (and elsewhere...)
-        struct gm_skeleton *skeleton = NULL;
-        if (data->latest_tracking) {
-            skeleton = (struct gm_skeleton *)
-                gm_tracking_get_skeleton(data->latest_tracking);
-        }
-        update_target_skeleton_wireframe_gl_bos(data, skeleton);
-    }
-
     // Clean up old skeletons whose people are no longer tracked
     for (auto it = data->skeletons.begin(); it != data->skeletons.end();) {
         auto &skel_gl = *it;
@@ -2064,16 +1858,6 @@ draw_tracking_scene_to_texture(Data *data,
                 gm_tracking_get_timestamp(data->latest_tracking);
 
             update_and_render_skeletons(data, timestamp, mvp, pt_size);
-
-            if (data->target) {
-                if (data->puppet_target) {
-                    glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
-                    mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
-                    draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
-                } else {
-                    draw_skeleton_wireframe(data, &data->target_skel_gl, mvp, pt_size);
-                }
-            }
         }
 
         draw_debug_lines(data, mvp);
@@ -2417,11 +2201,6 @@ draw_ar_video(Data *data)
                                                              data->view_zoom);
         glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, aspect_y_scale, -1.0));
 
-        if (data->target) {
-            glm::mat4 mvp2 = glm::scale(mvp, glm::vec3(0.3f, 0.3f, 0.3f));
-            mvp2 = glm::translate(mvp2, glm::vec3(-1.5f, 0.f, 2.0f));
-            draw_skeleton_wireframe(data, &data->target_skel_gl, mvp2, pt_size);
-        }
         update_and_render_skeletons(data, data->last_video_frame->timestamp -
                                     data->prediction_delay, mvp, pt_size);
     }
@@ -3189,9 +2968,6 @@ init_viewer_opengl(Data *data)
 
     glGenBuffers(1, &data->lines_bo);
 
-    glGenBuffers(1, &data->target_skel_gl.bones_bo);
-    glGenBuffers(1, &data->target_skel_gl.joints_bo);
-
     int n_stages = gm_context_get_n_stages(data->ctx);
     data->stage_textures.resize(n_stages);
 
@@ -3548,10 +3324,6 @@ viewer_destroy(Data *data)
 
     gm_device_close(data->recording_device);
 
-    if (data->target) {
-        gm_target_free(data->target);
-    }
-
     gm_logger_destroy(data->log);
 
     delete data->events_front;
@@ -3692,9 +3464,6 @@ viewer_init(Data *data)
 
     data->show_skeletons = true;
     data->show_view_cam_controls = false;
-
-    data->target_error = 0.25f;
-    data->target_progress = true;
 
     data->stage_stats_mode = 1; // aggregated per-frame median
 
@@ -3875,14 +3644,9 @@ main(int argc, char **argv)
     snprintf(path_tmp, sizeof(path_tmp),
              "%s/ViewerRecording", assets_root);
     glimpse_recordings_path = strdup(path_tmp);
-    snprintf(path_tmp, sizeof(path_tmp),
-             "%s/Targets", assets_root);
-    glimpse_targets_path = strdup(path_tmp);
 
     gm_info(data->log, "Indexing recordings...");
     index_recordings(data);
-    gm_info(data->log, "Indexing targets...");
-    index_targets(data);
 
     data->events_front = new std::vector<struct event>();
     data->events_back = new std::vector<struct event>();
