@@ -1775,19 +1775,6 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
         free(json);
     }
 
-    ImGui::SameLine();
-    if (ImGui::Button("Save skeleton") && data->latest_tracking &&
-        gm_tracking_has_skeleton(data->latest_tracking)) {
-        char output_name[1024];
-        snprintf(output_name, 1024, "%06" PRIu64 ".json",
-                 gm_tracking_get_timestamp(data->latest_tracking));
-        const struct gm_skeleton *skeleton =
-            gm_tracking_get_skeleton(data->latest_tracking);
-        if (!gm_skeleton_save(skeleton, output_name)) {
-            gm_error(data->log, "Error writing skeleton '%s'", output_name);
-        }
-    }
-
     if (disabled) {
         ImGui::PopItemFlag();
     }
