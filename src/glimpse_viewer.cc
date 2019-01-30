@@ -869,7 +869,10 @@ get_oldest_ar_video_tex(Data *data)
 }
 
 static bool
-update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t timestamp)
+update_skeleton_wireframe_gl_bos(Data *data,
+                                 struct gm_tracking *tracking,
+                                 uint64_t timestamp,
+                                 GLSkeleton *skel_gl)
 {
     // NB: The number of bones we can get for any individual tracking skeleton
     // can vary based on tracking confidence and occlusions, so we can't assume
@@ -894,16 +897,29 @@ update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t times
     }
     skel_gl->last_detected = last_update;
 
-    /*
-     * Update labelled point cloud
+    struct gm_prediction *prediction = NULL;
+
+    // May come from a prediction or from the tracking object...
+    const struct gm_skeleton *skeleton = NULL;
+
+    /* In realtime-ar mode we want to see smooth, interpolated skeleton
+     * pose predictions but otherwise we want to see the skeletons that
+     * we derived for each concrete tracking update.
      */
-    struct gm_prediction *prediction =
-        gm_context_get_prediction_for_person(data->ctx, timestamp,
-                                             skel_gl->person_id);
-    if (!prediction) {
-        return false;
-    }
-    struct gm_skeleton *skeleton = gm_prediction_get_skeleton(prediction);
+    if (data->realtime_ar_mode) {
+        prediction = gm_context_get_prediction_for_person(data->ctx, timestamp,
+                                                          skel_gl->person_id);
+        if (!prediction) {
+            return false;
+        }
+        skeleton = gm_prediction_get_skeleton(prediction);
+    } else {
+        skeleton = gm_tracking_get_skeleton_for_person(tracking,
+                                                       skel_gl->person_id);
+        if (!skeleton) {
+            return false;
+        }
+    } // TODO: Another case for calling _tracking_get_raw_skeleton_for_person()?
 
     int n_joints = gm_skeleton_get_n_joints(skeleton);
     skel_gl->n_joints = 0;
@@ -953,10 +969,10 @@ update_skeleton_wireframe_gl_bos(Data *data, GLSkeleton *skel_gl, uint64_t times
                  sizeof(XYZRGBA) * skel_gl->n_bones * 2,
                  colored_bones, GL_DYNAMIC_DRAW);
 
-    // Clean-up
     glBindBuffer(GL_ARRAY_BUFFER, 0);
 
-    gm_prediction_unref(prediction);
+    if (prediction)
+        gm_prediction_unref(prediction);
 
     return true;
 }
@@ -1696,11 +1712,17 @@ draw_debug_lines(Data *data, glm::mat4 mvp)
 }
 
 static void
-update_and_render_skeletons(Data *data, uint64_t timestamp,
-                            glm::mat4 &mvp, float pt_size)
+update_and_render_skeletons(Data *data,
+                            struct gm_tracking *tracking,
+                            uint64_t timestamp,
+                            glm::mat4 &mvp,
+                            float pt_size)
 {
-    int n_people = 0;
-    int *people_ids = gm_context_get_people(data->ctx, &n_people);
+    int max_people = gm_context_get_max_people(data->ctx);
+    int people_ids[max_people];
+    int n_people = gm_context_get_people_ids(data->ctx,
+                                             people_ids,
+                                             max_people);
     for (int p = 0; p < n_people; ++p) {
         int id = people_ids[p];
 
@@ -1721,7 +1743,11 @@ update_and_render_skeletons(Data *data, uint64_t timestamp,
             glGenBuffers(1, &skel_gl->joints_bo);
         }
 
-        if (update_skeleton_wireframe_gl_bos(data, skel_gl, timestamp)) {
+        if (update_skeleton_wireframe_gl_bos(data,
+                                             tracking,
+                                             timestamp,
+                                             skel_gl))
+        {
             draw_skeleton_wireframe(data, skel_gl, mvp, pt_size);
         }
     }
@@ -1857,7 +1883,11 @@ draw_tracking_scene_to_texture(Data *data,
             uint64_t timestamp =
                 gm_tracking_get_timestamp(data->latest_tracking);
 
-            update_and_render_skeletons(data, timestamp, mvp, pt_size);
+            update_and_render_skeletons(data,
+                                        data->latest_tracking,
+                                        timestamp,
+                                        mvp,
+                                        pt_size);
         }
 
         draw_debug_lines(data, mvp);
@@ -2201,8 +2231,11 @@ draw_ar_video(Data *data)
                                                              data->view_zoom);
         glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, aspect_y_scale, -1.0));
 
-        update_and_render_skeletons(data, data->last_video_frame->timestamp -
-                                    data->prediction_delay, mvp, pt_size);
+        update_and_render_skeletons(data,
+                                    data->latest_tracking,
+                                    (data->last_video_frame->timestamp -
+                                     data->prediction_delay),
+                                    mvp, pt_size);
     }
 }
 

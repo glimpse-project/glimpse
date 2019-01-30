@@ -124,10 +124,10 @@ typedef struct {
              */
             uint64_t last_written_timestamp;
 
-            const char *out_dir;
-            JSON_Value *targets;
-            JSON_Value *frames;
-        } make_targets;
+            const char *out_file;
+            JSON_Value *root;
+            JSON_Value *poses;
+        } mocap;
         struct {
             int n_frames;
             int n_joints;
@@ -140,12 +140,13 @@ typedef struct {
 
 
 static void
-make_target_sequence_print_usage(FILE* stream)
+mocap_print_usage(FILE* stream)
 {
     fprintf(stream,
-"Usage: make_target_sequence [options...] <recording directory> <output directory>\n"
+"Usage: mocap [options...] <recording directory> <output file>\n"
 "\n"
-"Converts tracked recording frames into a sequence of target poses\n"
+"Runs skeleton tracking over all recording frames and writes a JSON\n"
+"file including all the tracked skeleton poses that were tracked\n"
 "\n"
 "  -h, --help             Display this help\n"
 "\n"
@@ -153,7 +154,7 @@ make_target_sequence_print_usage(FILE* stream)
 }
 
 static bool
-make_target_sequence_argparse(Data *data, int argc, char **argv)
+mocap_argparse(Data *data, int argc, char **argv)
 {
     optind = 0; // reset getopt parser state
 
@@ -167,99 +168,108 @@ make_target_sequence_argparse(Data *data, int argc, char **argv)
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, NULL)) != -1) {
         switch (opt) {
         case 'h':
-            make_target_sequence_print_usage(stdout);
+            mocap_print_usage(stdout);
             return false;
         default:
-            make_target_sequence_print_usage(stderr);
+            mocap_print_usage(stderr);
             return false;
         }
     }
 
     if (argc != 3) {
-        make_target_sequence_print_usage(stderr);
+        mocap_print_usage(stderr);
         return false;
     }
 
     data->recording_dir = strdup(argv[1]);
 
-    data->make_targets.out_dir = argv[2];
+    data->mocap.out_file = argv[2];
 
     return true;
 }
 
 static bool
-make_target_sequence_start(Data *data)
+mocap_start(Data *data)
 {
-    // Check if the output directory exists, and if not, try to make it
-    struct stat file_props;
-    if (stat(data->make_targets.out_dir, &file_props) == 0) {
-        // If the file exists, make sure it's a directory
-        if (!S_ISDIR(file_props.st_mode)) {
-            gm_error(data->log,
-                     "Output directory '%s' exists but is not a directory",
-                     data->make_targets.out_dir);
-            return false;
-        }
-    } else {
-        // Create the directory
-        if (mkdir(data->make_targets.out_dir, 0755) != 0) {
-            gm_error(data->log, "Failed to create output directory");
-            return false;
-        }
-    }
-
-    data->make_targets.targets = json_value_init_object();
-    data->make_targets.frames = json_value_init_array();
-    json_object_set_value(json_object(data->make_targets.targets),
-                          "frame", data->make_targets.frames);
-
-    return true;
-}
-
-static bool
-append_tracking_target(Data *data,
-                       struct gm_tracking *tracking,
-                       int recording_frame_no)
-{
-    const struct gm_skeleton *skeleton = gm_tracking_get_skeleton(tracking);
-
-    int n_joints = gm_skeleton_get_n_joints(skeleton);
-
-    for (int i = 0; i < n_joints; i++) {
-        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        if (!joint || !joint->valid)
-            return false;
-    }
-
-    JSON_Value *frame = json_value_init_object();
-    JSON_Value *joints = json_value_init_array();
-    json_object_set_value(json_object(frame), "joints", joints);
-
-    for (int i = 0; i < n_joints; i++) {
-        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        JSON_Value *joint_js = json_value_init_object();
-        json_object_set_number(json_object(joint_js), "x", joint->x);
-        json_object_set_number(json_object(joint_js), "y", joint->y);
-        json_object_set_number(json_object(joint_js), "z", joint->z);
-        json_array_append_value(json_array(joints), joint_js);
-    }
-
-    json_array_append_value(json_array(data->make_targets.frames), frame);
-
-    data->make_targets.last_written_timestamp = data->last_tracking_timestamp;
+    data->mocap.root = json_value_init_object();
+    data->mocap.poses = json_value_init_array();
+    json_object_set_value(json_object(data->mocap.root),
+                          "poses", data->mocap.poses);
 
     return true;
 }
 
 static void
-make_target_sequence_tracking_ready(Data *data)
+append_mocap_poses(Data *data,
+                   struct gm_tracking *tracking,
+                   int recording_frame_no)
+{
+    int max_people = gm_context_get_max_people(data->ctx);
+    int people_ids[max_people];
+    int n_people = gm_context_get_people_ids(data->ctx,
+                                             people_ids,
+                                             max_people);
+
+    if (!n_people) {
+        gm_message(data->log,
+                   "Skipping frame %d (failed to track)",
+                   recording_frame_no);
+        return;
+    }
+
+    for (int p = 0; p < n_people; ++p) {
+        int id = people_ids[p];
+
+        const struct gm_skeleton *skeleton =
+            gm_tracking_get_skeleton_for_person(tracking, id);
+        if (!skeleton)
+            continue;
+
+        int n_joints = gm_skeleton_get_n_joints(skeleton);
+
+        bool complete = true;
+        for (int i = 0; i < n_joints; i++) {
+            const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+            if (!joint || !joint->valid) {
+                complete = false;
+                break;
+            }
+        }
+        if (!complete)
+            continue;
+
+        JSON_Value *pose = json_value_init_object();
+
+        json_object_set_number(json_object(pose), "frame", recording_frame_no);
+
+        json_object_set_number(json_object(pose), "person_id", id);
+
+        JSON_Value *joints = json_value_init_array();
+        json_object_set_value(json_object(pose), "joints", joints);
+
+        for (int i = 0; i < n_joints; i++) {
+            const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+            JSON_Value *joint_js = json_value_init_object();
+            json_object_set_number(json_object(joint_js), "x", joint->x);
+            json_object_set_number(json_object(joint_js), "y", joint->y);
+            json_object_set_number(json_object(joint_js), "z", joint->z);
+            json_array_append_value(json_array(joints), joint_js);
+        }
+        json_array_append_value(json_array(data->mocap.poses), pose);
+    }
+
+    data->mocap.last_written_timestamp = data->last_tracking_timestamp;
+}
+
+static void
+mocap_tracking_ready(Data *data)
 {
     int recording_frame_no = data->last_tracking_frame_depth_no;
 
     uint64_t elapsed = UINT64_MAX;
-    if (data->make_targets.last_written_timestamp) {
+    if (data->mocap.last_written_timestamp) {
         elapsed = (data->last_tracking_timestamp -
-                   data->make_targets.last_written_timestamp);
+                   data->mocap.last_written_timestamp);
     }
     if (elapsed < data->time_step) {
         gm_debug(data->log, "Skipping unwanted recording frame %d, due to time step",
@@ -275,22 +285,13 @@ make_target_sequence_tracking_ready(Data *data)
     gm_assert(data->log, tracking != NULL,
               "Spurious NULL tracking after _TRACKING_READY notification");
 
-    if (gm_tracking_was_successful(tracking))
-    {
-        append_tracking_target(data, tracking, recording_frame_no);
-    }
-    else
-    {
-        gm_message(data->log,
-                   "Skipping frame %d (failed to track)",
-                   recording_frame_no);
-    }
+    append_mocap_poses(data, tracking, recording_frame_no);
 
     gm_tracking_unref(tracking);
 }
 
 static bool
-make_target_sequence_has_time_step_elapsed(Data *data)
+mocap_has_time_step_elapsed(Data *data)
 {
     /* Note that we may pass more frames than necessary to gm_context for
      * tracking due to the latency before ->last_written_timestamp is
@@ -298,22 +299,18 @@ make_target_sequence_has_time_step_elapsed(Data *data)
      * redundant tracking work by skipping unwanted frames at this point.
      */
     uint64_t elapsed = UINT64_MAX;
-    if (data->make_targets.last_written_timestamp) {
+    if (data->mocap.last_written_timestamp) {
         elapsed = (data->last_depth_frame->timestamp -
-                   data->make_targets.last_written_timestamp);
+                   data->mocap.last_written_timestamp);
     }
 
     return (elapsed >= data->time_step);
 }
 
 static void
-make_target_sequence_end(Data *data)
+mocap_end(Data *data)
 {
-    char out_name[1024];
-    snprintf(out_name, 1024, "%s/glimpse_target.json",
-             data->make_targets.out_dir);
-
-    json_serialize_to_file_pretty(data->make_targets.targets, out_name);
+    json_serialize_to_file_pretty(data->mocap.root, data->mocap.out_file);
 }
 
 static void
@@ -415,7 +412,13 @@ benchmark_joint_inference_tracking_ready(Data *data)
     gm_assert(data->log, tracking != NULL,
               "Spurious NULL tracking after _TRACKING_READY notification");
 
-    if (gm_tracking_was_successful(tracking))
+    int max_people = gm_context_get_max_people(data->ctx);
+    int people_ids[max_people];
+    int n_people = gm_context_get_people_ids(data->ctx,
+                                             people_ids,
+                                             max_people);
+
+    if (n_people == 1)
     {
         struct gm_joint joints[data->benchmark_ji.n_joints];
         for (int j = 0; j < data->benchmark_ji.n_joints; ++j)
@@ -434,7 +437,9 @@ benchmark_joint_inference_tracking_ready(Data *data)
 
         float diffs[data->benchmark_ji.n_joints];
         gm_skeleton_diff(data->ctx, skeleton, (struct gm_skeleton *)
-                         gm_tracking_get_skeleton(tracking), diffs);
+                         gm_tracking_get_skeleton_for_person(tracking,
+                                                             people_ids[0]),
+                         diffs);
 
         for (int j = 0; j < data->benchmark_ji.n_joints; ++j)
         {
@@ -538,13 +543,13 @@ static struct command {
     void (*end)(Data *data);
 } commands[] = {
     {
-        "make_target_sequence",
-        "Build a sequence of target poses from tracked frames",
-        make_target_sequence_argparse,
-        make_target_sequence_start,
-        make_target_sequence_tracking_ready,
-        make_target_sequence_has_time_step_elapsed,
-        make_target_sequence_end,
+        "mocap",
+        "Record the skeleton poses from tracked frames",
+        mocap_argparse,
+        mocap_start,
+        mocap_tracking_ready,
+        mocap_has_time_step_elapsed,
+        mocap_end,
     },
     {
         "benchmark_joint_inference",
@@ -665,8 +670,7 @@ handle_device_frame_updates(Data *data)
             /* It's possible that the data->frame_time for sub sampling the
              * recording could take us past the data->end_frame of the
              * recording so we can't only rely on
-             * handle_context_tracking_updates() to check for completion after
-             * writing out targets...
+             * handle_context_tracking_updates() to check for completion
              */
             check_complete(data, recording_frame_no);
         }

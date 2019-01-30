@@ -561,8 +561,13 @@ gm_context_get_average_frame_duration(struct gm_context *ctx);
 struct gm_tracking *
 gm_context_get_latest_tracking(struct gm_context *ctx);
 
-int *
-gm_context_get_people(struct gm_context *ctx, int *n_people);
+int
+gm_context_get_max_people(struct gm_context *ctx);
+
+int
+gm_context_get_people_ids(struct gm_context *ctx,
+                          int *people_ids_out,
+                          int max_ids);
 
 bool
 gm_context_has_person(struct gm_context *ctx, int person_id);
@@ -577,14 +582,6 @@ struct gm_prediction *
 gm_context_get_prediction_for_person(struct gm_context *ctx,
                                      uint64_t timestamp,
                                      int person_id);
-
-/* Legacy API, this returns a prediction for the oldest tracked person. If
- * multiple people were tracked in the same frame, it returns a prediction
- * for the most confident of those people.
- */
-struct gm_prediction *
-gm_context_get_prediction(struct gm_context *ctx,
-                          uint64_t timestamp);
 
 /* Gets the sum of the square of the difference between min/max bone lengths
  * and actual bone lengths from the inferred skeleton.
@@ -660,20 +657,25 @@ gm_tracking_create_stage_rgb_image(struct gm_tracking *tracking,
                                    int *height,
                                    uint8_t **output);
 
+int
+gm_tracking_get_tracked_people_ids(struct gm_tracking *_tracking,
+                                   int *people_ids_out,
+                                   int max_ids);
+
 bool
-gm_tracking_has_skeleton(struct gm_tracking *tracking);
+gm_tracking_has_skeleton_for_person(struct gm_tracking *tracking,
+                                    int person_id);
 
 const struct gm_skeleton *
-gm_tracking_get_skeleton(struct gm_tracking *tracking);
+gm_tracking_get_skeleton_for_person(struct gm_tracking *tracking,
+                                    int person_id);
 
 const struct gm_skeleton *
-gm_tracking_get_raw_skeleton(struct gm_tracking *tracking);
+gm_tracking_get_raw_skeleton(struct gm_tracking *tracking,
+                             int person_id);
 
 uint64_t
 gm_tracking_get_timestamp(struct gm_tracking *tracking);
-
-bool
-gm_tracking_was_successful(struct gm_tracking *tracking);
 
 const struct gm_point_rgba *
 gm_tracking_get_pipeline_stage_data(struct gm_tracking *tracking,

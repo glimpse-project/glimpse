@@ -1696,6 +1696,30 @@ gm_unity_context_get_n_joints(intptr_t plugin_handle)
     return gm_context_get_n_joints(data->ctx);
 }
 
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_max_people(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return gm_context_get_max_people(data->ctx);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_people_ids(intptr_t plugin_handle,
+                                int *people_ids,
+                                int max_people)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return gm_context_get_people_ids(data->ctx, people_ids, max_people);
+}
+
 extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_context_get_joint_name(intptr_t plugin_handle, int joint_no)
 {
@@ -1776,9 +1800,26 @@ gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
     return (intptr_t)tracking;
 }
 
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_get_tracked_people_ids(intptr_t plugin_handle,
+                                         intptr_t tracking_handle,
+                                         int *people_ids,
+                                         int max_people)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+
+    return gm_tracking_get_tracked_people_ids(tracking, people_ids, max_people);
+}
+
 extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
-                               intptr_t tracking_handle)
+gm_unity_tracking_has_skeleton_for_person(intptr_t plugin_handle,
+                                          intptr_t tracking_handle,
+                                          int person_id)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -1787,12 +1828,13 @@ gm_unity_tracking_has_skeleton(intptr_t plugin_handle,
 
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
-    return gm_tracking_has_skeleton(tracking);
+    return gm_tracking_has_skeleton_for_person(tracking, person_id);
 }
 
 extern "C" const intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_tracking_get_skeleton(intptr_t plugin_handle,
-                               intptr_t tracking_handle)
+gm_unity_tracking_get_skeleton_for_person(intptr_t plugin_handle,
+                                          intptr_t tracking_handle,
+                                          int person_id)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -1801,7 +1843,7 @@ gm_unity_tracking_get_skeleton(intptr_t plugin_handle,
 
     struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
 
-    return (intptr_t)gm_tracking_get_skeleton(tracking);
+    return (intptr_t)gm_tracking_get_skeleton_for_person(tracking, person_id);
 }
 
 extern "C" const uint64_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1836,8 +1878,9 @@ gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_context_get_prediction(intptr_t plugin_handle,
-                                uint64_t delay)
+gm_unity_context_get_prediction_for_person(intptr_t plugin_handle,
+                                           uint64_t delay,
+                                           int person_id)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -1847,11 +1890,13 @@ gm_unity_context_get_prediction(intptr_t plugin_handle,
     if (data->last_video_frame) {
         uint64_t timestamp = data->last_video_frame->timestamp - delay;
 
-        struct gm_prediction *prediction = gm_context_get_prediction(data->ctx,
-                                                                     timestamp);
+        struct gm_prediction *prediction =
+            gm_context_get_prediction_for_person(data->ctx,
+                                                 timestamp,
+                                                 person_id);
 
-        gm_debug(data->log, "Get Prediction: delay=%" PRIu64 "ns, ts=%" PRIu64 "ns: %p",
-                 delay, timestamp, prediction);
+        gm_debug(data->log, "Get Prediction: person=%d, delay=%" PRIu64 "ns, ts=%" PRIu64 "ns: %p",
+                 person_id, delay, timestamp, prediction);
 
         return (intptr_t)prediction;
     } else {

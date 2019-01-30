@@ -527,6 +527,12 @@ struct gm_person
     std::vector<std::vector<struct average_length>> connection_lengths;
 };
 
+struct tracked_person
+{
+    int person_id;
+    struct skeleton_history tracking;
+};
+
 struct gm_prediction_impl
 {
     struct gm_prediction base;
@@ -633,12 +639,7 @@ struct gm_tracking_impl
 
     uint64_t duration_ns;
 
-    /* XXX The following are retained for tracking API that will eventually
-     *     become legacy once we expose gm_person.
-     */
-    bool has_skeleton;
-    struct gm_skeleton skeleton;
-    struct gm_skeleton skeleton_corrected;
+    std::vector<struct tracked_person> tracked_people;
 };
 
 struct gm_context
@@ -2608,7 +2609,7 @@ tracking_state_recycle(struct gm_tracking *self)
         joints_inferrer_free_joints(ctx->joints_inferrer, person.joints);
     }
     tracking->people.resize(0);
-    tracking->has_skeleton = false;
+    tracking->tracked_people.resize(0);
 
     for (auto string : tracking->debug_text) {
         free(string);
@@ -3234,28 +3235,68 @@ gm_tracking_get_depth_camera_intrinsics(struct gm_tracking *_tracking)
     return &tracking->depth_camera_intrinsics;
 }
 
-// XXX Legacy API, remove once we expose gm_person
+int
+gm_tracking_get_tracked_people_ids(struct gm_tracking *_tracking,
+                                   int *people_ids_out,
+                                   int max_ids)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+
+    if (!people_ids_out)
+        return tracking->tracked_people.size();
+
+    int i = 0;
+    for (auto &tracked_person : tracking->tracked_people) {
+        if (i >= max_ids)
+            break;
+        people_ids_out[i++] = tracked_person.person_id;
+    }
+
+    return i;
+}
+
 bool
-gm_tracking_has_skeleton(struct gm_tracking *_tracking)
+gm_tracking_has_skeleton_for_person(struct gm_tracking *_tracking,
+                                    int person_id)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->has_skeleton;
+
+    for (auto &tracked_person : tracking->tracked_people) {
+        if (tracked_person.person_id == person_id) {
+            return true;
+        }
+    }
+    return false;
 }
 
-// XXX Legacy API, remove once we expose gm_person
 const struct gm_skeleton *
-gm_tracking_get_skeleton(struct gm_tracking *_tracking)
+gm_tracking_get_skeleton_for_person(struct gm_tracking *_tracking,
+                                    int person_id)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return &tracking->skeleton_corrected;
+
+    for (auto &tracked_person : tracking->tracked_people) {
+        if (tracked_person.person_id == person_id) {
+            return &tracked_person.tracking.skeleton_corrected;
+        }
+    }
+
+    return NULL;
 }
 
-// XXX Legacy API, remove once we expose gm_person
 const struct gm_skeleton *
-gm_tracking_get_raw_skeleton(struct gm_tracking *_tracking)
+gm_tracking_get_raw_skeleton_for_person(struct gm_tracking *_tracking,
+                                        int person_id)
 {
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return &tracking->skeleton;
+
+    for (auto &tracked_person : tracking->tracked_people) {
+        if (tracked_person.person_id == person_id) {
+            return &tracked_person.tracking.skeleton;
+        }
+    }
+
+    return NULL;
 }
 
 const struct gm_point_rgba *
@@ -3422,14 +3463,6 @@ gm_tracking_get_timestamp(struct gm_tracking *_tracking)
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
 
     return tracking->frame->timestamp;
-}
-
-// XXX Legacy API, remove once we expose gm_person
-bool
-gm_tracking_was_successful(struct gm_tracking *_tracking)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    return tracking->has_skeleton;
 }
 
 static struct gm_prediction_impl *
@@ -4781,7 +4814,7 @@ stage_codebook_retire_cb(struct gm_tracking_impl *tracking,
     uint64_t since_tracked_duration =
         frame_timestamp - ctx->last_tracking_success_timestamp;
 
-    if (!tracking->has_skeleton)
+    if (tracking->tracked_people.size() == 0)
     {
         if (frame_timestamp - ctx->codebook_last_clear_timestamp > clear_timeout &&
             since_tracked_duration > clear_timeout)
@@ -6892,6 +6925,12 @@ stage_update_people_cb(struct gm_tracking_impl *tracking,
             }
         }
 
+        struct tracked_person tracked_person = {
+            person_history.person->id,
+            history
+        };
+        tracking->tracked_people.push_back(tracked_person);
+
         person_history.person->history.push_front(history);
         person_history.person->time_last_tracked = tracking->frame->timestamp;
 
@@ -7224,7 +7263,9 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
     if (ctx->debug_predictions) {
         int64_t offset_ns = ctx->debug_prediction_offset * 1e9;
         prediction =
-            gm_context_get_prediction(ctx, (int64_t)tracking->frame->timestamp + offset_ns);
+            gm_context_get_prediction_for_person(ctx,
+                                                 (int64_t)tracking->frame->timestamp + offset_ns,
+                                                 ctx->tracked_people.front().id);
         prediction_impl = (struct gm_prediction_impl *)prediction;
 
         skeleton_history = &prediction_impl->history;
@@ -7869,14 +7910,6 @@ context_track_skeleton(struct gm_context *ctx,
             tracked_person = &person;
             break;
         }
-    }
-
-    // XXX Copy most confident inferred person for legacy tracking API
-    if (tracked_person) {
-        tracking->has_skeleton = true;
-        tracking->skeleton = tracked_person->history[0].skeleton;
-        tracking->skeleton_corrected =
-            tracked_person->history[0].skeleton_corrected;
     }
 
     return tracked_person != NULL;
@@ -11411,21 +11444,30 @@ gm_context_get_latest_tracking(struct gm_context *ctx)
     return tracking;
 }
 
-int *
-gm_context_get_people(struct gm_context *ctx, int *n_people)
+int
+gm_context_get_max_people(struct gm_context *ctx)
+{
+    return ctx->max_people;
+}
+
+int
+gm_context_get_people_ids(struct gm_context *ctx,
+                          int *people_ids_out,
+                          int max_ids)
 {
     std::lock_guard<std::mutex> scope_lock(ctx->people_modify_mutex);
 
-    *n_people = ctx->tracked_people.size();
-    int *people_ids = ((*n_people) > 0) ?
-        (int *)malloc(sizeof(int) * (*n_people)) : NULL;
+    if (!people_ids_out)
+        return ctx->tracked_people.size();
 
     int i = 0;
     for (auto &person : ctx->tracked_people) {
-        people_ids[i++] = person.id;
+        if (i >= max_ids)
+            break;
+        people_ids_out[i++] = person.id;
     }
 
-    return people_ids;
+    return i;
 }
 
 bool
@@ -11502,13 +11544,6 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
 
     // The person id wasn't found
     return NULL;
-}
-
-struct gm_prediction *
-gm_context_get_prediction(struct gm_context *ctx, uint64_t timestamp)
-{
-    return gm_context_get_prediction_for_person(ctx, timestamp,
-                                                ctx->tracked_people.front().id);
 }
 
 void
