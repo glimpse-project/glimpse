@@ -293,10 +293,6 @@ struct _Data
     std::vector<struct event> *events_back;
     std::vector<struct event> *events_front;
 
-    JSON_Value *joints_recording_val;
-    JSON_Array *joints_recording;
-    int requested_recording_len;
-
     GLuint video_program;
     GLuint video_quad_attrib_bo;
 
@@ -2810,24 +2806,6 @@ upload_tracking_textures(Data *data)
 }
 
 static void
-destroy_joints_recording(Data *data)
-{
-    if (data->joints_recording_val) {
-        json_value_free(data->joints_recording_val);
-        data->joints_recording_val = NULL;
-        data->joints_recording = NULL;
-    }
-}
-
-static void
-start_joints_recording(Data *data)
-{
-    destroy_joints_recording(data);
-    data->joints_recording_val = json_value_init_array();
-    data->joints_recording = json_array(data->joints_recording_val);
-}
-
-static void
 handle_context_tracking_updates(Data *data)
 {
     ProfileScopedSection(UpdatingTracking);
@@ -2849,40 +2827,6 @@ handle_context_tracking_updates(Data *data)
         return;
     }
 
-    if (data->joints_recording) {
-        const struct gm_skeleton *skeleton =
-            gm_tracking_get_skeleton(data->latest_tracking);
-        int n_joints = gm_skeleton_get_n_joints(skeleton);
-
-        JSON_Value *joints_array_val = json_value_init_array();
-        JSON_Array *joints_array = json_array(joints_array_val);
-        for (int i = 0; i < n_joints; i++) {
-            const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-            JSON_Value *coord_val = json_value_init_array();
-            JSON_Array *coord = json_array(coord_val);
-            if (joint) {
-                json_array_append_number(coord, joint->x);
-                json_array_append_number(coord, joint->y);
-                json_array_append_number(coord, joint->z);
-            } else {
-                /* TODO: do something smarter... */
-                json_array_append_number(coord, 0);
-                json_array_append_number(coord, 0);
-                json_array_append_number(coord, 0);
-            }
-
-            json_array_append_value(joints_array, coord_val);
-        }
-
-        json_array_append_value(data->joints_recording, joints_array_val);
-
-        int n_frames = json_array_get_count(data->joints_recording);
-        if (n_frames >= data->requested_recording_len) {
-            json_serialize_to_file_pretty(data->joints_recording_val,
-                                          "glimpse-joints-recording.json");
-            destroy_joints_recording(data);
-        }
-    }
 
     upload_tracking_textures(data);
 }
@@ -2925,9 +2869,6 @@ handle_device_ready(Data *data, struct gm_device *dev)
     if (old_reqs) {
         request_device_frame(data, old_reqs);
     }
-
-    if (data->requested_recording_len)
-        start_joints_recording(data);
 }
 
 static void
@@ -3762,10 +3703,6 @@ viewer_init(Data *data)
         gm_error(data->log, "%s", open_err);
         exit(1);
     }
-
-    const char *n_frames_env = getenv("GLIMPSE_RECORD_N_JOINT_FRAMES");
-    if (n_frames_env)
-        data->requested_recording_len = strtoull(n_frames_env, NULL, 10);
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
