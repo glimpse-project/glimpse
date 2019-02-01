@@ -98,12 +98,13 @@ def install_unity_plugin__linux(dst, unity_project):
                 print(" ".join(ln_cmd))
                 subprocess.check_call(ln_cmd)
 
-            # To avoid needing to set LD_LIBRARY_PATH for the plugin to load
-            # its dependencies we update the RPATH to look in the same
-            # directory as the plugin itself...
-            chrpath_cmd = ['chrpath', '-r', '$ORIGIN', dst_filename]
-            print(" ".join(chrpath_cmd))
-            subprocess.check_call(chrpath_cmd)
+            if target['name'] == "glimpse-unity-plugin":
+                # To avoid needing to set LD_LIBRARY_PATH for the plugin to load
+                # its dependencies we update the RPATH to look in the same
+                # directory as the plugin itself...
+                chrpath_cmd = ['chrpath', '-k', '-r', '$ORIGIN', dst_filename]
+                print(" ".join(chrpath_cmd))
+                subprocess.check_call(chrpath_cmd)
 
         elif target['type'] == 'static library' and target['name'] in static_libs_whitelist:
             basename = os.path.basename(target['filename'])
@@ -162,14 +163,14 @@ def install_unity_plugin__osx(dst, unity_project):
             # build directory but the libraries will all be in the same Assets/
             # Plugins/ directory so, as for Linux we want an rpath that will
             # check for dependencies adjacent to the plugin...
-            chrpath_cmd = [ 'install_name_tool', '-add_rpath', '@loader_path', dst_filename ]
-            print(" ".join(chrpath_cmd))
-            subprocess.check_call(chrpath_cmd)
+            add_rpath_cmd = [ 'install_name_tool', '-add_rpath', '@loader_path', dst_filename ]
+            print(" ".join(add_rpath_cmd))
+            subprocess.check_call(add_rpath_cmd)
 
             if new_id:
-                chrpath_cmd = [ 'install_name_tool', '-id', new_id, dst_filename ]
-                print(" ".join(chrpath_cmd))
-                subprocess.check_call(chrpath_cmd)
+                new_id_cmd = [ 'install_name_tool', '-id', new_id, dst_filename ]
+                print(" ".join(new_id_cmd))
+                subprocess.check_call(new_id_cmd)
 
         elif target['type'] == 'static library' and target['name'] in static_libs_whitelist:
             basename = os.path.basename(target['filename'])
