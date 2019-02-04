@@ -148,16 +148,18 @@ struct glimpse_data
     pthread_mutex_t swap_frames_lock;
     struct gm_frame *last_depth_frame;
     struct gm_frame *last_video_frame;
+    bool last_depth_frame_valid;
 
     /* When we come to render the background we take a reference on the latest
      * gm_frame before uploading to a texture for display.
      */
     struct gm_frame *visible_frame;
 
-    /* When we pass the video frame to Unity, we take a reference on the latest
-     * gm_frame.
+    /* When we pass video or depth data to Unity, we keep track of the frames
+     * that provided them so we can prevent unnecessary texture upload.
      */
-    struct gm_frame *texture_frame;
+    struct gm_frame *video_texture_frame;
+    struct gm_frame *depth_texture_frame;
 
     /* Set when gm_context sends a _REQUEST_FRAME event */
     bool context_needs_frame;
@@ -200,6 +202,7 @@ struct glimpse_data
     int ar_video_queue_pos;
 
     std::queue<struct gm_frame *> video_tex_queue;
+    std::queue<struct gm_frame *> depth_tex_queue;
     int video_frame_delay;
 };
 
@@ -393,6 +396,7 @@ handle_device_frame_updates(struct glimpse_data *data)
                 gm_frame_unref(data->last_depth_frame);
             }
             gm_frame_ref(device_frame);
+            data->last_depth_frame_valid = true;
             data->last_depth_frame = device_frame;
             data->pending_frame_buffers_mask &= ~GM_REQUEST_FRAME_DEPTH;
             gm_frame_add_breadcrumb(device_frame, "unity: latest depth frame");
@@ -416,7 +420,7 @@ handle_device_frame_updates(struct glimpse_data *data)
     }
 
     if (data->context_needs_frame &&
-        data->last_depth_frame && data->last_video_frame) {
+        data->last_depth_frame_valid && data->last_video_frame) {
         //ProfileScopedSection(FwdContextFrame);
 
         // Combine the two video/depth frames into a single frame for gm_context
@@ -451,10 +455,10 @@ handle_device_frame_updates(struct glimpse_data *data)
         data->context_needs_frame =
             !gm_context_notify_frame(data->ctx, data->last_depth_frame);
 
-        // We don't want to send duplicate frames to tracking, so discard now
+        // We don't want to send duplicate frames to tracking, mark as invalid
+        // for now.
         pthread_mutex_lock(&data->swap_frames_lock);
-        gm_frame_unref(data->last_depth_frame);
-        data->last_depth_frame = NULL;
+        data->last_depth_frame_valid = false;
         pthread_mutex_unlock(&data->swap_frames_lock);
     }
 
@@ -1183,7 +1187,7 @@ gm_format_verify(enum gm_format glimpse_format,
     return false;
 }
 
-static void texture_update_callback(int eventType, void *userdata)
+static void video_texture_update_callback(int eventType, void *userdata)
 {
     auto event = static_cast<UnityRenderingExtEventType>(eventType);
 
@@ -1191,7 +1195,8 @@ static void texture_update_callback(int eventType, void *userdata)
         return;
     }
 
-    auto params = reinterpret_cast<UnityRenderingExtTextureUpdateParamsV2*>(userdata);
+    auto params =
+        reinterpret_cast<UnityRenderingExtTextureUpdateParamsV2*>(userdata);
     struct glimpse_data *data = NULL;
     for (int i = 0; i < all_plugin_data.size(); ++i) {
         if (all_plugin_data[i]->render_event_id == (int)params->userData) {
@@ -1202,13 +1207,31 @@ static void texture_update_callback(int eventType, void *userdata)
 
     params->texData = nullptr;
 
-    if (!data || data->last_video_frame == data->texture_frame) {
+    if (!data) {
         return;
     }
 
     pthread_mutex_lock(&data->swap_frames_lock);
+    if (data->last_video_frame == data->video_texture_frame) {
+        pthread_mutex_unlock(&data->swap_frames_lock);
+        return;
+    }
     struct gm_frame *new_frame = gm_frame_ref(data->last_video_frame);
-    gm_frame_add_breadcrumb(new_frame, "texture update callback");
+    pthread_mutex_unlock(&data->swap_frames_lock);
+
+    gm_frame_add_breadcrumb(new_frame, "video texture update callback");
+
+    data->video_tex_queue.push(new_frame);
+    while (data->video_tex_queue.size() > data->video_frame_delay + 1) {
+        struct gm_frame *discard_frame = data->video_tex_queue.front();
+        data->video_tex_queue.pop();
+        gm_frame_add_breadcrumb(discard_frame,
+                                "video texture discard");
+        gm_frame_unref(discard_frame);
+    }
+
+    data->video_texture_frame = new_frame;
+    new_frame = data->video_tex_queue.front();
 
     const struct gm_intrinsics *video_intrinsics =
         &new_frame->video_intrinsics;
@@ -1222,34 +1245,118 @@ static void texture_update_callback(int eventType, void *userdata)
         (int)params->height != video_height) {
         if (!format_valid) {
             gm_debug(data->log,
-                     "texture_update_callback: Texture format mismatch");
+                     "%s: Texture format mismatch", __func__);
         } else {
             gm_debug(data->log,
-                     "texture_update_callback_v2: Texture size mismatch "
-                     "(%dx%d != %dx%d)",
+                     "%s: Texture size mismatch "
+                     "(%dx%d != %dx%d)", __func__,
                      (int)params->width, (int)params->height,
                      video_width, video_height);
         }
         gm_frame_add_breadcrumb(new_frame,
-                                "texture update cb size mismatch discard");
-        gm_frame_unref(new_frame);
-        pthread_mutex_unlock(&data->swap_frames_lock);
+                                "video texture size mismatch discard");
         return;
     }
 
-    data->video_tex_queue.push(new_frame);
-    while (data->video_tex_queue.size() > data->video_frame_delay + 1) {
-        struct gm_frame *discard_frame = data->video_tex_queue.front();
-        data->video_tex_queue.pop();
+    params->texData = new_frame->video->data;
+}
+
+static void depth_texture_update_callback(int eventType, void *userdata)
+{
+    auto event = static_cast<UnityRenderingExtEventType>(eventType);
+
+    if (event != kUnityRenderingExtEventUpdateTextureEndV2 &&
+        event != kUnityRenderingExtEventUpdateTextureBeginV2)
+    {
+        return;
+    }
+
+    auto params =
+        reinterpret_cast<UnityRenderingExtTextureUpdateParamsV2*>(userdata);
+    struct glimpse_data *data = NULL;
+    for (int i = 0; i < all_plugin_data.size(); ++i) {
+        if (all_plugin_data[i]->render_event_id == (int)params->userData) {
+            data = all_plugin_data[i];
+            break;
+        }
+    }
+
+    if (event == kUnityRenderingExtEventUpdateTextureEndV2) {
+        if (params->texData &&
+            data->depth_tex_queue.front()->depth_format != GM_FORMAT_Z_F32_M)
+        {
+            free(params->texData);
+            params->texData = nullptr;
+        }
+        return;
+    }
+
+    params->texData = nullptr;
+
+    if (!data) {
+        return;
+    }
+
+    pthread_mutex_lock(&data->swap_frames_lock);
+    if (data->last_depth_frame == data->depth_texture_frame) {
+        pthread_mutex_unlock(&data->swap_frames_lock);
+        return;
+    }
+    struct gm_frame *new_frame = gm_frame_ref(data->last_depth_frame);
+    pthread_mutex_unlock(&data->swap_frames_lock);
+
+    gm_frame_add_breadcrumb(new_frame, "depth texture update callback");
+
+    data->depth_tex_queue.push(new_frame);
+    while (data->depth_tex_queue.size() > data->video_frame_delay + 1) {
+        struct gm_frame *discard_frame = data->depth_tex_queue.front();
+        data->depth_tex_queue.pop();
         gm_frame_add_breadcrumb(discard_frame,
-                                "texture update cb discard");
+                                "depth texture discard");
         gm_frame_unref(discard_frame);
     }
 
-    data->texture_frame = data->video_tex_queue.back();
-    params->texData = data->video_tex_queue.front()->video->data;
+    data->depth_texture_frame = new_frame;
+    new_frame = data->depth_tex_queue.front();
 
-    pthread_mutex_unlock(&data->swap_frames_lock);
+    const struct gm_intrinsics *depth_intrinsics =
+        &new_frame->depth_intrinsics;
+    int depth_width = depth_intrinsics->width;
+    int depth_height = depth_intrinsics->height;
+
+    bool format_valid = params->format == kUnityRenderingExtFormatR32_SFloat;
+    if (!format_valid ||
+        (int)params->width != depth_width ||
+        (int)params->height != depth_height) {
+        if (!format_valid) {
+            gm_debug(data->log,
+                     "%s: Texture format mismatch", __func__);
+        } else {
+            gm_debug(data->log,
+                     "%s: Texture size mismatch "
+                     "(%dx%d != %dx%d)", __func__,
+                     (int)params->width, (int)params->height,
+                     depth_width, depth_height);
+        }
+        return;
+    }
+
+    switch(new_frame->depth_format) {
+    case GM_FORMAT_Z_U16_MM:
+        params->texData = malloc(sizeof(float) * depth_width * depth_height);
+        for (int i = 0; i < depth_width * depth_height; ++i) {
+            ((float *)params->texData)[i] =
+                ((uint16_t *)new_frame->depth->data)[i] / 1000.f;
+        }
+        break;
+
+    case GM_FORMAT_Z_F32_M:
+        params->texData = new_frame->depth->data;
+        break;
+
+    default:
+        gm_assert(data->log, false, "Unsupported depth format");
+    }
 }
 
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1266,7 +1373,13 @@ gm_unity_set_video_frame_delay(intptr_t plugin_handle, int delay)
 extern "C" UnityRenderingEventAndData UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_video_texture_update_callback(void)
 {
-    return texture_update_callback;
+    return video_texture_update_callback;
+}
+
+extern "C" UnityRenderingEventAndData UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_depth_texture_update_callback(void)
+{
+    return depth_texture_update_callback;
 }
 
 extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
@@ -1275,7 +1388,7 @@ gm_unity_get_video_texture_format(intptr_t plugin_handle,
                                   enum gm_format *out_format)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data || !data->last_video_frame) {
+    if (!data) {
         return false;
     }
 
@@ -1290,6 +1403,31 @@ gm_unity_get_video_texture_format(intptr_t plugin_handle,
     *out_width = video_intrinsics->width;
     *out_height = video_intrinsics->height;
     *out_format = data->last_video_frame->video_format;
+
+    pthread_mutex_unlock(&data->swap_frames_lock);
+
+    return true;
+}
+
+extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_get_depth_texture_format(intptr_t plugin_handle,
+                                  int *out_width, int *out_height)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
+
+    pthread_mutex_lock(&data->swap_frames_lock);
+    if (!data->last_depth_frame) {
+        pthread_mutex_unlock(&data->swap_frames_lock);
+        return false;
+    }
+
+    const struct gm_intrinsics *depth_intrinsics =
+        &data->last_depth_frame->depth_intrinsics;
+    *out_width = depth_intrinsics->width;
+    *out_height = depth_intrinsics->height;
 
     pthread_mutex_unlock(&data->swap_frames_lock);
 
@@ -1411,9 +1549,14 @@ gm_unity_terminate(intptr_t plugin_handle)
         gm_frame_unref(data->video_tex_queue.front());
         data->video_tex_queue.pop();
     }
+    while (data->depth_tex_queue.size()) {
+        gm_frame_unref(data->depth_tex_queue.front());
+        data->depth_tex_queue.pop();
+    }
     if (data->last_depth_frame) {
         gm_frame_unref(data->last_depth_frame);
         data->last_depth_frame = NULL;
+        data->last_depth_frame_valid = false;
     }
     if (data->last_video_frame) {
         gm_frame_unref(data->last_video_frame);
