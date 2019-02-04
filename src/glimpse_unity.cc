@@ -1187,11 +1187,11 @@ static void texture_update_callback(int eventType, void *userdata)
 {
     auto event = static_cast<UnityRenderingExtEventType>(eventType);
 
-    if (event != kUnityRenderingExtEventUpdateTextureBegin) {
+    if (event != kUnityRenderingExtEventUpdateTextureBeginV2) {
         return;
     }
 
-    auto params = reinterpret_cast<UnityRenderingExtTextureUpdateParams*>(userdata);
+    auto params = reinterpret_cast<UnityRenderingExtTextureUpdateParamsV2*>(userdata);
     struct glimpse_data *data = NULL;
     for (int i = 0; i < all_plugin_data.size(); ++i) {
         if (all_plugin_data[i]->render_event_id == (int)params->userData) {
@@ -1199,6 +1199,8 @@ static void texture_update_callback(int eventType, void *userdata)
             break;
         }
     }
+
+    params->texData = nullptr;
 
     if (!data || data->last_video_frame == data->texture_frame) {
         return;
