@@ -39,6 +39,7 @@ enum gm_rotation {
   GM_ROTATION_270 = 3
 };
 
+/* NB: Unity bindings would break if these were reordered. */
 enum gm_property_type {
     GM_PROPERTY_INT,
     GM_PROPERTY_ENUM,

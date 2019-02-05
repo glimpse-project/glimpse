@@ -1831,6 +1831,188 @@ gm_unity_get_render_event_id(intptr_t plugin_handle)
 }
 
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_properties_get_count(intptr_t plugin_handle, intptr_t properties)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    if (!properties) {
+        return 0;
+    }
+
+    struct gm_ui_properties *props = (struct gm_ui_properties *)properties;
+    return props->n_properties;
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_properties_get_nth_info(intptr_t plugin_handle,
+                                 intptr_t properties,
+                                 int n)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    if (!properties) {
+        return 0;
+    }
+
+    struct gm_ui_properties *props = (struct gm_ui_properties *)properties;
+    if (n < 0 || n >= props->n_properties)
+        return 0;
+
+    return (intptr_t)&props->properties[n];
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prop_info_get_type(intptr_t plugin_handle, intptr_t property)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return -1;
+    }
+
+    if (!property)
+        return -1;
+
+    struct gm_ui_property *prop = (struct gm_ui_property *)property;
+    return (int)prop->type;
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prop_info_get_name(intptr_t plugin_handle, intptr_t property)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    if (!property)
+        return 0;
+
+    struct gm_ui_property *prop = (struct gm_ui_property *)property;
+    return (intptr_t)prop->name;
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_prop_info_get_desc(intptr_t plugin_handle, intptr_t property)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    if (!property)
+        return 0;
+
+    struct gm_ui_property *prop = (struct gm_ui_property *)property;
+    return (intptr_t)prop->desc;
+}
+
+#define DECLARE_SCALAR_PROPS_GETTER(NAME, CTYPE) \
+extern "C" CTYPE UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API \
+gm_unity_properties_get_##NAME(intptr_t plugin_handle, \
+                               intptr_t properties, \
+                               int prop_idx) \
+{ \
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle; \
+    if (!data || !properties) \
+        return 0; \
+    struct gm_ui_properties *props = (struct gm_ui_properties *)properties; \
+    if (prop_idx < 0 || prop_idx >= props->n_properties) \
+        return 0; \
+    return gm_prop_get_##NAME(&props->properties[prop_idx]); \
+}
+DECLARE_SCALAR_PROPS_GETTER(int, int)
+DECLARE_SCALAR_PROPS_GETTER(bool, bool)
+DECLARE_SCALAR_PROPS_GETTER(enum, int)
+DECLARE_SCALAR_PROPS_GETTER(float, float)
+#undef DECLARE_SCALARA_PROPS_GETTER
+
+#define DECLARE_SCALAR_PROPS_SETTER(NAME, CTYPE) \
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API \
+gm_unity_properties_set_##NAME(intptr_t plugin_handle, \
+                               intptr_t properties, \
+                               int prop_idx, \
+                               CTYPE value) \
+{ \
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle; \
+    if (!data || !properties) \
+        return; \
+    struct gm_ui_properties *props = (struct gm_ui_properties *)properties; \
+    if (prop_idx < 0 || prop_idx >= props->n_properties) \
+        return; \
+    gm_prop_set_##NAME(&props->properties[prop_idx], value); \
+}
+DECLARE_SCALAR_PROPS_SETTER(int, int)
+DECLARE_SCALAR_PROPS_SETTER(bool, bool)
+DECLARE_SCALAR_PROPS_SETTER(enum, int)
+DECLARE_SCALAR_PROPS_SETTER(float, float)
+#undef DECLARE_SCALARA_PROPS_SETTER
+
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_properties(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return (intptr_t)gm_context_get_ui_properties(data->ctx);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_n_stages(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return gm_context_get_n_stages(data->ctx);
+}
+
+extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_stage_name(intptr_t plugin_handle,
+                                int stage)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return gm_context_get_stage_name(data->ctx, stage);
+}
+
+extern "C" const char * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_stage_description(intptr_t plugin_handle,
+                                       int stage)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return gm_context_get_stage_description(data->ctx, stage);
+}
+
+extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_get_stage_properties(intptr_t plugin_handle,
+                                      int stage)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return 0;
+    }
+
+    return (intptr_t)gm_context_get_stage_ui_properties(data->ctx, stage);
+}
+
+extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_context_get_n_joints(intptr_t plugin_handle)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;

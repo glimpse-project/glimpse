@@ -461,7 +461,7 @@ gm_context_rotate_intrinsics(struct gm_context *ctx,
 void
 gm_context_enable(struct gm_context *ctx);
 
-/* Disable skeltal tracking */
+/* Disable skeletal tracking */
 void
 gm_context_disable(struct gm_context *ctx);
 
