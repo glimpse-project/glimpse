@@ -10603,7 +10603,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         ctx->r_behaviour_roof = 135.f;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "reliability_behaviour_floor";
+        prop.name = "reliability_behaviour_roof";
         prop.desc = "Unacceptable amount of rotation of joints between frames, "
                     "in degrees";
         prop.type = GM_PROPERTY_FLOAT;
@@ -10615,7 +10615,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         ctx->reliability_frames = 6;
         prop = gm_ui_property();
         prop.object = ctx;
-        prop.name = "reliability_behaviour_frames";
+        prop.name = "reliability_frames";
         prop.desc = "Number of frames to consider when calculating "
                     "joint reliability rate";
         prop.type = GM_PROPERTY_INT;
