@@ -569,7 +569,7 @@ executable('index-to-recording',
            include_directories: inc,
            dependencies: [ libpng_dep, threads_dep ])
 
-if snappy_dep.found()
+if snappy_dep.found() and host_machine.system() == 'linux'
     executable('pack-training-data',
                [ 'src/pack-training-data.cc',
                  'src/pack.c',
