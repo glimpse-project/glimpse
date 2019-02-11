@@ -2670,9 +2670,7 @@ gm_unity_target_sequence_get_timestamp(intptr_t plugin_handle,
 
 extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_video_intrinsics(intptr_t plugin_handle,
-                              int *out_width, int *out_height,
-                              float *out_fx, float *out_fy,
-                              float *out_cx, float *out_cy)
+                              struct gm_intrinsics *out_intrinsics)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -2687,30 +2685,20 @@ gm_unity_get_video_intrinsics(intptr_t plugin_handle,
 
     struct gm_intrinsics *intrinsics = &data->last_video_frame->video_intrinsics;
     enum gm_rotation rotation = data->last_video_frame->camera_rotation;
-    struct gm_intrinsics rotated_intrinsics;
 
     gm_context_rotate_intrinsics(data->ctx,
                                  intrinsics,
-                                 &rotated_intrinsics,
+                                 out_intrinsics,
                                  rotation);
 
     pthread_mutex_unlock(&data->swap_frames_lock);
-
-    *out_width = rotated_intrinsics.width;
-    *out_height = rotated_intrinsics.height;
-    *out_fx = rotated_intrinsics.fx;
-    *out_fy = rotated_intrinsics.fy;
-    *out_cx = rotated_intrinsics.cx;
-    *out_cy = rotated_intrinsics.cy;
 
     return true;
 }
 
 extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_get_depth_intrinsics(intptr_t plugin_handle,
-                              int *out_width, int *out_height,
-                              float *out_fx, float *out_fy,
-                              float *out_cx, float *out_cy)
+                              struct gm_intrinsics *out_intrinsics)
 {
     struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
     if (!data) {
@@ -2729,17 +2717,10 @@ gm_unity_get_depth_intrinsics(intptr_t plugin_handle,
 
     gm_context_rotate_intrinsics(data->ctx,
                                  intrinsics,
-                                 &rotated_intrinsics,
+                                 out_intrinsics,
                                  rotation);
 
     pthread_mutex_unlock(&data->swap_frames_lock);
-
-    *out_width = rotated_intrinsics.width;
-    *out_height = rotated_intrinsics.height;
-    *out_fx = rotated_intrinsics.fx;
-    *out_fy = rotated_intrinsics.fy;
-    *out_cx = rotated_intrinsics.cx;
-    *out_cy = rotated_intrinsics.cy;
 
     return true;
 }
