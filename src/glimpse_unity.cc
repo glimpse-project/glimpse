@@ -2187,6 +2187,24 @@ gm_unity_tracking_get_timestamp(intptr_t plugin_handle,
     return gm_tracking_get_timestamp(tracking);
 }
 
+extern "C" const bool UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_tracking_get_debug_point_cloud(intptr_t plugin_handle,
+                                        intptr_t tracking_handle,
+                                        const struct gm_point_rgba **cloud,
+                                        int *n_points,
+                                        struct gm_intrinsics *intrinsics)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return false;
+    }
+
+    struct gm_tracking *tracking = (struct gm_tracking *)tracking_handle;
+
+    *cloud = gm_tracking_get_debug_point_cloud(tracking, n_points, intrinsics);
+    return true;
+}
+
 extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_tracking_unref(intptr_t plugin_handle, intptr_t tracking_handle)
 {
