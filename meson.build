@@ -253,6 +253,7 @@ if platform_ios
     # and so the subproject variables should be valid...
     ios_client_api_libs += png_sp.get_variable('libpng')
     ios_client_api_libs += dlib_sp.get_variable('lib')
+    freenect_sp = subproject('libfreenect')
     ios_client_api_libs += freenect_sp.get_variable('fakenect_lib')
     ios_client_api_libs += pcl_sp.get_variable('common_lib')
     ios_client_api_libs += pcl_sp.get_variable('segmentation_lib')
