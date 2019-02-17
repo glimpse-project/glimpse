@@ -1113,6 +1113,13 @@ static bool
 gm_format_verify(enum gm_format glimpse_format,
                  enum UnityRenderingExtTextureFormat unity_format)
 {
+#ifdef __APPLE__
+    // FIXME: It seems unity_format doesn't really correspond to the
+    //        texture format on the Metal backend... We should do some
+    //        investigation here.
+    return true;
+#endif
+
     switch(glimpse_format) {
     case GM_FORMAT_LUMINANCE_U8:
         switch(unity_format) {
