@@ -2119,6 +2119,17 @@ gm_unity_context_get_joint_semantic(intptr_t plugin_handle, int joint_no)
     return (int)gm_context_get_joint_semantic(data->ctx, joint_no);
 }
 
+extern "C" void UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
+gm_unity_context_request_codebook_reset(intptr_t plugin_handle)
+{
+    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
+    if (!data) {
+        return;
+    }
+
+    gm_context_request_codebook_reset(data->ctx);
+}
+
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_context_get_latest_tracking(intptr_t plugin_handle)
 {

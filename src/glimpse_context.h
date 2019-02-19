@@ -465,6 +465,11 @@ gm_context_enable(struct gm_context *ctx);
 void
 gm_context_disable(struct gm_context *ctx);
 
+
+/* Note: the request will only be honoured during the next tracking update */
+void
+gm_context_request_codebook_reset(struct gm_context *ctx);
+
 bool
 gm_context_notify_frame(struct gm_context *ctx,
                         struct gm_frame *frame);

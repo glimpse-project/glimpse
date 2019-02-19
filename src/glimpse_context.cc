@@ -809,6 +809,7 @@ struct gm_context
     float cluster_from_prev_time_threshold;
     int cluster_from_prev_bounds;
 
+    bool requested_codebook_reset;
     bool codebook_frozen;
     float codebook_foreground_scrub_timeout;
     uint64_t codebook_last_foreground_scrub_timestamp;
@@ -7556,8 +7557,14 @@ context_track_skeleton(struct gm_context *ctx,
     }
 
     bool reset_codebook = false;
-    if (ctx->seg_codebook.size() != downsampled_cloud_size ||
-        (ctx->codebook_pose.type != tracking->frame->pose.type))
+    if (ctx->requested_codebook_reset)
+    {
+        gm_debug(ctx->log, "Resetting codebook (explicitly requested)");
+        ctx->requested_codebook_reset = false;
+        reset_codebook = true;
+    }
+    else if (ctx->seg_codebook.size() != downsampled_cloud_size ||
+             (ctx->codebook_pose.type != tracking->frame->pose.type))
     {
         gm_debug(ctx->log, "Resetting codebook (pose type changed or inconsistent size)");
         reset_codebook = true;
@@ -11418,6 +11425,12 @@ gm_context_flush(struct gm_context *ctx, char **err)
         return false;
 
     return true;
+}
+
+void
+gm_context_request_codebook_reset(struct gm_context *ctx)
+{
+    ctx->requested_codebook_reset = true;
 }
 
 struct gm_tracking *
