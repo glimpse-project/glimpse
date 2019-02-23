@@ -30,6 +30,7 @@
 
 #pragma once
 
+#include <sys/types.h> // off_t
 #include <glimpse_log.h>
 
 /* Note: currently compatible with Android's Asset mode enum which is

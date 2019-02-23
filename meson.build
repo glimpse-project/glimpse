@@ -10,9 +10,6 @@ endif
 compiler = meson.get_compiler('c')
 python3 = import('python3').find_python()
 
-client_api_defines = []
-client_api_deps = []
-
 if compiler.get_define('__ANDROID__') != ''
     add_languages('java')
 
@@ -87,25 +84,33 @@ endif
 threads_dep = dependency('threads')
 maths_dep = compiler.find_library('m', required : false)
 
-# Not sure why Meson doesn't support a way to append include directories :/
+
+glimpse_includes = [ include_directories('src') ]
 if host_machine.system() == 'windows'
-inc = include_directories(
-	'src',
-	'src/win32',
-	'src/imgui',
-	'src/UnityPluginAPI')
-else
-inc = include_directories(
-	'src',
-	'src/imgui',
-	'src/UnityPluginAPI')
+glimpse_includes += [ include_directories('src/win32') ]
 endif
+imgui_includes = [ include_directories('src/imgui') ]
+shell_includes = glimpse_includes + imgui_includes
+unity_includes = [ include_directories('src/UnityPluginAPI') ]
+
 
 dlib_sp = subproject('dlib')
 dlib_dep = dlib_sp.get_variable('dlib_dep')
-client_api_deps += dlib_dep
 
-client_api_defines += ['-DGLM_ENABLE_EXPERIMENTAL']
+shell_defines = []
+shell_deps = [ threads_dep ]
+shell_src = [
+    'src/xalloc.c',
+    'src/glimpse_os.c',
+    'src/glimpse_mutex.c',
+    'src/glimpse_log.c',
+    'src/glimpse_assets.c',
+    'src/glimpse_imgui_shell.cc',
+]
+shell_link_args = []
+
+client_api_defines = ['-DGLM_ENABLE_EXPERIMENTAL']
+client_api_deps = [ dlib_dep ]
 
 # It's convenient to be able to link with distro packages, but also somewhat
 # unpredictable.  We want a way of pinning down our dependencies to subprojects
@@ -167,6 +172,9 @@ client_api_deps += [
     pcl_deps,
     epoxy_dep,
 ]
+shell_deps += [
+    epoxy_dep,
+]
 
 uw_dep = dependency('libunwind', required: false)
 if uw_dep.found()
@@ -184,6 +192,19 @@ if platform_pc
     endif
 
     glfw_dep = dependency('glfw3', fallback: [ 'glfw', 'glfw_dep' ], required: false)
+    if glfw_dep.found()
+        shell_deps += glfw_dep
+        shell_defines += [
+            '-DUSE_GLFW',
+            '-DGLFW_INCLUDE_NONE',
+            '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
+        ]
+        shell_src += [
+            'src/imgui/imgui_impl_glfw.cpp',
+            'src/imgui/imgui_impl_opengl3.cpp'
+        ]
+    endif
+
     snappy_dep = dependency('snappy', required: false)
 
     rs_dep = dependency('librealsense',
@@ -195,6 +216,46 @@ if platform_pc
     endif
 endif
 
+if platform_ios
+    glfm_sp = subproject('glfm')
+    glfm_dep = glfm_sp.get_variable('glfm_dep')
+
+    shell_deps += glfm_dep
+    shell_defines += [
+        '-DUSE_GLFM',
+        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
+    ]
+    shell_src += [
+        'src/imgui/imgui_impl_glfm.cpp',
+        'src/imgui/imgui_impl_opengl3.cpp',
+        'src/ios_utils.m'
+    ]
+    shell_link_args += [
+        '-framework', 'Foundation',
+        '-framework', 'OpenGLES',
+        '-framework', 'CoreGraphics',
+        '-framework', 'QuartzCore',
+        '-framework', 'UIKit',
+        '-framework', 'AVFoundation',
+    ]
+endif
+
+if platform_android
+    glfm_sp = subproject('glfm')
+    glfm_dep = glfm_sp.get_variable('glfm_dep')
+
+    shell_deps += glfm_dep
+    shell_defines += [
+        '-DUSE_GLFM',
+        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
+    ]
+    shell_src += [
+        'src/imgui/imgui_impl_glfm.cpp',
+        'src/imgui/imgui_impl_opengl3.cpp'
+    ]
+endif
+
+
 imgui_src = [
     'src/imgui/imgui.cpp',
     'src/imgui/imgui_demo.cpp',
@@ -203,6 +264,8 @@ imgui_src = [
     'src/imgui/profiler.cpp',
     'src/imgui/timer.cpp',
 ]
+shell_src += imgui_src
+
 
 if host_machine.system() == 'windows'
     getopt_src = [ 'src/getopt-compat.c' ]
@@ -345,7 +408,7 @@ if unity_enabled
         endforeach
         plugin_lib = library('glimpse-unity-plugin',
                                      unity_plugin_src,
-                                     include_directories: inc,
+                                     include_directories: glimpse_includes + unity_includes,
                                      objects: dep_objects,
                                      dependencies: plugin_deps,
                                      c_args: plugin_defines,
@@ -353,7 +416,7 @@ if unity_enabled
     else
         plugin_lib = library('glimpse-unity-plugin',
                              unity_plugin_src,
-                             include_directories: inc,
+                             include_directories: glimpse_includes + unity_includes,
                              dependencies: plugin_deps,
                              c_args: plugin_defines,
                              cpp_args: plugin_defines)
@@ -362,14 +425,8 @@ endif
 
 need_glimpse_native_jar = false
 if platform_android
-    glfm_sp = subproject('glfm')
-    glfm_dep = glfm_sp.get_variable('glfm_dep')
-
-    viewer_deps = client_api_deps + [ glfm_dep ]
-    viewer_defines = client_api_defines + [
-        '-DUSE_GLFM',
-        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
-    ]
+    viewer_deps = client_api_deps + shell_deps
+    viewer_defines = client_api_defines + shell_defines
 
     if tango_enabled
         viewer_deps += tango_deps
@@ -381,48 +438,37 @@ if platform_android
         viewer_defines += [ '-DUSE_ANDROID_ASSET_MANAGER_API' ]
     endif
 
-    imgui_src += 'src/imgui/imgui_impl_glfm.cpp'
-    imgui_src += 'src/imgui/imgui_impl_opengl3.cpp'
-
     android_viewer = shared_library('glimpse_viewer_android',
-        [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src,
-        include_directories: inc,
+        [ 'src/glimpse_viewer.cc' ] + client_api_src + shell_src,
+        include_directories: glimpse_includes + shell_includes,
         dependencies: viewer_deps,
         c_args: viewer_defines,
         cpp_args: viewer_defines)
 
     need_glimpse_native_jar = true
+
+    subdir('src/java')
 endif
 
-subdir('src/java')
-
 if platform_ios
-    glfm_sp = subproject('glfm')
-    glfm_dep = glfm_sp.get_variable('glfm_dep')
-
-    viewer_deps = client_api_deps + [ glfm_dep ]
-    viewer_defines = client_api_defines + [
-        '-DUSE_GLFM',
-        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
-    ]
-
-    imgui_src += 'src/imgui/imgui_impl_glfm.cpp'
-    imgui_src += 'src/imgui/imgui_impl_opengl3.cpp'
+    viewer_deps = client_api_deps + shell_deps
+    viewer_defines = client_api_defines + shell_defines
 
     executable('glimpse_viewer',
-               [ 'src/glimpse_viewer.cc', 'src/ios_utils.m' ] + client_api_src + imgui_src,
-               include_directories: inc,
+               [ 'src/glimpse_viewer.cc', 'src/ios_utils.m' ] + client_api_src + shell_src,
+               include_directories: glimpse_includes + shell_includes,
                dependencies: viewer_deps,
                c_args: viewer_defines,
                cpp_args: viewer_defines,
-               link_args: [
-                    '-framework', 'Foundation',
-                    '-framework', 'OpenGLES',
-                    '-framework', 'CoreGraphics',
-                    '-framework', 'QuartzCore',
-                    '-framework', 'UIKit',
-                    '-framework', 'AVFoundation',
-              ])
+               link_args: shell_link_args)
+
+    executable('glimpse_shell_test',
+               [ 'src/glimpse_shell_test.c', 'src/ios_utils.m' ] + shell_src,
+               include_directories: shell_includes,
+               dependencies: shell_deps,
+               c_args: shell_defines,
+               cpp_args: shell_defines,
+               link_args: shell_link_args)
 endif
 
 if platform_pc
@@ -441,7 +487,7 @@ executable('image-pre-processor',
              'src/image_utils.cc',
              'src/rdt_tree.cc',
              'src/xalloc.c' ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep ])
 
 executable('train_rdt',
@@ -458,7 +504,7 @@ executable('train_rdt',
              'src/llist.c',
              'src/xalloc.c'
            ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep ])
 
 executable('test_rdt',
@@ -475,7 +521,7 @@ executable('test_rdt',
              'src/parson.c',
              'src/llist.c',
              'src/xalloc.c' ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep ])
 
 executable('annotate_bone_map',
@@ -488,7 +534,7 @@ executable('annotate_bone_map',
              'src/parson.c',
              'src/llist.c',
              'src/xalloc.c' ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep, glm_dep ])
 
 executable('train_joint_params',
@@ -505,7 +551,7 @@ executable('train_joint_params',
              'src/llist.c',
              'src/xalloc.c',
              'src/pthread_barrier/pthread_barrier.c' ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep ])
 
 executable('depth2labels',
@@ -519,25 +565,25 @@ executable('depth2labels',
              'src/parson.c',
              'src/llist.c',
              'src/xalloc.c' ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep ])
 
 executable('recordings-tool',
            [ 'src/recordings-tool.cc' ] + client_api_src,
            c_args: client_api_defines,
            cpp_args: client_api_defines,
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: client_api_deps)
 
 executable('exr-to-pfm',
            [ 'src/exr-to-pfm.cc',
              'src/tinyexr.cc' ],
-           include_directories: inc)
+           include_directories: glimpse_includes)
 
 executable('pfm-to-exr',
            [ 'src/pfm-to-exr.cc',
              'src/tinyexr.cc' ],
-           include_directories: inc)
+           include_directories: glimpse_includes)
 
 executable('jip-to-json',
            [ 'src/jip-to-json.c',
@@ -547,12 +593,12 @@ executable('jip-to-json',
              'src/parson.c',
              'src/llist.c',
              'src/xalloc.c' ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ threads_dep ])
 
 executable('pfm-debug',
            [ 'src/pfm-debug.c' ],
-           include_directories: inc)
+           include_directories: glimpse_includes)
 
 executable('index-to-recording',
            [ 'src/index-to-recording.cc',
@@ -565,7 +611,7 @@ executable('index-to-recording',
              'src/parson.c',
              'src/xalloc.c',
            ],
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ libpng_dep, threads_dep ])
 
 if snappy_dep.found() and host_machine.system() == 'linux'
@@ -576,7 +622,7 @@ if snappy_dep.found() and host_machine.system() == 'linux'
                  'src/tinyexr.cc',
                  'src/llist.c',
                  'src/xalloc.c' ],
-               include_directories: inc,
+               include_directories: glimpse_includes,
                dependencies: [ snappy_dep, libpng_dep, threads_dep ])
 endif
 
@@ -589,23 +635,23 @@ executable('json-to-rdt',
              'src/rdt_tree.cc',
              'src/parson.c',
              'src/xalloc.c' ] + getopt_src,
-           include_directories: inc,
+           include_directories: glimpse_includes,
            dependencies: [ threads_dep ])
 
 if glfw_dep.found() and epoxy_dep.found()
-    viewer_defines = client_api_defines + [
-        '-DUSE_GLFW',
-        '-DGLFW_INCLUDE_NONE',
-        '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
-    ]
-    imgui_src += 'src/imgui/imgui_impl_glfw.cpp'
-    imgui_src += 'src/imgui/imgui_impl_opengl3.cpp'
     executable('glimpse_viewer',
-               [ 'src/glimpse_viewer.cc' ] + client_api_src + imgui_src + getopt_src,
-               include_directories: inc,
-               dependencies: client_api_deps + [ glfw_dep ],
-               c_args: viewer_defines,
-               cpp_args: viewer_defines)
+               [ 'src/glimpse_viewer.cc' ] + client_api_src + shell_src + getopt_src,
+               include_directories: glimpse_includes + shell_includes,
+               dependencies: client_api_deps + shell_deps,
+               c_args: shell_defines,
+               cpp_args: shell_defines)
+
+    executable('glimpse_shell_test',
+               [ 'src/glimpse_shell_test.c' ] + shell_src + getopt_src,
+               include_directories: shell_includes,
+               dependencies: shell_deps,
+               c_args: shell_defines,
+               cpp_args: shell_defines)
 endif
 
 endif # platform_pc

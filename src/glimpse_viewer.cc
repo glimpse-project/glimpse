@@ -74,16 +74,8 @@
 #    include "ios_utils.h"
 #endif
 
-#ifdef USE_GLFM
-#    define GLFM_INCLUDE_NONE
-#    include <glfm.h>
-#    include <imgui_impl_glfm.h>
-#    include <imgui_impl_opengl3.h>
-#else
-#    include <GLFW/glfw3.h>
-#    include <imgui_impl_glfw.h>
-#    include <imgui_impl_opengl3.h>
-#    include <getopt-compat.h>
+#ifdef USE_GLFW
+#include <getopt-compat.h>
 #endif
 
 #if TARGET_OS_OSX == 1 || defined(_WIN32)
@@ -107,6 +99,7 @@
 #include "glimpse_record.h"
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
+#include "glimpse_imgui_shell.h"
 
 #ifdef _WIN32
 #define strdup(X) _strdup(X)
@@ -184,7 +177,6 @@ typedef struct {
 struct _Data
 {
     struct gm_logger *log;
-    FILE *log_fp;
 
     /* On Android we don't actually initialize a lot of state including
      * ImGui until we've negotiated permissions, since we might not be
@@ -199,11 +191,8 @@ struct _Data
 
     struct gm_context *ctx;
 
-#ifdef USE_GLFW
-    GLFWwindow *window;
-#else
     bool surface_created;
-#endif
+
     int win_width;
     int win_height;
 
@@ -370,11 +359,6 @@ static uint32_t joint_palette[] = {
 char *glimpse_recordings_path;
 
 static bool pause_profile;
-
-#ifdef USE_GLFM
-static bool permissions_check_failed;
-static bool permissions_check_passed;
-#endif
 
 static const char *log_filename_opt = NULL;
 
@@ -2692,13 +2676,15 @@ event_loop_iteration(Data *data)
 
 }
 
-#ifdef USE_GLFM
 static void
-surface_created_cb(GLFMDisplay *display, int width, int height)
+on_surface_created_resized_cb(struct gm_imgui_shell *shell,
+                              int width,
+                              int height,
+                              void *user_data)
 {
-    Data *data = (Data *)glfmGetUserData(display);
+    Data *data = (Data *)user_data;
 
-    gm_debug(data->log, "Surface created (%dx%d)", width, height);
+    gm_debug(data->log, "Surface created/resized (%dx%d)", width, height);
 
     if (!data->surface_created) {
         init_basic_opengl(data);
@@ -2711,18 +2697,21 @@ surface_created_cb(GLFMDisplay *display, int width, int height)
 }
 
 static void
-surface_destroyed_cb(GLFMDisplay *display)
+on_surface_destroyed_cb(struct gm_imgui_shell *shell,
+                        void *user_data)
 {
-    Data *data = (Data *)glfmGetUserData(display);
+    Data *data = (Data *)user_data;
     gm_debug(data->log, "Surface destroyed");
     data->surface_created = false;
     data->cloud_fbo_valid = false;
 }
 
 static void
-app_focus_cb(GLFMDisplay *display, bool focused)
+on_app_focus_cb(struct gm_imgui_shell *shell,
+                bool focused,
+                void *user_data)
 {
-    Data *data = (Data *)glfmGetUserData(display);
+    Data *data = (Data *)user_data;
     gm_debug(data->log, focused ? "Focused" : "Unfocused");
 
     if (focused) {
@@ -2741,149 +2730,28 @@ app_focus_cb(GLFMDisplay *display, bool focused)
 }
 
 static void
-frame_cb(GLFMDisplay* display, double frameTime)
-{
-    Data *data = (Data*)glfmGetUserData(display);
-
-    if (permissions_check_passed) {
-        if (!data->initialized)
-            viewer_init(data);
-
-        ProfileNewFrame();
-        ProfileScopedSection(Frame);
-        event_loop_iteration(data);
-
-        {
-            ProfileScopedSection(Redraw);
-
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplGlfm_NewFrame(display, frameTime);
-            ImGui::NewFrame();
-
-            glViewport(0, 0, data->win_width, data->win_height);
-            glClear(GL_COLOR_BUFFER_BIT);
-
-            if (data->realtime_ar_mode)
-                draw_ar_video(data);
-            draw_ui(data);
-
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        }
-
-    } else if (permissions_check_failed) {
-        /* At least some visual feedback that we failed to
-         * acquire the permissions we need...
-         */
-        glClearColor(1.0, 0.0, 0.0, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT);
-    } else {
-        glClear(GL_COLOR_BUFFER_BIT);
-    }
-}
-#endif
-
-#ifdef USE_GLFW
-static void
-event_loop(Data *data)
-{
-    while (!glfwWindowShouldClose(data->window)) {
-        ProfileNewFrame();
-
-        ProfileScopedSection(Frame);
-
-        {
-            ProfileScopedSection(GLFWEvents);
-            glfwPollEvents();
-        }
-
-        event_loop_iteration(data);
-
-        {
-            ProfileScopedSection(Redraw);
-
-            ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplGlfw_NewFrame();
-            ImGui::NewFrame();
-
-            glfwMakeContextCurrent(data->window);
-            glViewport(0, 0, data->win_width, data->win_height);
-            glClear(GL_COLOR_BUFFER_BIT);
-
-            if (data->realtime_ar_mode)
-                draw_ar_video(data);
-            draw_ui(data);
-
-            ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
-        }
-
-        {
-            ProfileScopedSection(SwapBuffers);
-            glfwMakeContextCurrent(data->window);
-            glfwSwapBuffers(data->window);
-        }
-    }
-}
-
-static void
-on_window_fb_size_change_cb(GLFWwindow *window, int width, int height)
-{
-    Data *data = (Data *)glfwGetWindowUserPointer(window);
-
-    data->win_width = width;
-    data->win_height = height;
-    data->cloud_fbo_valid = false;
-}
-
-static void
-on_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mods)
-{
-    Data *data = (Data *)glfwGetWindowUserPointer(window);
-
-    ImGui_ImplGlfw_KeyCallback(window, key, scancode, action, mods);
-
-    if (action != GLFW_PRESS)
-        return;
-
-    switch (key) {
-    case GLFW_KEY_ESCAPE:
-    case GLFW_KEY_Q:
-        glfwSetWindowShouldClose(data->window, 1);
-        break;
-    }
-}
-
-static void
-on_glfw_error_cb(int error_code, const char *error_msg)
-{
-    fprintf(stderr, "GLFW ERROR: %d: %s\n", error_code, error_msg);
-}
-#endif
-
-static void
-on_khr_debug_message_cb(GLenum source,
-                        GLenum type,
-                        GLuint id,
-                        GLenum gl_severity,
-                        GLsizei length,
-                        const GLchar *message,
-                        void *user_data)
+on_mainloop_cb(struct gm_imgui_shell *shell,
+               uint64_t timestamp,
+               void *user_data)
 {
     Data *data = (Data *)user_data;
 
-    switch (gl_severity) {
-    case GL_DEBUG_SEVERITY_HIGH:
-        gm_log(data->log, GM_LOG_ERROR, "Viewer GL", "%s", message);
-        break;
-    case GL_DEBUG_SEVERITY_MEDIUM:
-        gm_log(data->log, GM_LOG_WARN, "Viewer GL", "%s", message);
-        break;
-    case GL_DEBUG_SEVERITY_LOW:
-        gm_log(data->log, GM_LOG_WARN, "Viewer GL", "%s", message);
-        break;
-    case GL_DEBUG_SEVERITY_NOTIFICATION:
-        gm_log(data->log, GM_LOG_INFO, "Viewer GL", "%s", message);
-        break;
-    }
+    if (!data->initialized)
+        viewer_init(data);
+
+    event_loop_iteration(data);
+}
+
+static void
+on_render_cb(struct gm_imgui_shell *shell,
+             uint64_t timestamp,
+             void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    if (data->realtime_ar_mode)
+        draw_ar_video(data);
+    draw_ui(data);
 }
 
 /* XXX:
@@ -3151,174 +3019,6 @@ deinit_device_opengl(Data *data)
     data->device_gl_initialized = false;
 }
 
-static void
-logger_cb(struct gm_logger *logger,
-          enum gm_log_level level,
-          const char *context,
-          struct gm_backtrace *backtrace,
-          const char *format,
-          va_list ap,
-          void *user_data)
-{
-    Data *data = (Data *)user_data;
-    char *msg = NULL;
-
-    xvasprintf(&msg, format, ap);
-
-#ifdef __ANDROID__
-    switch (level) {
-    case GM_LOG_ASSERT:
-        __android_log_print(ANDROID_LOG_FATAL, context, "%s", msg);
-        break;
-    case GM_LOG_ERROR:
-        __android_log_print(ANDROID_LOG_ERROR, context, "%s", msg);
-        break;
-    case GM_LOG_WARN:
-        __android_log_print(ANDROID_LOG_WARN, context, "%s", msg);
-        break;
-    case GM_LOG_INFO:
-        __android_log_print(ANDROID_LOG_INFO, context, "%s", msg);
-        break;
-    case GM_LOG_DEBUG:
-        __android_log_print(ANDROID_LOG_DEBUG, context, "%s", msg);
-        break;
-    }
-#endif
-
-    if (data->log_fp) {
-        switch (level) {
-        case GM_LOG_ERROR:
-            fprintf(data->log_fp, "%s: ERROR: ", context);
-            break;
-        case GM_LOG_WARN:
-            fprintf(data->log_fp, "%s: WARN: ", context);
-            break;
-        default:
-            fprintf(data->log_fp, "%s: ", context);
-        }
-
-        fprintf(data->log_fp, "%s\n", msg);
-#if TARGET_OS_IOS == 1
-        ios_log(msg);
-#endif
-
-        if (backtrace) {
-            int line_len = 100;
-            char *formatted = (char *)alloca(backtrace->n_frames * line_len);
-
-            gm_logger_get_backtrace_strings(logger, backtrace,
-                                            line_len, (char *)formatted);
-            for (int i = 0; i < backtrace->n_frames; i++) {
-                char *line = formatted + line_len * i;
-                fprintf(data->log_fp, "> %s\n", line);
-            }
-        }
-
-        fflush(data->log_fp);
-        fflush(stdout);
-    }
-
-    xfree(msg);
-}
-
-static void
-logger_abort_cb(struct gm_logger *logger,
-                void *user_data)
-{
-    Data *data = (Data *)user_data;
-
-    if (data->log_fp) {
-        fprintf(data->log_fp, "ABORT\n");
-        fflush(data->log_fp);
-        fclose(data->log_fp);
-    }
-
-    abort();
-}
-
-#ifdef USE_GLFM
-static void
-init_winsys_glfm(Data *data, GLFMDisplay *display)
-{
-    glfmSetDisplayConfig(display,
-                         GLFMRenderingAPIOpenGLES3,
-                         GLFMColorFormatRGBA8888,
-                         GLFMDepthFormatNone,
-                         GLFMStencilFormatNone,
-                         GLFMMultisampleNone);
-    glfmSetDisplayChrome(display,
-                         GLFMUserInterfaceChromeNavigationAndStatusBar);
-    glfmSetUserData(display, data);
-    glfmSetSurfaceCreatedFunc(display, surface_created_cb);
-    glfmSetSurfaceResizedFunc(display, surface_created_cb);
-    glfmSetSurfaceDestroyedFunc(display, surface_destroyed_cb);
-    glfmSetAppFocusFunc(display, app_focus_cb);
-    glfmSetMainLoopFunc(display, frame_cb);
-
-    ImGui::CreateContext();
-    ImGui_ImplGlfm_Init(display, true /* install callbacks */);
-    ImGui_ImplOpenGL3_Init(GLSL_SHADER_VERSION);
-
-    // Quick hack to make scrollbars a bit more usable on small devices
-    ImGui::GetStyle().ScrollbarSize *= 2;
-}
-#endif
-
-#ifdef USE_GLFW
-static void
-init_winsys_glfw(Data *data)
-{
-    if (!glfwInit()) {
-        gm_error(data->log, "Failed to init GLFW, OpenGL windows system library\n");
-        exit(1);
-    }
-
-#if TARGET_OS_OSX == 1 || defined(_WIN32)
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  2) ;
-#else
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  0) ;
-    glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
-#endif
-
-    data->window = glfwCreateWindow(1280, 720, "Glimpse Viewer", NULL, NULL);
-    if (!data->window) {
-        gm_error(data->log, "Failed to create window\n");
-        exit(1);
-    }
-
-
-    glfwSetWindowUserPointer(data->window, data);
-
-    glfwGetFramebufferSize(data->window, &data->win_width, &data->win_height);
-    glfwSetFramebufferSizeCallback(data->window, on_window_fb_size_change_cb);
-
-    glfwMakeContextCurrent(data->window);
-    glfwSwapInterval(1);
-
-    glfwSetErrorCallback(on_glfw_error_cb);
-
-    ImGui::CreateContext();
-    ImGui_ImplGlfw_InitForOpenGL(data->window, false /* don't install callbacks */);
-    ImGui_ImplOpenGL3_Init(GLSL_SHADER_VERSION);
-
-    ImGuiIO& io = ImGui::GetIO();
-    ImVec2 ui_scale = io.DisplayFramebufferScale;
-    ImGui::GetStyle().ScaleAllSizes(ui_scale.x);
-
-    /* will chain on to ImGui_ImplGlfw_KeyCallback... */
-    glfwSetKeyCallback(data->window, on_key_input_cb);
-    glfwSetMouseButtonCallback(data->window,
-                               ImGui_ImplGlfw_MouseButtonCallback);
-    glfwSetScrollCallback(data->window, ImGui_ImplGlfw_ScrollCallback);
-    glfwSetCharCallback(data->window, ImGui_ImplGlfw_CharCallback);
-
-    init_basic_opengl(data);
-}
-#endif // USE_GLFW
 
 static void __attribute__((unused))
 viewer_destroy(Data *data)
@@ -3364,22 +3064,10 @@ viewer_destroy(Data *data)
 
     gm_device_close(data->recording_device);
 
-    gm_logger_destroy(data->log);
-
     delete data->events_front;
     delete data->events_back;
 
-#ifdef USE_GLFW
-    ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
-    glfwDestroyWindow(data->window);
-    glfwTerminate();
-#endif
-
     delete data;
-
-    ProfileShutdown();
 }
 
 static void
@@ -3415,10 +3103,7 @@ viewer_init(Data *data)
         gm_asset_close(font_asset);
     } else {
         gm_error(data->log, "%s", open_err);
-        exit(1);
     }
-
-    ProfileInitialize(&pause_profile, on_profiler_pause_cb);
 
     data->ctx = gm_context_new(data->log, NULL);
 
@@ -3613,73 +3298,63 @@ parse_args(Data *data, int argc, char **argv)
 }
 #endif
 
-#ifdef USE_GLFM
+static void
+on_log_ready_cb(struct gm_imgui_shell *shell,
+                struct gm_logger *log,
+                void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    // Use the shell's log for application logging too
+    data->log = log;
+}
+
+
 void
-glfmMain(GLFMDisplay *display)
-#else  // USE_GLFW
-int
-main(int argc, char **argv)
-#endif
+glimpse_imgui_shell_main(struct gm_imgui_shell *shell,
+                         int argc,
+                         char **argv)
 {
     Data *data = new Data();
-#if TARGET_OS_IOS == 1
-    char *assets_root = ios_util_get_documents_path();
-    char log_filename_tmp[PATH_MAX];
-    snprintf(log_filename_tmp, sizeof(log_filename_tmp),
-             "%s/glimpse.log", assets_root);
-    data->log_fp = fopen(log_filename_tmp, "w");
-    permissions_check_passed = true;
-#elif defined(__ANDROID__)
-    char *assets_root = strdup("/sdcard/GlimpseViewer");
-    char log_filename_tmp[PATH_MAX];
-    snprintf(log_filename_tmp, sizeof(log_filename_tmp),
-             "%s/glimpse.log", assets_root);
-    data->log_fp = fopen(log_filename_tmp, "w");
-#ifndef USE_TANGO
-    permissions_check_passed = true;
-#endif
-#else
+
+#ifdef USE_GLFW
     parse_args(data, argc, argv);
 
-    const char *assets_root_env = getenv("GLIMPSE_ASSETS_ROOT");
-    char *assets_root = strdup(assets_root_env ? assets_root_env : "");
-    if (assets_root_env) {
-        fprintf(stderr, "GLIMPSE_ASSETS_ROOT=%s\n", assets_root_env);
-    }
-
     if (log_filename_opt) {
-        data->log_fp = fopen(log_filename_opt, "w");
-        if (!data->log_fp) {
-            fprintf(stderr, "Failed to open %s\n", log_filename_opt);
-            exit(1);
-        }
-    } else
-        data->log_fp = stderr;
+        gm_imgui_shell_preinit_log_filename(shell,
+                                            log_filename_opt);
+    }
 #endif
 
-    data->log = gm_logger_new(logger_cb, data);
-    gm_logger_set_abort_callback(data->log, logger_abort_cb, data);
+    gm_imgui_shell_preinit_log_ready_callback(shell,
+                                              on_log_ready_cb,
+                                              data);
+
+    gm_imgui_shell_preinit_surface_created_callback(shell,
+                                                    on_surface_created_resized_cb,
+                                                    data);
+    gm_imgui_shell_preinit_surface_resized_callback(shell,
+                                                    on_surface_created_resized_cb,
+                                                    data);
+    gm_imgui_shell_preinit_surface_destroyed_callback(shell,
+                                                      on_surface_destroyed_cb,
+                                                      data);
+    gm_imgui_shell_preinit_mainloop_callback(shell,
+                                             on_mainloop_cb,
+                                             data);
+    gm_imgui_shell_preinit_render_callback(shell,
+                                           on_render_cb,
+                                           data);
+
+    gm_imgui_shell_init(shell,
+                        "GlimpseViewer",
+                        "Glimpse Viewer",
+                        NULL); // abort on error
 
     gm_debug(data->log, "Glimpse Viewer");
 
-    gm_set_assets_root(data->log, assets_root);
 
-    if (!getenv("FAKENECT_PATH")) {
-        char fakenect_path[14 + PATH_MAX];
-        struct stat sb;
-
-        snprintf(fakenect_path, sizeof(fakenect_path),
-                 "%s/FakeRecording", assets_root);
-
-        if (stat(fakenect_path, &sb) != -1 && S_ISDIR(sb.st_mode))
-        {
-#ifdef _WIN32
-            _putenv_s("FAKENECT_PATH", fakenect_path);
-#else
-            setenv("FAKENECT_PATH", fakenect_path, true);
-#endif
-        }
-    }
+    const char *assets_root = gm_get_assets_root();
 
     char path_tmp[PATH_MAX];
     snprintf(path_tmp, sizeof(path_tmp),
@@ -3694,42 +3369,21 @@ main(int argc, char **argv)
 
     reset_view(data);
 
-#ifdef USE_GLFM
-    gm_info(data->log, "Initializing GLFM...");
-    init_winsys_glfm(data, display);
-#else // USE_GLFW
-    gm_info(data->log, "Initializing GLFW...");
-    init_winsys_glfw(data);
-
     gm_info(data->log, "Initializing view state...");
     viewer_init(data);
-
-    gm_info(data->log, "Starting GLFW event loop...");
-    event_loop(data);
-
-    viewer_destroy(data);
-
-    return 0;
-#endif
 }
 
 #ifdef __ANDROID__
-extern "C" jint
-JNI_OnLoad(JavaVM *vm, void *reserved)
-{
-    android_jvm_singleton = vm;
-
-    return JNI_VERSION_1_6;
-}
-
 extern "C" JNIEXPORT void JNICALL
 Java_com_impossible_glimpse_GlimpseNativeActivity_OnPermissionsCheckResult(
     JNIEnv *env, jclass type, jboolean permission)
 {
+#if 0
     /* Just wait for the next frame to check these */
     if (permission) {
         permissions_check_passed = true;
     } else
         permissions_check_failed = true;
-}
 #endif
+}
+ #endif
