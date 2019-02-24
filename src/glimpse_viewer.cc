@@ -3489,6 +3489,7 @@ viewer_init(Data *data)
     case GM_DEVICE_AVF_TRUEDEPTH_FRONT:
     case GM_DEVICE_AVF_DUAL_BACK:
         data->realtime_ar_mode = true;
+        break;
     default:
         data->realtime_ar_mode = false;
     }
