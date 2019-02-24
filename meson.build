@@ -257,8 +257,9 @@ if platform_ios
     ios_client_api_libs += freenect_sp.get_variable('fakenect_lib')
     ios_client_api_libs += pcl_sp.get_variable('common_lib')
     ios_client_api_libs += pcl_sp.get_variable('segmentation_lib')
-#ios_client_api_libs += epoxy_sp.get_variable('libepoxy_static')
+    #ios_client_api_libs += epoxy_sp.get_variable('libepoxy_static')
 
+    client_api_defines += [ '-DUSE_AVF' ]
 endif
 
 unity_enabled = false
@@ -311,7 +312,10 @@ if platform_android
                                             args: '-I' + tango_sdk_inc)
     endif
 
-    if tango_enabled == false
+    if tango_enabled
+        client_api_defines += [ '-DUSE_TANGO' ]
+        client_api_deps += [ tango_deps ]
+    else
         warning('☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠☠')
         warning('☠                                                                                   ☠')
         warning('☠ Tango support not currently enabled. Use -Dandroid_tango_sdk=<path> to locate SDK ☠')
@@ -325,13 +329,9 @@ if unity_enabled
     if platform_android
         need_unity_jar = true
     endif
-    if tango_enabled
-        plugin_deps = client_api_deps + [ tango_deps ]
-        plugin_defines = client_api_defines + [ '-DUSE_TANGO=1' ]
-    else
-        plugin_deps = client_api_deps
-        plugin_defines = client_api_defines
-    endif
+
+    plugin_deps = client_api_deps
+    plugin_defines = client_api_defines
 
     unity_plugin_src = [ 'src/glimpse_unity.cc' ] + client_api_src
     if platform_ios == true
