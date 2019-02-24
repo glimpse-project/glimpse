@@ -47,7 +47,6 @@ endif
 if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
     add_languages('objc')
 
-    client_api_defines += [ '-D__IOS__' ]
     if get_option('default_library') != 'static'
         error('IOS doesn\'t support shared libraries, so you must configure with --default-library=static')
     endif
