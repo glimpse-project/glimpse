@@ -5,7 +5,7 @@ option('android_ndk', type: 'string',
        description: 'Absolute path to the Android NDK')
 option('android_sdk', type: 'string',
        description: 'Absolute path to the Android SDK')
-option('android_sdk_build_tools', type: 'string', value: '26.0.2',
+option('android_sdk_build_tools', type: 'string', value: '28.0.3',
        description: 'The version of Android SDK build tools to use')
 option('android_tango_sdk', type: 'string',
        description: 'Absolute path to unpacked Tango SDK for Android')
