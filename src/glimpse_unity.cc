@@ -2800,7 +2800,7 @@ gm_unity_stop(intptr_t plugin_handle)
 
     gm_debug(data->log, "GLIMPSE: Stop\n");
     gm_context_disable(data->ctx);
-    //gm_device_stop(data->device);
+    gm_device_stop(data->device);
 }
 
 extern "C" void	UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API

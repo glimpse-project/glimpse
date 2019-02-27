@@ -646,6 +646,9 @@ struct gm_context
 {
     struct gm_logger *log;
 
+    /* Whether or not tracking is enabled */
+    bool enabled;
+
     /* E.g taken during the render hook to block the context from being stopped
      * or destroyed
      */
@@ -8682,7 +8685,9 @@ detector_thread_cb(void *data)
 
         gm_debug(ctx->log, "Requesting new frame for skeletal tracking");
         /* We throttle frame acquisition according to our tracking rate... */
-        request_frame(ctx);
+        if (ctx->enabled) {
+            request_frame(ctx);
+        }
 
 
         /* Maintain running statistics about pipeline stage timings
@@ -12048,13 +12053,17 @@ gm_context_set_event_callback(struct gm_context *ctx,
 void
 gm_context_enable(struct gm_context *ctx)
 {
-    request_frame(ctx);
+    if (!ctx->enabled) {
+        ctx->enabled = true;
+        request_frame(ctx);
+    }
 }
 
-/* Disable skeltal tracking */
+/* Disable skeletal tracking */
 void
 gm_context_disable(struct gm_context *ctx)
 {
+    ctx->enabled = false;
 }
 
 int
