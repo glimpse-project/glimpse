@@ -643,8 +643,8 @@ if glfw_dep.found() and epoxy_dep.found()
                [ 'src/glimpse_viewer.cc' ] + client_api_src + shell_src + getopt_src,
                include_directories: glimpse_includes + shell_includes,
                dependencies: client_api_deps + shell_deps,
-               c_args: shell_defines,
-               cpp_args: shell_defines)
+               c_args: client_api_defines + shell_defines,
+               cpp_args: client_api_defines + shell_defines)
 
     executable('glimpse_shell_test',
                [ 'src/glimpse_shell_test.c' ] + shell_src + getopt_src,
