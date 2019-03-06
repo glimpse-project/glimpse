@@ -236,6 +236,7 @@ enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_DEPTH,
     DEBUG_CLOUD_MODE_CODEBOOK_LABELS,
     DEBUG_CLOUD_MODE_LABELS,
+    DEBUG_CLOUD_MODE_LABELS_ORDERED,
     DEBUG_CLOUD_MODE_EDGES,
 
     N_DEBUG_CLOUD_MODES
@@ -4222,6 +4223,7 @@ colour_debug_cloud(struct gm_context *ctx,
         }
         break;
     case DEBUG_CLOUD_MODE_LABELS:
+    case DEBUG_CLOUD_MODE_LABELS_ORDERED:
         if (state->done_label_inference &&
             indices.size() &&
             tracking->people.size())
@@ -4266,7 +4268,19 @@ colour_debug_cloud(struct gm_context *ctx,
 
                     float *label_probs = &person_label_probs[cluster_idx * n_labels];
                     uint8_t rgb[3];
-                    label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
+                    if (state->debug_cloud_mode == DEBUG_CLOUD_MODE_LABELS) {
+                        label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
+                    } else {
+                        uint8_t label = 0;
+                        float pr = -1.0f;
+                        for (int l = 0; l < n_labels; ++l) {
+                            if (label_probs[l] > pr) {
+                                label = l;
+                                pr = label_probs[l];
+                            }
+                        }
+                        rgb[0] = rgb[1] = rgb[2] = label;
+                    }
                     debug_cloud[i].rgba += (((uint32_t)rgb[0])<<24 |
                                             ((uint32_t)rgb[1])<<16 |
                                             ((uint32_t)rgb[2])<<8 |
@@ -9649,6 +9663,13 @@ gm_context_new(struct gm_logger *logger, char **err)
     enumerant.name = "labels";
     enumerant.desc = "Body part labels";
     enumerant.val = DEBUG_CLOUD_MODE_LABELS;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "labels_ordered";
+    enumerant.desc = "Body part labels, with each colour component "
+                     "corresponding to label index";
+    enumerant.val = DEBUG_CLOUD_MODE_LABELS_ORDERED;
     ctx->cloud_mode_enumerants.push_back(enumerant);
 
     enumerant = gm_ui_enumerant();
