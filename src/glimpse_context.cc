@@ -238,6 +238,7 @@ enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_LABELS,
     DEBUG_CLOUD_MODE_LABELS_ORDERED,
     DEBUG_CLOUD_MODE_EDGES,
+    DEBUG_CLOUD_MODE_VIDEO_LABEL_ALPHA,
 
     N_DEBUG_CLOUD_MODES
 };
@@ -2694,6 +2695,22 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
     return tracking;
 }
 
+static uint8_t
+label_from_pr_table(float *label_probs, int n_labels)
+{
+    uint8_t label = 0;
+    float pr = -1.0;
+
+    for (int l = 0; l < n_labels; ++l) {
+        if (label_probs[l] > pr) {
+            label = l;
+            pr = label_probs[l];
+        }
+    }
+
+    return label;
+}
+
 static void
 label_probs_to_rgb(struct gm_context *ctx,
                    float *label_probs,
@@ -2701,16 +2718,7 @@ label_probs_to_rgb(struct gm_context *ctx,
                    uint8_t *rgb_out)
 {
     if (ctx->debug_label == -1) {
-        uint8_t label = 0;
-        float pr = -1.0;
-
-        for (int l = 0; l < n_labels; l++) {
-            if (label_probs[l] > pr) {
-                label = l;
-                pr = label_probs[l];
-            }
-        }
-
+        uint8_t label = label_from_pr_table(label_probs, n_labels);
         rgb_out[0] = default_palette[label].red;
         rgb_out[1] = default_palette[label].green;
         rgb_out[2] = default_palette[label].blue;
@@ -4118,11 +4126,14 @@ colour_debug_cloud(struct gm_context *ctx,
 
     switch ((enum debug_cloud_mode)state->debug_cloud_mode)
     {
-    case DEBUG_CLOUD_MODE_VIDEO: {
+    case DEBUG_CLOUD_MODE_VIDEO:
+    case DEBUG_CLOUD_MODE_VIDEO_LABEL_ALPHA: {
         const float vid_fx = tracking->video_camera_intrinsics.fx;
         const float vid_fy = tracking->video_camera_intrinsics.fy;
         const float vid_cx = tracking->video_camera_intrinsics.cx;
         const float vid_cy = tracking->video_camera_intrinsics.cy;
+
+        int n_labels = ctx->n_labels;
 
         int vid_width = 0;
         int vid_height = 0;
@@ -4130,6 +4141,7 @@ colour_debug_cloud(struct gm_context *ctx,
         tracking_create_rgb_video(&tracking->base, &vid_width, &vid_height, &vid_rgb);
         if (vid_rgb) {
             if (indexed_pcl_cloud && indices.size()) {
+                int cloud_width_2d = indexed_pcl_cloud->width;
                 for (int i = 0; i < indices.size(); i++) {
                     int idx = indices[i];
 
@@ -4155,10 +4167,49 @@ colour_debug_cloud(struct gm_context *ctx,
                                     (float)vid_height - 1);
                     int v_off = vy * vid_width * 3 + vx * 3;
 
+                    uint8_t alpha = 0xff;
+                    if (state->debug_cloud_mode == DEBUG_CLOUD_MODE_VIDEO_LABEL_ALPHA &&
+                        state->done_label_inference &&
+                        state->people.size())
+                    {
+                        for (auto &person_data : state->people) {
+                            InferredPerson &person = person_data.first;
+                            int person_cluster = person_data.second;
+
+                            struct candidate_cluster &cluster =
+                                state->person_clusters[person_cluster];
+
+                            int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
+                            int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+
+                            std::vector<float> &person_label_probs = person.label_probs;
+
+                            gm_assert(ctx->log,
+                                      (cluster_width_2d * cluster_height_2d * n_labels ==
+                                       person_label_probs.size()),
+                                      "Cluster bounds don't corresponds with size of label_probs array");
+
+                            int x = idx % cloud_width_2d;
+                            int y = idx / cloud_width_2d;
+
+                            int cluster_x = x - cluster.min_x_2d;
+                            int cluster_y = y - cluster.min_y_2d;
+
+                            if (cluster_x >= 0 && cluster_x < cluster_width_2d &&
+                                cluster_y >= 0 && cluster_y < cluster_height_2d)
+                            {
+                                int cluster_idx = cluster_width_2d * cluster_y + cluster_x;
+                                float *label_probs = &person_label_probs[cluster_idx * n_labels];
+                                alpha = label_from_pr_table(label_probs, n_labels);
+                                break;
+                            }
+                        }
+                    }
+
                     debug_cloud[i].rgba = (((uint32_t)vid_rgb[v_off])<<24 |
                                            ((uint32_t)vid_rgb[v_off+1])<<16 |
                                            ((uint32_t)vid_rgb[v_off+2])<<8 |
-                                           0xff);
+                                           alpha);
                 }
             } else {
                 for (unsigned off = 0; off < debug_cloud.size(); off++) {
@@ -4226,7 +4277,7 @@ colour_debug_cloud(struct gm_context *ctx,
     case DEBUG_CLOUD_MODE_LABELS_ORDERED:
         if (state->done_label_inference &&
             indices.size() &&
-            tracking->people.size())
+            state->people.size())
         {
             int n_labels = ctx->n_labels;
 
@@ -4267,24 +4318,22 @@ colour_debug_cloud(struct gm_context *ctx,
                     int cluster_idx = cluster_width_2d * cluster_y + cluster_x;
 
                     float *label_probs = &person_label_probs[cluster_idx * n_labels];
-                    uint8_t rgb[3];
-                    if (state->debug_cloud_mode == DEBUG_CLOUD_MODE_LABELS) {
+                    uint8_t rgb[4];
+                    uint8_t label;
+                    switch (state->debug_cloud_mode) {
+                    case DEBUG_CLOUD_MODE_LABELS:
                         label_probs_to_rgb(ctx, label_probs, n_labels, rgb);
-                    } else {
-                        uint8_t label = 0;
-                        float pr = -1.0f;
-                        for (int l = 0; l < n_labels; ++l) {
-                            if (label_probs[l] > pr) {
-                                label = l;
-                                pr = label_probs[l];
-                            }
-                        }
-                        rgb[0] = rgb[1] = rgb[2] = label;
+                        rgb[3] = 0xff;
+                        break;
+                    case DEBUG_CLOUD_MODE_LABELS_ORDERED:
+                        label = label_from_pr_table(label_probs, n_labels);
+                        rgb[0] = rgb[1] = rgb[2] = rgb[3] = label;
+                        break;
                     }
                     debug_cloud[i].rgba += (((uint32_t)rgb[0])<<24 |
                                             ((uint32_t)rgb[1])<<16 |
                                             ((uint32_t)rgb[2])<<8 |
-                                            0xff);
+                                            rgb[3]);
                 }
 
                 if (state->debug_cloud_focus == DEBUG_CLOUD_FOCUS_BEST) {
@@ -9676,6 +9725,12 @@ gm_context_new(struct gm_logger *logger, char **err)
     enumerant.name = "edges";
     enumerant.desc = "Edges";
     enumerant.val = DEBUG_CLOUD_MODE_EDGES;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "video_label_alpha";
+    enumerant.desc = "Video with body part labels encoded in the alpha channel";
+    enumerant.val = DEBUG_CLOUD_MODE_VIDEO_LABEL_ALPHA;
     ctx->cloud_mode_enumerants.push_back(enumerant);
 
     prop.enum_state.n_enumerants = ctx->cloud_mode_enumerants.size();
