@@ -1,0 +1,29 @@
+[binaries]
+name = 'android-aarch64'
+c = 'aarch64-linux-android28-clang'
+cpp = 'aarch64-linux-android28-clang++'
+ar = 'aarch64-linux-android-ar'
+ld = 'aarch64-linux-android-ld'
+strip = 'aarch64-linux-android-strip'
+
+[host_machine]
+system = 'android'
+cpu_family = 'arm64'
+cpu = 'arm64-v8a'
+endian = 'little'
+
+[properties]
+
+# As a hacky workaround for not being able to query the binaries
+# we need to specify the strip tool again for our install script
+_strip_binary = 'aarch64-linux-android-strip'
+
+#c_args = ['-target aarch64-linux-android28']
+#cpp_args = ['-target aarch64-linux-android28']
+#c_link_args = ['-target aarch64-linux-android28']
+#cpp_link_args = ['-target aarch64-linux-android28']
+
+# So we can locate libc++_shared.so in the NDK we need to know
+# the arch directory name used within the NDK
+_ndk_arch = 'arm64-v8a'
+
