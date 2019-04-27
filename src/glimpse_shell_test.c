@@ -17,6 +17,8 @@ on_log_ready_cb(struct gm_imgui_shell *shell,
 
     // Use the shell's log for application logging too
     app->log = log;
+
+    gm_info(log, "Log Ready Callback");
 }
 
 static void
@@ -65,6 +67,7 @@ glimpse_imgui_shell_main(struct gm_imgui_shell *shell,
                          char **argv)
 {
     struct shell_test_app *app = xcalloc(1, sizeof(*app));
+
 
     gm_imgui_shell_preinit_log_ready_callback(shell,
                                               on_log_ready_cb,

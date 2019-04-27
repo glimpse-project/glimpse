@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2017 Glimp IP Ltd
+ * Copyright (C) 2019 Glimp IP Ltd
+ * Copyright (C) 2019 Robert Bragg <robert@sixbynine.org>
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -67,12 +68,13 @@
 #    include "ios_utils.h"
 #endif
 
-#ifdef USE_GLFM
-#    define GLFM_INCLUDE_NONE
+#ifdef SUPPORTS_GLFM
 #    include <glfm.h>
 #    include <imgui_impl_glfm.h>
 #    include <imgui_impl_opengl3.h>
-#else
+#endif
+
+#ifdef SUPPORTS_GLFW
 #    include <GLFW/glfw3.h>
 #    include <imgui_impl_glfw.h>
 #    include <imgui_impl_opengl3.h>
@@ -91,6 +93,10 @@
 #include "glimpse_gl.h"
 #include "glimpse_assets.h"
 #include "glimpse_imgui_shell.h"
+#ifdef TARGET_OS_MAC // OSX or IOS
+#include "glimpse_imgui_darwin_shell.h"
+#endif
+#include "glimpse_imgui_shell_impl.h"
 
 #ifdef _WIN32
 #define strdup(X) _strdup(X)
@@ -112,74 +118,12 @@
     } while(0)
 
 
-struct gm_imgui_shell
-{
-    struct gm_logger *log;
-
-    // Only set if user called _preinit_log_filename
-    char *log_filename;
-
-    // Note if NULL then that implies the user gave a custom logger and
-    // we shouldn't destroy their logger.
-    FILE *log_fp;
-
-    char *app_name;
-    char *app_title;
-
-    char *custom_assets_root;
-
-    bool initialized;
-    bool imgui_initialized;
-    bool gl_initialized;
-
-#ifdef USE_GLFM
-    GLFMDisplay *display;
-#endif
-
-#ifdef USE_GLFW
-    GLFWwindow *window;
-#endif
-
-    int surface_width;
-    int surface_height;
-
-    void (*log_ready_callback)(struct gm_imgui_shell *shell,
-                               struct gm_logger *log,
-                               void *user_data);
-    void *log_ready_callback_data;
-
-    void (*surface_created_callback)(struct gm_imgui_shell *shell,
-                                     int width,
-                                     int height,
-                                     void *user_data);
-    void *surface_created_callback_data;
-
-    void (*surface_resized_callback)(struct gm_imgui_shell *shell,
-                                     int width,
-                                     int height,
-                                     void *user_data);
-    void *surface_resized_callback_data;
-
-    void (*surface_destroyed_callback)(struct gm_imgui_shell *shell,
-                                       void *user_data);
-    void *surface_destroyed_callback_data;
-
-    void (*app_focus_callback)(struct gm_imgui_shell *shell,
-                               bool focused,
-                               void *user_data);
-    void *app_focus_callback_data;
-    void (*mainloop_callback)(struct gm_imgui_shell *shell,
-                              uint64_t timestamp,
-                              void *user_data);
-    void *mainloop_callback_data;
-    void (*render_callback)(struct gm_imgui_shell *shell,
-                              uint64_t timestamp,
-                              void *user_data);
-    void *render_callback_data;
-};
-
 #ifdef __ANDROID__
 static JavaVM *android_jvm_singleton;
+#endif
+
+#ifdef SUPPORTS_GLFM
+static struct gm_imgui_shell *glfm_global_shell;
 #endif
 
 static bool pause_profile;
@@ -250,6 +194,8 @@ opengl_init(struct gm_imgui_shell *shell)
     glBindVertexArray(vertex_array);
 #endif
 
+    GM_GL_CHECK_ERRORS(shell->log);
+
     shell->gl_initialized = true;
 }
 
@@ -262,6 +208,8 @@ on_profiler_pause_cb(bool pause)
 static void
 imgui_init(struct gm_imgui_shell *shell)
 {
+    gm_info(shell->log, "Initializing IMGUI state...");
+
     ImGui::StyleColorsClassic();
 
     // We don't try and load any external fonts since we might not have
@@ -270,10 +218,12 @@ imgui_init(struct gm_imgui_shell *shell)
     // checking for permissions)
 
     ProfileInitialize(&pause_profile, on_profiler_pause_cb);
+
+    shell->imgui_initialized = true;
 }
 
 
-#ifdef USE_GLFM
+#ifdef SUPPORTS_GLFM
 static void
 glfm_surface_created_cb(GLFMDisplay *display, int width, int height)
 {
@@ -332,8 +282,9 @@ glfm_mainloop_cb(GLFMDisplay* display, double frameTime)
 
     uint64_t time = frameTime * 1e9;
 
-    if (!shell->imgui_initialized)
+    if (!shell->imgui_initialized) {
         imgui_init(shell);
+    }
 
     ProfileNewFrame();
     ProfileScopedSection(Frame);
@@ -378,7 +329,7 @@ glfm_mainloop_cb(GLFMDisplay* display, double frameTime)
 static void
 glfm_init(struct gm_imgui_shell *shell)
 {
-    GLFMDisplay *display = shell->display;
+    GLFMDisplay *display = shell->glfm_display;
 
     glfmSetDisplayConfig(display,
                          GLFMRenderingAPIOpenGLES3,
@@ -402,13 +353,15 @@ glfm_init(struct gm_imgui_shell *shell)
     // Quick hack to make scrollbars a bit more usable on small devices
     ImGui::GetStyle().ScrollbarSize *= 2;
 }
-#endif // USE_GLFM
+#endif // SUPPORTS_GLFM
 
-#ifdef USE_GLFW
+#ifdef SUPPORTS_GLFW
 static void
 glfw_mainloop(struct gm_imgui_shell *shell)
 {
-    while (!glfwWindowShouldClose(shell->window)) {
+    gm_info(shell->log, "Starting GLFW mainloop loop...");
+
+    while (!glfwWindowShouldClose(shell->glfw_window)) {
         uint64_t time = gm_os_get_time();
 
         ProfileNewFrame();
@@ -436,7 +389,7 @@ glfw_mainloop(struct gm_imgui_shell *shell)
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
 
-            glfwMakeContextCurrent(shell->window);
+            glfwMakeContextCurrent(shell->glfw_window);
 
             if (!shell->gl_initialized)
                 opengl_init(shell);
@@ -459,8 +412,8 @@ glfw_mainloop(struct gm_imgui_shell *shell)
 
         {
             ProfileScopedSection(SwapBuffers);
-            glfwMakeContextCurrent(shell->window);
-            glfwSwapBuffers(shell->window);
+            glfwMakeContextCurrent(shell->glfw_window);
+            glfwSwapBuffers(shell->glfw_window);
         }
     }
 }
@@ -494,7 +447,7 @@ glfw_key_input_cb(GLFWwindow *window, int key, int scancode, int action, int mod
     switch (key) {
     case GLFW_KEY_ESCAPE:
     case GLFW_KEY_Q:
-        glfwSetWindowShouldClose(shell->window, 1);
+        glfwSetWindowShouldClose(shell->glfw_window, 1);
         break;
     }
 }
@@ -528,29 +481,29 @@ glfw_init(struct gm_imgui_shell *shell, char **err)
     shell->surface_width = 1280;
     shell->surface_height = 720;
 
-    shell->window = glfwCreateWindow(shell->surface_width,
+    shell->glfw_window = glfwCreateWindow(shell->surface_width,
                                      shell->surface_height,
                                      shell->app_title,
                                      NULL, NULL);
-    if (!shell->window) {
+    if (!shell->glfw_window) {
         gm_throw(shell->log, err, "Failed to create window\n");
         return false;
     }
 
-    glfwSetWindowUserPointer(shell->window, shell);
+    glfwSetWindowUserPointer(shell->glfw_window, shell);
 
-    glfwGetFramebufferSize(shell->window,
+    glfwGetFramebufferSize(shell->glfw_window,
                            &shell->surface_width,
                            &shell->surface_height);
-    glfwSetFramebufferSizeCallback(shell->window, glfw_window_fb_size_change_cb);
+    glfwSetFramebufferSizeCallback(shell->glfw_window, glfw_window_fb_size_change_cb);
 
-    glfwMakeContextCurrent(shell->window);
+    glfwMakeContextCurrent(shell->glfw_window);
     glfwSwapInterval(1);
 
     glfwSetErrorCallback(glfw_error_cb);
 
     ImGui::CreateContext();
-    ImGui_ImplGlfw_InitForOpenGL(shell->window, false /* don't install callbacks */);
+    ImGui_ImplGlfw_InitForOpenGL(shell->glfw_window, false /* don't install callbacks */);
     ImGui_ImplOpenGL3_Init(GLSL_SHADER_VERSION);
 
     ImGuiIO& io = ImGui::GetIO();
@@ -558,11 +511,11 @@ glfw_init(struct gm_imgui_shell *shell, char **err)
     ImGui::GetStyle().ScaleAllSizes(ui_scale.x);
 
     /* will chain on to ImGui_ImplGlfw_KeyCallback... */
-    glfwSetKeyCallback(shell->window, glfw_key_input_cb);
-    glfwSetMouseButtonCallback(shell->window,
+    glfwSetKeyCallback(shell->glfw_window, glfw_key_input_cb);
+    glfwSetMouseButtonCallback(shell->glfw_window,
                                ImGui_ImplGlfw_MouseButtonCallback);
-    glfwSetScrollCallback(shell->window, ImGui_ImplGlfw_ScrollCallback);
-    glfwSetCharCallback(shell->window, ImGui_ImplGlfw_CharCallback);
+    glfwSetScrollCallback(shell->glfw_window, ImGui_ImplGlfw_ScrollCallback);
+    glfwSetCharCallback(shell->glfw_window, ImGui_ImplGlfw_CharCallback);
 
     if (shell->surface_created_callback) {
         shell->surface_created_callback(shell,
@@ -571,9 +524,11 @@ glfw_init(struct gm_imgui_shell *shell, char **err)
                                         shell->surface_created_callback_data);
     }
 
+    imgui_init(shell);
+
     return true;
 }
-#endif // USE_GLFW
+#endif // SUPPORTS_GLFW
 
 static void
 logger_cb(struct gm_logger *logger,
@@ -701,6 +656,28 @@ gm_imgui_shell_preinit_assets_root(struct gm_imgui_shell *shell,
     shell->custom_assets_root = assets_root ? strdup(assets_root) : NULL;
 }
 
+bool
+gm_imgui_shell_preinit_renderer(struct gm_imgui_shell *shell,
+                                enum gm_imgui_renderer renderer)
+{
+    if (shell->initialized) {
+        gm_error(shell->log, "_preinit apis must be called before gm_imgui_shell_init()");
+        gm_logger_abort(shell->log);
+    }
+
+#ifndef SUPPORTS_METAL
+    if (renderer == GM_IMGUI_RENDERER_METAL)
+    {
+        gm_info(shell->log, "Probe failure for Meta API support");
+        return false;
+    }
+#endif
+
+    shell->requested_renderer = renderer;
+
+    return true;
+}
+
 #define IMPL_CALLBACK_PREINIT_API(CALLBACK_NAME, CALLBACK_TYPE) \
 void \
 gm_imgui_shell_preinit_##CALLBACK_NAME##_callback(struct gm_imgui_shell *shell, \
@@ -751,8 +728,8 @@ IMPL_CALLBACK_PREINIT_API(render,
 static void __attribute__((unused))
 imgui_shell_destroy(struct gm_imgui_shell *shell)
 {
-#ifdef USE_GLFW
-    glfwDestroyWindow(shell->window);
+#ifdef SUPPORTS_GLFW
+    glfwDestroyWindow(shell->glfw_window);
 
     if (shell->surface_destroyed_callback) {
         shell->surface_destroyed_callback(shell,
@@ -907,17 +884,56 @@ gm_imgui_shell_init(struct gm_imgui_shell *shell,
     free(assets_root);
     assets_root = NULL;
 
-#ifdef USE_GLFM
-    gm_info(shell->log, "Initializing GLFM...");
-    glfm_init(shell);
-#else
-    gm_info(shell->log, "Initializing GLFW...");
-    if (!glfw_init(shell, err)) {
-        return false;
+    const char *renderer_override = getenv("GLIMPSE_RENDERER");
+    if (renderer_override)
+    {
+        if (strcasecmp(renderer_override, "GL") == 0)
+            shell->requested_renderer = GM_IMGUI_RENDERER_OPENGL;
+        else if (strcasecmp(renderer_override, "metal") == 0)
+            shell->requested_renderer = GM_IMGUI_RENDERER_METAL;
     }
 
-    gm_info(shell->log, "Initializing IMGUI state...");
-    imgui_init(shell);
+    switch (shell->requested_renderer)
+    {
+    case GM_IMGUI_RENDERER_AUTO:
+    case GM_IMGUI_RENDERER_OPENGL:
+        shell->renderer = GM_IMGUI_RENDERER_OPENGL;
+        break;
+    case GM_IMGUI_RENDERER_METAL:
+        shell->renderer = GM_IMGUI_RENDERER_METAL;
+        break;
+    }
+
+    switch (shell->renderer)
+    {
+    case GM_IMGUI_RENDERER_METAL:
+        shell->winsys = GM_IMGUI_WINSYS_METAL_KIT;
+        break;
+    case GM_IMGUI_RENDERER_OPENGL:
+#ifdef SUPPORTS_GLFM
+        shell->winsys = GM_IMGUI_WINSYS_GLFM;
+#endif
+#ifdef SUPPORTS_GLFW
+        shell->winsys = GM_IMGUI_WINSYS_GLFW;
+#endif
+        break;
+    case GM_IMGUI_RENDERER_AUTO:
+        gm_assert(shell->log, 0, "Spurious undefined shell renderer");
+        break;
+    }
+
+    // We can't init GLFM at this point because we have to
+    // start the mainloop before glfmMain will be called
+    // on some platforms
+
+#ifdef SUPPORTS_GLFW
+    if (shell->winsys == GM_IMGUI_WINSYS_GLFW)
+    {
+        gm_info(shell->log, "Initializing GLFW...");
+        if (!glfw_init(shell, err)) {
+            return false;
+        }
+    }
 #endif
 
     shell->initialized = true;
@@ -931,30 +947,113 @@ gm_imgui_shell_get_log(struct gm_imgui_shell *shell)
     return shell->log;
 }
 
-#ifdef USE_GLFM
+enum gm_imgui_renderer
+gm_imgui_shell_get_renderer(struct gm_imgui_shell *shell)
+{
+    if (shell->renderer == GM_IMGUI_RENDERER_AUTO) {
+        gm_error(shell->log, "%s called before the renderer has been determined", __func__);
+        gm_logger_abort(shell->log);
+    }
+
+    return shell->renderer;
+}
+
+void
+gm_imgui_shell_get_chrome_insets(struct gm_imgui_shell *shell,
+                                 float *top,
+                                 float *right,
+                                 float *bottom,
+                                 float *left)
+{
+    *top = 0;
+    *right = 0;
+    *bottom = 0;
+    *left = 0;
+
+#ifdef SUPPORTS_GLFM
+    double t, r, b, l;
+    glfmGetDisplayChromeInsets(shell->glfm_display, &t, &r, &b, &l);
+    *top = t;
+    *right = r;
+    *bottom = b;
+    *left = l;
+#endif
+}
+
+#ifdef SUPPORTS_GLFM
 void
 glfmMain(GLFMDisplay *display)
-#else  // USE_GLFW
+{
+    struct gm_imgui_shell *shell = glfm_global_shell;
+
+    // In the case of Android then glfmMain is our first entry point
+    if (!shell)
+    {
+        shell = new gm_imgui_shell();
+        shell->renderer = GM_IMGUI_RENDERER_OPENGL;
+        glimpse_imgui_shell_main(shell, 0, NULL);
+    }
+
+    shell->glfm_display = display;
+
+    gm_info(shell->log, "Initializing GLFM...");
+    glfm_init(shell);
+}
+#endif // SUPPORTS_GLFM
+
+//static void
+//darwin_metal_kit_app_ready_cb(struct gm_imgui_shell *shell)
+//{
+//    gm_info(shell->log, "Darwin Metal Kit app ready");
+//}
+
+#ifndef __ANDROID__
 int
 main(int argc, char **argv)
-#endif
 {
     struct gm_imgui_shell *shell = new gm_imgui_shell();
 
-#ifdef USE_GLFM
-    shell->display = display;
-    glimpse_imgui_shell_main(shell, 0, NULL);
-#else
+    // This isn't assuming we will use GLFM, but if we do
+    // then glfmMain will be called later and needs to be
+    // able to access this shell...
+#ifdef SUPPORTS_GLFM
+    glfm_global_shell = shell;
+#endif
+
     glimpse_imgui_shell_main(shell, argc, argv);
 
-    gm_info(shell->log, "Starting GLFW mainloop loop...");
-    glfw_mainloop(shell);
+    switch (shell->winsys)
+    {
+    case GM_IMGUI_WINSYS_METAL_KIT:
+#ifdef SUPPORTS_METAL
+        glimpse_imgui_darwin_metal_kit_main(shell);
+#endif
+        break;
+    case GM_IMGUI_WINSYS_GLFM:
+#ifdef SUPPORTS_GLFM
+#if TARGET_OS_IOS == 1
+        glimpse_imgui_darwin_glfm_main(shell);
+#else
+#error "Unhandled main()-based GLFM init"
+#endif
+#endif
+        break;
+    case GM_IMGUI_WINSYS_GLFW:
+#ifdef SUPPORTS_GLFW
+        glfw_mainloop(shell);
+#endif
+        break;
+    case GM_IMGUI_WINSYS_NONE:
+        gm_assert(shell->log, 0, "Spurious, undefined, shell winsys");
+        break;
+    }
 
     imgui_shell_destroy(shell);
 
     return 0;
-#endif
 }
+#endif // !ANDROID
+
 
 #ifdef __ANDROID__
 extern "C" jint

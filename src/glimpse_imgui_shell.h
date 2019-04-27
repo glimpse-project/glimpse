@@ -9,6 +9,21 @@
 extern "C" {
 #endif
 
+enum gm_imgui_renderer
+{
+    GM_IMGUI_RENDERER_AUTO,
+    GM_IMGUI_RENDERER_OPENGL,
+    GM_IMGUI_RENDERER_METAL,
+};
+
+enum gm_imgui_winsys
+{
+    GM_IMGUI_WINSYS_NONE,
+    GM_IMGUI_WINSYS_GLFM,
+    GM_IMGUI_WINSYS_GLFW,
+    GM_IMGUI_WINSYS_METAL_KIT,
+};
+
 struct gm_imgui_shell;
 
 // If you want to create your own logger that the shell will use then call this
@@ -33,6 +48,15 @@ gm_imgui_shell_preinit_log_filename(struct gm_imgui_shell *shell,
 void
 gm_imgui_shell_preinit_assets_root(struct gm_imgui_shell *shell,
                                    const char *assets_root);
+
+// On platforms where multiple graphics apis are supported then this api can
+// affect the choice of API. By default Metal is used if supported otherwise
+// OpenGL[ES] is used.
+//
+// This will return false if the requested API is not supported.
+bool
+gm_imgui_shell_preinit_renderer(struct gm_imgui_shell *shell,
+                                enum gm_imgui_renderer renderer);
 
 void
 gm_imgui_shell_preinit_log_ready_callback(struct gm_imgui_shell *shell,
@@ -93,6 +117,21 @@ gm_imgui_shell_init(struct gm_imgui_shell *shell,
 // Call this to be able to share the same logger as the shell
 struct gm_logger *
 gm_imgui_shell_get_log(struct gm_imgui_shell *shell);
+
+// Call to know what renderer was finally chosen if a renderer wasn't
+// explicitly requested.
+enum gm_imgui_renderer
+gm_imgui_shell_get_renderer(struct gm_imgui_shell *shell);
+
+// E.g. on Android and iOS then applications are required to inset their
+// content, either to account for physical notches in the display for
+// for status areas.
+void
+gm_imgui_shell_get_chrome_insets(struct gm_imgui_shell *shell,
+                                 float *top,
+                                 float *right,
+                                 float *bottom,
+                                 float *left);
 
 // Each application using this imgui shell needs to implement this
 // function where it can parse command line arguments (if command

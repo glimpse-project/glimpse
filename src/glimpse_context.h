@@ -508,7 +508,10 @@ gm_context_event_free(struct gm_event *event);
  * bound to have a chance to use the gpu.
  */
 void
-gm_context_render_thread_hook(struct gm_context *ctx);
+gm_context_opengl_gpu_hook(struct gm_context *ctx);
+
+void
+gm_context_metal_gpu_hook(struct gm_context *ctx);
 
 int
 gm_context_get_n_stages(struct gm_context *ctx);
@@ -676,8 +679,8 @@ gm_tracking_get_skeleton_for_person(struct gm_tracking *tracking,
                                     int person_id);
 
 const struct gm_skeleton *
-gm_tracking_get_raw_skeleton(struct gm_tracking *tracking,
-                             int person_id);
+gm_tracking_get_raw_skeleton_for_person(struct gm_tracking *_tracking,
+                                        int person_id);
 
 uint64_t
 gm_tracking_get_timestamp(struct gm_tracking *tracking);
