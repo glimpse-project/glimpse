@@ -153,32 +153,18 @@ ninja
 
 # Building for Android
 
-We currently only test building with NDK r18b, though later versions may work.
+We currently only test building with NDK r19c (no longer requiring
+stand-alone toolchains), though later versions may work.
 
 From here it's assumed you have set up an environment something like:
 ```
-export ANDROID_NDK_HOME="path/to/android-ndk-r18b"
+export ANDROID_NDK_HOME="path/to/android-ndk-r19c"
 export ANDROID_HOME="path/to/android-sdk"
 export PATH="$ANDROID_HOME/tools:$PATH"
 export PATH="$ANDROID_HOME/tools/bin:$PATH"
 export PATH="$ANDROID_HOME/platform-tools:$PATH"
+export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/bin:$PATH
 ```
-For ease of integration with Meson we create a standalone toolchain like so:
-```
-$ANDROID_NDK_HOME/build/tools/make_standalone_toolchain.py \
-        --install-dir ~/local/android-arm-toolchain-28 \
-        --arch arm \
-        --api 28 \
-        --stl libc++
-export PATH=~/local/android-arm-toolchain-28/bin:$PATH
-```
-*Note: we can't build for arm64 when building the libglimpse-unity-plugin.so
-since Unity doesn't natively support arm64 on Android*
-*Note: while building for 32bit arm we have to use api level >= 24 otherwise we
-hit build issues with -D_FILE_OFFSET_BITS=64 usage*
-*Note: it's not recommended to add the above toolchain path to your default PATH
-considering that it includes a minimal installation of python2.*
-
 The following SDK components should be downloaded:
 ```
 sdkmanager "platforms;android-28"
@@ -190,7 +176,7 @@ Then to compile Glimpse:
 ```
 mkdir build-android-debug
 cd build-android-debug
-meson --cross-file ../android-armeabi-v7a-cross-file.txt --buildtype=debug ..
+meson --cross-file ../android-aarch64-cross-file.txt --buildtype=debug ..
 ninja
 ```
 
@@ -198,7 +184,7 @@ or release:
 ```
 mkdir build-android-release
 cd build-android-release
-meson --cross-file ../android-armeabi-v7a-cross-file.txt --buildtype=release ..
+meson --cross-file ../android-aarch64-cross-file.txt --buildtype=release ..
 ninja
 ```
 
