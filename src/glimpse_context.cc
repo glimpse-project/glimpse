@@ -11641,7 +11641,7 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
 }
 
 void
-gm_context_render_thread_hook(struct gm_context *ctx)
+gm_context_opengl_gpu_hook(struct gm_context *ctx)
 {
     std::lock_guard<std::mutex> scope_lock(ctx->liveness_lock);
 
@@ -12107,6 +12107,12 @@ gm_context_render_thread_hook(struct gm_context *ctx)
 
     ctx->need_new_scaled_frame = false;
     ctx->scaled_frame_available_cond.notify_one();
+}
+
+void
+gm_context_metal_gpu_hook(struct gm_context *ctx)
+{
+    gm_info(ctx->log, "Metal API GPU Hook");
 }
 
 struct gm_ui_properties *

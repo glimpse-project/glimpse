@@ -1,5 +1,6 @@
 /*
- * Copyright (C) 2017 Glimp IP Ltd
+ * Copyright (C) 2017-2019 Glimp IP Ltd
+ * Copyright (C) 2019 Robert Bragg <robert@sixbynine.org>
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -74,9 +75,7 @@
 #    include "ios_utils.h"
 #endif
 
-#ifdef USE_GLFW
 #include <getopt-compat.h>
-#endif
 
 #if TARGET_OS_OSX == 1 || defined(_WIN32)
 #define GLSL_SHADER_VERSION "#version 400\n"
@@ -155,7 +154,7 @@ typedef struct {
 } XYZRGBA;
 
 struct debug_image {
-    GLuint gl_tex;
+    void *imgui_texture;
     int width;
     int height;
 };
@@ -167,15 +166,22 @@ struct stage_textures {
 
 typedef struct {
     int person_id;
-    uint64_t last_detected;
-    GLuint joints_bo;
-    GLuint bones_bo;
     int n_joints;
     int n_bones;
+    GLuint joints_bo;
+    GLuint bones_bo;
 } GLSkeleton;
+
+enum skel_view_mode {
+    SKEL_VIEW_NONE,
+    SKEL_VIEW_PREDICTED,
+    SKEL_VIEW_TRACKED_CORRECTED,
+    SKEL_VIEW_TRACKED_RAW
+};
 
 struct _Data
 {
+    struct gm_imgui_shell *shell;
     struct gm_logger *log;
 
     /* On Android we don't actually initialize a lot of state including
@@ -185,6 +191,7 @@ struct _Data
      */
     bool initialized;
     bool gl_initialized;
+    bool gl_has_program_point_size;
 
     /* Some GL state is re-initialized each time we switch devices */
     bool device_gl_initialized;
@@ -207,7 +214,7 @@ struct _Data
      */
     bool realtime_ar_mode;
 
-    bool show_skeletons;
+    int skel_view_mode;
     bool show_view_cam_controls;
     bool show_profiler;
     bool show_debug_text;
@@ -387,11 +394,6 @@ static enum gm_device_type device_type_options[] = {
 static char *device_recording_opt;
 
 static void viewer_init(Data *data);
-
-static void init_basic_opengl(Data *data);
-static void init_viewer_opengl(Data *data);
-static void init_device_opengl(Data *data);
-static void deinit_device_opengl(Data *data);
 
 static void handle_device_ready(Data *data, struct gm_device *dev);
 static void on_device_event_cb(struct gm_device_event *device_event,
@@ -586,6 +588,982 @@ index_recordings(Data *data)
         free(index_err);
     }
 }
+
+static void
+render_skeleton_wireframe_opengl(Data *data, GLSkeleton *skel,
+                                 glm::mat4 mvp,
+                                 float pt_size)
+{
+    glUseProgram(data->cloud_program);
+
+    // Set projection transform
+    glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+
+    // Enable vertex arrays for drawing joints/bones
+    glEnableVertexAttribArray(data->cloud_attr_pos);
+    glEnableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, skel->bones_bo);
+
+    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
+                          GL_FALSE, sizeof(XYZRGBA), nullptr);
+    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                          GL_TRUE, sizeof(XYZRGBA),
+                          (void *)offsetof(XYZRGBA, rgba));
+
+    glDrawArrays(GL_LINES, 0, skel->n_bones * 2);
+    GM_GL_CHECK_ERRORS(data->log);
+
+    glUniform1f(data->cloud_uniform_pt_size, pt_size * 3.f);
+
+    glBindBuffer(GL_ARRAY_BUFFER, skel->joints_bo);
+
+    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
+                          GL_FALSE, sizeof(XYZRGBA), nullptr);
+    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                          GL_TRUE, sizeof(XYZRGBA),
+                          (void *)offsetof(XYZRGBA, rgba));
+
+    if (data->gl_has_program_point_size)
+        glEnable(GL_PROGRAM_POINT_SIZE);
+    glDrawArrays(GL_POINTS, 0, skel->n_joints);
+    GM_GL_CHECK_ERRORS(data->log);
+    if (data->gl_has_program_point_size)
+        glDisable(GL_PROGRAM_POINT_SIZE);
+
+    glDisableVertexAttribArray(data->cloud_attr_pos);
+    glDisableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+}
+
+static void
+render_debug_lines_opengl(Data *data, glm::mat4 mvp)
+{
+    if (!data->n_lines)
+        return;
+
+    glUseProgram(data->cloud_program);
+
+    glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+
+    glEnableVertexAttribArray(data->cloud_attr_pos);
+    glEnableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, data->lines_bo);
+
+    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
+                          GL_FALSE, sizeof(struct gm_point_rgba), nullptr);
+    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                          GL_TRUE, sizeof(struct gm_point_rgba),
+                          (void *)offsetof(struct gm_point_rgba, rgba));
+
+    glDrawArrays(GL_LINES, 0, data->n_lines * 2);
+    GM_GL_CHECK_ERRORS(data->log);
+
+    glDisableVertexAttribArray(data->cloud_attr_pos);
+    glDisableVertexAttribArray(data->cloud_attr_col);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glUseProgram(0);
+}
+
+static bool
+update_skeleton_wireframe_bos_opengl(Data *data,
+                                     struct gm_tracking *tracking,
+                                     uint64_t timestamp,
+                                     GLSkeleton *skel_gl)
+{
+    // NB: The number of bones/joints we can get for any individual tracking skeleton
+    // can vary based on tracking confidence and occlusions, so we can't assume
+    // that n_bones == gm_context_get_n_bones() or
+    // n_joints == gm_context_get_n_joints()
+    //
+    // It doesn't really make sense for the viewer to try and make up for the
+    // lack of knowledge by e.g. showing old bone state since it's unlikely
+    // they will be consistent with changing tracking poses. If there were any
+    // meaningful heuristic for predicting those bones then we should rely
+    // on those being reported to us via the tracking context.
+    //
+    // For now we do this up-front, unconditionally which means the skeleton
+    // will disappear if we failed to track which at least helps make tracking
+    // failures apparent though may be more visually jarring.
+    skel_gl->n_bones = 0;
+    skel_gl->n_joints = 0;
+
+    struct gm_prediction *prediction = NULL;
+
+    // May come from a prediction or from the tracking object...
+    const struct gm_skeleton *skeleton = NULL;
+
+    switch ((enum skel_view_mode)data->skel_view_mode) {
+    case SKEL_VIEW_PREDICTED:
+        prediction = gm_context_get_prediction_for_person(data->ctx, timestamp,
+                                                          skel_gl->person_id);
+        if (!prediction) {
+            return false;
+        }
+        skeleton = gm_prediction_get_skeleton(prediction);
+        break;
+    case SKEL_VIEW_TRACKED_CORRECTED:
+        skeleton = gm_tracking_get_skeleton_for_person(tracking,
+                                                       skel_gl->person_id);
+        break;
+    case SKEL_VIEW_TRACKED_RAW:
+        skeleton = gm_tracking_get_raw_skeleton_for_person(tracking,
+                                                           skel_gl->person_id);
+        break;
+    case SKEL_VIEW_NONE:
+        return false;
+    }
+
+    if (!skeleton) {
+        if (prediction)
+            gm_prediction_unref(prediction);
+        return false;
+    }
+
+    int n_joints = gm_skeleton_get_n_joints(skeleton);
+
+    // Reformat and copy over joint data
+    XYZRGBA colored_joints[n_joints];
+    for (int i = 0; i < n_joints; i++) {
+        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
+        if (joint) {
+            int pos = skel_gl->n_joints;
+            colored_joints[pos].x = joint->x;
+            colored_joints[pos].y = joint->y;
+            colored_joints[pos].z = joint->z;
+            colored_joints[pos].rgba = LOOP_INDEX(joint_palette, i);
+            skel_gl->n_joints++;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, skel_gl->joints_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(XYZRGBA) * skel_gl->n_joints,
+                 colored_joints, GL_DYNAMIC_DRAW);
+
+    int n_bones = gm_skeleton_get_n_bones(skeleton);
+    skel_gl->n_bones = 0;
+    XYZRGBA colored_bones[n_bones * 2];
+    for (int b = 0; b < n_bones; ++b) {
+        const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
+        if (bone) {
+            int head_idx = gm_bone_get_head(data->ctx, bone);
+            const float *head = gm_bone_get_head_position(data->ctx, bone);
+            int tail_idx = gm_bone_get_tail(data->ctx, bone);
+            const float *tail = gm_bone_get_tail_position(data->ctx, bone);
+            int pos = skel_gl->n_bones;
+            XYZRGBA head_rgba = {
+                head[0], head[1], head[2], LOOP_INDEX(joint_palette, head_idx)
+            };
+            XYZRGBA tail_rgba = {
+                tail[0], tail[1], tail[2], LOOP_INDEX(joint_palette, tail_idx)
+            };
+            colored_bones[pos*2] = head_rgba;
+            colored_bones[pos*2+1] = tail_rgba;
+            skel_gl->n_bones++;
+        }
+    }
+    glBindBuffer(GL_ARRAY_BUFFER, skel_gl->bones_bo);
+    glBufferData(GL_ARRAY_BUFFER,
+                 sizeof(XYZRGBA) * skel_gl->n_bones * 2,
+                 colored_bones, GL_DYNAMIC_DRAW);
+    GM_GL_CHECK_ERRORS(data->log);
+
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+    if (prediction)
+        gm_prediction_unref(prediction);
+
+    return true;
+}
+
+
+static void
+update_and_render_skeletons_opengl(Data *data,
+                                   struct gm_tracking *tracking,
+                                   uint64_t timestamp,
+                                   glm::mat4 &mvp,
+                                   float pt_size)
+{
+    int max_people = gm_context_get_max_people(data->ctx);
+    int people_ids[max_people];
+    int n_people = gm_context_get_people_ids(data->ctx,
+                                             people_ids,
+                                             max_people);
+    for (int p = 0; p < n_people; ++p) {
+        int id = people_ids[p];
+
+        GLSkeleton *skel_gl = NULL;
+        for (auto &skel : data->skeletons) {
+            if (skel.person_id == id) {
+                skel_gl = &skel;
+                break;
+            }
+        }
+
+        if (!skel_gl) {
+            // Allocate GL resources for new skeleton
+            data->skeletons.push_back({0,});
+            skel_gl = &data->skeletons.back();
+            skel_gl->person_id = id;
+            glGenBuffers(1, &skel_gl->bones_bo);
+            glGenBuffers(1, &skel_gl->joints_bo);
+        }
+
+        if (update_skeleton_wireframe_bos_opengl(data,
+                                                 tracking,
+                                                 timestamp,
+                                                 skel_gl))
+        {
+            render_skeleton_wireframe_opengl(data, skel_gl, mvp, pt_size);
+        }
+    }
+
+    // Clean up old skeletons whose people are no longer tracked
+    for (auto it = data->skeletons.begin(); it != data->skeletons.end();) {
+        auto &skel_gl = *it;
+        if (!gm_context_has_person(data->ctx, skel_gl.person_id)) {
+            glDeleteBuffers(1, &skel_gl.bones_bo);
+            glDeleteBuffers(1, &skel_gl.joints_bo);
+            it = data->skeletons.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+static void
+render_tracking_scene_to_texture_opengl(Data *data,
+                                        struct gm_tracking *tracking,
+                                        ImVec2 win_size, ImVec2 uiScale)
+{
+    GLint saved_fbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
+
+    // Ensure the framebuffer texture is valid
+    if (!data->cloud_fbo_valid) {
+        int width = win_size.x * uiScale.x;
+        int height = win_size.y * uiScale.y;
+
+        // Generate textures
+        glBindTexture(GL_TEXTURE_2D, data->cloud_fbo_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                     width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
+
+        // Bind colour/depth to point-cloud fbo
+        glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
+
+        glBindRenderbuffer(GL_RENDERBUFFER, data->cloud_depth_renderbuf);
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
+                              width, height);
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                  GL_RENDERBUFFER, data->cloud_depth_renderbuf);
+
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
+                               GL_TEXTURE_2D,
+                               data->cloud_fbo_tex, 0);
+
+        GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
+        glDrawBuffers(1, drawBuffers);
+
+        gm_assert(data->log,
+                  (glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
+                   GL_FRAMEBUFFER_COMPLETE),
+                  "Incomplete framebuffer\n");
+
+        data->cloud_fbo_valid = true;
+    }
+
+    if (data->cloud_bo &&
+        data->cloud_intrinsics.width &&
+        data->cloud_intrinsics.height)
+    {
+        struct gm_intrinsics *debug_intrinsics =
+            &data->cloud_intrinsics;
+        glm::mat4 proj = intrinsics_to_zoomed_project_matrix(debug_intrinsics,
+                                                             0.01f, 10, // near, far
+                                                             data->view_zoom);
+
+        /* NB: we're rendering to an intermediate 2D texture with a bottom left
+         * origin of (0,0).
+         *
+         * By default ImGui::Image() assumes you're mapping uv0=(0,0) and
+         * uv1=(1,1) to the top-left and bottom-right of a quad, respectively.
+         *
+         * We flip Y here so our render-to-texture results will be the right
+         * after the texture is sampled (with a second flips) via ImGui::Image().
+         *
+         * We don't want to mess with the uv coordinates we pass to
+         * ImGui::Image() since it would probably be better to just be
+         * consistent with what ImGui expects by default (notably convenient
+         * for cases where images are loaded in scanline order from memory,
+         * which technically leaves them 'upside down' by GL conventions and
+         * typically need flipping too.)
+         */
+        glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, -1.0, -1.0));
+        mvp = glm::translate(mvp, data->focal_point);
+        mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
+        mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
+        mvp = glm::translate(mvp, -data->focal_point);
+        mvp = glm::translate(mvp, data->camera_pos_xyz);
+
+        glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
+
+        glUseProgram(data->cloud_program);
+        glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
+
+        float pt_size = ceilf((win_size.x * uiScale.x * data->view_zoom) /
+                              debug_intrinsics->width);
+        glUniform1f(data->cloud_uniform_pt_size, pt_size);
+
+        glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
+        if (data->cloud_attr_pos != -1) {
+            glEnableVertexAttribArray(data->cloud_attr_pos);
+            glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT, GL_FALSE,
+                                  sizeof(struct gm_point_rgba), 0);
+        }
+        glEnableVertexAttribArray(data->cloud_attr_col);
+        glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
+                              GL_TRUE,
+                              sizeof(struct gm_point_rgba),
+                              (void *)offsetof(struct gm_point_rgba, rgba));
+
+        glEnable(GL_DEPTH_TEST);
+        if (data->gl_has_program_point_size)
+            glEnable(GL_PROGRAM_POINT_SIZE);
+        glDepthFunc(GL_LESS);
+
+        glDrawArrays(GL_POINTS, 0, data->n_cloud_points);
+
+        if (data->gl_has_program_point_size)
+            glDisable(GL_PROGRAM_POINT_SIZE);
+        glDisable(GL_DEPTH_TEST);
+
+        glDisableVertexAttribArray(data->cloud_attr_pos);
+        if (data->cloud_attr_pos != -1)
+            glDisableVertexAttribArray(data->cloud_attr_col);
+
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glUseProgram(0);
+
+        if (data->skel_view_mode != SKEL_VIEW_NONE) {
+            uint64_t timestamp =
+                gm_tracking_get_timestamp(data->latest_tracking);
+
+            update_and_render_skeletons_opengl(data,
+                                               data->latest_tracking,
+                                               timestamp,
+                                               mvp,
+                                               pt_size);
+        }
+
+        render_debug_lines_opengl(data, mvp);
+    }
+
+    glBindFramebuffer(GL_FRAMEBUFFER, saved_fbo);
+}
+
+static GLuint
+gen_ar_video_texture_opengl(Data *data)
+{
+    GLuint ar_video_tex;
+
+    glGenTextures(1, &ar_video_tex);
+
+    GLenum target = GL_TEXTURE_2D;
+    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
+        target = GL_TEXTURE_EXTERNAL_OES;
+    }
+
+    glBindTexture(target, ar_video_tex);
+    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    GM_GL_CHECK_ERRORS(data->log);
+
+    return ar_video_tex;
+}
+
+static void
+update_ar_video_queue_len_opengl(Data *data, int len)
+{
+    if (len >= data->ar_video_queue_len) {
+        data->ar_video_queue_len = len;
+        return;
+    }
+    glDeleteTextures(data->ar_video_queue.size(),
+                     data->ar_video_queue.data());
+    data->ar_video_queue.resize(0);
+    data->ar_video_queue_len = len;
+    data->ar_video_queue_pos = -1;
+
+    GM_GL_CHECK_ERRORS(data->log);
+}
+
+static GLuint
+get_next_ar_video_tex_opengl(Data *data)
+{
+    if (data->ar_video_queue_len < 1) {
+        update_ar_video_queue_len_opengl(data, 1);
+    }
+
+    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
+        GLuint ar_video_tex = gen_ar_video_texture_opengl(data);
+
+        data->ar_video_queue_pos = data->ar_video_queue.size();
+        data->ar_video_queue.push_back(ar_video_tex);
+        return data->ar_video_queue.back();
+    } else {
+        data->ar_video_queue_pos =
+            (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
+        return data->ar_video_queue[data->ar_video_queue_pos];
+    }
+}
+
+static GLuint
+get_oldest_ar_video_tex_opengl(Data *data)
+{
+    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
+        return data->ar_video_queue[0];
+    } else {
+        int oldest = (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
+        return data->ar_video_queue[oldest];
+    }
+}
+
+static void
+render_ar_video_opengl(Data *data)
+{
+    if (!data->device_gl_initialized || data->last_video_frame == NULL)
+        return;
+
+    gm_assert(data->log, !!data->ctx, "draw_ar_video, NULL ctx");
+
+    enum gm_rotation rotation = data->last_video_frame->camera_rotation;
+    const struct gm_intrinsics *video_intrinsics =
+        &data->last_video_frame->video_intrinsics;
+    int video_width = video_intrinsics->width;
+    int video_height = video_intrinsics->height;
+
+    int aspect_width = video_width;
+    int aspect_height = video_height;
+
+    struct {
+        float x, y, s, t;
+    } xyst_verts[4] = {
+        { -1,  1, 0, 0, }, //  0 -- 1
+        {  1,  1, 1, 0, }, //  | \  |
+        {  1, -1, 1, 1  }, //  |  \ |
+        { -1, -1, 0, 1, }, //  3 -- 2
+    };
+    int n_verts = ARRAY_LEN(xyst_verts);
+
+    gm_debug(data->log, "rendering background with camera rotation of %d degrees",
+             ((int)rotation) * 90);
+
+    switch (rotation) {
+    case GM_ROTATION_0:
+        break;
+    case GM_ROTATION_90:
+        xyst_verts[0].s = 1; xyst_verts[0].t = 0;
+        xyst_verts[1].s = 1; xyst_verts[1].t = 1;
+        xyst_verts[2].s = 0; xyst_verts[2].t = 1;
+        xyst_verts[3].s = 0; xyst_verts[3].t = 0;
+        std::swap(aspect_width, aspect_height);
+        break;
+    case GM_ROTATION_180:
+        xyst_verts[0].s = 1; xyst_verts[0].t = 1;
+        xyst_verts[1].s = 0; xyst_verts[1].t = 1;
+        xyst_verts[2].s = 0; xyst_verts[2].t = 0;
+        xyst_verts[3].s = 1; xyst_verts[3].t = 0;
+        break;
+    case GM_ROTATION_270:
+        xyst_verts[0].s = 0; xyst_verts[0].t = 1;
+        xyst_verts[1].s = 0; xyst_verts[1].t = 0;
+        xyst_verts[2].s = 1; xyst_verts[2].t = 0;
+        xyst_verts[3].s = 1; xyst_verts[3].t = 1;
+        std::swap(aspect_width, aspect_height);
+        break;
+    }
+
+    float display_aspect = data->win_width / (float)data->win_height;
+    float video_aspect = aspect_width / (float)aspect_height;
+    float aspect_x_scale = 1;
+    float aspect_y_scale = 1;
+    if (video_aspect > display_aspect) {
+        // fit by scaling down y-axis of video
+        float fit_height = (float)data->win_width / video_aspect;
+        aspect_y_scale = fit_height / (float)data->win_height;
+    } else {
+        // fit by scaling x-axis of video
+        float fit_width = video_aspect * data->win_height;
+        aspect_x_scale = fit_width / (float)data->win_width;
+    }
+
+    gm_debug(data->log, "UVs: %f,%f %f,%f %f,%f, %f,%f",
+             xyst_verts[0].s,
+             xyst_verts[0].t,
+             xyst_verts[1].s,
+             xyst_verts[1].t,
+             xyst_verts[2].s,
+             xyst_verts[2].t,
+             xyst_verts[3].s,
+             xyst_verts[3].t);
+
+    /* trivial enough to just do the transform on the cpu... */
+    for (int i = 0; i < n_verts; i++) {
+        xyst_verts[i].x *= aspect_x_scale;
+        xyst_verts[i].y *= aspect_y_scale;
+    }
+
+    /* XXX: we could just cache buffers for each rotation */
+    glBindBuffer(GL_ARRAY_BUFFER, data->video_quad_attrib_bo);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * n_verts,
+                 xyst_verts, GL_STATIC_DRAW);
+
+    glUseProgram(data->video_program);
+    glBindBuffer(GL_ARRAY_BUFFER, data->video_quad_attrib_bo);
+
+    glEnableVertexAttribArray(data->video_quad_attrib_pos);
+    glVertexAttribPointer(data->video_quad_attrib_pos,
+                          2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)0);
+
+    if (data->video_quad_attrib_tex_coords != -1) {
+        glEnableVertexAttribArray(data->video_quad_attrib_tex_coords);
+        glVertexAttribPointer(data->video_quad_attrib_tex_coords,
+                              2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)8);
+    }
+
+    enum gm_device_type device_type = gm_device_get_type(data->active_device);
+    GLenum target = GL_TEXTURE_2D;
+    if (device_type == GM_DEVICE_TANGO)
+        target = GL_TEXTURE_EXTERNAL_OES;
+    GLuint ar_video_tex = get_oldest_ar_video_tex_opengl(data);
+    glBindTexture(target, ar_video_tex);
+
+    glDepthMask(GL_FALSE);
+    glDisable(GL_DEPTH_TEST);
+    glDrawArrays(GL_TRIANGLE_FAN, 0, n_verts);
+    gm_debug(data->log, "draw_video");
+    GM_GL_CHECK_ERRORS(data->log);
+    glDepthMask(GL_TRUE);
+
+    glBindTexture(target, 0);
+
+    glDisableVertexAttribArray(data->video_quad_attrib_pos);
+    if (data->video_quad_attrib_tex_coords != -1)
+        glDisableVertexAttribArray(data->video_quad_attrib_tex_coords);
+
+    glUseProgram(0);
+
+    GM_GL_CHECK_ERRORS(data->log);
+
+    if (data->skel_view_mode != SKEL_VIEW_NONE && data->latest_tracking) {
+        struct gm_intrinsics rotated_intrinsics;
+
+        gm_context_rotate_intrinsics(data->ctx,
+                                     video_intrinsics,
+                                     &rotated_intrinsics,
+                                     rotation);
+
+        float pt_size = ((float)data->win_width / 240.0f) * aspect_x_scale;
+        glm::mat4 proj = intrinsics_to_zoomed_project_matrix(&rotated_intrinsics,
+                                                             0.01f, 10, // near, far
+                                                             data->view_zoom);
+        glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, aspect_y_scale, -1.0));
+
+        update_and_render_skeletons_opengl(data,
+                                           data->latest_tracking,
+                                           (data->last_video_frame->timestamp -
+                                            data->prediction_delay),
+                                           mvp, pt_size);
+    }
+}
+
+static void
+upload_tracking_textures_opengl(Data *data)
+{
+    /* The tracking textures are all for debug purposes and we want to skip
+     * the overhead of uploading them while in realtime_ar_mode
+     */
+    if (data->realtime_ar_mode)
+        return;
+
+    ProfileScopedSection(UploadTrackingBufs);
+
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    gm_assert(data->log, n_stages == data->stage_textures.size(),
+              "stage_textures size doesn't match number of stages");
+
+    for (int i = 0; i < n_stages; i++) {
+        int width;
+        int height;
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+        struct stage_textures &stage_textures = data->stage_textures[i];
+        uint64_t stage_duration = gm_tracking_get_stage_duration(data->latest_tracking, i);
+
+        for (int n = 0; n < n_images; n++) {
+            struct debug_image &debug_image = stage_textures.images[n];
+            uint8_t *rgb_data = NULL;
+
+            GLuint gl_texture = (GLuint)(uintptr_t)debug_image.imgui_texture;
+
+            if (stage_duration &&
+                gm_tracking_create_stage_rgb_image(data->latest_tracking,
+                                                   i,
+                                                   n,
+                                                   &width,
+                                                   &height,
+                                                   &rgb_data))
+            {
+                if (!gl_texture) {
+                    glGenTextures(1, &gl_texture);
+                    glBindTexture(GL_TEXTURE_2D, gl_texture);
+
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+                    GM_GL_CHECK_ERRORS(data->log);
+
+                    debug_image.imgui_texture = (void *)(uintptr_t)gl_texture;
+                }
+
+                glBindTexture(GL_TEXTURE_2D, gl_texture);
+                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                             width, height,
+                             0, GL_RGB, GL_UNSIGNED_BYTE, rgb_data);
+                GM_GL_CHECK_ERRORS(data->log);
+                debug_image.width = width;
+                debug_image.height = height;
+
+                free(rgb_data);
+                rgb_data = NULL;
+            } else {
+                if (gl_texture) {
+                    glDeleteTextures(1, &gl_texture);
+                    GM_GL_CHECK_ERRORS(data->log);
+                }
+                debug_image.imgui_texture = NULL;
+                debug_image.width = 0;
+                debug_image.height = 0;
+            }
+        }
+    }
+
+    int n_points = 0;
+    struct gm_intrinsics debug_cloud_intrinsics = {};
+    const struct gm_point_rgba *debug_points =
+        gm_tracking_get_debug_point_cloud(data->latest_tracking,
+                                          &n_points,
+                                          &debug_cloud_intrinsics);
+    if (n_points) {
+        if (!data->cloud_bo)
+            glGenBuffers(1, &data->cloud_bo);
+        glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(debug_points[0]) * n_points,
+                     debug_points, GL_DYNAMIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        data->n_cloud_points = n_points;
+        data->cloud_intrinsics = debug_cloud_intrinsics;
+    } else
+        data->n_cloud_points = 0;
+
+    int n_lines = 0;
+    const struct gm_point_rgba *debug_lines =
+        gm_tracking_get_debug_lines(data->latest_tracking, &n_lines);
+    if (n_lines) {
+        if (!data->lines_bo)
+            glGenBuffers(1, &data->lines_bo);
+        glBindBuffer(GL_ARRAY_BUFFER, data->lines_bo);
+        glBufferData(GL_ARRAY_BUFFER,
+                     sizeof(debug_lines[0]) * n_lines * 2,
+                     debug_lines, GL_DYNAMIC_DRAW);
+        GM_GL_CHECK_ERRORS(data->log);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        data->n_lines = n_lines;
+    } else
+        data->n_lines = 0;
+}
+
+static void
+upload_last_video_frame_opengl(Data *data)
+{
+    enum gm_device_type device_type = gm_device_get_type(data->active_device);
+
+    if (device_type != GM_DEVICE_TANGO) {
+        const struct gm_intrinsics *video_intrinsics =
+            &data->last_video_frame->video_intrinsics;
+        int video_width = video_intrinsics->width;
+        int video_height = video_intrinsics->height;
+
+        ProfileScopedSection(UploadFrameTextures);
+
+        /*
+         * Update video from camera
+         */
+        GLuint ar_video_tex = get_next_ar_video_tex_opengl(data);
+        glBindTexture(GL_TEXTURE_2D, ar_video_tex);
+
+        glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+
+        void *video_front = data->last_video_frame->video->data;
+        enum gm_format video_format = data->last_video_frame->video_format;
+
+        switch (video_format) {
+        case GM_FORMAT_LUMINANCE_U8:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
+                         video_width, video_height,
+                         0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_RGB_U8:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                         video_width, video_height,
+                         0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
+            break;
+        case GM_FORMAT_BGR_U8:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
+                         video_width, video_height,
+                         0, GL_BGR, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_RGBX_U8:
+        case GM_FORMAT_RGBA_U8:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                         video_width, video_height,
+                         0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+            break;
+        case GM_FORMAT_BGRX_U8:
+        case GM_FORMAT_BGRA_U8:
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                         video_width, video_height,
+                         0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
+            break;
+
+        case GM_FORMAT_UNKNOWN:
+        case GM_FORMAT_Z_U16_MM:
+        case GM_FORMAT_Z_F32_M:
+        case GM_FORMAT_Z_F16_M:
+        case GM_FORMAT_POINTS_XYZC_F32_M:
+            gm_assert(data->log, 0, "Unexpected format for video buffer");
+            break;
+        }
+    } else {
+#ifdef USE_TANGO
+        GLuint ar_video_tex = get_next_ar_video_tex(data);
+        if (TangoService_updateTextureExternalOes(
+                TANGO_CAMERA_COLOR, ar_video_tex,
+                NULL /* ignore timestamp */) != TANGO_SUCCESS)
+        {
+            gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
+        }
+#endif
+    }
+    GM_GL_CHECK_ERRORS(data->log);
+}
+
+static void
+init_viewer_opengl(Data *data)
+{
+    if (data->gl_initialized)
+        return;
+
+    static const char *cloud_vert_shader =
+        GLSL_SHADER_VERSION
+        "precision mediump float;\n"
+        "uniform mat4 mvp;\n"
+        "uniform float size;\n"
+        "in vec3 pos;\n"
+        "in vec4 color_in;\n"
+        "out vec4 v_color;\n"
+        "\n"
+        "void main() {\n"
+        "  gl_PointSize = size;\n"
+        "  gl_Position =  mvp * vec4(pos.x, pos.y, pos.z, 1.0);\n"
+        "  v_color = color_in;\n"
+        "}\n";
+
+    static const char *cloud_frag_shader =
+        GLSL_SHADER_VERSION
+        "precision mediump float;\n"
+        "in vec4 v_color;\n"
+        "layout(location = 0) out vec4 color;\n"
+        "void main() {\n"
+        "  color = v_color.abgr;\n"
+        "}\n";
+
+    data->cloud_program = gm_gl_create_program(data->log,
+                                               cloud_vert_shader,
+                                               cloud_frag_shader,
+                                               NULL);
+
+    glUseProgram(data->cloud_program);
+
+    data->cloud_attr_pos = glGetAttribLocation(data->cloud_program, "pos");
+    data->cloud_attr_col = glGetAttribLocation(data->cloud_program, "color_in");
+    data->cloud_uniform_mvp = glGetUniformLocation(data->cloud_program, "mvp");
+    data->cloud_uniform_pt_size = glGetUniformLocation(data->cloud_program, "size");
+
+    glUseProgram(0);
+
+    glGenBuffers(1, &data->lines_bo);
+
+    glGenFramebuffers(1, &data->cloud_fbo);
+    glGenRenderbuffers(1, &data->cloud_depth_renderbuf);
+    glGenTextures(1, &data->cloud_fbo_tex);
+    glBindTexture(GL_TEXTURE_2D, data->cloud_fbo_tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+
+    glGenBuffers(1, &data->video_quad_attrib_bo);
+
+    // Note this also makes sure to clear any errors before we check
+    // for GL_PROGRAM_POINT_SIZE via glGetBoolean below..
+    GM_GL_CHECK_ERRORS(data->log);
+
+    // GLES doesn't have a GL_PROGRAM_POINT_SIZE enum, so we check
+    // it it's a valid enum:
+    GLboolean ps_enabled = false;
+    glGetBooleanv(GL_PROGRAM_POINT_SIZE, &ps_enabled);
+    GLenum error = glGetError();
+    if (error != GL_INVALID_ENUM) {
+        data->gl_has_program_point_size = true;
+    } else {
+        data->gl_has_program_point_size = false;
+    }
+
+    GM_GL_CHECK_ERRORS(data->log);
+
+    data->gl_initialized = true;
+}
+
+static void
+init_device_opengl(Data *data)
+{
+    if (data->device_gl_initialized)
+        return;
+
+    gm_assert(data->log, data->video_program == 0,
+              "Spurious GL video_program while device_gl_initialized == false");
+
+    const char *vert_shader =
+        GLSL_SHADER_VERSION
+        "precision mediump float;\n"
+        "precision mediump int;\n"
+        "in vec2 pos;\n"
+        "in vec2 tex_coords_in;\n"
+        "out vec2 tex_coords;\n"
+        "void main() {\n"
+        "  gl_Position = vec4(pos.x, pos.y, 0.0, 1.0);\n"
+        "  tex_coords = tex_coords_in;\n"
+        "}\n";
+    const char *frag_shader =
+        GLSL_SHADER_VERSION
+        "precision highp float;\n"
+        "precision highp int;\n"
+        "uniform sampler2D tex_sampler;\n"
+        "in vec2 tex_coords;\n"
+        "out lowp vec4 frag_color;\n"
+        "void main() {\n"
+        "  frag_color = texture(tex_sampler, tex_coords);\n"
+        "}\n";
+    const char *external_tex_frag_shader =
+        GLSL_SHADER_VERSION
+        "#extension GL_OES_EGL_image_external_essl3 : require\n"
+        "precision highp float;\n"
+        "precision highp int;\n"
+        "uniform samplerExternalOES tex_sampler;\n"
+        "in vec2 tex_coords;\n"
+        "out lowp vec4 frag_color;\n"
+        "void main() {\n"
+        "  frag_color = texture(tex_sampler, tex_coords);\n"
+        "}\n";
+
+    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
+        data->video_program = gm_gl_create_program(data->log,
+                                                   vert_shader,
+                                                   external_tex_frag_shader,
+                                                   NULL);
+    } else {
+        data->video_program = gm_gl_create_program(data->log,
+                                                   vert_shader,
+                                                   frag_shader,
+                                                   NULL);
+    }
+
+    data->video_quad_attrib_pos =
+        glGetAttribLocation(data->video_program, "pos");
+    data->video_quad_attrib_tex_coords =
+        glGetAttribLocation(data->video_program, "tex_coords_in");
+
+    data->ar_video_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
+
+    glUseProgram(data->video_program);
+    glUniform1i(data->ar_video_tex_sampler, 0);
+    glUseProgram(0);
+    update_ar_video_queue_len_opengl(data, 6);
+
+    GM_GL_CHECK_ERRORS(data->log);
+
+    // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
+    data->cloud_fbo_valid = false;
+
+    data->device_gl_initialized = true;
+}
+
+static void
+deinit_device_opengl(Data *data)
+{
+    if (!data->device_gl_initialized)
+        return;
+
+    if (data->video_program) {
+        glDeleteProgram(data->video_program);
+        data->video_program = 0;
+
+        data->video_quad_attrib_pos = 0;
+        data->video_quad_attrib_tex_coords = 0;
+        data->ar_video_tex_sampler = 0;
+    }
+
+    update_ar_video_queue_len_opengl(data, 0);
+
+    int n_stages = gm_context_get_n_stages(data->ctx);
+    for (int i = 0; i < n_stages; i++) {
+        struct stage_textures &stage_textures = data->stage_textures[i];
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+
+        for (int n = 0; n < n_images; n++) {
+            struct debug_image &debug_image = stage_textures.images[n];
+
+            if (debug_image.imgui_texture)
+            {
+                GLuint gl_texture = (GLuint)(uintptr_t)debug_image.imgui_texture;
+                glDeleteTextures(1, &gl_texture);
+            }
+            debug_image.imgui_texture = NULL;
+            debug_image.width = 0;
+            debug_image.height = 0;
+        }
+    }
+
+    // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
+    data->cloud_fbo_valid = false;
+
+    data->device_gl_initialized = false;
+}
+
 
 static void
 draw_int_property(Data *data,
@@ -787,181 +1765,6 @@ find_prop(struct gm_ui_properties *props, const char *name)
     return NULL;
 }
 
-static GLuint
-gen_ar_video_texture(Data *data)
-{
-    GLuint ar_video_tex;
-
-    glGenTextures(1, &ar_video_tex);
-
-    GLenum target = GL_TEXTURE_2D;
-    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
-        target = GL_TEXTURE_EXTERNAL_OES;
-    }
-
-    glBindTexture(target, ar_video_tex);
-    glTexParameteri(target, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-    glTexParameteri(target, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-    glTexParameteri(target, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-
-    return ar_video_tex;
-}
-
-static void
-update_ar_video_queue_len(Data *data, int len)
-{
-    if (len >= data->ar_video_queue_len) {
-        data->ar_video_queue_len = len;
-        return;
-    }
-    glDeleteTextures(data->ar_video_queue.size(),
-                     data->ar_video_queue.data());
-    data->ar_video_queue.resize(0);
-    data->ar_video_queue_len = len;
-    data->ar_video_queue_pos = -1;
-}
-
-static GLuint
-get_next_ar_video_tex(Data *data)
-{
-    if (data->ar_video_queue_len < 1) {
-        update_ar_video_queue_len(data, 1);
-    }
-
-    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
-        GLuint ar_video_tex = gen_ar_video_texture(data);
-
-        data->ar_video_queue_pos = data->ar_video_queue.size();
-        data->ar_video_queue.push_back(ar_video_tex);
-        return data->ar_video_queue.back();
-    } else {
-        data->ar_video_queue_pos =
-            (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
-        return data->ar_video_queue[data->ar_video_queue_pos];
-    }
-}
-
-static GLuint
-get_oldest_ar_video_tex(Data *data)
-{
-    if (data->ar_video_queue.size() < data->ar_video_queue_len) {
-        return data->ar_video_queue[0];
-    } else {
-        int oldest = (data->ar_video_queue_pos + 1) % data->ar_video_queue_len;
-        return data->ar_video_queue[oldest];
-    }
-}
-
-static bool
-update_skeleton_wireframe_gl_bos(Data *data,
-                                 struct gm_tracking *tracking,
-                                 uint64_t timestamp,
-                                 GLSkeleton *skel_gl)
-{
-    // NB: The number of bones we can get for any individual tracking skeleton
-    // can vary based on tracking confidence and occlusions, so we can't assume
-    // that n_bones == gm_context_get_n_bones()
-    //
-    // It doesn't really make sense for the viewer to try and make up for the
-    // lack of knowledge by e.g. showing old bone state since it's unlikely
-    // they will be consistent with changing tracking poses. If there were any
-    // meaningful heuristic for predicting those bones then we should rely
-    // on those being reported to us via the tracking context.
-    //
-    // For now we do this up-front, unconditionally which means the skeleton
-    // will disappear if we failed to track which at least helps make tracking
-    // failures apparent though may be more visually jarring.
-    skel_gl->n_bones = 0;
-
-    // Check if the person has been updated first
-    uint64_t last_update = gm_context_get_last_detected(data->ctx,
-                                                        skel_gl->person_id);
-    if (last_update <= skel_gl->last_detected && last_update < timestamp) {
-        return false;
-    }
-    skel_gl->last_detected = last_update;
-
-    struct gm_prediction *prediction = NULL;
-
-    // May come from a prediction or from the tracking object...
-    const struct gm_skeleton *skeleton = NULL;
-
-    /* In realtime-ar mode we want to see smooth, interpolated skeleton
-     * pose predictions but otherwise we want to see the skeletons that
-     * we derived for each concrete tracking update.
-     */
-    if (data->realtime_ar_mode) {
-        prediction = gm_context_get_prediction_for_person(data->ctx, timestamp,
-                                                          skel_gl->person_id);
-        if (!prediction) {
-            return false;
-        }
-        skeleton = gm_prediction_get_skeleton(prediction);
-    } else {
-        skeleton = gm_tracking_get_skeleton_for_person(tracking,
-                                                       skel_gl->person_id);
-        if (!skeleton) {
-            return false;
-        }
-    } // TODO: Another case for calling _tracking_get_raw_skeleton_for_person()?
-
-    int n_joints = gm_skeleton_get_n_joints(skeleton);
-    skel_gl->n_joints = 0;
-
-    // Reformat and copy over joint data
-    XYZRGBA colored_joints[n_joints];
-    for (int i = 0; i < n_joints; i++) {
-        const struct gm_joint *joint = gm_skeleton_get_joint(skeleton, i);
-        if (joint) {
-            int pos = skel_gl->n_joints;
-            colored_joints[pos].x = joint->x;
-            colored_joints[pos].y = joint->y;
-            colored_joints[pos].z = joint->z;
-            colored_joints[pos].rgba = LOOP_INDEX(joint_palette, i);
-            skel_gl->n_joints++;
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, skel_gl->joints_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * skel_gl->n_joints,
-                 colored_joints, GL_DYNAMIC_DRAW);
-
-    int n_bones = gm_skeleton_get_n_bones(skeleton);
-    skel_gl->n_bones = 0;
-    XYZRGBA colored_bones[n_bones * 2];
-    for (int b = 0; b < n_bones; ++b) {
-        const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
-        if (bone) {
-            int head_idx = gm_bone_get_head(data->ctx, bone);
-            const float *head = gm_bone_get_head_position(data->ctx, bone);
-            int tail_idx = gm_bone_get_tail(data->ctx, bone);
-            const float *tail = gm_bone_get_tail_position(data->ctx, bone);
-            int pos = skel_gl->n_bones;
-            XYZRGBA head_rgba = {
-                head[0], head[1], head[2], LOOP_INDEX(joint_palette, head_idx)
-            };
-            XYZRGBA tail_rgba = {
-                tail[0], tail[1], tail[2], LOOP_INDEX(joint_palette, tail_idx)
-            };
-            colored_bones[pos*2] = head_rgba;
-            colored_bones[pos*2+1] = tail_rgba;
-            skel_gl->n_bones++;
-        }
-    }
-    glBindBuffer(GL_ARRAY_BUFFER, skel_gl->bones_bo);
-    glBufferData(GL_ARRAY_BUFFER,
-                 sizeof(XYZRGBA) * skel_gl->n_bones * 2,
-                 colored_bones, GL_DYNAMIC_DRAW);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-
-    if (prediction)
-        gm_prediction_unref(prediction);
-
-    return true;
-}
-
 static void
 viewer_close_playback_device(Data *data)
 {
@@ -982,7 +1785,9 @@ viewer_close_playback_device(Data *data)
     data->playback_device = nullptr;
 
     data->active_device = data->recording_device;
-    deinit_device_opengl(data);
+
+    if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+        deinit_device_opengl(data);
 }
 
 static void
@@ -1068,7 +1873,11 @@ draw_playback_controls(Data *data)
                 gm_device_set_event_callback(data->playback_device,
                                              on_device_event_cb, data);
                 data->active_device = data->playback_device;
-                deinit_device_opengl(data);
+
+                if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+                {
+                    deinit_device_opengl(data);
+                }
 
                 gm_device_commit_config(data->playback_device, NULL);
             } else {
@@ -1152,11 +1961,11 @@ draw_playback_controls(Data *data)
 }
 
 static bool
-draw_image_in_bounds(Data *data,
-                     GLuint image_tex,
-                     int image_width, int image_height, // only for aspect ratio
-                     int bounds_width, int bounds_height,
-                     enum gm_rotation rotation)
+draw_texture_in_bounds(Data *data,
+                       void *image_tex,
+                       int image_width, int image_height, // only for aspect ratio
+                       int bounds_width, int bounds_height,
+                       enum gm_rotation rotation)
 {
     ImVec2 uv0, uv1, uv2, uv3;
 
@@ -1196,7 +2005,7 @@ draw_image_in_bounds(Data *data,
 
     ImGui::BeginGroup();
     ImDrawList *draw_list = ImGui::GetWindowDrawList();
-    draw_list->PushTextureID((void *)(intptr_t)image_tex);
+    draw_list->PushTextureID(image_tex);
     draw_list->PrimReserve(6, 4);
     draw_list->PrimQuadUV(ImVec2(cur.x, cur.y),
                           ImVec2(cur.x+area_size.x, cur.y),
@@ -1211,36 +2020,6 @@ draw_image_in_bounds(Data *data,
     ImGui::EndGroup();
 
     return true;
-}
-
-static bool
-draw_visualisation(Data *data, int x, int y, int width, int height,
-                   int aspect_width, int aspect_height,
-                   const char *name, GLuint tex,
-                   enum gm_rotation rotation)
-{
-    ImGui::SetNextWindowPos(ImVec2(x, y));
-    ImGui::SetNextWindowSize(ImVec2(width, height));
-    ImGui::Begin(name, NULL,
-                 ImGuiWindowFlags_NoTitleBar |
-                 ImGuiWindowFlags_NoScrollbar |
-                 ImGuiWindowFlags_NoResize |
-                 ImGuiWindowFlags_NoScrollWithMouse |
-                 ImGuiWindowFlags_NoCollapse |
-                 ImGuiWindowFlags_NoBringToFrontOnFocus);
-    bool focused = ImGui::IsWindowFocused();
-    if (tex == 0) {
-        return focused;
-    }
-
-    ImVec2 area_size = ImGui::GetContentRegionAvail();
-    draw_image_in_bounds(data,
-                         tex,
-                         aspect_width, aspect_height,
-                         area_size.x, area_size.y,
-                         rotation);
-
-    return focused;
 }
 
 static bool
@@ -1308,7 +2087,17 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                          !data->realtime_ar_mode);
     }
 
-    ImGui::Checkbox("Show skeletons", &data->show_skeletons);
+    static const char *skel_view_modes[] = {
+        "None",
+        "Predicted",
+        "Tracked, Corrected",
+        "Tracked, Raw",
+    };
+    ImGui::Combo("Skeleton view", &data->skel_view_mode, skel_view_modes,
+                 ARRAY_LEN(skel_view_modes));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("%s", "Which skeleton derivation should be shown");
+
     ImGui::Checkbox("Show view camera controls", &data->show_view_cam_controls);
     ImGui::Checkbox("Show profiler", &data->show_profiler);
     ImGui::Checkbox("Show debug text", &data->show_debug_text);
@@ -1316,7 +2105,8 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
     int queue_len = data->ar_video_queue_len;
     ImGui::SliderInt("AR video queue len", &queue_len, 1, 30);
     if (data->ar_video_queue_len != queue_len) {
-        update_ar_video_queue_len(data, queue_len);
+        if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+            update_ar_video_queue_len_opengl(data, queue_len);
     }
 
     static const char *stage_stat_modes[] = {
@@ -1498,7 +2288,7 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
         if (data->gl_initialized) {
             for (int n = 0; n < n_images; n++) {
-                if (stage_textures.images[n].gl_tex) {
+                if (stage_textures.images[n].imgui_texture) {
                     any_created_images = true;
                     break;
                 }
@@ -1515,16 +2305,15 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
             for (int n = 0; n < n_images; n++) {
                 struct debug_image &debug_image = stage_textures.images[n];
 
-                if (debug_image.gl_tex) {
-                    GLuint view_tex = debug_image.gl_tex;
+                if (debug_image.imgui_texture) {
                     int view_tex_width = debug_image.width;
                     int view_tex_height = debug_image.height;
 
-                    draw_image_in_bounds(data,
-                                         view_tex,
-                                         view_tex_width, view_tex_height, // aspect ratio of texture
-                                         w, h,
-                                         GM_ROTATION_0);
+                    draw_texture_in_bounds(data,
+                                           debug_image.imgui_texture,
+                                           view_tex_width, view_tex_height, // aspect ratio of texture
+                                           w, h,
+                                           GM_ROTATION_0);
                     ImGui::SetCursorPosX(ImGui::GetCursorPosX() + w);
                 }
             }
@@ -1622,268 +2411,8 @@ draw_debug_text(Data *data)
     ImGui::End();
 }
 
-static void
-draw_skeleton_wireframe(Data *data, GLSkeleton *skel,
-                        glm::mat4 mvp,
-                        float pt_size)
-{
-    glUseProgram(data->cloud_program);
-
-    // Set projection transform
-    glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-
-    // Enable vertex arrays for drawing joints/bones
-    glEnableVertexAttribArray(data->cloud_attr_pos);
-    glEnableVertexAttribArray(data->cloud_attr_col);
-
-    glBindBuffer(GL_ARRAY_BUFFER, skel->bones_bo);
-
-    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
-                          GL_FALSE, sizeof(XYZRGBA), nullptr);
-    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                          GL_TRUE, sizeof(XYZRGBA),
-                          (void *)offsetof(XYZRGBA, rgba));
-
-    glDrawArrays(GL_LINES, 0, skel->n_bones * 2);
-
-    glUniform1f(data->cloud_uniform_pt_size, pt_size * 3.f);
-
-    glBindBuffer(GL_ARRAY_BUFFER, skel->joints_bo);
-
-    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
-                          GL_FALSE, sizeof(XYZRGBA), nullptr);
-    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                          GL_TRUE, sizeof(XYZRGBA),
-                          (void *)offsetof(XYZRGBA, rgba));
-
-    glEnable(GL_PROGRAM_POINT_SIZE);
-    glDrawArrays(GL_POINTS, 0, skel->n_joints);
-    glDisable(GL_PROGRAM_POINT_SIZE);
-
-    glDisableVertexAttribArray(data->cloud_attr_pos);
-    glDisableVertexAttribArray(data->cloud_attr_col);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glUseProgram(0);
-}
-
-static void
-draw_debug_lines(Data *data, glm::mat4 mvp)
-{
-    if (!data->n_lines)
-        return;
-
-    glUseProgram(data->cloud_program);
-
-    glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-
-    glEnableVertexAttribArray(data->cloud_attr_pos);
-    glEnableVertexAttribArray(data->cloud_attr_col);
-
-    glBindBuffer(GL_ARRAY_BUFFER, data->lines_bo);
-
-    glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT,
-                          GL_FALSE, sizeof(struct gm_point_rgba), nullptr);
-    glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                          GL_TRUE, sizeof(struct gm_point_rgba),
-                          (void *)offsetof(struct gm_point_rgba, rgba));
-
-    glDrawArrays(GL_LINES, 0, data->n_lines * 2);
-
-    glDisableVertexAttribArray(data->cloud_attr_pos);
-    glDisableVertexAttribArray(data->cloud_attr_col);
-
-    glBindBuffer(GL_ARRAY_BUFFER, 0);
-    glUseProgram(0);
-}
-
-static void
-update_and_render_skeletons(Data *data,
-                            struct gm_tracking *tracking,
-                            uint64_t timestamp,
-                            glm::mat4 &mvp,
-                            float pt_size)
-{
-    int max_people = gm_context_get_max_people(data->ctx);
-    int people_ids[max_people];
-    int n_people = gm_context_get_people_ids(data->ctx,
-                                             people_ids,
-                                             max_people);
-    for (int p = 0; p < n_people; ++p) {
-        int id = people_ids[p];
-
-        GLSkeleton *skel_gl = NULL;
-        for (auto &skel : data->skeletons) {
-            if (skel.person_id == id) {
-                skel_gl = &skel;
-                break;
-            }
-        }
-
-        if (!skel_gl) {
-            // Allocate GL resources for new skeleton
-            data->skeletons.push_back({0,});
-            skel_gl = &data->skeletons.back();
-            skel_gl->person_id = id;
-            glGenBuffers(1, &skel_gl->bones_bo);
-            glGenBuffers(1, &skel_gl->joints_bo);
-        }
-
-        if (update_skeleton_wireframe_gl_bos(data,
-                                             tracking,
-                                             timestamp,
-                                             skel_gl))
-        {
-            draw_skeleton_wireframe(data, skel_gl, mvp, pt_size);
-        }
-    }
-
-    // Clean up old skeletons whose people are no longer tracked
-    for (auto it = data->skeletons.begin(); it != data->skeletons.end();) {
-        auto &skel_gl = *it;
-        if (!gm_context_has_person(data->ctx, skel_gl.person_id)) {
-            glDeleteBuffers(1, &skel_gl.bones_bo);
-            glDeleteBuffers(1, &skel_gl.joints_bo);
-            it = data->skeletons.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
-static void
-draw_tracking_scene_to_texture(Data *data,
-                               struct gm_tracking *tracking,
-                               ImVec2 win_size, ImVec2 uiScale)
-{
-    GLint saved_fbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &saved_fbo);
-
-    // Ensure the framebuffer texture is valid
-    if (!data->cloud_fbo_valid) {
-        int width = win_size.x * uiScale.x;
-        int height = win_size.y * uiScale.y;
-
-        // Generate textures
-        glBindTexture(GL_TEXTURE_2D, data->cloud_fbo_tex);
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                     width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-
-        // Bind colour/depth to point-cloud fbo
-        glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
-
-        glBindRenderbuffer(GL_RENDERBUFFER, data->cloud_depth_renderbuf);
-        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24,
-                              width, height);
-        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
-                                  GL_RENDERBUFFER, data->cloud_depth_renderbuf);
-
-        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0,
-                               GL_TEXTURE_2D,
-                               data->cloud_fbo_tex, 0);
-
-        GLenum drawBuffers[1] = { GL_COLOR_ATTACHMENT0 };
-        glDrawBuffers(1, drawBuffers);
-
-        gm_assert(data->log,
-                  (glCheckFramebufferStatus(GL_FRAMEBUFFER) ==
-                   GL_FRAMEBUFFER_COMPLETE),
-                  "Incomplete framebuffer\n");
-
-        data->cloud_fbo_valid = true;
-    }
-
-    if (data->cloud_bo &&
-        data->cloud_intrinsics.width &&
-        data->cloud_intrinsics.height)
-    {
-        struct gm_intrinsics *debug_intrinsics =
-            &data->cloud_intrinsics;
-        glm::mat4 proj = intrinsics_to_zoomed_project_matrix(debug_intrinsics,
-                                                             0.01f, 10, // near, far
-                                                             data->view_zoom);
-
-        /* NB: we're rendering to an intermediate 2D texture with a bottom left
-         * origin of (0,0).
-         *
-         * By default ImGui::Image() assumes you're mapping uv0=(0,0) and
-         * uv1=(1,1) to the top-left and bottom-right of a quad, respectively.
-         *
-         * We flip Y here so our render-to-texture results will be the right
-         * after the texture is sampled (with a second flips) via ImGui::Image().
-         *
-         * We don't want to mess with the uv coordinates we pass to
-         * ImGui::Image() since it would probably be better to just be
-         * consistent with what ImGui expects by default (notably convenient
-         * for cases where images are loaded in scanline order from memory,
-         * which technically leaves them 'upside down' by GL conventions and
-         * typically need flipping too.)
-         */
-        glm::mat4 mvp = glm::scale(proj, glm::vec3(1.0, -1.0, -1.0));
-        mvp = glm::translate(mvp, data->focal_point);
-        mvp = glm::rotate(mvp, data->camera_rot_yx[0], glm::vec3(0.0, 1.0, 0.0));
-        mvp = glm::rotate(mvp, data->camera_rot_yx[1], glm::vec3(1.0, 0.0, 0.0));
-        mvp = glm::translate(mvp, -data->focal_point);
-        mvp = glm::translate(mvp, data->camera_pos_xyz);
-
-        glBindFramebuffer(GL_FRAMEBUFFER, data->cloud_fbo);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glViewport(0, 0, win_size.x * uiScale.x, win_size.y * uiScale.y);
-
-        glUseProgram(data->cloud_program);
-        glUniformMatrix4fv(data->cloud_uniform_mvp, 1, GL_FALSE, glm::value_ptr(mvp));
-
-        float pt_size = ceilf((win_size.x * uiScale.x * data->view_zoom) /
-                              debug_intrinsics->width);
-        glUniform1f(data->cloud_uniform_pt_size, pt_size);
-
-        glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
-        if (data->cloud_attr_pos != -1) {
-            glEnableVertexAttribArray(data->cloud_attr_pos);
-            glVertexAttribPointer(data->cloud_attr_pos, 3, GL_FLOAT, GL_FALSE,
-                                  sizeof(struct gm_point_rgba), 0);
-        }
-        glEnableVertexAttribArray(data->cloud_attr_col);
-        glVertexAttribPointer(data->cloud_attr_col, 4, GL_UNSIGNED_BYTE,
-                              GL_TRUE,
-                              sizeof(struct gm_point_rgba),
-                              (void *)offsetof(struct gm_point_rgba, rgba));
-
-        glEnable(GL_DEPTH_TEST);
-        glEnable(GL_PROGRAM_POINT_SIZE);
-        glDepthFunc(GL_LESS);
-
-        glDrawArrays(GL_POINTS, 0, data->n_cloud_points);
-
-        glDisable(GL_PROGRAM_POINT_SIZE);
-        glDisable(GL_DEPTH_TEST);
-
-        glDisableVertexAttribArray(data->cloud_attr_pos);
-        if (data->cloud_attr_pos != -1)
-            glDisableVertexAttribArray(data->cloud_attr_col);
-
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        glUseProgram(0);
-
-        if (data->show_skeletons) {
-            uint64_t timestamp =
-                gm_tracking_get_timestamp(data->latest_tracking);
-
-            update_and_render_skeletons(data,
-                                        data->latest_tracking,
-                                        timestamp,
-                                        mvp,
-                                        pt_size);
-        }
-
-        draw_debug_lines(data, mvp);
-    }
-
-    glBindFramebuffer(GL_FRAMEBUFFER, saved_fbo);
-}
-
 static bool
-draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
+draw_tracking_visualisation_scene(Data *data, ImVec2 &uiScale,
                          int x, int y, int width, int height)
 {
     if (!data->latest_tracking)
@@ -1894,15 +2423,30 @@ draw_cloud_visualisation(Data *data, ImVec2 &uiScale,
     int depth_width = depth_intrinsics->width;
     int depth_height = depth_intrinsics->height;
 
-    bool focused = draw_visualisation(data, x, y, width, height,
-                                      depth_width, depth_height,
-                                      "Cloud", 0, GM_ROTATION_0);
+    ImGui::SetNextWindowPos(ImVec2(x, y));
+    ImGui::SetNextWindowSize(ImVec2(width, height));
+    ImGui::Begin("Cloud", NULL,
+                 ImGuiWindowFlags_NoTitleBar |
+                 ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_NoResize |
+                 ImGuiWindowFlags_NoScrollWithMouse |
+                 ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    bool focused = ImGui::IsWindowFocused();
 
     ImVec2 win_size = ImGui::GetContentRegionMax();
     adjust_aspect(win_size, depth_width, depth_height);
-    draw_tracking_scene_to_texture(data, data->latest_tracking, win_size, uiScale);
 
-    ImGui::Image((void *)(intptr_t)data->cloud_fbo_tex, win_size);
+    if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+    {
+        render_tracking_scene_to_texture_opengl(data, data->latest_tracking, win_size, uiScale);
+    }
+
+    if (data->cloud_fbo_tex)
+    {
+        ImGui::Image((void *)(intptr_t)data->cloud_fbo_tex, win_size);
+    }
 
     // Handle input for cloud visualisation
     if (ImGui::IsWindowHovered()) {
@@ -1955,6 +2499,7 @@ draw_view_camera_controls(Data *data)
     ImGui::PopStyleVar(); // ImGuiStyleVar_FrameRounding
     ImGui::PopStyleVar(); // ImGuiStyleVar_WindowPadding
 }
+
 static void
 draw_ui(Data *data)
 {
@@ -1965,21 +2510,14 @@ draw_ui(Data *data)
     ImVec2 origin;
     ImVec2 win_size;
 
-    // Obsolete but may be necessary on iOS for dealing with iPhone notch...
-    if (io.DisplayVisibleMin.x ||
-        io.DisplayVisibleMin.y ||
-        io.DisplayVisibleMax.x ||
-        io.DisplayVisibleMax.y)
-    {
-        origin = io.DisplayVisibleMin;
-        win_size = ImVec2(io.DisplayVisibleMax.x - io.DisplayVisibleMin.x,
-                          io.DisplayVisibleMax.y - io.DisplayVisibleMin.y);
-    }
-    else
-    {
-        origin = ImVec2();
-        win_size = io.DisplaySize;
-    }
+    origin = ImVec2();
+    win_size = io.DisplaySize;
+
+    float top, right, bottom, left;
+    gm_imgui_shell_get_chrome_insets(data->shell, &top, &right, &bottom, &left);
+    origin = ImVec2(left / uiScale.x, top / uiScale.y);
+    win_size = ImVec2(win_size.x - (right + left) / uiScale.x,
+                      win_size.y - (bottom + top) / uiScale.y);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
 
@@ -2009,11 +2547,11 @@ draw_ui(Data *data)
      * real-time mode
      */
     if (!data->realtime_ar_mode) {
-        draw_cloud_visualisation(data,
-                                 uiScale,
-                                 main_x, main_y,
-                                 main_area_size.x,
-                                 main_area_size.y);
+        draw_tracking_visualisation_scene(data,
+                                          uiScale,
+                                          main_x, main_y,
+                                          main_area_size.x,
+                                          main_area_size.y);
     }
 
     static bool show_controls = false;
@@ -2082,152 +2620,6 @@ draw_ui(Data *data)
     //ImGui::ShowTestWindow();
 
     ImGui::Render();
-}
-
-static void
-draw_ar_video(Data *data)
-{
-    if (!data->device_gl_initialized || data->last_video_frame == NULL)
-        return;
-
-    gm_assert(data->log, !!data->ctx, "draw_ar_video, NULL ctx");
-
-    enum gm_rotation rotation = data->last_video_frame->camera_rotation;
-    const struct gm_intrinsics *video_intrinsics =
-        &data->last_video_frame->video_intrinsics;
-    int video_width = video_intrinsics->width;
-    int video_height = video_intrinsics->height;
-
-    int aspect_width = video_width;
-    int aspect_height = video_height;
-
-    struct {
-        float x, y, s, t;
-    } xyst_verts[4] = {
-        { -1,  1, 0, 0, }, //  0 -- 1
-        {  1,  1, 1, 0, }, //  | \  |
-        {  1, -1, 1, 1  }, //  |  \ |
-        { -1, -1, 0, 1, }, //  3 -- 2
-    };
-    int n_verts = ARRAY_LEN(xyst_verts);
-
-    gm_debug(data->log, "rendering background with camera rotation of %d degrees",
-             ((int)rotation) * 90);
-
-    switch (rotation) {
-    case GM_ROTATION_0:
-        break;
-    case GM_ROTATION_90:
-        xyst_verts[0].s = 1; xyst_verts[0].t = 0;
-        xyst_verts[1].s = 1; xyst_verts[1].t = 1;
-        xyst_verts[2].s = 0; xyst_verts[2].t = 1;
-        xyst_verts[3].s = 0; xyst_verts[3].t = 0;
-        std::swap(aspect_width, aspect_height);
-        break;
-    case GM_ROTATION_180:
-        xyst_verts[0].s = 1; xyst_verts[0].t = 1;
-        xyst_verts[1].s = 0; xyst_verts[1].t = 1;
-        xyst_verts[2].s = 0; xyst_verts[2].t = 0;
-        xyst_verts[3].s = 1; xyst_verts[3].t = 0;
-        break;
-    case GM_ROTATION_270:
-        xyst_verts[0].s = 0; xyst_verts[0].t = 1;
-        xyst_verts[1].s = 0; xyst_verts[1].t = 0;
-        xyst_verts[2].s = 1; xyst_verts[2].t = 0;
-        xyst_verts[3].s = 1; xyst_verts[3].t = 1;
-        std::swap(aspect_width, aspect_height);
-        break;
-    }
-
-    float display_aspect = data->win_width / (float)data->win_height;
-    float video_aspect = aspect_width / (float)aspect_height;
-    float aspect_x_scale = 1;
-    float aspect_y_scale = 1;
-    if (video_aspect > display_aspect) {
-        // fit by scaling down y-axis of video
-        float fit_height = (float)data->win_width / video_aspect;
-        aspect_y_scale = fit_height / (float)data->win_height;
-    } else {
-        // fit by scaling x-axis of video
-        float fit_width = video_aspect * data->win_height;
-        aspect_x_scale = fit_width / (float)data->win_width;
-    }
-
-    gm_debug(data->log, "UVs: %f,%f %f,%f %f,%f, %f,%f",
-             xyst_verts[0].s,
-             xyst_verts[0].t,
-             xyst_verts[1].s,
-             xyst_verts[1].t,
-             xyst_verts[2].s,
-             xyst_verts[2].t,
-             xyst_verts[3].s,
-             xyst_verts[3].t);
-
-    /* trivial enough to just do the transform on the cpu... */
-    for (int i = 0; i < n_verts; i++) {
-        xyst_verts[i].x *= aspect_x_scale;
-        xyst_verts[i].y *= aspect_y_scale;
-    }
-
-    /* XXX: we could just cache buffers for each rotation */
-    glBindBuffer(GL_ARRAY_BUFFER, data->video_quad_attrib_bo);
-    glBufferData(GL_ARRAY_BUFFER, sizeof(float) * 4 * n_verts,
-                 xyst_verts, GL_STATIC_DRAW);
-
-    glUseProgram(data->video_program);
-    glBindBuffer(GL_ARRAY_BUFFER, data->video_quad_attrib_bo);
-
-    glEnableVertexAttribArray(data->video_quad_attrib_pos);
-    glVertexAttribPointer(data->video_quad_attrib_pos,
-                          2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)0);
-
-    if (data->video_quad_attrib_tex_coords != -1) {
-        glEnableVertexAttribArray(data->video_quad_attrib_tex_coords);
-        glVertexAttribPointer(data->video_quad_attrib_tex_coords,
-                              2, GL_FLOAT, GL_FALSE, sizeof(float) * 4, (void *)8);
-    }
-
-    enum gm_device_type device_type = gm_device_get_type(data->active_device);
-    GLenum target = GL_TEXTURE_2D;
-    if (device_type == GM_DEVICE_TANGO)
-        target = GL_TEXTURE_EXTERNAL_OES;
-    GLuint ar_video_tex = get_oldest_ar_video_tex(data);
-    glBindTexture(target, ar_video_tex);
-
-    glDepthMask(GL_FALSE);
-    glDisable(GL_DEPTH_TEST);
-    glDrawArrays(GL_TRIANGLE_FAN, 0, n_verts);
-    gm_debug(data->log, "draw_video");
-    glDepthMask(GL_TRUE);
-
-    glBindTexture(target, 0);
-
-    glDisableVertexAttribArray(data->video_quad_attrib_pos);
-    if (data->video_quad_attrib_tex_coords != -1)
-        glDisableVertexAttribArray(data->video_quad_attrib_tex_coords);
-
-    glUseProgram(0);
-
-    if (data->show_skeletons && data->latest_tracking) {
-        struct gm_intrinsics rotated_intrinsics;
-
-        gm_context_rotate_intrinsics(data->ctx,
-                                     video_intrinsics,
-                                     &rotated_intrinsics,
-                                     rotation);
-
-        float pt_size = ((float)data->win_width / 240.0f) * aspect_x_scale;
-        glm::mat4 proj = intrinsics_to_zoomed_project_matrix(&rotated_intrinsics,
-                                                             0.01f, 10, // near, far
-                                                             data->view_zoom);
-        glm::mat4 mvp = glm::scale(proj, glm::vec3(aspect_x_scale, aspect_y_scale, -1.0));
-
-        update_and_render_skeletons(data,
-                                    data->latest_tracking,
-                                    (data->last_video_frame->timestamp -
-                                     data->prediction_delay),
-                                    mvp, pt_size);
-    }
 }
 
 /* If we've already requested gm_device for a frame then this won't submit
@@ -2337,177 +2729,13 @@ handle_device_frame_updates(Data *data)
                              GM_REQUEST_FRAME_VIDEO);
     }
 
-    enum gm_device_type device_type = gm_device_get_type(data->active_device);
-
-    if (upload_video_texture && data->device_gl_initialized) {
-        if (device_type != GM_DEVICE_TANGO) {
-            const struct gm_intrinsics *video_intrinsics =
-                &data->last_video_frame->video_intrinsics;
-            int video_width = video_intrinsics->width;
-            int video_height = video_intrinsics->height;
-
-            ProfileScopedSection(UploadFrameTextures);
-
-            /*
-             * Update video from camera
-             */
-            GLuint ar_video_tex = get_next_ar_video_tex(data);
-            glBindTexture(GL_TEXTURE_2D, ar_video_tex);
-
-            glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-
-            void *video_front = data->last_video_frame->video->data;
-            enum gm_format video_format = data->last_video_frame->video_format;
-
-            switch (video_format) {
-            case GM_FORMAT_LUMINANCE_U8:
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
-                             video_width, video_height,
-                             0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
-                break;
-
-            case GM_FORMAT_RGB_U8:
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                             video_width, video_height,
-                             0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
-                break;
-            case GM_FORMAT_BGR_U8:
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                             video_width, video_height,
-                             0, GL_BGR, GL_UNSIGNED_BYTE, video_front);
-                break;
-
-            case GM_FORMAT_RGBX_U8:
-            case GM_FORMAT_RGBA_U8:
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                             video_width, video_height,
-                             0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
-                break;
-            case GM_FORMAT_BGRX_U8:
-            case GM_FORMAT_BGRA_U8:
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                             video_width, video_height,
-                             0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
-                break;
-
-            case GM_FORMAT_UNKNOWN:
-            case GM_FORMAT_Z_U16_MM:
-            case GM_FORMAT_Z_F32_M:
-            case GM_FORMAT_Z_F16_M:
-            case GM_FORMAT_POINTS_XYZC_F32_M:
-                gm_assert(data->log, 0, "Unexpected format for video buffer");
-                break;
-            }
-        } else {
-#ifdef USE_TANGO
-            GLuint ar_video_tex = get_next_ar_video_tex(data);
-            if (TangoService_updateTextureExternalOes(
-                    TANGO_CAMERA_COLOR, ar_video_tex,
-                    NULL /* ignore timestamp */) != TANGO_SUCCESS)
-            {
-                gm_warn(data->log, "Failed to update video frame via TangoService_updateTextureExternalOes");
-            }
-#endif
+    if (upload_video_texture) {
+        if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL &&
+            data->device_gl_initialized)
+        {
+            upload_last_video_frame_opengl(data);
         }
     }
-}
-
-static void
-upload_tracking_textures(Data *data)
-{
-    /* The tracking textures are all for debug purposes and we want to skip
-     * the overhead of uploading them while in realtime_ar_mode
-     */
-    if (data->realtime_ar_mode)
-        return;
-
-    ProfileScopedSection(UploadTrackingBufs);
-
-    int n_stages = gm_context_get_n_stages(data->ctx);
-    gm_assert(data->log, n_stages == data->stage_textures.size(),
-              "stage_textures size doesn't match number of stages");
-
-    for (int i = 0; i < n_stages; i++) {
-        int width;
-        int height;
-        int n_images = gm_context_get_stage_n_images(data->ctx, i);
-        struct stage_textures &stage_textures = data->stage_textures[i];
-        uint64_t stage_duration = gm_tracking_get_stage_duration(data->latest_tracking, i);
-
-        for (int n = 0; n < n_images; n++) {
-            struct debug_image &debug_image = stage_textures.images[n];
-            uint8_t *rgb_data = NULL;
-
-            if (stage_duration &&
-                gm_tracking_create_stage_rgb_image(data->latest_tracking,
-                                                   i,
-                                                   n,
-                                                   &width,
-                                                   &height,
-                                                   &rgb_data))
-            {
-                if (!debug_image.gl_tex) {
-                    glGenTextures(1, &debug_image.gl_tex);
-                    glBindTexture(GL_TEXTURE_2D, debug_image.gl_tex);
-
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
-                    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-                }
-
-                glBindTexture(GL_TEXTURE_2D, debug_image.gl_tex);
-                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
-                             width, height,
-                             0, GL_RGB, GL_UNSIGNED_BYTE, rgb_data);
-                debug_image.width = width;
-                debug_image.height = height;
-
-                free(rgb_data);
-                rgb_data = NULL;
-            } else {
-                glDeleteTextures(1, &debug_image.gl_tex);
-                debug_image.gl_tex = 0;
-                debug_image.width = 0;
-                debug_image.height = 0;
-            }
-        }
-    }
-
-    int n_points = 0;
-    struct gm_intrinsics debug_cloud_intrinsics = {};
-    const struct gm_point_rgba *debug_points =
-        gm_tracking_get_debug_point_cloud(data->latest_tracking,
-                                          &n_points,
-                                          &debug_cloud_intrinsics);
-    if (n_points) {
-        if (!data->cloud_bo)
-            glGenBuffers(1, &data->cloud_bo);
-        glBindBuffer(GL_ARRAY_BUFFER, data->cloud_bo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     sizeof(debug_points[0]) * n_points,
-                     debug_points, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        data->n_cloud_points = n_points;
-        data->cloud_intrinsics = debug_cloud_intrinsics;
-    } else
-        data->n_cloud_points = 0;
-
-    int n_lines = 0;
-    const struct gm_point_rgba *debug_lines =
-        gm_tracking_get_debug_lines(data->latest_tracking, &n_lines);
-    if (n_lines) {
-        if (!data->lines_bo)
-            glGenBuffers(1, &data->lines_bo);
-        glBindBuffer(GL_ARRAY_BUFFER, data->lines_bo);
-        glBufferData(GL_ARRAY_BUFFER,
-                     sizeof(debug_lines[0]) * n_lines * 2,
-                     debug_lines, GL_DYNAMIC_DRAW);
-        glBindBuffer(GL_ARRAY_BUFFER, 0);
-        data->n_lines = n_lines;
-    } else
-        data->n_lines = 0;
 }
 
 static void
@@ -2532,8 +2760,10 @@ handle_context_tracking_updates(Data *data)
         return;
     }
 
-
-    upload_tracking_textures(data);
+    if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+    {
+        upload_tracking_textures_opengl(data);
+    }
 }
 
 static void
@@ -2542,8 +2772,11 @@ handle_device_ready(Data *data, struct gm_device *dev)
     gm_debug(data->log, "%s device ready\n",
             dev == data->playback_device ? "Playback" : "Default");
 
-    init_viewer_opengl(data);
-    init_device_opengl(data);
+    if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+    {
+        init_viewer_opengl(data);
+        init_device_opengl(data);
+    }
 
     int max_depth_pixels =
         gm_device_get_max_depth_pixels(dev);
@@ -2636,7 +2869,7 @@ handle_context_event(Data *data, struct gm_event *event)
 }
 
 static void
-event_loop_iteration(Data *data)
+event_loop_iteration(struct gm_imgui_shell *shell, Data *data)
 {
     {
         ProfileScopedSection(GlimpseEvents);
@@ -2671,87 +2904,21 @@ event_loop_iteration(Data *data)
 
     {
         ProfileScopedSection(GlimpseGPUHook);
-        gm_context_render_thread_hook(data->ctx);
-    }
-
-}
-
-static void
-on_surface_created_resized_cb(struct gm_imgui_shell *shell,
-                              int width,
-                              int height,
-                              void *user_data)
-{
-    Data *data = (Data *)user_data;
-
-    gm_debug(data->log, "Surface created/resized (%dx%d)", width, height);
-
-    if (!data->surface_created) {
-        init_basic_opengl(data);
-        data->surface_created = true;
-    }
-
-    data->win_width = width;
-    data->win_height = height;
-    data->cloud_fbo_valid = false;
-}
-
-static void
-on_surface_destroyed_cb(struct gm_imgui_shell *shell,
-                        void *user_data)
-{
-    Data *data = (Data *)user_data;
-    gm_debug(data->log, "Surface destroyed");
-    data->surface_created = false;
-    data->cloud_fbo_valid = false;
-}
-
-static void
-on_app_focus_cb(struct gm_imgui_shell *shell,
-                bool focused,
-                void *user_data)
-{
-    Data *data = (Data *)user_data;
-    gm_debug(data->log, focused ? "Focused" : "Unfocused");
-
-    if (focused) {
-        if (data->playback_device) {
-            gm_device_start(data->playback_device);
-        } else {
-            gm_device_start(data->recording_device);
-        }
-    } else {
-        if (data->playback_device) {
-            gm_device_stop(data->playback_device);
-        } else {
-            gm_device_stop(data->recording_device);
+        enum gm_imgui_renderer renderer = gm_imgui_shell_get_renderer(shell);
+        switch (renderer)
+        {
+        case GM_IMGUI_RENDERER_OPENGL:
+            gm_context_opengl_gpu_hook(data->ctx);
+            break;
+        case GM_IMGUI_RENDERER_METAL:
+            gm_context_metal_gpu_hook(data->ctx);
+            break;
+        case GM_IMGUI_RENDERER_AUTO:
+            gm_assert(data->log, 0, "Spurious, unknown, renderer");
+            break;
         }
     }
-}
 
-static void
-on_mainloop_cb(struct gm_imgui_shell *shell,
-               uint64_t timestamp,
-               void *user_data)
-{
-    Data *data = (Data *)user_data;
-
-    if (!data->initialized)
-        viewer_init(data);
-
-    event_loop_iteration(data);
-}
-
-static void
-on_render_cb(struct gm_imgui_shell *shell,
-             uint64_t timestamp,
-             void *user_data)
-{
-    Data *data = (Data *)user_data;
-
-    if (data->realtime_ar_mode)
-        draw_ar_video(data);
-    draw_ui(data);
 }
 
 /* XXX:
@@ -2765,8 +2932,8 @@ on_render_cb(struct gm_imgui_shell *shell,
  * deterministic state for locks...
  */
 static void
-on_event_cb(struct gm_context *ctx,
-            struct gm_event *context_event, void *user_data)
+on_context_event_cb(struct gm_context *ctx,
+                    struct gm_event *context_event, void *user_data)
 {
     Data *data = (Data *)user_data;
 
@@ -2793,232 +2960,6 @@ on_device_event_cb(struct gm_device_event *device_event,
     data->events_back->push_back(event);
     data->event_notify_cond.notify_one();
 }
-
-/* Initialize enough OpenGL state to handle rendering before being
- * notified that the Glimpse device is 'ready' (i.e. before it's
- * possible to query camera intrinsics)
- */
-static void
-init_basic_opengl(Data *data)
-{
-    glClearColor(0.0, 0.0, 0.0, 1.0);
-    glClearStencil(0);
-#if 0
-    glDebugMessageControl(GL_DONT_CARE, /* source */
-                          GL_DONT_CARE, /* type */
-                          GL_DONT_CARE, /* severity */
-                          0,
-                          NULL,
-                          false);
-
-    glDebugMessageControl(GL_DONT_CARE, /* source */
-                          GL_DEBUG_TYPE_ERROR,
-                          GL_DONT_CARE, /* severity */
-                          0,
-                          NULL,
-                          true);
-
-    glEnable(GL_DEBUG_OUTPUT);
-    glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
-#endif
-
-#if TARGET_OS_OSX == 1 || defined(_WIN32)
-    // In the forwards-compatible context, there's no default vertex array.
-    GLuint vertex_array;
-    glGenVertexArrays(1, &vertex_array);
-    glBindVertexArray(vertex_array);
-#endif
-}
-
-static void
-init_viewer_opengl(Data *data)
-{
-    if (data->gl_initialized)
-        return;
-
-    static const char *cloud_vert_shader =
-        GLSL_SHADER_VERSION
-        "precision mediump float;\n"
-        "uniform mat4 mvp;\n"
-        "uniform float size;\n"
-        "in vec3 pos;\n"
-        "in vec4 color_in;\n"
-        "out vec4 v_color;\n"
-        "\n"
-        "void main() {\n"
-        "  gl_PointSize = size;\n"
-        "  gl_Position =  mvp * vec4(pos.x, pos.y, pos.z, 1.0);\n"
-        "  v_color = color_in;\n"
-        "}\n";
-
-    static const char *cloud_frag_shader =
-        GLSL_SHADER_VERSION
-        "precision mediump float;\n"
-        "in vec4 v_color;\n"
-        "layout(location = 0) out vec4 color;\n"
-        "void main() {\n"
-        "  color = v_color.abgr;\n"
-        "}\n";
-
-    data->cloud_program = gm_gl_create_program(data->log,
-                                               cloud_vert_shader,
-                                               cloud_frag_shader,
-                                               NULL);
-
-    glUseProgram(data->cloud_program);
-
-    data->cloud_attr_pos = glGetAttribLocation(data->cloud_program, "pos");
-    data->cloud_attr_col = glGetAttribLocation(data->cloud_program, "color_in");
-    data->cloud_uniform_mvp = glGetUniformLocation(data->cloud_program, "mvp");
-    data->cloud_uniform_pt_size = glGetUniformLocation(data->cloud_program, "size");
-
-    glUseProgram(0);
-
-    glGenBuffers(1, &data->lines_bo);
-
-    int n_stages = gm_context_get_n_stages(data->ctx);
-    data->stage_textures.resize(n_stages);
-
-    for (int i = 0; i < n_stages; i++) {
-        struct stage_textures &stage_textures = data->stage_textures[i];
-        int n_images = gm_context_get_stage_n_images(data->ctx, i);
-
-        gm_assert(data->log, n_images < MAX_IMAGES_PER_STAGE,
-                  "Can't handle more than %d debug images per stage",
-                  MAX_IMAGES_PER_STAGE);
-
-        for (int n = 0; n < n_images; n++) {
-            struct debug_image &debug_image = stage_textures.images[n];
-
-            debug_image.gl_tex = 0;
-            debug_image.width = 0;
-            debug_image.height = 0;
-        }
-    }
-
-    glGenFramebuffers(1, &data->cloud_fbo);
-    glGenRenderbuffers(1, &data->cloud_depth_renderbuf);
-    glGenTextures(1, &data->cloud_fbo_tex);
-    glBindTexture(GL_TEXTURE_2D, data->cloud_fbo_tex);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-
-    glGenBuffers(1, &data->video_quad_attrib_bo);
-
-    data->gl_initialized = true;
-}
-
-static void
-init_device_opengl(Data *data)
-{
-    if (data->device_gl_initialized)
-        return;
-
-    gm_assert(data->log, data->video_program == 0,
-              "Spurious GL video_program while device_gl_initialized == false");
-
-    const char *vert_shader =
-        GLSL_SHADER_VERSION
-        "precision mediump float;\n"
-        "precision mediump int;\n"
-        "in vec2 pos;\n"
-        "in vec2 tex_coords_in;\n"
-        "out vec2 tex_coords;\n"
-        "void main() {\n"
-        "  gl_Position = vec4(pos.x, pos.y, 0.0, 1.0);\n"
-        "  tex_coords = tex_coords_in;\n"
-        "}\n";
-    const char *frag_shader =
-        GLSL_SHADER_VERSION
-        "precision highp float;\n"
-        "precision highp int;\n"
-        "uniform sampler2D tex_sampler;\n"
-        "in vec2 tex_coords;\n"
-        "out lowp vec4 frag_color;\n"
-        "void main() {\n"
-        "  frag_color = texture(tex_sampler, tex_coords);\n"
-        "}\n";
-    const char *external_tex_frag_shader =
-        GLSL_SHADER_VERSION
-        "#extension GL_OES_EGL_image_external_essl3 : require\n"
-        "precision highp float;\n"
-        "precision highp int;\n"
-        "uniform samplerExternalOES tex_sampler;\n"
-        "in vec2 tex_coords;\n"
-        "out lowp vec4 frag_color;\n"
-        "void main() {\n"
-        "  frag_color = texture(tex_sampler, tex_coords);\n"
-        "}\n";
-
-    if (gm_device_get_type(data->active_device) == GM_DEVICE_TANGO) {
-        data->video_program = gm_gl_create_program(data->log,
-                                                   vert_shader,
-                                                   external_tex_frag_shader,
-                                                   NULL);
-    } else {
-        data->video_program = gm_gl_create_program(data->log,
-                                                   vert_shader,
-                                                   frag_shader,
-                                                   NULL);
-    }
-
-    data->video_quad_attrib_pos =
-        glGetAttribLocation(data->video_program, "pos");
-    data->video_quad_attrib_tex_coords =
-        glGetAttribLocation(data->video_program, "tex_coords_in");
-
-    data->ar_video_tex_sampler = glGetUniformLocation(data->video_program, "tex_sampler");
-
-    glUseProgram(data->video_program);
-    glUniform1i(data->ar_video_tex_sampler, 0);
-    glUseProgram(0);
-    update_ar_video_queue_len(data, 6);
-
-    // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
-    data->cloud_fbo_valid = false;
-
-    data->device_gl_initialized = true;
-}
-
-static void
-deinit_device_opengl(Data *data)
-{
-    if (!data->device_gl_initialized)
-        return;
-
-    if (data->video_program) {
-        glDeleteProgram(data->video_program);
-        data->video_program = 0;
-
-        data->video_quad_attrib_pos = 0;
-        data->video_quad_attrib_tex_coords = 0;
-        data->ar_video_tex_sampler = 0;
-    }
-
-    update_ar_video_queue_len(data, 0);
-
-    int n_stages = gm_context_get_n_stages(data->ctx);
-    for (int i = 0; i < n_stages; i++) {
-        struct stage_textures &stage_textures = data->stage_textures[i];
-        int n_images = gm_context_get_stage_n_images(data->ctx, i);
-
-        for (int n = 0; n < n_images; n++) {
-            struct debug_image &debug_image = stage_textures.images[n];
-
-            if (debug_image.gl_tex)
-                glDeleteTextures(1, &debug_image.gl_tex);
-            debug_image.gl_tex = 0;
-            debug_image.width = 0;
-            debug_image.height = 0;
-        }
-    }
-
-    // XXX: inconsistent that cloud_fbo is allocated in init_viewer_opengl
-    data->cloud_fbo_valid = false;
-
-    data->device_gl_initialized = false;
-}
-
 
 static void __attribute__((unused))
 viewer_destroy(Data *data)
@@ -3082,6 +3023,8 @@ configure_recording_device(Data *data)
 static void
 viewer_init(Data *data)
 {
+    gm_info(data->log, "Initializing view state...");
+
     ImGuiIO& io = ImGui::GetIO();
 
     ImGui::StyleColorsClassic();
@@ -3107,7 +3050,7 @@ viewer_init(Data *data)
 
     data->ctx = gm_context_new(data->log, NULL);
 
-    gm_context_set_event_callback(data->ctx, on_event_cb, data);
+    gm_context_set_event_callback(data->ctx, on_context_event_cb, data);
 
     /* TODO: load config for viewer properties */
     data->prediction_delay = 250000000;
@@ -3186,9 +3129,9 @@ viewer_init(Data *data)
     gm_prop_set_enum(find_prop(ctx_props, "debug_stage"),
                      data->current_stage);
 
-    update_ar_video_queue_len(data, 6);
+    update_ar_video_queue_len_opengl(data, 6);
 
-    data->show_skeletons = true;
+    data->skel_view_mode = SKEL_VIEW_PREDICTED;
     data->show_view_cam_controls = false;
 
     data->stage_stats_mode = 1; // aggregated per-frame median
@@ -3208,20 +3151,114 @@ viewer_init(Data *data)
     });
 
     int n_stages = gm_context_get_n_stages(data->ctx);
-    for (int i = 0; i < n_stages; ++i) {
+
+    data->stage_textures.resize(n_stages);
+
+    for (int i = 0; i < n_stages; i++) {
         struct gm_ui_property *toggle =
             gm_context_get_stage_toggle_property(data->ctx, i);
-        if (!toggle) {
-            continue;
+        if (toggle) {
+            data->stage_control_overrides.insert({{toggle->name, NULL}});
         }
 
-        data->stage_control_overrides.insert({{toggle->name, NULL}});
+        struct stage_textures &stage_textures = data->stage_textures[i];
+        int n_images = gm_context_get_stage_n_images(data->ctx, i);
+
+        gm_assert(data->log, n_images < MAX_IMAGES_PER_STAGE,
+                  "Can't handle more than %d debug images per stage",
+                  MAX_IMAGES_PER_STAGE);
+
+        for (int n = 0; n < n_images; n++) {
+            struct debug_image &debug_image = stage_textures.images[n];
+
+            debug_image.imgui_texture = NULL;
+            debug_image.width = 0;
+            debug_image.height = 0;
+        }
     }
 
     data->initialized = true;
 }
 
-#if !defined(USE_GLFM)
+static void
+on_surface_created_resized_cb(struct gm_imgui_shell *shell,
+                              int width,
+                              int height,
+                              void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    gm_debug(data->log, "Surface created/resized (%dx%d)", width, height);
+
+    data->win_width = width;
+    data->win_height = height;
+    data->cloud_fbo_valid = false;
+
+    data->surface_created = true;
+}
+
+static void
+on_surface_destroyed_cb(struct gm_imgui_shell *shell,
+                        void *user_data)
+{
+    Data *data = (Data *)user_data;
+    gm_debug(data->log, "Surface destroyed");
+    data->surface_created = false;
+    data->cloud_fbo_valid = false;
+}
+
+static void
+on_app_focus_cb(struct gm_imgui_shell *shell,
+                bool focused,
+                void *user_data)
+{
+    Data *data = (Data *)user_data;
+    gm_debug(data->log, focused ? "Focused" : "Unfocused");
+
+    if (focused) {
+        if (data->playback_device) {
+            gm_device_start(data->playback_device);
+        } else {
+            gm_device_start(data->recording_device);
+        }
+    } else {
+        if (data->playback_device) {
+            gm_device_stop(data->playback_device);
+        } else {
+            gm_device_stop(data->recording_device);
+        }
+    }
+}
+
+static void
+on_mainloop_cb(struct gm_imgui_shell *shell,
+               uint64_t timestamp,
+               void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    if (!data->initialized)
+        viewer_init(data);
+
+    event_loop_iteration(shell, data);
+}
+
+static void
+on_render_cb(struct gm_imgui_shell *shell,
+             uint64_t timestamp,
+             void *user_data)
+{
+    Data *data = (Data *)user_data;
+
+    if (data->realtime_ar_mode)
+    {
+        if (gm_imgui_shell_get_renderer(data->shell) == GM_IMGUI_RENDERER_OPENGL)
+            render_ar_video_opengl(data);
+    }
+
+    draw_ui(data);
+}
+
 static void
 usage(void)
 {
@@ -3296,7 +3333,6 @@ parse_args(Data *data, int argc, char **argv)
         }
     }
 }
-#endif
 
 static void
 on_log_ready_cb(struct gm_imgui_shell *shell,
@@ -3316,15 +3352,17 @@ glimpse_imgui_shell_main(struct gm_imgui_shell *shell,
                          char **argv)
 {
     Data *data = new Data();
+    data->shell = shell;
 
-#ifdef USE_GLFW
-    parse_args(data, argc, argv);
+    if (argc)
+    {
+        parse_args(data, argc, argv);
 
-    if (log_filename_opt) {
-        gm_imgui_shell_preinit_log_filename(shell,
-                                            log_filename_opt);
+        if (log_filename_opt) {
+            gm_imgui_shell_preinit_log_filename(shell,
+                                                log_filename_opt);
+        }
     }
-#endif
 
     gm_imgui_shell_preinit_log_ready_callback(shell,
                                               on_log_ready_cb,
@@ -3368,9 +3406,6 @@ glimpse_imgui_shell_main(struct gm_imgui_shell *shell,
     data->events_back = new std::vector<struct event>();
 
     reset_view(data);
-
-    gm_info(data->log, "Initializing view state...");
-    viewer_init(data);
 }
 
 #ifdef __ANDROID__

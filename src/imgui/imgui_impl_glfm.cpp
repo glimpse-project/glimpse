@@ -11,8 +11,7 @@
 #include <imgui.h>
 #include "imgui_impl_glfm.h"
 
-#define GLFM_INCLUDE_NONE
-#include "glfm.h"
+#include <glfm.h>
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
 
@@ -121,12 +120,6 @@ ImGui_ImplGlfm_UpdateDisplayMetrics(GLFMDisplay* display)
     io.DisplaySize = ImVec2((float)(w / scale), (float)(h / scale));
     io.DisplayFramebufferScale = ImVec2(scale, scale);
     io.FontGlobalScale = 1.f / scale;
-
-    double top, right, bottom, left;
-    glfmGetDisplayChromeInsets(display, &top, &right, &bottom, &left);
-    io.DisplayVisibleMin = ImVec2(left / scale, top / scale);
-    io.DisplayVisibleMax = ImVec2(io.DisplaySize.x - right / scale,
-                                  io.DisplaySize.y - bottom / scale);
 }
 
 bool

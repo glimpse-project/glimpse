@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2017 Glimp IP Ltd
+ * Copyright (C) 2019 Robert Bragg <robert@sixbynine.org>
  *
  * Permission is hereby granted, free of charge, to any person
  * obtaining a copy of this software and associated documentation
@@ -22,30 +22,21 @@
  * SOFTWARE.
  */
 
+
 #pragma once
 
-#include "glimpse_log.h"
+#include <glimpse_imgui_shell.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-#define GM_GL_CHECK_ERRORS(LOG) \
-    do { \
-        GLenum error = glGetError(); \
-        if (error != GL_NO_ERROR) { \
-            gm_error(LOG, "OpenGL error 0x%04x at %s:%i", \
-                     error, __func__, __LINE__); \
-        } else { \
-            break; \
-        } \
-    } while(1)
+extern struct gm_imgui_shell *global_imgui_darwin_shell;
 
-unsigned int
-gm_gl_create_program(struct gm_logger *log,
-                     const char *vertex_source,
-                     const char *fragment_source,
-                     char **err);
+void
+glimpse_imgui_darwin_metal_kit_main(struct gm_imgui_shell *shell);
+void
+glimpse_imgui_darwin_glfm_main(struct gm_imgui_shell *shell);
 
 #ifdef __cplusplus
 }

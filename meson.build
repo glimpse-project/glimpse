@@ -43,6 +43,7 @@ endif
 
 if compiler.get_define('__ENVIRONMENT_IPHONE_OS_VERSION_MIN_REQUIRED__') != ''
     add_languages('objc')
+    add_languages('objcpp')
 
     if get_option('default_library') != 'static'
         error('IOS doesn\'t support shared libraries, so you must configure with --default-library=static')
@@ -73,12 +74,29 @@ else
     platform_ios = false
 endif
 
+if host_machine.system() == 'darwin'
+    add_languages('objc')
+    add_languages('objcpp')
+    add_global_arguments([ '-fobjc-arc' ],
+                         language: ['objc', 'objcpp'])
+
+    supports_metal_api = true
+else
+    supports_metal_api = false
+endif
+
 platform_mobile = false
 platform_pc = false
 if platform_ios or platform_android
     platform_mobile = true
 else
     platform_pc = true
+endif
+
+if host_machine.system() == 'darwin' and platform_pc
+    # imgui uses some non-standard features...
+    add_global_arguments([ '-std=gnu++14' ],
+                         language: ['objcpp'])
 endif
 
 threads_dep = dependency('threads')
@@ -90,6 +108,9 @@ if host_machine.system() == 'windows'
 glimpse_includes += [ include_directories('src/win32') ]
 endif
 imgui_includes = [ include_directories('src/imgui') ]
+if host_machine.system() == 'darwin'
+    imgui_includes += [ include_directories('src/imgui/darwin') ]
+endif
 shell_includes = glimpse_includes + imgui_includes
 unity_includes = [ include_directories('src/UnityPluginAPI') ]
 
@@ -176,6 +197,41 @@ shell_deps += [
     epoxy_dep,
 ]
 
+if host_machine.system() == 'darwin'
+    shell_src += [
+        'src/glimpse_imgui_darwin_shell.mm',
+    ]
+endif
+
+if host_machine.system() == 'darwin' and platform_pc
+    shell_src += [
+        'src/imgui/imgui_impl_osx.mm',
+    ]
+    shell_link_args += [
+        '-framework', 'AppKit',
+    ]
+endif
+
+if supports_metal_api
+    shell_src += [
+        'src/imgui/imgui_impl_metal.mm',
+        'src/imgui/darwin/IMGUIMetalAppDelegate.m',
+        'src/imgui/darwin/IMGUIMetalRenderer.mm',
+        'src/imgui/darwin/IMGUIMetalViewController.mm',
+    ]
+    shell_defines += ['-DSUPPORTS_METAL=1']
+    shell_link_args += [
+        '-framework', 'Foundation',
+'-framework', 'CoreGraphics',
+'-framework', 'QuartzCore',
+#'-framework', 'UIKit',
+        '-framework', 'Metal',
+        '-framework', 'MetalKit',
+    ]
+    client_api_defines += ['-DSUPPORTS_METAL=1']
+endif
+
+
 uw_dep = dependency('libunwind', required: false)
 if uw_dep.found()
     client_api_defines += ['-DUSE_LIBUNWIND=1']
@@ -195,7 +251,7 @@ if platform_pc
     if glfw_dep.found()
         shell_deps += glfw_dep
         shell_defines += [
-            '-DUSE_GLFW',
+            '-DSUPPORTS_GLFW=1',
             '-DGLFW_INCLUDE_NONE',
             '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
         ]
@@ -222,7 +278,8 @@ if platform_ios
 
     shell_deps += glfm_dep
     shell_defines += [
-        '-DUSE_GLFM',
+        '-DSUPPORTS_GLFM',
+        '-DGLFM_INCLUDE_NONE',
         '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
     ]
     shell_src += [
@@ -246,7 +303,8 @@ if platform_android
 
     shell_deps += glfm_dep
     shell_defines += [
-        '-DUSE_GLFM',
+        '-DSUPPORTS_GLFM',
+        '-DGLFM_INCLUDE_NONE',
         '-DIMGUI_IMPL_OPENGL_LOADER_CUSTOM=<epoxy/gl.h>'
     ]
     shell_src += [
@@ -460,6 +518,8 @@ if platform_ios
                dependencies: viewer_deps,
                c_args: viewer_defines,
                cpp_args: viewer_defines,
+               objc_args: viewer_defines,
+               objcpp_args: viewer_defines,
                link_args: shell_link_args)
 
     executable('glimpse_shell_test',
@@ -468,6 +528,8 @@ if platform_ios
                dependencies: shell_deps,
                c_args: shell_defines,
                cpp_args: shell_defines,
+               objc_args: shell_defines,
+               objcpp_args: shell_defines,
                link_args: shell_link_args)
 endif
 
@@ -644,14 +706,20 @@ if glfw_dep.found() and epoxy_dep.found()
                include_directories: glimpse_includes + shell_includes,
                dependencies: client_api_deps + shell_deps,
                c_args: client_api_defines + shell_defines,
-               cpp_args: client_api_defines + shell_defines)
+               cpp_args: client_api_defines + shell_defines,
+               objc_args: client_api_defines + shell_defines,
+               objcpp_args: client_api_defines + shell_defines,
+               link_args: shell_link_args)
 
     executable('glimpse_shell_test',
                [ 'src/glimpse_shell_test.c' ] + shell_src + getopt_src,
                include_directories: shell_includes,
                dependencies: shell_deps,
                c_args: shell_defines,
-               cpp_args: shell_defines)
+               cpp_args: shell_defines,
+               objc_args: shell_defines,
+               objcpp_args: shell_defines,
+               link_args: shell_link_args)
 endif
 
 endif # platform_pc
