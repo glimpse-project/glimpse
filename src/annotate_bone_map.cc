@@ -478,6 +478,13 @@ main(int argc, char** argv)
         JSON_Object* bone_annotated = bones_annotated.front();
         bones_annotated.pop();
 
+        // Copy bone name
+        const char *bone_name = "Unnamed";
+        if (json_object_has_value_of_type(bone, "name", JSONString)) {
+            bone_name = json_object_get_string(bone, "name");
+            json_object_set_string(bone_annotated, "name", bone_name);
+        }
+
         // Copy head/tail names
         const char* head_name = json_object_get_string(bone, "head");
         const char* tail_name = json_object_get_string(bone, "tail");
