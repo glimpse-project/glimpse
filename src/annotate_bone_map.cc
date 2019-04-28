@@ -45,13 +45,8 @@
 #include "glimpse_data.h"
 
 typedef struct {
-    int index;
-    float weight;
-} BoneJoint;
-
-typedef struct {
-    std::vector<BoneJoint> head_joints;
-    std::vector<BoneJoint> tail_joints;
+    int head;
+    int tail;
     int parent;
 } Bone;
 
@@ -94,36 +89,17 @@ typedef struct {
                                  // encompasses every rotation
 } ThreadContext;
 
-static void
-calc_bone_joint_position(std::vector<BoneJoint> &bone_joints,
-                         float *joints, float *output)
-{
-    memset(output, 0, sizeof(float) * 3);
-    float weight = 0.f;
-    for (auto &bone_joint : bone_joints) {
-        output[0] += joints[bone_joint.index * 3] * bone_joint.weight;
-        output[1] += joints[bone_joint.index * 3 + 1] * bone_joint.weight;
-        output[2] += joints[bone_joint.index * 3 + 2] * bone_joint.weight;
-        weight += bone_joint.weight;
-    }
-    output[0] /= weight;
-    output[1] /= weight;
-    output[2] /= weight;
-}
-
 static glm::quat
 calc_bone_rotation(TrainContext* ctx, Bone& bone, int joint_idx)
 {
     Bone& parent = ctx->bones[bone.parent];
     float* joints = &ctx->joints[joint_idx];
 
-    float head[3], tail[3];
-    calc_bone_joint_position(bone.head_joints, joints, head);
-    calc_bone_joint_position(bone.tail_joints, joints, tail);
+    float* head = &joints[bone.head * 3];
+    float* tail = &joints[bone.tail * 3];
 
-    float parent_head[3], parent_tail[3];
-    calc_bone_joint_position(parent.head_joints, joints, parent_head);
-    calc_bone_joint_position(parent.tail_joints, joints, parent_tail);
+    float* parent_head = &joints[parent.head * 3];
+    float* parent_tail = &joints[parent.tail * 3];
 
     glm::vec3 bone_vec = glm::normalize(
         glm::vec3(tail[0] - head[0],
@@ -155,10 +131,8 @@ thread_stage1(void* userdata)
             Bone& bone = ctx->ctx->bones[j];
 
             // Measure the length of the bone and update our running totals
-            float head[3], tail[3];
-            calc_bone_joint_position(bone.head_joints, joints, head);
-            calc_bone_joint_position(bone.tail_joints, joints, tail);
-
+            float* head = &joints[bone.head * 3];
+            float* tail = &joints[bone.tail * 3];
             float dist = sqrtf(powf(tail[0] - head[0], 2.f) +
                                powf(tail[1] - head[1], 2.f) +
                                powf(tail[2] - head[2], 2.f));
@@ -340,83 +314,40 @@ main(int argc, char** argv)
         bones.pop();
 
         // Validate bone
-        bool has_multiple_heads =
-            json_object_has_value_of_type(bone, "heads", JSONArray);
-        bool has_multiple_tails =
-            json_object_has_value_of_type(bone, "tails", JSONArray);
-        if ((!json_object_has_value_of_type(bone, "head", JSONString) &&
-             !has_multiple_heads) ||
-            (!json_object_has_value_of_type(bone, "tail", JSONString) &&
-             !has_multiple_tails))
+        if (!json_object_has_value(bone, "head") ||
+            !json_object_has_value(bone, "tail"))
         {
             fprintf(stderr, "Bone missing required properties\n");
             return 1;
         }
 
         // Find joint indices
-        std::vector<std::pair<const char *, float>>heads;
-        if (has_multiple_heads) {
-            JSON_Array *json_heads = json_object_get_array(bone, "heads");
-            for (int i = 0; i < json_array_get_count(json_heads); ++i) {
-                JSON_Object *bone_joint = json_array_get_object(json_heads, i);
-                const char *name = json_object_get_string(bone_joint, "name");
-                float weight = json_object_get_number(bone_joint, "weight");
-                heads.push_back({name, weight});
+        const char* head_name = json_object_get_string(bone, "head");
+        const char* tail_name = json_object_get_string(bone, "tail");
+
+        int head = -1;
+        int tail = -1;
+        for (int i = 0; i < json_array_get_count(joint_array) &&
+             (head < 0 || tail < 0); ++i)
+        {
+            JSON_Object* joint = json_array_get_object(joint_array, i);
+            const char* joint_name = json_object_get_string(joint, "joint");
+            if (head < 0 && strcmp(joint_name, head_name) == 0) {
+                head = i;
+                continue;
             }
-        } else {
-            heads.push_back({json_object_get_string(bone, "head"), 1.f});
-        }
-
-        std::vector<std::pair<const char *, float>>tails;
-        if (has_multiple_tails) {
-            JSON_Array *json_tails = json_object_get_array(bone, "tails");
-            for (int i = 0; i < json_array_get_count(json_tails); ++i) {
-                JSON_Object *bone_joint = json_array_get_object(json_tails, i);
-                const char *name = json_object_get_string(bone_joint, "name");
-                float weight = json_object_get_number(bone_joint, "weight");
-                tails.push_back({name, weight});
-            }
-        } else {
-            tails.push_back({json_object_get_string(bone, "tail"), 1.f});
-        }
-
-        std::vector<BoneJoint> head_joints;
-        std::vector<BoneJoint> tail_joints;
-        for (int i = 0; i < json_array_get_count(joint_array); ++i) {
-            JSON_Object *joint = json_array_get_object(joint_array, i);
-            const char *joint_name = json_object_get_string(joint, "joint");
-
-            for (auto iter = heads.begin(); iter != heads.end(); ++iter) {
-                auto &bone_joint = *iter;
-                if (strcmp(bone_joint.first, joint_name) == 0) {
-                    head_joints.push_back({i, bone_joint.second});
-                    heads.erase(iter);
-                    break;
-                }
-            }
-
-            for (auto iter = tails.begin(); iter != tails.end(); ++iter) {
-                auto &bone_joint = *iter;
-                if (strcmp(bone_joint.first, joint_name) == 0) {
-                    tail_joints.push_back({i, bone_joint.second});
-                    tails.erase(iter);
-                    break;
-                }
-            }
-
-            if (heads.empty() && tails.empty()) {
-                break;
+            if (tail < 0 && strcmp(joint_name, tail_name) == 0) {
+                tail = i;
+                continue;
             }
         }
-
-        if (head_joints.empty() || tail_joints.empty()) {
-            const char *bone_name = json_object_get_string(bone, "name");
-            fprintf(stderr, "Bone '%s' joints not found",
-                    bone_name ? bone_name : "Unnamed");
+        if (head == -1 || tail == -1) {
+            fprintf(stderr, "Bone '%s'->'%s' joints not found",
+                    head_name, tail_name);
             return 1;
         }
 
-        ctx.bones.push_back({head_joints, tail_joints, parent});
+        ctx.bones.push_back({head, tail, parent});
 
         // Collect next bones
         JSON_Array* children = json_object_get_array(bone, "children");
@@ -547,33 +478,11 @@ main(int argc, char** argv)
         JSON_Object* bone_annotated = bones_annotated.front();
         bones_annotated.pop();
 
-        // Copy bone name
-        const char *bone_name = "Unnamed";
-        if (json_object_has_value_of_type(bone, "name", JSONString)) {
-            bone_name = json_object_get_string(bone, "name");
-            json_object_set_string(bone_annotated, "name", bone_name);
-        }
-
-        // Copy head/tail descriptions
-        if (json_object_has_value_of_type(bone, "head", JSONString)) {
-            const char* head_name = json_object_get_string(bone, "head");
-            json_object_set_string(bone_annotated, "head", head_name);
-        }
-        if (json_object_has_value_of_type(bone, "tail", JSONString)) {
-            const char* tail_name = json_object_get_string(bone, "tail");
-            json_object_set_string(bone_annotated, "tail", tail_name);
-        }
-
-        if (json_object_has_value_of_type(bone, "heads", JSONArray)) {
-            JSON_Value *heads =
-                json_value_deep_copy(json_object_get_value(bone, "heads"));
-            json_object_set_value(bone_annotated, "heads", heads);
-        }
-        if (json_object_has_value_of_type(bone, "tails", JSONArray)) {
-            JSON_Value *tails =
-                json_value_deep_copy(json_object_get_value(bone, "tails"));
-            json_object_set_value(bone_annotated, "tails", tails);
-        }
+        // Copy head/tail names
+        const char* head_name = json_object_get_string(bone, "head");
+        const char* tail_name = json_object_get_string(bone, "tail");
+        json_object_set_string(bone_annotated, "head", head_name);
+        json_object_set_string(bone_annotated, "tail", tail_name);
 
         // Add calculated bone length data
         json_object_set_number(bone_annotated, "min_length",
@@ -605,13 +514,12 @@ main(int argc, char** argv)
 
         if (ctx.verbose)
         {
-            printf("    Bone %s\n"
-                   "        min:  %.2f\n"
-                   "        mean: %.2f\n"
-                   "        max:  %.2f\n"
-                   "        rotation constraint: (x,y,z,w - radius)\n"
-                   "            %.2f, %.2f, %.2f, %.2f - %.2f\n",
-                   bone_name,
+            printf("    Bone %s->%s - min:  %.2f\n"
+                   "                  mean: %.2f\n"
+                   "                  max:  %.2f\n"
+                   "                  rotation constraint: (x,y,z,w - radius)\n"
+                   "                  %.2f, %.2f, %.2f, %.2f - %.2f\n",
+                   head_name, tail_name,
                    thread_ctx[0].min_lengths[bone_id],
                    thread_ctx[0].mean_lengths[bone_id],
                    thread_ctx[0].max_lengths[bone_id],
