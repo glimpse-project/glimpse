@@ -99,6 +99,7 @@
 #include "glimpse_assets.h"
 #include "glimpse_gl.h"
 #include "glimpse_imgui_shell.h"
+#include "glimpse_os.h"
 
 #ifdef _WIN32
 #define strdup(X) _strdup(X)
@@ -202,6 +203,10 @@ struct _Data
 
     int win_width;
     int win_height;
+
+    struct gm_ui_property *codebook_freeze_prop;
+    bool calibrating_background;
+    uint64_t calibrate_start;
 
     /* Normally this is 'false' and we show lots of intermediate debug buffers
      * but e.g. if running on Android with Tango then we try to more closely
@@ -779,7 +784,6 @@ update_skeleton_wireframe_bos_opengl(Data *data,
 
     return true;
 }
-
 
 static void
 update_and_render_skeletons_opengl(Data *data,
@@ -2062,8 +2066,9 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
                  ImGuiWindowFlags_NoTitleBar|
                  ImGuiWindowFlags_NoResize|
                  ImGuiWindowFlags_NoMove|
-                 ImGuiWindowFlags_AlwaysVerticalScrollbar|
-                 ImGuiWindowFlags_NoBringToFrontOnFocus);
+                 ImGuiWindowFlags_AlwaysVerticalScrollbar
+                 //ImGuiWindowFlags_NoBringToFrontOnFocus
+                 );
 
     ImGui::PushItemWidth(ImGui::GetContentRegionAvailWidth() * 0.5);
     //ImGui::PushItemWidth(ImGui::GetWindowWidth() * 0.5);
@@ -2554,6 +2559,40 @@ draw_ui(Data *data)
                                           main_area_size.y);
     }
 
+    static int calibrate_controls_height = 100;
+    ImGui::SetNextWindowPos(ImVec2(main_x, main_y + main_area_size.y -
+                                   calibrate_controls_height));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(main_area_size.x, 0),
+                                        ImVec2(main_area_size.x,
+                                               main_area_size.y));
+    ImGui::Begin("Background Calibrate Controls", NULL,
+                 ImGuiWindowFlags_NoTitleBar|
+                 ImGuiWindowFlags_NoResize|
+                 ImGuiWindowFlags_NoScrollbar |
+                 ImGuiWindowFlags_AlwaysAutoResize|
+                 ImGuiWindowFlags_NoMove);
+
+    if (!data->calibrating_background) {
+        if (ImGui::Button("Calibrate Background")) {
+            data->calibrating_background = true;
+            data->calibrate_start = gm_os_get_time();
+            gm_prop_set_bool(data->codebook_freeze_prop, false);
+            gm_context_request_codebook_reset(data->ctx);
+        }
+    } else {
+        uint64_t progress_time = gm_os_get_time() - data->calibrate_start;
+        uint64_t calibration_duration = 5000000000;
+        float progress = (double)progress_time / (double)calibration_duration;
+        ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f), "");
+        if (progress_time> calibration_duration) {
+            gm_prop_set_bool(data->codebook_freeze_prop, true);
+            data->calibrating_background = false;
+        }
+    }
+    calibrate_controls_height = ImGui::GetWindowHeight();
+    ImGui::End();
+
+
     static bool show_controls = false;
 
     if (show_controls_button) {
@@ -2568,7 +2607,9 @@ draw_ui(Data *data)
                      ImGuiWindowFlags_NoTitleBar|
                      ImGuiWindowFlags_NoResize|
                      ImGuiWindowFlags_NoScrollbar |
-                     ImGuiWindowFlags_AlwaysAutoResize|
+                     ImGuiWindowFlags_AlwaysAutoResize |
+                     ImGuiWindowFlags_NoBringToFrontOnFocus |
+                     ImGuiWindowFlags_NoFocusOnAppearing |
                      ImGuiWindowFlags_NoMove);
         /* XXX: assuming that "Controls" and "Video Buffer" are the first two
          * entries, we only want to expose these two options in
@@ -3176,6 +3217,23 @@ viewer_init(Data *data)
             debug_image.height = 0;
         }
     }
+
+    int motion_detection_stage = -1;
+    for (int i = 0; i < n_stages; i++) {
+        if (strcmp(gm_context_get_stage_name(data->ctx, i),
+                   "motion_detection_codebook_retire") == 0)
+        {
+            motion_detection_stage = i;
+        }
+    }
+
+    gm_assert(data->log, motion_detection_stage > -1,
+              "Failed to lookup motion_detection_codebook_retire pipeline stage");
+
+    struct gm_ui_properties *stage_props =
+        gm_context_get_stage_ui_properties(data->ctx, motion_detection_stage);
+    data->codebook_freeze_prop = gm_props_lookup(stage_props, "codebook_frozen");
+
 
     data->initialized = true;
 }
