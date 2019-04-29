@@ -1540,52 +1540,6 @@ calc_average_joint_difference(struct gm_context *ctx,
     return diff / n_joints_shared;
 }
 
-static int
-calc_mismatched_bones(struct gm_context *ctx,
-                      struct gm_skeleton &skel,
-                      struct gm_skeleton &ref,
-                      float time_delta)
-{
-    int n_bones = ctx->n_bones;
-
-    gm_assert(ctx->log, skel.bones.size() == n_bones,
-              "Skeleton doesn't have expected %d bones", n_bones);
-    gm_assert(ctx->log, ref.bones.size() == n_bones,
-              "Reference skeleton doesn't have expected %d bones", n_bones);
-
-    int violations = 0;
-    for (int i = 0; i < n_bones; ++i) {
-        struct gm_bone &bone = skel.bones[i];
-        struct gm_bone &ref_bone = ref.bones[i];
-        struct gm_bone_info &bone_info = ctx->bone_info[i];
-
-        // XXX: it's not entirely obvious what the best way of considering
-        // bone validity is here but one aim is to avoid having a skeleton
-        // where all bones are invalid looking better than any valid skeleton
-        // so we count invalid bones as violations.
-        if (!bone.valid)
-            violations++;
-
-        // We can't compare lengths or angles if either bone is invalid...
-        if (!bone.valid || !ref_bone.valid)
-            continue;
-
-        if (is_bone_length_diff(bone, ref_bone, ctx->bone_length_variance))
-            violations++;
-
-        // Don't check for angle missmatches for the root bone...
-        if (bone_info.parent >= 0) {
-            if (is_bone_angle_diff(ctx, bone, ref, skel, time_delta,
-                                   ctx->bone_rotation_variance))
-            {
-                violations++;
-            }
-        }
-    }
-
-    return violations;
-}
-
 static void
 update_bones(struct gm_context *ctx, struct gm_skeleton &skeleton)
 {
