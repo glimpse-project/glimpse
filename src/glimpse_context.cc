@@ -7230,7 +7230,7 @@ context_track_skeleton(struct gm_context *ctx,
      * frames in a recording.
      */
     if (tracking->frame->discontinuity) {
-        gm_debug(ctx->log, "Wiping codebook (frame discontinuity)");
+        gm_debug(ctx->log, "Frame discontinuity");
 
         /* Note: this isn't the same as resetting the codebook
          * later in cases that the pose has changed since we don't
@@ -7238,6 +7238,7 @@ context_track_skeleton(struct gm_context *ctx,
          */
         unsigned int codebook_size = ctx->seg_codebook.size();
         if (!state.codebook_frozen) {
+            gm_debug(ctx->log, "Wiping codebook");
             ctx->seg_codebook.clear();
             ctx->seg_codebook.resize(codebook_size);
         }
