@@ -863,7 +863,6 @@ struct gm_context
     float sanitisation_window;
     bool joint_velocity_sanitisation;
     bool bone_length_sanitisation;
-    bool bone_rotation_sanitisation;
     bool use_bone_map_annotation;
 
     float joint_velocity_threshold;
@@ -1465,52 +1464,6 @@ is_bone_length_diff(const struct gm_bone &ref_bone,
                     float max_variance)
 {
     return fabsf(bone.length - ref_bone.length) > max_variance;
-}
-
-// FIXME: we almost certainly don't want to be measuring bone angles in world
-// coordinates
-//
-// I.e. the angle between corresponding bones, measured in world coordinates,
-// represents the result of a complex combination of body movements so we can't
-// use the angle to infer much about the movement of this specific bone.
-static float
-bone_angle_diff(struct gm_context *ctx,
-                struct gm_bone *bone,
-                struct gm_skeleton *ref_skel,
-                struct gm_skeleton *skel)
-{
-    struct gm_bone_info &bone_info = ctx->bone_info[bone->idx];
-    struct gm_joint &ref_head = ref_skel->joints[bone_info.head];
-    struct gm_joint &ref_tail = ref_skel->joints[bone_info.tail];
-    struct gm_joint &head = skel->joints[bone_info.head];
-    struct gm_joint &tail = skel->joints[bone_info.tail];
-
-    glm::vec3 ref_vec = glm::vec3(ref_tail.x - ref_head.x,
-                                  ref_tail.y - ref_head.y,
-                                  ref_tail.z - ref_head.z);
-    glm::vec3 bone_vec = glm::vec3(tail.x - head.x,
-                                   tail.y - head.y,
-                                   tail.z - head.z);
-
-    float angle = glm::degrees(acosf(
-        glm::dot(glm::normalize(bone_vec), glm::normalize(ref_vec))));
-    while (angle > 180.f)
-        angle -= 360.f;
-    return std::isnan(angle) ? 0.f : angle;
-}
-
-static bool
-is_bone_angle_diff(struct gm_context *ctx,
-                   struct gm_bone &bone,
-                   struct gm_skeleton &ref_skel,
-                   struct gm_skeleton &skel,
-                   float time_delta,
-                   float max_angle)
-{
-    float angle = bone_angle_diff(ctx, &bone, &ref_skel, &skel);
-    float angle_delta = fabsf(angle) / time_delta;
-
-    return angle_delta > max_angle;
 }
 
 static float
@@ -2116,140 +2069,6 @@ sanitise_bone_lengths(struct gm_person *person,
     }
 }
 
-/* FIXME: this is currently comparing bone angles in world coordinates which
- * won't give meaningful results
- */
-static void
-sanitise_bone_rotations(struct gm_person *person,
-                        struct gm_skeleton &skeleton,
-                        uint64_t time_threshold)
-{
-    struct gm_context *ctx = person->ctx;
-
-    if (!ctx->bone_rotation_sanitisation) {
-        return;
-    }
-
-    auto &history = person->history;
-
-    for (auto &bone : skeleton.bones) {
-        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
-
-        // If this bone has no parent bone, we can't correct its angle
-        int parent_bone_idx = bone_info.parent;
-        if (parent_bone_idx < 0)
-            continue;
-
-        struct gm_bone_info &parent_bone_info = ctx->bone_info[parent_bone_idx];
-
-        // Look at the change of the angle of rotation of each bone in
-        // tracking history and compare the average of this to the current
-        // change. If it exceeds it by too much, use the last rotation that
-        // doesn't exceed this value.
-
-        // Record which bones are valid and within the time threshold.
-        // If bone-map-annotation is being used, record bones as invalid if
-        // their rotation doesn't lie within the annotated rotation constraints.
-        bool bone_validity[history.size()];
-        for (int i = 0; i < history.size(); ++i) {
-            if (!history[i].skeleton.bones[bone.idx].valid ||
-                history[i].timestamp < time_threshold)
-            {
-                bone_validity[i] = false;
-            } else {
-                struct gm_bone &prev_bone = history[i].skeleton.bones[bone.idx];
-                bone_validity[i] = is_bone_rotation_valid(ctx, prev_bone);
-            }
-        }
-
-        // Find the average rotation change magnitude
-        float bone_rots[history.size() - 1];
-        float bone_rot = fabsf(bone_angle_diff(ctx,
-                                               &bone,
-                                               &skeleton,
-                                               &history[0].skeleton));
-        float avg_bone_rot = bone_rot;
-        int n_rots = 1;
-        for (int i = 0; i < history.size() - 1; ++i) {
-            if (!bone_validity[i] || !bone_validity[i + 1])
-            {
-              bone_rots[i] = 180.f;
-              continue;
-            }
-
-            bone_rots[i] = fabsf(bone_angle_diff(ctx,
-                                                 &bone,
-                                                 &history[i].skeleton,
-                                                 &history[i+1].skeleton));
-            gm_assert(ctx->log, !std::isnan(bone_rots[i]),
-                      "Bone (%s) angle diff is NaN "
-                      "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f) v "
-                      "(%.2f, %.2f, %.2f->%.2f, %.2f, %.2f)",
-                      gm_context_get_bone_name(ctx, bone.idx),
-                      history[i].skeleton.joints[bone_info.head].x,
-                      history[i].skeleton.joints[bone_info.head].y,
-                      history[i].skeleton.joints[bone_info.head].z,
-                      history[i].skeleton.joints[bone_info.tail].x,
-                      history[i].skeleton.joints[bone_info.tail].y,
-                      history[i].skeleton.joints[bone_info.tail].z,
-                      history[i+1].skeleton.joints[bone_info.head].x,
-                      history[i+1].skeleton.joints[bone_info.head].y,
-                      history[i+1].skeleton.joints[bone_info.head].z,
-                      history[i+1].skeleton.joints[bone_info.tail].x,
-                      history[i+1].skeleton.joints[bone_info.tail].y,
-                      history[i+1].skeleton.joints[bone_info.tail].z);
-            avg_bone_rot += bone_rots[i];
-            ++n_rots;
-        }
-        avg_bone_rot /= n_rots;
-
-        gm_debug(ctx->log, "Bone (%s) average rot-mag: %.2f",
-                 gm_context_get_bone_name(ctx, bone.idx),
-                 avg_bone_rot);
-
-        float bone_rot_factor = avg_bone_rot *
-            ctx->bone_rotation_outlier_factor;
-        if (bone_rot > bone_rot_factor || !is_bone_rotation_valid(ctx, bone)) {
-            for (int i = 0; i < history.size() - 1; ++i) {
-                if (bone_rots[i] > bone_rot_factor || !bone_validity[i]) {
-                    continue;
-                }
-
-                gm_debug(ctx->log, "Bone (%s) average rot-mag: %.2f, "
-                         "correction: %.2f -> %.2f",
-                         gm_context_get_bone_name(ctx, bone.idx),
-                         avg_bone_rot, bone_rot, bone_rots[i]);
-
-                const struct gm_bone *abs_prev_bone =
-                    &history[i].skeleton.bones[bone.idx];
-
-                glm::mat3 rotate = glm::mat3_cast(abs_prev_bone->angle);
-
-                glm::vec3 parent_vec = glm::normalize(
-                    glm::vec3(skeleton.joints[parent_bone_info.tail].x -
-                              skeleton.joints[parent_bone_info.head].x,
-                              skeleton.joints[parent_bone_info.tail].y -
-                              skeleton.joints[parent_bone_info.head].y,
-                              skeleton.joints[parent_bone_info.tail].z -
-                              skeleton.joints[parent_bone_info.head].z));
-
-                glm::vec3 new_tail = ((parent_vec * rotate) * bone.length);
-                new_tail.x += skeleton.joints[bone_info.head].x;
-                new_tail.y += skeleton.joints[bone_info.head].y;
-                new_tail.z += skeleton.joints[bone_info.head].z;
-
-                skeleton.joints[bone_info.tail].x = new_tail.x;
-                skeleton.joints[bone_info.tail].y = new_tail.y;
-                skeleton.joints[bone_info.tail].z = new_tail.z;
-
-                // Refresh bone metadata now the bone position has changed
-                update_bones(ctx, skeleton);
-                break;
-            }
-        }
-    }
-}
-
 static void
 sanitise_skeleton(struct gm_person *person, struct skeleton_history &history)
 {
@@ -2268,7 +2087,6 @@ sanitise_skeleton(struct gm_person *person, struct skeleton_history &history)
     sanitise_joint_velocities(person, skeleton, history.timestamp,
                               time_threshold);
     sanitise_bone_lengths(person, skeleton, time_threshold);
-    sanitise_bone_rotations(person, skeleton, time_threshold);
 }
 
 template<typename PointT>
@@ -10668,16 +10486,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                     "between previous tracked frames, use a previous length.";
         prop.type = GM_PROPERTY_BOOL;
         prop.bool_state.ptr = &ctx->bone_length_sanitisation;
-        stage.properties.push_back(prop);
-
-        ctx->bone_rotation_sanitisation = false;
-        prop = gm_ui_property();
-        prop.object = ctx;
-        prop.name = "bone_rotation_sanitisation";
-        prop.desc = "If bone rotation exceeds a set threshold of difference "
-                    "between previous tracked frames, use a previous length.";
-        prop.type = GM_PROPERTY_BOOL;
-        prop.bool_state.ptr = &ctx->bone_rotation_sanitisation;
         stage.properties.push_back(prop);
 
         ctx->use_bone_map_annotation = true;
