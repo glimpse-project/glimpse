@@ -9079,30 +9079,6 @@ gm_context_new(struct gm_logger *logger, char **err)
                   "Unknown joint semantic");
     }
 
-    // Read joint connections
-    ctx->joint_connections.resize(n_joints);
-    for (int i = 0; i < ctx->n_joints; ++i) {
-        JSON_Object *joint_object =
-            json_array_get_object(json_array(ctx->joint_map), i);
-
-        JSON_Array *connections = json_object_get_array(joint_object,
-                                                        "connections");
-        if (!connections) {
-            continue;
-        }
-
-        for (int j = 0; j < json_array_get_count(connections); ++j) {
-            const char *joint_name = json_array_get_string(connections, j);
-            for (int k = 0; k < n_joints; ++k) {
-                if (strcmp(ctx->joint_blender_names[k], joint_name) == 0) {
-                    ctx->joint_connections[i].push_back(k);
-                    ctx->joint_connections[k].push_back(i);
-                    break;
-                }
-            }
-        }
-    }
-
     struct gm_asset *bone_map_asset = gm_asset_open(logger,
                                                      "bone-map.json",
                                                      GM_ASSET_MODE_BUFFER,
@@ -9148,6 +9124,14 @@ gm_context_new(struct gm_logger *logger, char **err)
         free(open_err);
         gm_context_destroy(ctx);
         return NULL;
+    }
+
+    // Derive joint connections from bone topology
+    ctx->joint_connections.resize(n_joints);
+    for (int b = 0; b < ctx->n_bones; b++) {
+        struct gm_bone_info &bone_info = ctx->bone_info[b];
+        ctx->joint_connections[bone_info.head].push_back(bone_info.tail);
+        ctx->joint_connections[bone_info.tail].push_back(bone_info.head);
     }
 
     ctx->joint_params = NULL;
