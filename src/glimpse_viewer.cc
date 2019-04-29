@@ -751,15 +751,15 @@ update_skeleton_wireframe_bos_opengl(Data *data,
         const struct gm_bone *bone = gm_skeleton_get_bone(skeleton, b);
         if (bone) {
             int head_idx = gm_bone_get_head(data->ctx, bone);
-            const float *head = gm_bone_get_head_position(data->ctx, bone);
+            const struct gm_joint *head = gm_skeleton_get_joint(skeleton, head_idx);
             int tail_idx = gm_bone_get_tail(data->ctx, bone);
-            const float *tail = gm_bone_get_tail_position(data->ctx, bone);
+            const struct gm_joint *tail = gm_skeleton_get_joint(skeleton, tail_idx);
             int pos = skel_gl->n_bones;
             XYZRGBA head_rgba = {
-                head[0], head[1], head[2], LOOP_INDEX(joint_palette, head_idx)
+                head->x, head->y, head->z, LOOP_INDEX(joint_palette, head_idx)
             };
             XYZRGBA tail_rgba = {
-                tail[0], tail[1], tail[2], LOOP_INDEX(joint_palette, tail_idx)
+                tail->x, tail->y, tail->z, LOOP_INDEX(joint_palette, tail_idx)
             };
             colored_bones[pos*2] = head_rgba;
             colored_bones[pos*2+1] = tail_rgba;

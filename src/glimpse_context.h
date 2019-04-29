@@ -725,9 +725,6 @@ gm_skeleton_save(const struct gm_skeleton *skeleton,
 void
 gm_skeleton_free(struct gm_skeleton *skeleton);
 
-/* XXX: gm_bone_get_head/tail are legacy API. A bone can now be defined by more
- *      than two joints.
- */
 int
 gm_bone_get_head(struct gm_context *ctx,
                  const struct gm_bone *bone);
@@ -735,18 +732,6 @@ gm_bone_get_head(struct gm_context *ctx,
 int
 gm_bone_get_tail(struct gm_context *ctx,
                  const struct gm_bone *bone);
-
-int
-gm_bone_get_id(struct gm_context *ctx,
-               const struct gm_bone *bone);
-
-const float *
-gm_bone_get_head_position(struct gm_context *ctx,
-                          const struct gm_bone *bone);
-
-const float *
-gm_bone_get_tail_position(struct gm_context *ctx,
-                          const struct gm_bone *bone);
 
 float
 gm_bone_get_length(struct gm_context *ctx,

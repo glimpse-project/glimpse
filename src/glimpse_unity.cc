@@ -2475,7 +2475,6 @@ gm_unity_skeleton_free(intptr_t plugin_handle, intptr_t skeleton_handle)
     gm_skeleton_free(skeleton);
 }
 
-/* XXX: deprecated, use gm_unity_bone_get_head_position() */
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_head(intptr_t plugin_handle, intptr_t bone_handle)
 {
@@ -2493,7 +2492,6 @@ gm_unity_bone_get_head(intptr_t plugin_handle, intptr_t bone_handle)
     return gm_bone_get_head(data->ctx, bone);
 }
 
-/* XXX: deprecated, use gm_unity_bone_get_tail_position() */
 extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
 gm_unity_bone_get_tail(intptr_t plugin_handle, intptr_t bone_handle)
 {
@@ -2509,57 +2507,6 @@ gm_unity_bone_get_tail(intptr_t plugin_handle, intptr_t bone_handle)
     }
 
     return gm_bone_get_tail(data->ctx, bone);
-}
-
-extern "C" int UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_bone_get_id(intptr_t plugin_handle, intptr_t bone_handle)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data) {
-        return -1;
-    }
-
-    const struct gm_bone *bone = (struct gm_bone *)bone_handle;
-    if (!bone) {
-        gm_error(data->log, "NULL bone handle");
-        return -1;
-    }
-
-    return gm_bone_get_id(data->ctx, bone);
-}
-
-extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_bone_get_head_position(intptr_t plugin_handle, intptr_t bone_handle)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data) {
-        return NULL;
-    }
-
-    const struct gm_bone *bone = (struct gm_bone *)bone_handle;
-    if (!bone) {
-        gm_error(data->log, "NULL bone handle");
-        return NULL;
-    }
-
-    return gm_bone_get_head_position(data->ctx, bone);
-}
-
-extern "C" const float * UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
-gm_unity_bone_get_tail_position(intptr_t plugin_handle, intptr_t bone_handle)
-{
-    struct glimpse_data *data = (struct glimpse_data *)plugin_handle;
-    if (!data) {
-        return NULL;
-    }
-
-    const struct gm_bone *bone = (struct gm_bone *)bone_handle;
-    if (!bone) {
-        gm_error(data->log, "NULL bone handle");
-        return NULL;
-    }
-
-    return gm_bone_get_tail_position(data->ctx, bone);
 }
 
 extern "C" intptr_t UNITY_INTERFACE_EXPORT UNITY_INTERFACE_API
