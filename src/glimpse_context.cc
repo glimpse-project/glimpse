@@ -5179,18 +5179,15 @@ predict_skeleton_for_history(struct gm_context *ctx,
 
     // Work out the two nearest frames and the interpolation value
     int h1;
-    bool interpolate_angles = ctx->prediction_interpolate_angles;
     if (timestamp > closest_timestamp) {
         if (closest == 0) {
             h1 = 0;
-            interpolate_angles = false;
         } else {
             h1 = closest - 1;
         }
     } else {
         if (closest == history.size() - 1) {
             h1 = closest - 1;
-            interpolate_angles = false;
         } else {
             h1 = closest;
         }
@@ -5228,55 +5225,6 @@ predict_skeleton_for_history(struct gm_context *ctx,
               skeleton.joints[i]);
     }
 
-    update_bones(ctx, skeleton);
-
-    if (!interpolate_angles) {
-        return skeleton;
-    }
-
-    // Use angle interpolation to get better-looking results for bone
-    // positions.
-    for (auto &bone : skeleton.bones) {
-        struct gm_bone_info &bone_info = ctx->bone_info[bone.idx];
-
-        if (bone_info.parent < 0 ||
-            !history2.skeleton_corrected.bones[bone.idx].valid ||
-            !history1.skeleton_corrected.bones[bone.idx].valid) {
-            continue;
-        }
-
-        struct gm_bone &parent_bone = skeleton.bones[bone_info.parent];
-        struct gm_bone_info &parent_bone_info = ctx->bone_info[parent_bone.idx];
-
-        struct gm_bone &bone1 = history1.skeleton_corrected.bones[bone.idx];
-        struct gm_bone &bone2 = history2.skeleton_corrected.bones[bone.idx];
-
-        // Find the angle to rotate the parent bone. Note, we're relying
-        // on bones being stored in an order where we can rely on the
-        // bone's parent being seen before any descendants.
-        glm::mat3 rotate = glm::mat3_cast(
-            glm::slerp(bone2.angle, bone1.angle, t));
-
-        struct gm_joint &parent_head = skeleton.joints[parent_bone_info.head];
-        struct gm_joint &parent_tail = skeleton.joints[parent_bone_info.tail];
-
-        glm::vec3 parent_vec = glm::normalize(
-            glm::vec3(parent_tail.x - parent_head.x,
-                      parent_tail.y - parent_head.y,
-                      parent_tail.z - parent_head.z));
-        float length = bone2.length +
-            (bone1.length - bone2.length) * t;
-        glm::vec3 new_tail = ((parent_vec * rotate) * length);
-        new_tail.x += skeleton.joints[bone_info.head].x;
-        new_tail.y += skeleton.joints[bone_info.head].y;
-        new_tail.z += skeleton.joints[bone_info.head].z;
-
-        skeleton.joints[bone_info.tail].x = new_tail.x;
-        skeleton.joints[bone_info.tail].y = new_tail.y;
-        skeleton.joints[bone_info.tail].z = new_tail.z;
-    }
-
-    // Update bone lengths and angles after doing rotation interpolation
     update_bones(ctx, skeleton);
 
     return skeleton;
@@ -9272,16 +9220,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.desc = "Should we dampen predictions that deviate too far from the known data we interpolating from";
     prop.type = GM_PROPERTY_BOOL;
     prop.bool_state.ptr = &ctx->prediction_dampen_large_deltas;
-    ctx->properties.push_back(prop);
-
-    ctx->prediction_interpolate_angles = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "prediction_interpolate_angles";
-    prop.desc = "Interpolate angles of bones (not just positions of joints) "
-                "when interpolating between two skeletons.";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->prediction_interpolate_angles;
     ctx->properties.push_back(prop);
 
     ctx->max_prediction_delta = 100.f;
