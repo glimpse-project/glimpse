@@ -67,6 +67,13 @@ struct joints_inferrer
     int n_joints;
     std::vector<joint_labels_entry> map;
 
+    int state_ref = 0;
+};
+
+struct joints_inferrer_state
+{
+    struct joints_inferrer *inferrer;
+
     std::vector<unsigned> cluster_id_runs;
     std::vector<unsigned> id_map;
     std::vector<std::vector<unsigned>> cluster_indices;
@@ -74,15 +81,16 @@ struct joints_inferrer
     std::vector<std::vector<Joint>> results;
 };
 
-
-float*
-joints_inferrer_calc_pixel_weights(struct joints_inferrer *inferrer,
-                                   float* depth_image,
-                                   float* pr_table,
-                                   int width, int height,
+float *
+joints_inferrer_calc_pixel_weights(struct joints_inferrer_state *state,
+                                   float *depth_image,
+                                   float *pr_table,
+                                   int width,
+                                   int height,
                                    int n_labels,
-                                   float* weights)
+                                   float *weights)
 {
+    struct joints_inferrer *inferrer = state->inferrer;
     int n_joints = inferrer->n_joints;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
@@ -153,18 +161,19 @@ find_id_root(std::vector<unsigned> &runs, unsigned index)
 }
 
 InferredJoints*
-joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
+joints_inferrer_infer_fast(struct joints_inferrer_state *state,
                            struct gm_intrinsics *intrinsics,
                            int cluster_width,
                            int cluster_height,
                            int cluster_x0,
                            int cluster_y0,
-                           float* cluster_depth_image,
-                           float* cluster_label_probs,
-                           float* cluster_weights,
+                           float *cluster_depth_image,
+                           float *cluster_label_probs,
+                           float *cluster_weights,
                            int n_labels,
-                           JIParam* params)
+                           JIParam *params)
 {
+    struct joints_inferrer *inferrer = state->inferrer;
     int n_joints = inferrer->n_joints;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
@@ -247,11 +256,11 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
         }
     }
 
-    std::vector<unsigned> &cluster_id_runs = inferrer->cluster_id_runs;
-    std::vector<unsigned> &id_map = inferrer->id_map;
-    std::vector<std::vector<unsigned>> &cluster_indices = inferrer->cluster_indices;
+    std::vector<unsigned> &cluster_id_runs = state->cluster_id_runs;
+    std::vector<unsigned> &id_map = state->id_map;
+    std::vector<std::vector<unsigned>> &cluster_indices = state->cluster_indices;
 
-    std::vector<std::vector<Joint>> &results = inferrer->results;
+    std::vector<std::vector<Joint>> &results = state->results;
     results.resize(n_joints);
 
     // Now iteratively connect the scanline clusters
@@ -412,7 +421,7 @@ joints_inferrer_infer_fast(struct joints_inferrer *inferrer,
 }
 
 static int
-compare_joints(LList* a, LList* b, void* userdata)
+compare_joints(LList *a, LList *b, void *userdata)
 {
     Joint* ja = (Joint*)a->data;
     Joint* jb = (Joint*)b->data;
@@ -420,28 +429,29 @@ compare_joints(LList* a, LList* b, void* userdata)
 }
 
 InferredJoints*
-joints_inferrer_infer(struct joints_inferrer* inferrer,
+joints_inferrer_infer(struct joints_inferrer_state *state,
                       struct gm_intrinsics *intrinsics,
                       int cluster_width,
                       int cluster_height,
                       int cluster_x0,
                       int cluster_y0,
-                      float* cluster_depth_image,
-                      float* cluster_label_probs,
-                      float* cluster_weights,
+                      float *cluster_depth_image,
+                      float *cluster_label_probs,
+                      float *cluster_weights,
                       float bg_depth,
                       int n_labels,
                       JIParam* params)
 {
+    struct joints_inferrer *inferrer = state->inferrer;
     int n_joints = inferrer->n_joints;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
     // Use mean-shift to find the inferred joint positions, set them back into
     // the body using the given offset, and return the results
-    int* n_pixels = (int*)xcalloc(n_joints, sizeof(int));
+    int *n_pixels = (int *)xcalloc(n_joints, sizeof(int));
     size_t points_size = n_joints * cluster_width * cluster_height * 3 * sizeof(float);
-    float* points = (float*)xmalloc(points_size);
-    float* density = (float*)xmalloc(points_size);
+    float *points = (float *)xmalloc(points_size);
+    float *density = (float *)xmalloc(points_size);
 
     // Variables for reprojection of 2d point + depth
     float fx = intrinsics->fx;
@@ -497,7 +507,7 @@ joints_inferrer_infer(struct joints_inferrer* inferrer,
         }
     }
 
-    InferredJoints* result = (InferredJoints*)xcalloc(sizeof(InferredJoints) +
+    InferredJoints *result = (InferredJoints*)xcalloc(sizeof(InferredJoints) +
                                                       sizeof(LList*) * n_joints,
                                                       1);
     result->n_joints = n_joints;
@@ -607,8 +617,8 @@ joints_inferrer_infer(struct joints_inferrer* inferrer,
 }
 
 void
-joints_inferrer_free_joints(struct joints_inferrer* inferrer,
-                            InferredJoints* joints)
+joints_inferrer_state_free_joints(struct joints_inferrer_state *state,
+                                  InferredJoints *joints)
 {
     for (int i = 0; i < joints->n_joints; i++) {
         llist_free(joints->joints[i], llist_free_cb, NULL);
@@ -616,14 +626,15 @@ joints_inferrer_free_joints(struct joints_inferrer* inferrer,
     xfree(joints);
 }
 
-struct joints_inferrer*
-joints_inferrer_new(struct gm_logger* log,
-                    JSON_Value* joint_map,
-                    char** err)
+struct joints_inferrer *
+joints_inferrer_new(struct gm_logger *log,
+                    JSON_Value *joint_map,
+                    char **err)
 {
-    struct joints_inferrer* inferrer = new joints_inferrer();
+    struct joints_inferrer *inferrer = new joints_inferrer();
 
     inferrer->log = log;
+    inferrer->state_ref = 0;
 
     int n_joints = json_array_get_count(json_array(joint_map));
     inferrer->n_joints = n_joints;
@@ -632,8 +643,8 @@ joints_inferrer_new(struct gm_logger* log,
     map.resize(n_joints);
 
     for (int i = 0; i < n_joints; i++) {
-        JSON_Object* entry = json_array_get_object(json_array(joint_map), i);
-        JSON_Array* labels = json_object_get_array(entry, "labels");
+        JSON_Object *entry = json_array_get_object(json_array(joint_map), i);
+        JSON_Array *labels = json_object_get_array(entry, "labels");
         int n_labels = json_array_get_count(labels);
 
         if (n_labels > (int)ARRAY_LEN(map[0].labels)) {
@@ -652,7 +663,29 @@ joints_inferrer_new(struct gm_logger* log,
 }
 
 void
-joints_inferrer_destroy(struct joints_inferrer* inferrer)
+joints_inferrer_destroy(struct joints_inferrer *inferrer)
 {
+    gm_assert(inferrer->log, inferrer->state_ref == 0,
+              "Can't destroying joints inferrer before destroying all associated joints inferrer state");
+
     delete inferrer;
 }
+
+struct joints_inferrer_state *
+joints_inferrer_state_new(struct joints_inferrer *inferrer)
+{
+    struct joints_inferrer_state *state = new joints_inferrer_state();
+    state->inferrer = inferrer;
+
+    inferrer->state_ref++;
+
+    return state;
+}
+
+void
+joints_inferrer_state_destroy(struct joints_inferrer_state *state)
+{
+    state->inferrer->state_ref--;
+    delete state;
+}
+

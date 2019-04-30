@@ -72,6 +72,7 @@ typedef struct {
     int      n_joints;      // Number of joints
     JSON_Value* joint_map;  // Map between joints and labels
     struct joints_inferrer* joints_inferrer;
+    struct joints_inferrer_state* joints_inferrer_state;
 
     float*   joints;        // List of joint positions for each image
 
@@ -231,7 +232,7 @@ thread_body(void* userdata)
                      false, // don't use multi-threaded inference
                      false); // don't combine horizontal flipped results
 
-        joints_inferrer_calc_pixel_weights(ctx->joints_inferrer,
+        joints_inferrer_calc_pixel_weights(ctx->joints_inferrer_state,
                                            &ctx->depth_images[idx],
                                            pr_table.data(),
                                            ctx->width, ctx->height,
@@ -259,7 +260,7 @@ thread_body(void* userdata)
 
             if (ctx->fast) {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    joints_inferrer_infer_fast(ctx->joints_inferrer,
+                    joints_inferrer_infer_fast(ctx->joints_inferrer_state,
                                                &intrinsics,
                                                ctx->width,
                                                ctx->height,
@@ -272,7 +273,7 @@ thread_body(void* userdata)
                                                params);
             } else {
                 ctx->inferred_joints[(i * n_combos) + c] =
-                    joints_inferrer_infer(ctx->joints_inferrer,
+                    joints_inferrer_infer(ctx->joints_inferrer_state,
                                           &intrinsics,
                                           ctx->width,
                                           ctx->height,
@@ -357,7 +358,7 @@ thread_body(void* userdata)
             }
 
             // Free joint positions
-            joints_inferrer_free_joints(ctx->joints_inferrer, result);
+            joints_inferrer_state_free_joints(ctx->joints_inferrer_state, result);
         }
 
         // See if this combination is better than the current best for any
@@ -642,6 +643,7 @@ main(int argc, char** argv)
     ctx.joints_inferrer = joints_inferrer_new(ctx.log,
                                               ctx.joint_map,
                                               NULL); // abort on error
+    ctx.joints_inferrer_state = joints_inferrer_state_new(ctx.joints_inferrer);
 
     printf("Generating test parameters...\n");
     if (ctx.fast) {
@@ -864,6 +866,10 @@ main(int argc, char** argv)
     xfree(best_thresholds);
     xfree(ctx.offsets);
     xfree(best_offsets);
+
+    joints_inferrer_state_destroy(ctx.joints_inferrer_state);
+    joints_inferrer_destroy(ctx.joints_inferrer);
+
     json_value_free(ctx.joint_map);
     xfree(ctx.joints);
 

@@ -601,6 +601,8 @@ struct gm_tracking_impl
     // The ground-aligned segmentation-resolution depth cloud
     pcl::PointCloud<pcl::PointXYZL>::Ptr ground_cloud;
 
+    struct joints_inferrer_state *joints_inferrer_state;
+
     std::vector<struct gm_point_rgba> debug_cloud;
     // It's useful to associate some intrinsics with the debug cloud to help
     // with visualizing it...
@@ -2233,6 +2235,11 @@ tracking_state_free(struct gm_mem_pool *pool,
     struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)self;
     //struct gm_context *ctx = tracking->ctx;
 
+    if (tracking->joints_inferrer_state) {
+        joints_inferrer_state_destroy(tracking->joints_inferrer_state);
+        tracking->joints_inferrer_state = NULL;
+    }
+
     free(tracking->depth);
 
     free(tracking->face_detect_buf);
@@ -2275,7 +2282,7 @@ tracking_state_recycle(struct gm_tracking *self)
     tracking->frame = NULL;
 
     for (auto &person : tracking->people) {
-        joints_inferrer_free_joints(ctx->joints_inferrer, person.joints);
+        joints_inferrer_state_free_joints(tracking->joints_inferrer_state, person.joints);
     }
     tracking->people.resize(0);
     tracking->tracked_people.resize(0);
@@ -2325,6 +2332,8 @@ tracking_state_alloc(struct gm_mem_pool *pool, void *user_data)
 
     tracking->pool = pool;
     tracking->ctx = ctx;
+
+    tracking->joints_inferrer_state = joints_inferrer_state_new(ctx->joints_inferrer);
 
     gm_assert(ctx->log, ctx->max_depth_pixels,
               "Undefined maximum number of depth pixels");
@@ -2647,6 +2656,69 @@ tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
     return true;
 }
 
+static bool
+tracking_create_rgb_joint_clusters(struct gm_tracking *_tracking,
+                                   int *width_out, int *height_out,
+                                   uint8_t **output)
+{
+    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
+    struct gm_context *ctx = tracking->ctx;
+
+    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
+    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
+
+    if (!tracking->cluster_indices.size()) {
+        return false;
+    }
+
+    int width = pcl_cloud->width;
+    int height = pcl_cloud->height;
+    *width_out = width;
+    *height_out = height;
+
+    if (!width || !height)
+        return false;
+
+    size_t out_size = width * height * 3;
+    if (!(*output))
+        *output = (uint8_t *)malloc(out_size);
+
+    memset(*output, 0, out_size);
+
+    int nth_large = -1;
+    for (unsigned label = 0; label < cluster_indices.size(); label++) {
+        auto &cluster = cluster_indices[label];
+
+        if (cluster.indices.size() < ctx->codebook_large_cluster_threshold)
+            continue;
+
+        nth_large++;
+
+        if (ctx->debug_codebook_cluster_idx != -1 &&
+            ctx->debug_codebook_cluster_idx != nth_large)
+        {
+            continue;
+        }
+
+        for (int i : cluster.indices) {
+            int x = i % width;
+            int y = i / width;
+            int off = width * y + x;
+
+            if (x >= width || y >= height)
+                continue;
+
+            png_color *color =
+                &default_palette[label % ARRAY_LEN(default_palette)];
+            float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
+            (*output)[off * 3] = (uint8_t)(color->red * shade);
+            (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
+            (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
+        }
+    }
+
+    return true;
+}
 static void
 depth_classification_to_rgb(enum codebook_class label, uint8_t *rgb_out)
 {
@@ -6339,7 +6411,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
 
     if (ctx->fast_clustering) {
         state->joints_candidate =
-                joints_inferrer_infer_fast(ctx->joints_inferrer,
+                joints_inferrer_infer_fast(tracking->joints_inferrer_state,
                                            &downsampled_intrinsics,
                                            cluster_width_2d, cluster_height_2d,
                                            cluster.min_x_2d, cluster.min_y_2d,
@@ -6350,7 +6422,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                                            ctx->joint_params->joint_params);
     } else {
         state->joints_candidate =
-                joints_inferrer_infer(ctx->joints_inferrer,
+                joints_inferrer_infer(tracking->joints_inferrer_state,
                                       &downsampled_intrinsics,
                                       cluster_width_2d, cluster_height_2d,
                                       cluster.min_x_2d, cluster.min_y_2d,
@@ -10160,7 +10232,12 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "joint_inference";
         stage.desc = "Infer position of skeleton joints";
         stage.toggle_property = -1;
-
+        stage.images.push_back((struct image_generator)
+                               {
+                                   "joint_clusters",
+                                   "All candidate joint clusters found, before inferring positions",
+                                   tracking_create_rgb_joint_clusters,
+                               });
         ctx->fast_clustering = true;
         prop = gm_ui_property();
         prop.object = ctx;
