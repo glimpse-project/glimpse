@@ -136,6 +136,7 @@
 #include "wrapper_image.h"
 #include "infer_labels.h"
 #include "joints_inferrer.h"
+#include "joints_inferrer_impl.h"
 #include "rdt_tree.h"
 #include "jip.h"
 #include "image_utils.h"
@@ -6370,7 +6371,7 @@ stage_joint_weights_cb(struct gm_tracking_impl *tracking,
                                           cluster_height_2d *
                                           ctx->n_joints);
 
-    joints_inferrer_calc_pixel_weights(ctx->joints_inferrer,
+    joints_inferrer_calc_pixel_weights(tracking->joints_inferrer_state,
                                        ctx->inference_cluster_depth_image.data(),
                                        ctx->label_probs_back.data(),
                                        cluster_width_2d, cluster_height_2d,

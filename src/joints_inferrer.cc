@@ -38,6 +38,7 @@
 #include "glimpse_log.h"
 
 #include "joints_inferrer.h"
+#include "joints_inferrer_impl.h"
 #include "xalloc.h"
 #include "jip.h"
 
@@ -68,17 +69,6 @@ struct joints_inferrer
     std::vector<joint_labels_entry> map;
 
     int state_ref = 0;
-};
-
-struct joints_inferrer_state
-{
-    struct joints_inferrer *inferrer;
-
-    std::vector<unsigned> cluster_id_runs;
-    std::vector<unsigned> id_map;
-    std::vector<std::vector<unsigned>> cluster_indices;
-
-    std::vector<std::vector<Joint>> results;
 };
 
 float *

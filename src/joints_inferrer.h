@@ -67,7 +67,7 @@ joints_inferrer_state_new(struct joints_inferrer *inferrer);
 void
 joints_inferrer_state_destroy(struct joints_inferrer_state *state);
 
-float*
+float *
 joints_inferrer_calc_pixel_weights(struct joints_inferrer_state *state,
                                    float *depth_image,
                                    float *pr_table,
