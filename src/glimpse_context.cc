@@ -855,10 +855,8 @@ struct gm_context
     float bone_length_variance;
     float bone_rotation_variance;
 
-    bool prediction_dampen_large_deltas;
     bool prediction_interpolate_angles;
     float max_prediction_delta;
-    float prediction_decay;
 
     float sanitisation_window;
     bool joint_velocity_sanitisation;
@@ -1175,66 +1173,6 @@ distance_between(const float *point1, const float *point2)
     return sqrtf(powf(point1[0] - point2[0], 2.f) +
                  powf(point1[1] - point2[1], 2.f) +
                  powf(point1[2] - point2[2], 2.f));
-}
-
-// The overall intention here is that this transform should be used to limit
-// how far into the past/future predictions should be made relative a base
-// timestamp, considering that predictions become less and less accurate the
-// further forwards/backwards we project.
-//
-// This function will leave timestamps unchanged so long as the delta from
-// the base timestamp is below max_delta_ms.
-//
-// After the max_delta_ms threshold we have a second delta threshold
-// at max_delta_ms + max_decay_ms, where max_decay_ms is:
-//
-//   max_decay_ms = max_delta_ms * delta_decay
-//
-// For timestamps that have a delta from the base timestamp of delta_ms that's
-// between max_delta_ms and max_decay_ms this function maps the timestamp to:
-//
-//   base_ms + max_delta_ms + sqrt((delta_ms/max_decay_ms) * max_decay_ms)
-//
-// Note: the delta_ms value is clamped to never be > max_decay_ms
-// Note: the largest effective delta is `max_delta_ms + sqrt(max_decay_ms)`
-// Note: the implementation is actually done using nanosecond units
-//
-static uint64_t
-calculate_decayed_timestamp(uint64_t base,
-                            uint64_t timestamp,
-                            float max_delta_ms, // XXX: milliseconds
-                            float delta_decay)
-{
-    uint64_t max_delta_ns = (uint64_t)(max_delta_ms * 1000000.0);
-    uint64_t delta_ns = (timestamp < base) ? base - timestamp : timestamp - base;
-
-    if (delta_ns <= max_delta_ns)
-        return timestamp;
-
-    // After the max_delta_ns threshold we have a second delta threshold
-    // at max_delta_ns + max_decay_ns...
-    //
-    uint64_t max_decay_ns = (uint64_t)((double)max_delta_ns * delta_decay);
-
-    // How much have we overshot max_delta_ns?
-    //
-    // Note: Deltas that reach the second max_decay_ns threshold are clamped...
-    //
-    uint64_t decay_time_ns = std::min(delta_ns - max_delta_ns, max_decay_ns);
-
-    // Map deltas > max_delta_ns to a value in the range from max_delta_ns to
-    // (max_delta_ns + sqrt(max_decay_ns)) based on the function:
-    //
-    //   sqrt((decay/max_decay) * max_decay)
-    //
-    // NB: (decay/max_decay) is clamped to the range [0:1]
-    //
-    uint64_t decay_ns = (uint64_t)(sqrt(decay_time_ns / (double)max_decay_ns) *
-                                   max_decay_ns);
-
-    return (timestamp < base) ?
-        (base - max_delta_ns) - decay_ns :
-        base + max_delta_ns + decay_ns;
 }
 
 static char *
@@ -1818,10 +1756,10 @@ static void
 interpolate_joints(struct gm_joint &a, struct gm_joint &b, float t,
                    struct gm_joint &out)
 {
-    out.x = a.x + (b.x - a.x) * t;
-    out.y = a.y + (b.y - a.y) * t;
-    out.z = a.z + (b.z - a.z) * t;
-    out.reliability = a.reliability + (b.reliability - a.reliability) * t;
+    out.x = a.x * (1.0f - t) + b.x * t;
+    out.y = a.y * (1.0f - t) + b.y * t;
+    out.z = a.z * (1.0f - t) + b.z * t;
+    out.reliability = a.reliability * (1.0f - t) + b.reliability * t;
 }
 
 static bool
@@ -5144,56 +5082,53 @@ get_closest_skeleton_history(std::deque<skeleton_history> &history, uint64_t tim
     return closest_frame;
 }
 
-struct gm_skeleton
+static bool
 predict_skeleton_for_history(struct gm_context *ctx,
                              std::deque<struct skeleton_history> &history,
                              uint64_t timestamp,
+                             struct gm_skeleton &skeleton,
                              int *out_h1 = NULL,
                              int *out_h2 = NULL)
 {
-    // Pre-fill the skeleton with the closest history
+    if (!history.size())
+        return false;
+
     int closest =
         get_closest_skeleton_history(history, timestamp);
+    uint64_t closest_timestamp = history[closest].timestamp;
     struct gm_skeleton &closest_skeleton =
         history[closest].skeleton_corrected;
 
-    struct gm_skeleton skeleton = closest_skeleton;
+    // If our timestamp is too far from our closest tracked skeleton
+    // then we won't try and predict a skeleton
+    uint64_t delta_ns = (timestamp >= closest_timestamp) ?
+        timestamp - closest_timestamp : closest_timestamp - timestamp;
+    uint64_t max_delta_ns = (uint64_t)ctx->max_prediction_delta * 1000000;
+    if (delta_ns > max_delta_ns)
+        return false;
 
-    if (ctx->prediction_dampen_large_deltas) {
-        timestamp = calculate_decayed_timestamp(
-            history[closest].timestamp,
-            timestamp, ctx->max_prediction_delta, ctx->prediction_decay);
-    }
-
-    uint64_t closest_timestamp = history[closest].timestamp;
-    if (timestamp == closest_timestamp || history.size() <= 1) {
-        if (out_h1) {
-            *out_h1 = closest;
-        }
-        if (out_h2) {
-            *out_h2 = -1;
-        }
-
-        return skeleton;
-    }
+    gm_assert(ctx->log,
+              history[0].timestamp > history[1].timestamp,
+              "Expected history sorted from newest to oldest");
 
     // Work out the two nearest frames and the interpolation value
     int h1;
-    if (timestamp > closest_timestamp) {
-        if (closest == 0) {
-            h1 = 0;
-        } else {
-            h1 = closest - 1;
-        }
+    int h2; // (newer than h1)
+    if (timestamp == closest_timestamp) {
+        h1 = h2 = closest;
+    } else if (timestamp > closest_timestamp) {
+        h1 = closest;
+        if (closest == 0)
+            h2 = h1; // clamp to the last entry (don't try and predict future)
+        else
+            h2 = closest - 1;
     } else {
-        if (closest == history.size() - 1) {
-            h1 = closest - 1;
-        } else {
-            h1 = closest;
-        }
+        h2 = closest;
+        if (closest == history.size() - 1)
+            h1 = h2; // clamp to first entry
+        else
+            h1 = closest + 1;
     }
-    int h2 = h1 + 1;
-
     if (out_h1) {
         *out_h1 = h1;
     }
@@ -5201,10 +5136,14 @@ predict_skeleton_for_history(struct gm_context *ctx,
         *out_h2 = h2;
     }
 
+    skeleton = closest_skeleton;
+    if (h1 == h2)
+        return true;
+
     struct skeleton_history &history1 = history[h1];
     struct skeleton_history &history2 = history[h2];
-    float t = (timestamp - history2.timestamp) /
-              (float)(history1.timestamp - history2.timestamp);
+    float t = (timestamp - history1.timestamp) /
+              (float)(history2.timestamp - history1.timestamp);
 
     // Intersect the joint validity and use linear interpolation to
     // fill joint positions
@@ -5212,22 +5151,22 @@ predict_skeleton_for_history(struct gm_context *ctx,
     for (int i = 0; i < n_joints; i++) {
         struct gm_joint &joint = skeleton.joints[i];
 
-        if (!history2.skeleton_corrected.joints[i].valid ||
-            !history1.skeleton_corrected.joints[i].valid) {
+        if (!history1.skeleton_corrected.joints[i].valid ||
+            !history2.skeleton_corrected.joints[i].valid) {
             joint.valid = false;
             continue;
         }
 
         interpolate_joints(
-              history2.skeleton_corrected.joints[i],
               history1.skeleton_corrected.joints[i],
+              history2.skeleton_corrected.joints[i],
               t,
               skeleton.joints[i]);
     }
 
     update_bones(ctx, skeleton);
 
-    return skeleton;
+    return true;
 }
 
 static void
@@ -5257,10 +5196,13 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             continue;
         }
 
-        struct gm_skeleton skeleton;
+        struct gm_skeleton predicted_skeleton;
+        bool have_predicted_skeleton = false;
         if (use_prediction) {
-            skeleton = predict_skeleton_for_history(ctx, person.history,
-                                                    tracking->frame->timestamp);
+            have_predicted_skeleton =
+                predict_skeleton_for_history(ctx, person.history,
+                                             tracking->frame->timestamp,
+                                             predicted_skeleton);
         }
 
         for (int j = 0; j < ctx->n_joints; ++j) {
@@ -5297,11 +5239,11 @@ get_prev_cluster_positions(struct gm_tracking_impl *tracking,
             // Project the joint position into the space of the new frame.
             // Use a predicted position instead of the old position if that
             // feature is enabled and we were able to get a prediction.
-            if (use_prediction) {
-                if (skeleton.joints[j].reliability >=
+            if (have_predicted_skeleton) {
+                if (predicted_skeleton.joints[j].reliability >=
                     ctx->reliability_threshold)
                 {
-                    joint = &skeleton.joints[j];
+                    joint = &predicted_skeleton.joints[j];
                 }
             }
 
@@ -6975,7 +6917,6 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
     }
 
     struct gm_prediction *prediction = NULL;
-    struct gm_prediction_impl *prediction_impl = NULL;
     int h1 = -1;
     int h2 = -1;
 
@@ -6987,12 +6928,17 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
             gm_context_get_prediction_for_person(ctx,
                                                  (int64_t)tracking->frame->timestamp + offset_ns,
                                                  ctx->tracked_people.front().id);
-        prediction_impl = (struct gm_prediction_impl *)prediction;
+        if (prediction) {
+            struct gm_prediction_impl *prediction_impl =
+                (struct gm_prediction_impl *)prediction;
 
-        skeleton_history = &prediction_impl->history;
-        h1 = prediction_impl->h1;
-        h2 = prediction_impl->h2;
-    } else {
+            skeleton_history = &prediction_impl->history;
+            h1 = prediction_impl->h1;
+            h2 = prediction_impl->h2;
+        }
+    }
+
+    if (!skeleton_history) {
         skeleton_history = &ctx->tracked_people.front().history;
     }
 
@@ -7024,7 +6970,7 @@ stage_update_history_debug_cb(struct gm_tracking_impl *tracking,
         }
     }
 
-    if (ctx->debug_predictions) {
+    if (prediction) {
         struct gm_skeleton *skel = gm_prediction_get_skeleton(prediction);
 
         for (int b = 0; b < n_bones; b++) {
@@ -9198,16 +9144,7 @@ gm_context_new(struct gm_logger *logger, char **err)
 
     struct gm_ui_property prop;
 
-    ctx->prediction_dampen_large_deltas = true;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "prediction_dampen_large_deltas";
-    prop.desc = "Should we dampen predictions that deviate too far from the known data we interpolating from";
-    prop.type = GM_PROPERTY_BOOL;
-    prop.bool_state.ptr = &ctx->prediction_dampen_large_deltas;
-    ctx->properties.push_back(prop);
-
-    ctx->max_prediction_delta = 100.f;
+    ctx->max_prediction_delta = 150.f;
     prop = gm_ui_property();
     prop.object = ctx;
     prop.name = "max_prediction_delta";
@@ -9216,19 +9153,6 @@ gm_context_new(struct gm_logger *logger, char **err)
     prop.float_state.ptr = &ctx->max_prediction_delta;
     prop.float_state.min = 0.f;
     prop.float_state.max = 1000.f;
-    ctx->properties.push_back(prop);
-
-    ctx->prediction_decay = 1.f;
-    prop = gm_ui_property();
-    prop.object = ctx;
-    prop.name = "prediction_decay";
-    prop.desc = "Prediction time decay. A multiplier for max_prediction_delta "
-                "where time after that point travels increasingly slowly to "
-                "dampen predictions.";
-    prop.type = GM_PROPERTY_FLOAT;
-    prop.float_state.ptr = &ctx->prediction_decay;
-    prop.float_state.min = 0.f;
-    prop.float_state.max = 4.f;
     ctx->properties.push_back(prop);
 
     ctx->debug_label = -1;
@@ -11224,11 +11148,16 @@ gm_context_get_prediction_for_person(struct gm_context *ctx,
 
             modify_lock.unlock();
 
-            prediction->skeleton =
+            bool status =
                 predict_skeleton_for_history(ctx, prediction->history,
-                                             timestamp, &prediction->h1,
+                                             timestamp,
+                                             prediction->skeleton,
+                                             &prediction->h1,
                                              &prediction->h2);
-
+            if (!status) {
+                gm_prediction_unref(&prediction->base);
+                return NULL;
+            }
             return &prediction->base;
         }
     }

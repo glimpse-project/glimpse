@@ -232,7 +232,7 @@ struct _Data
      * some lag, but improves the quality of the positions as it doesn't need
      * to extrapolate so far into the future.
      */
-    int prediction_delay;
+    int prediction_delay_ms;
 
     float view_zoom;
     glm::vec3 focal_point;
@@ -698,13 +698,15 @@ update_skeleton_wireframe_bos_opengl(Data *data,
     skel_gl->n_joints = 0;
 
     struct gm_prediction *prediction = NULL;
+    uint64_t prediction_delay_ns = (uint64_t)data->prediction_delay_ms * 1000000ULL;
 
     // May come from a prediction or from the tracking object...
     const struct gm_skeleton *skeleton = NULL;
 
     switch ((enum skel_view_mode)data->skel_view_mode) {
     case SKEL_VIEW_PREDICTED:
-        prediction = gm_context_get_prediction_for_person(data->ctx, timestamp,
+        prediction = gm_context_get_prediction_for_person(data->ctx,
+                                                          timestamp - prediction_delay_ns,
                                                           skel_gl->person_id);
         if (!prediction) {
             return false;
@@ -1185,8 +1187,7 @@ render_ar_video_opengl(Data *data)
 
         update_and_render_skeletons_opengl(data,
                                            data->latest_tracking,
-                                           (data->last_video_frame->timestamp -
-                                            data->prediction_delay),
+                                           data->last_video_frame->timestamp,
                                            mvp, pt_size);
     }
 }
@@ -2130,8 +2131,8 @@ draw_controls(Data *data, int x, int y, int width, int height, bool disabled)
 
 
     ImGui::Checkbox("Overwrite recording", &data->overwrite_recording);
-    ImGui::SliderInt("Prediction delay", &data->prediction_delay,
-                     0, 1000000000);
+    ImGui::SliderInt("Prediction delay (ms)", &data->prediction_delay_ms,
+                     0, 5000);
 
     ImGui::Spacing();
     ImGui::Separator();
@@ -3094,7 +3095,7 @@ viewer_init(Data *data)
     gm_context_set_event_callback(data->ctx, on_context_event_cb, data);
 
     /* TODO: load config for viewer properties */
-    data->prediction_delay = 250000000;
+    data->prediction_delay_ms = 250;
 
     struct gm_asset *config_asset =
         gm_asset_open(data->log,
