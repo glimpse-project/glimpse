@@ -56,6 +56,7 @@ extern "C" {
 struct joints_inferrer *
 joints_inferrer_new(struct gm_logger *logger,
                     JSON_Value *joint_map,
+                    int n_labels,
                     char **err);
 
 void
@@ -73,7 +74,6 @@ joints_inferrer_calc_pixel_weights(struct joints_inferrer_state *state,
                                    float *pr_table,
                                    int width,
                                    int height,
-                                   int n_labels,
                                    float *out_weights);
 
 InferredJoints *
@@ -86,8 +86,8 @@ joints_inferrer_infer_fast(struct joints_inferrer_state *state,
                            float *cluster_depth_image,
                            float *cluster_label_probs,
                            float *cluster_weights,
-                           int n_labels,
-                           JIParam *params);
+                           JIParam *params,
+                           bool debug);
 
 InferredJoints *
 joints_inferrer_infer(struct joints_inferrer_state *state,
@@ -100,8 +100,12 @@ joints_inferrer_infer(struct joints_inferrer_state *state,
                       float *cluster_label_probs,
                       float *cluster_weights,
                       float bg_depth,
-                      int n_labels,
                       JIParam *params);
+
+const Joint *
+joints_inferrer_state_get_candidates(struct joints_inferrer_state *state,
+                                     int joint,
+                                     int *n_candidates_out);
 
 void
 joints_inferrer_state_free_joints(struct joints_inferrer_state *state,

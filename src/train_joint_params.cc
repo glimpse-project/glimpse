@@ -235,8 +235,8 @@ thread_body(void* userdata)
         joints_inferrer_calc_pixel_weights(ctx->joints_inferrer_state,
                                            &ctx->depth_images[idx],
                                            pr_table.data(),
-                                           ctx->width, ctx->height,
-                                           n_labels,
+                                           ctx->width,
+                                           ctx->height,
                                            weights.data());
 
         // For each combination this thread is processing, infer the joint
@@ -269,8 +269,8 @@ thread_body(void* userdata)
                                                depth_image,
                                                pr_table.data(),
                                                weights.data(),
-                                               n_labels,
-                                               params);
+                                               params,
+                                               false);
             } else {
                 ctx->inferred_joints[(i * n_combos) + c] =
                     joints_inferrer_infer(ctx->joints_inferrer_state,
@@ -283,7 +283,6 @@ thread_body(void* userdata)
                                           pr_table.data(),
                                           weights.data(),
                                           bg_depth,
-                                          n_labels,
                                           params);
             }
         }
@@ -640,8 +639,10 @@ main(int argc, char** argv)
     gm_assert(ctx.log, ctx.n_joints < ctx.forest[0]->header.n_labels,
               "More joints defined than labels");
 
+    int n_labels = forest[0]->header.n_labels;
     ctx.joints_inferrer = joints_inferrer_new(ctx.log,
                                               ctx.joint_map,
+                                              n_labels,
                                               NULL); // abort on error
     ctx.joints_inferrer_state = joints_inferrer_state_new(ctx.joints_inferrer);
 

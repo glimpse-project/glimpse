@@ -66,6 +66,7 @@ struct joints_inferrer
     struct gm_logger* log;
 
     int n_joints;
+    int n_labels;
     std::vector<joint_labels_entry> map;
 
     int state_ref = 0;
@@ -77,11 +78,11 @@ joints_inferrer_calc_pixel_weights(struct joints_inferrer_state *state,
                                    float *pr_table,
                                    int width,
                                    int height,
-                                   int n_labels,
                                    float *weights)
 {
     struct joints_inferrer *inferrer = state->inferrer;
     int n_joints = inferrer->n_joints;
+    int n_labels = inferrer->n_labels;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
     gm_assert(inferrer->log, weights != NULL, "NULL weights destination buffer");
@@ -160,11 +161,12 @@ joints_inferrer_infer_fast(struct joints_inferrer_state *state,
                            float *cluster_depth_image,
                            float *cluster_label_probs,
                            float *cluster_weights,
-                           int n_labels,
-                           JIParam *params)
+                           JIParam *params,
+                           bool debug)
 {
     struct joints_inferrer *inferrer = state->inferrer;
     int n_joints = inferrer->n_joints;
+    int n_labels = inferrer->n_labels;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
     // Variables for reprojection of 2d point + depth
@@ -253,6 +255,13 @@ joints_inferrer_infer_fast(struct joints_inferrer_state *state,
     std::vector<std::vector<Joint>> &results = state->results;
     results.resize(n_joints);
 
+    if (debug) {
+        state->debug_joint_clusters.resize(n_joints);
+        state->debug_joint_clusters_valid = true;
+    } else {
+        state->debug_joint_clusters_valid = false;
+    }
+
     // Now iteratively connect the scanline clusters
     for (int j = 0; j < n_joints; j++)
     {
@@ -318,6 +327,10 @@ joints_inferrer_infer_fast(struct joints_inferrer_state *state,
                     cluster_indices[span.id].push_back(idx);
                 }
             }
+        }
+
+        if (debug) {
+            state->debug_joint_clusters[j] = cluster_indices;
         }
 
         for (auto &cluster : cluster_indices) {
@@ -410,6 +423,15 @@ joints_inferrer_infer_fast(struct joints_inferrer_state *state,
     return ret;
 }
 
+const Joint *
+joints_inferrer_state_get_candidates(struct joints_inferrer_state *state,
+                                     int joint,
+                                     int *n_candidates_out)
+{
+    *n_candidates_out = state->results[joint].size();
+    return state->results[joint].data();
+}
+
 static int
 compare_joints(LList *a, LList *b, void *userdata)
 {
@@ -429,11 +451,11 @@ joints_inferrer_infer(struct joints_inferrer_state *state,
                       float *cluster_label_probs,
                       float *cluster_weights,
                       float bg_depth,
-                      int n_labels,
-                      JIParam* params)
+                      JIParam *params)
 {
     struct joints_inferrer *inferrer = state->inferrer;
     int n_joints = inferrer->n_joints;
+    int n_labels = inferrer->n_labels;
     std::vector<joint_labels_entry> &map = inferrer->map;
 
     // Use mean-shift to find the inferred joint positions, set them back into
@@ -603,6 +625,8 @@ joints_inferrer_infer(struct joints_inferrer_state *state,
     xfree(points);
     xfree(n_pixels);
 
+    state->debug_joint_clusters_valid = false;
+
     return result;
 }
 
@@ -619,11 +643,13 @@ joints_inferrer_state_free_joints(struct joints_inferrer_state *state,
 struct joints_inferrer *
 joints_inferrer_new(struct gm_logger *log,
                     JSON_Value *joint_map,
+                    int n_labels,
                     char **err)
 {
     struct joints_inferrer *inferrer = new joints_inferrer();
 
     inferrer->log = log;
+    inferrer->n_labels = n_labels;
     inferrer->state_ref = 0;
 
     int n_joints = json_array_get_count(json_array(joint_map));

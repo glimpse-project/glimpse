@@ -156,6 +156,7 @@
 #endif
 
 #define ARRAY_LEN(X) (sizeof(X)/sizeof(X[0]))
+#define LOOP_INDEX(x,y) ((x)[(y) % ARRAY_LEN(x)])
 
 #define xsnprintf(dest, n, fmt, ...) do { \
         if (snprintf(dest, n, fmt,  __VA_ARGS__) >= (int)(n)) \
@@ -238,6 +239,7 @@ enum debug_cloud_mode {
     DEBUG_CLOUD_MODE_CODEBOOK_LABELS,
     DEBUG_CLOUD_MODE_LABELS,
     DEBUG_CLOUD_MODE_LABELS_ORDERED,
+    DEBUG_CLOUD_MODE_JOINT_CLUSTERS,
     DEBUG_CLOUD_MODE_EDGES,
     DEBUG_CLOUD_MODE_VIDEO_LABEL_ALPHA,
 
@@ -834,7 +836,6 @@ struct gm_context
     int debug_codebook_layer;
 
     std::vector<float> inference_cluster_depth_image;
-    std::vector<float> inference_cluster_weights;
     bool use_threads;
     bool flip_labels;
 
@@ -909,10 +910,15 @@ struct gm_context
 
     void *callback_data;
 
-    /* A re-usable allocation for label probabilities that might
-     * get swapped into the latest tracking object
+    /* A re-usable allocation for label probabilities that will
+     * get swapped into an InferredPerson
      */
     std::vector<float> label_probs_back;
+
+    /* A re-usable allocation for pixel weights (used during joint inference)
+     * that will get swapped into an InferredPerson
+     */
+    std::vector<float> point_weights_back;
 
     /* When paused we're careful to not preserve any results for tracking
      * frames so the future frames will be processed with the same initial
@@ -1011,8 +1017,10 @@ struct PointCmp {
 
 struct InferredPerson {
     std::vector<float> label_probs;
-    int label_probs_width;
-    int label_probs_height;
+    std::vector<float> point_weights;
+    std::vector<std::vector<std::vector<unsigned>>> debug_joint_clusters;
+    int bounds_width;
+    int bounds_height;
     InferredJoints *joints;
     float confidence;
 };
@@ -1137,6 +1145,22 @@ static png_color default_palette[] = {
     { 0x21, 0x21, 0x21 },
 };
 
+static uint32_t joint_palette[] = {
+    0xFFFFFFFF, // head.tail
+    0xCCCCCCFF, // neck_01.head
+    0xFF8888FF, // upperarm_l.head
+    0x8888FFFF, // upperarm_r.head
+    0xFFFF88FF, // lowerarm_l.head
+    0xFFFF00FF, // lowerarm_l.tail
+    0x88FFFFFF, // lowerarm_r.head
+    0x00FFFFFF, // lowerarm_r.tail
+    0x33FF33FF, // thigh_l.head
+    0x33AA33FF, // thigh_l.tail
+    0xFFFF33FF, // thigh_r.head
+    0xAAAA33FF, // thigh_r.tail
+    0x3333FFFF, // foot_l.head
+    0xFF3333FF, // foot_r.head
+};
 
 /* simple hash to cheaply randomize how we will gaps in our data without
  * too much bias
@@ -2421,8 +2445,8 @@ tracking_create_rgb_label_map(struct gm_tracking *_tracking,
     if (tracking->people.empty())
         return false;
 
-    int width = tracking->people.front().label_probs_width;
-    int height = tracking->people.front().label_probs_height;
+    int width = tracking->people.front().bounds_width;
+    int height = tracking->people.front().bounds_height;
 
     if (tracking->people.front().label_probs.size() != width * height * n_labels)
         return false;
@@ -2657,69 +2681,6 @@ tracking_create_rgb_candidate_clusters(struct gm_tracking *_tracking,
     return true;
 }
 
-static bool
-tracking_create_rgb_joint_clusters(struct gm_tracking *_tracking,
-                                   int *width_out, int *height_out,
-                                   uint8_t **output)
-{
-    struct gm_tracking_impl *tracking = (struct gm_tracking_impl *)_tracking;
-    struct gm_context *ctx = tracking->ctx;
-
-    pcl::PointCloud<pcl::PointXYZL>::Ptr pcl_cloud = tracking->downsampled_cloud;
-    std::vector<pcl::PointIndices> &cluster_indices = tracking->cluster_indices;
-
-    if (!tracking->cluster_indices.size()) {
-        return false;
-    }
-
-    int width = pcl_cloud->width;
-    int height = pcl_cloud->height;
-    *width_out = width;
-    *height_out = height;
-
-    if (!width || !height)
-        return false;
-
-    size_t out_size = width * height * 3;
-    if (!(*output))
-        *output = (uint8_t *)malloc(out_size);
-
-    memset(*output, 0, out_size);
-
-    int nth_large = -1;
-    for (unsigned label = 0; label < cluster_indices.size(); label++) {
-        auto &cluster = cluster_indices[label];
-
-        if (cluster.indices.size() < ctx->codebook_large_cluster_threshold)
-            continue;
-
-        nth_large++;
-
-        if (ctx->debug_codebook_cluster_idx != -1 &&
-            ctx->debug_codebook_cluster_idx != nth_large)
-        {
-            continue;
-        }
-
-        for (int i : cluster.indices) {
-            int x = i % width;
-            int y = i / width;
-            int off = width * y + x;
-
-            if (x >= width || y >= height)
-                continue;
-
-            png_color *color =
-                &default_palette[label % ARRAY_LEN(default_palette)];
-            float shade = 1.f - (float)(label / ARRAY_LEN(default_palette)) / 10.f;
-            (*output)[off * 3] = (uint8_t)(color->red * shade);
-            (*output)[off * 3 + 1] = (uint8_t)(color->green * shade);
-            (*output)[off * 3 + 2] = (uint8_t)(color->blue * shade);
-        }
-    }
-
-    return true;
-}
 static void
 depth_classification_to_rgb(enum codebook_class label, uint8_t *rgb_out)
 {
@@ -4027,8 +3988,8 @@ colour_debug_cloud(struct gm_context *ctx,
                 struct candidate_cluster &cluster =
                     state->person_clusters[person_cluster];
 
-                int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
-                int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
+                int cluster_width_2d = person.bounds_width;
+                int cluster_height_2d = person.bounds_height;
 
                 std::vector<float> &person_label_probs = person.label_probs;
 
@@ -4078,6 +4039,77 @@ colour_debug_cloud(struct gm_context *ctx,
             }
         } else {
             gm_warn(ctx->log, "No labels to colour debug cloud with");
+        }
+        break;
+    case DEBUG_CLOUD_MODE_JOINT_CLUSTERS:
+        if (state->joints_candidate &&
+            indices.size() &&
+            state->people.size())
+        {
+            int n_labels = ctx->n_labels;
+
+            int cloud_width_2d = indexed_pcl_cloud->width;
+            //int cloud_height_2d = indexed_pcl_cloud->height;
+
+            for (auto &person_data : state->people) {
+                InferredPerson &person = person_data.first;
+                int person_cluster = person_data.second;
+
+                struct candidate_cluster &cluster =
+                    state->person_clusters[person_cluster];
+
+                int cluster_width_2d = person.bounds_width;
+                int cluster_height_2d = person.bounds_height;
+
+                // indexed by joint, then cluster ID
+                std::vector<std::vector<std::vector<unsigned>>> &debug_joint_clusters =
+                    person.debug_joint_clusters;
+                std::vector<float> &point_weights = person.point_weights;
+
+                uint8_t scratch[cluster_width_2d * cluster_height_2d];
+                memset(scratch, 0, cluster_width_2d * cluster_height_2d);
+
+                int n_joints = ctx->n_joints;
+                for (int joint = 0; joint < n_joints; joint++) {
+                    std::vector<std::vector<unsigned>> &joint_clusters =
+                        debug_joint_clusters[joint];
+
+                    for (int cluster_id = 0; cluster_id < joint_clusters.size(); cluster_id++) {
+                        int n_points = joint_clusters[cluster_id].size();
+                        for (int i = 0; i < n_points; i++) {
+                            int idx = joint_clusters[cluster_id][i];
+                            int cluster_x = idx % cluster_width_2d;
+                            int cluster_y = idx / cluster_width_2d;
+                            scratch[idx] = joint;
+                        }
+                    }
+                }
+
+                for (int i = 0; i < indices.size(); i++) {
+                    int idx = indices[i];
+                    int x = idx % cloud_width_2d;
+                    int y = idx / cloud_width_2d;
+
+                    int cluster_x = x - cluster.min_x_2d;
+                    int cluster_y = y - cluster.min_y_2d;
+
+                    if (cluster_x < 0 || cluster_x >= cluster_width_2d ||
+                        cluster_y < 0 || cluster_y >= cluster_height_2d)
+                    {
+                        continue;
+                    }
+
+                    int cluster_idx = cluster_width_2d * cluster_y + cluster_x;
+                    int joint = scratch[cluster_idx];
+                    if (!joint) {
+                        continue;
+                    }
+
+                    // TODO: modulate with weight...
+                    //float weight =  point_weights[cluster_idx];
+                    debug_cloud[i].rgba = LOOP_INDEX(joint_palette, joint);
+                }
+            }
         }
         break;
     case DEBUG_CLOUD_MODE_EDGES:
@@ -6367,16 +6399,15 @@ stage_joint_weights_cb(struct gm_tracking_impl *tracking,
     int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
     int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
 
-    ctx->inference_cluster_weights.resize(cluster_width_2d *
-                                          cluster_height_2d *
-                                          ctx->n_joints);
+    ctx->point_weights_back.resize(cluster_width_2d *
+                                   cluster_height_2d *
+                                   ctx->n_joints);
 
     joints_inferrer_calc_pixel_weights(tracking->joints_inferrer_state,
                                        ctx->inference_cluster_depth_image.data(),
                                        ctx->label_probs_back.data(),
                                        cluster_width_2d, cluster_height_2d,
-                                       ctx->n_labels,
-                                       ctx->inference_cluster_weights.data());
+                                       ctx->point_weights_back.data());
 }
 
 static void
@@ -6411,6 +6442,14 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
     downsampled_intrinsics.fy /= seg_res;
 
     if (ctx->fast_clustering) {
+
+        bool debug = false;
+        if (state->debug_cloud_mode &&
+            state->debug_pipeline_stage == TRACKING_STAGE_JOINT_INFERENCE)
+        {
+            debug = true;
+        }
+
         state->joints_candidate =
                 joints_inferrer_infer_fast(tracking->joints_inferrer_state,
                                            &downsampled_intrinsics,
@@ -6418,9 +6457,9 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                                            cluster.min_x_2d, cluster.min_y_2d,
                                            ctx->inference_cluster_depth_image.data(),
                                            ctx->label_probs_back.data(),
-                                           ctx->inference_cluster_weights.data(),
-                                           ctx->n_labels,
-                                           ctx->joint_params->joint_params);
+                                           ctx->point_weights_back.data(),
+                                           ctx->joint_params->joint_params,
+                                           debug);
     } else {
         state->joints_candidate =
                 joints_inferrer_infer(tracking->joints_inferrer_state,
@@ -6429,9 +6468,8 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
                                       cluster.min_x_2d, cluster.min_y_2d,
                                       ctx->inference_cluster_depth_image.data(),
                                       ctx->label_probs_back.data(),
-                                      ctx->inference_cluster_weights.data(),
+                                      ctx->point_weights_back.data(),
                                       ctx->decision_trees[0]->header.bg_depth,
-                                      ctx->n_labels,
                                       ctx->joint_params->joint_params);
     }
 }
@@ -7567,12 +7605,15 @@ context_track_skeleton(struct gm_context *ctx,
         int n_cluster = state.current_person_cluster;
 
         std::swap(ctx->label_probs_back, person.label_probs);
+        std::swap(ctx->point_weights_back, person.point_weights);
+        std::swap(tracking->joints_inferrer_state->debug_joint_clusters,
+                  person.debug_joint_clusters);
 
         auto &cluster = person_clusters[state.current_person_cluster];
         int cluster_width_2d = cluster.max_x_2d - cluster.min_x_2d + 1;
         int cluster_height_2d = cluster.max_y_2d - cluster.min_y_2d + 1;
-        person.label_probs_width = cluster_width_2d;
-        person.label_probs_height = cluster_height_2d;
+        person.bounds_width = cluster_width_2d;
+        person.bounds_height = cluster_height_2d;
 
         person.joints = state.joints_candidate;
 
@@ -9193,7 +9234,9 @@ gm_context_new(struct gm_logger *logger, char **err)
     }
 
     ctx->joints_inferrer = joints_inferrer_new(ctx->log,
-                                               ctx->joint_map, err);
+                                               ctx->joint_map,
+                                               ctx->n_labels,
+                                               err);
     if (!ctx->joints_inferrer) {
         gm_context_destroy(ctx);
         return NULL;
@@ -9323,6 +9366,12 @@ gm_context_new(struct gm_logger *logger, char **err)
     enumerant.desc = "Body part labels, with each colour component "
                      "corresponding to label index";
     enumerant.val = DEBUG_CLOUD_MODE_LABELS_ORDERED;
+    ctx->cloud_mode_enumerants.push_back(enumerant);
+
+    enumerant = gm_ui_enumerant();
+    enumerant.name = "joint_clusters";
+    enumerant.desc = "Joint clusters";
+    enumerant.val = DEBUG_CLOUD_MODE_JOINT_CLUSTERS;
     ctx->cloud_mode_enumerants.push_back(enumerant);
 
     enumerant = gm_ui_enumerant();
@@ -10233,12 +10282,7 @@ gm_context_new(struct gm_logger *logger, char **err)
         stage.name = "joint_inference";
         stage.desc = "Infer position of skeleton joints";
         stage.toggle_property = -1;
-        stage.images.push_back((struct image_generator)
-                               {
-                                   "joint_clusters",
-                                   "All candidate joint clusters found, before inferring positions",
-                                   tracking_create_rgb_joint_clusters,
-                               });
+
         ctx->fast_clustering = true;
         prop = gm_ui_property();
         prop.object = ctx;

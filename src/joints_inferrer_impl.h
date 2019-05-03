@@ -32,11 +32,24 @@ struct joints_inferrer_state
 {
     struct joints_inferrer *inferrer;
 
+    int width;
+    int height;
+
     std::vector<unsigned> cluster_id_runs;
     std::vector<unsigned> id_map;
     std::vector<std::vector<unsigned>> cluster_indices;
 
     std::vector<std::vector<Joint>> results;
+
+    // Normally we infer clusters for one joint and then discard
+    // the indices when moving on to the next joint. For debugging
+    // though (debug=true when calling _infer api) then we copy
+    // the per-joint indices here before moving to the next joint
+    // so that it's possible to visualize the clusters.
+    //
+    // indexed by joint index, then, cluster id...
+    std::vector<std::vector<std::vector<unsigned>>> debug_joint_clusters;
+    bool debug_joint_clusters_valid;
 };
 
 
