@@ -6446,9 +6446,7 @@ stage_joint_inference_cb(struct gm_tracking_impl *tracking,
     if (ctx->fast_clustering) {
 
         bool debug = false;
-        if (state->debug_cloud_mode &&
-            state->debug_pipeline_stage == TRACKING_STAGE_JOINT_INFERENCE)
-        {
+        if (state->debug_cloud_mode == DEBUG_CLOUD_MODE_JOINT_CLUSTERS) {
             debug = true;
         }
 
