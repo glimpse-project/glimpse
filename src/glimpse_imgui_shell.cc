@@ -133,7 +133,6 @@ glimpse_imgui_shell_main(struct gm_imgui_shell *shell,
                          int argc,
                          char **argv);
 
-#if 0
 static void
 on_khr_debug_message_cb(GLenum source,
                         GLenum type,
@@ -161,38 +160,38 @@ on_khr_debug_message_cb(GLenum source,
         break;
     }
 }
-#endif
 
 static void
 opengl_init(struct gm_imgui_shell *shell)
 {
     glClearColor(0.0, 0.0, 0.0, 1.0);
     glClearStencil(0);
-#if 0
-    glDebugMessageControl(GL_DONT_CARE, /* source */
-                          GL_DONT_CARE, /* type */
-                          GL_DONT_CARE, /* severity */
-                          0,
-                          NULL,
-                          false);
 
-    glDebugMessageControl(GL_DONT_CARE, /* source */
-                          GL_DEBUG_TYPE_ERROR,
-                          GL_DONT_CARE, /* severity */
-                          0,
-                          NULL,
-                          true);
+    if (epoxy_has_gl_extension("GL_KHR_debug")) {
+        glDebugMessageControl(GL_DONT_CARE, /* source */
+                              GL_DONT_CARE, /* type */
+                              GL_DONT_CARE, /* severity */
+                              0,
+                              NULL,
+                              false);
 
-    glEnable(GL_DEBUG_OUTPUT);
-    glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, data);
-#endif
+        glDebugMessageControl(GL_DONT_CARE, /* source */
+                              GL_DEBUG_TYPE_ERROR,
+                              GL_DONT_CARE, /* severity */
+                              0,
+                              NULL,
+                              true);
 
-#if TARGET_OS_OSX == 1 || defined(_WIN32)
-    // In the forwards-compatible context, there's no default vertex array.
-    GLuint vertex_array;
-    glGenVertexArrays(1, &vertex_array);
-    glBindVertexArray(vertex_array);
-#endif
+        glEnable(GL_DEBUG_OUTPUT);
+        glDebugMessageCallback((GLDEBUGPROC)on_khr_debug_message_cb, shell);
+    }
+
+    if (!shell->gl_is_embedded) {
+        // In the forwards-compatible context, there's no default vertex array.
+        GLuint vertex_array;
+        glGenVertexArrays(1, &vertex_array);
+        glBindVertexArray(vertex_array);
+    }
 
     GM_GL_CHECK_ERRORS(shell->log);
 
@@ -346,6 +345,8 @@ glfm_init(struct gm_imgui_shell *shell)
     glfmSetAppFocusFunc(display, glfm_app_focus_cb);
     glfmSetMainLoopFunc(display, glfm_mainloop_cb);
 
+    shell->gl_is_embedded = true;
+
     ImGui::CreateContext();
     ImGui_ImplGlfm_Init(display, true /* install callbacks */);
     ImGui_ImplOpenGL3_Init(GLSL_SHADER_VERSION);
@@ -467,15 +468,17 @@ glfw_init(struct gm_imgui_shell *shell, char **err)
         return false;
     }
 
-#if TARGET_OS_OSX == 1 || defined(_WIN32)
+#if TARGET_OS_OSX == 1 || defined(_WIN32) || defined(__linux__)
     glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  2) ;
+    shell->gl_is_embedded = false;
 #else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3) ;
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,  0) ;
     glfwWindowHint(GLFW_CLIENT_API, GLFW_OPENGL_ES_API);
+    shell->gl_is_embedded = true;
 #endif
 
     shell->surface_width = 1280;
@@ -729,8 +732,6 @@ static void __attribute__((unused))
 imgui_shell_destroy(struct gm_imgui_shell *shell)
 {
 #ifdef SUPPORTS_GLFW
-    glfwDestroyWindow(shell->glfw_window);
-
     if (shell->surface_destroyed_callback) {
         shell->surface_destroyed_callback(shell,
                                           shell->surface_created_callback_data);
@@ -740,6 +741,9 @@ imgui_shell_destroy(struct gm_imgui_shell *shell)
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
 
+    // defer destroying the window to ensure the GL context can remain bound
+    // to something since the imgui teardown will call into GL.
+    glfwDestroyWindow(shell->glfw_window);
     glfwTerminate();
 #endif
 
@@ -956,6 +960,12 @@ gm_imgui_shell_get_renderer(struct gm_imgui_shell *shell)
     }
 
     return shell->renderer;
+}
+
+bool
+gm_imgui_shell_is_gles_renderer(struct gm_imgui_shell *shell)
+{
+    return shell->gl_is_embedded;
 }
 
 void

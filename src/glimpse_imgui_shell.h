@@ -123,6 +123,11 @@ gm_imgui_shell_get_log(struct gm_imgui_shell *shell);
 enum gm_imgui_renderer
 gm_imgui_shell_get_renderer(struct gm_imgui_shell *shell);
 
+// If the renderer == _OPENGL then this can be called to clarify if
+// it's big GL or GLES.
+bool
+gm_imgui_shell_is_gles_renderer(struct gm_imgui_shell *shell);
+
 // E.g. on Android and iOS then applications are required to inset their
 // content, either to account for physical notches in the display for
 // for status areas.

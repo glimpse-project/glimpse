@@ -61,6 +61,7 @@ struct gm_imgui_shell
     bool initialized;
     bool imgui_initialized;
     bool gl_initialized;
+    bool gl_is_embedded;
 
 #ifdef SUPPORTS_GLFM
     GLFMDisplay *glfm_display;

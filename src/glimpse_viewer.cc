@@ -77,7 +77,8 @@
 
 #include <getopt-compat.h>
 
-#if TARGET_OS_OSX == 1 || defined(_WIN32)
+// FIXME use runtime gles check
+#if TARGET_OS_OSX == 1 || defined(_WIN32) || defined(__linux__)
 #define GLSL_SHADER_VERSION "#version 400\n"
 #else
 #define GLSL_SHADER_VERSION "#version 300 es\n"
@@ -193,6 +194,7 @@ struct _Data
     bool initialized;
     bool gl_initialized;
     bool gl_has_program_point_size;
+    bool gl_has_GL_EXT_texture_format_BGRA8888;
 
     /* Some GL state is re-initialized each time we switch devices */
     bool device_gl_initialized;
@@ -1322,6 +1324,8 @@ upload_last_video_frame_opengl(Data *data)
 
         glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
 
+        GM_GL_CHECK_ERRORS(data->log);
+
         void *video_front = data->last_video_frame->video->data;
         enum gm_format video_format = data->last_video_frame->video_format;
 
@@ -1330,17 +1334,20 @@ upload_last_video_frame_opengl(Data *data)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_LUMINANCE,
                          video_width, video_height,
                          0, GL_LUMINANCE, GL_UNSIGNED_BYTE, video_front);
+            GM_GL_CHECK_ERRORS(data->log);
             break;
 
         case GM_FORMAT_RGB_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                          video_width, video_height,
                          0, GL_RGB, GL_UNSIGNED_BYTE, video_front);
+            GM_GL_CHECK_ERRORS(data->log);
             break;
         case GM_FORMAT_BGR_U8:
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB,
                          video_width, video_height,
                          0, GL_BGR, GL_UNSIGNED_BYTE, video_front);
+            GM_GL_CHECK_ERRORS(data->log);
             break;
 
         case GM_FORMAT_RGBX_U8:
@@ -1348,12 +1355,25 @@ upload_last_video_frame_opengl(Data *data)
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
                          video_width, video_height,
                          0, GL_RGBA, GL_UNSIGNED_BYTE, video_front);
+            GM_GL_CHECK_ERRORS(data->log);
             break;
         case GM_FORMAT_BGRX_U8:
         case GM_FORMAT_BGRA_U8:
-            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
-                         video_width, video_height,
-                         0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
+            if (data->gl_has_GL_EXT_texture_format_BGRA8888) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_BGRA_EXT,
+                             video_width, video_height,
+                             0, GL_BGRA_EXT, GL_UNSIGNED_BYTE, video_front);
+                gm_debug(data->log, "glTexImage2D, w=%d, h=%d, data=%p EXT_texture_format_BGRA8888",
+                         video_width, video_height, video_front);
+                GM_GL_CHECK_ERRORS(data->log);
+            } else {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA,
+                             video_width, video_height,
+                             0, GL_BGRA, GL_UNSIGNED_BYTE, video_front);
+                gm_debug(data->log, "glTexImage2D, w=%d, h=%d, data=%p",
+                         video_width, video_height, video_front);
+                GM_GL_CHECK_ERRORS(data->log);
+            }
             break;
 
         case GM_FORMAT_UNKNOWN:
@@ -1383,6 +1403,9 @@ init_viewer_opengl(Data *data)
 {
     if (data->gl_initialized)
         return;
+
+    data->gl_has_GL_EXT_texture_format_BGRA8888 =
+        epoxy_has_gl_extension("GL_EXT_texture_format_BGRA8888");
 
     static const char *cloud_vert_shader =
         GLSL_SHADER_VERSION
