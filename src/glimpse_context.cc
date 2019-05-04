@@ -5212,9 +5212,11 @@ predict_skeleton_for_history(struct gm_context *ctx,
     if (delta_ns > max_delta_ns)
         return false;
 
-    gm_assert(ctx->log,
-              history[0].timestamp > history[1].timestamp,
-              "Expected history sorted from newest to oldest");
+    if (history.size() > 1) {
+        gm_assert(ctx->log,
+                  history[0].timestamp > history[1].timestamp,
+                  "Expected history sorted from newest to oldest");
+    }
 
     // Work out the two nearest frames and the interpolation value
     int h1;
