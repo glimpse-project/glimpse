@@ -1,4 +1,4 @@
 [wrap-git]
 directory = libepoxy
 url = https://github.com/glimpse-project/libepoxy
-revision = 42e4809fcd6deaeeb93f1c2aff90cdee9a1f817d
+revision = 9b251b457f40d502ac0212d39b8bffaddd576598
