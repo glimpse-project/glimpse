@@ -987,6 +987,10 @@ directory_recurse(const char *rel_path, int *frame_count)
     xsnprintf(depth_dst_path, "%s/depth/%s", top_out_dir, rel_path);
 
     label_dir = opendir(label_src_path);
+    if (!label_dir) {
+        fprintf(stderr, "Failed to opendir %s\n", label_src_path);
+        return;
+    }
 
     while ((label_entry = readdir(label_dir)) != NULL) {
         char next_rel_path[1024];
