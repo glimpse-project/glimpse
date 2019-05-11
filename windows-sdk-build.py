@@ -26,11 +26,11 @@
 #
 # The script should be run under Microsoft' Windows Subsystem for Linux, with
 # a Windows installation found under /mnt/c (or use --c-drive to change)
-# assuming Visual Studio 2017 Community Edition and Windows 10 SDK have been
+# assuming Visual Studio (>=2017) Community Edition and Windows 10 SDK have been
 # installed.
 #
 # Note: the resulting SDK can be used from non-WSL-based Linux installations
-# or potentially (untested) OSX.
+# or OSX.
 #
 # The output SDK must be written to a case-sensitive filesystem since it
 # intentionally creates alternative header files that only differ in case to
@@ -52,7 +52,7 @@
 # configs without modifying the SDK.
 #
 # See --help for details but in general just running ./windows-sdk-build.py
-# with no arguments should hopefully Just Work to create and SDK under
+# with no arguments should hopefully Just Work to create an SDK under
 # ./windows-sdk/
 #
 
@@ -66,25 +66,26 @@ from distutils import file_util
 from distutils import dir_util
 from distutils import log
 
+
+if sys.platform == 'win32':
+    default_path_prefix = 'C:'
+else:
+    default_path_prefix = '/mnt/c'
+
 parser = argparse.ArgumentParser()
 parser.add_argument('--out', default='windows-sdk',
                     help='Output directory')
-parser.add_argument('--c-drive', default='/mnt/c',
-                    help="Path to C drive where Windows is installed (default = '/mnt/c')")
-default_vs_path = os.path.join('Program Files (x86)',
+example_vs_path = os.path.join(default_path_prefix,
+                               'Program Files (x86)',
                                'Microsoft Visual Studio',
-                               '2017')
-parser.add_argument('--visual-studio-2017-path',
-                    default=default_vs_path,
-                    help="Path to Visual Studio 2017 installation (default = '%s')" %
-                         default_vs_path)
+                               '2019')
+parser.add_argument('--visual-studio-path',
+                    help="Absolute path to Visual Studio installation (e.g. '%s')" % example_vs_path)
 parser.add_argument('--msvc-version',
                     help="Override version of MSVC headers/libs to copy (default = latest)")
-default_sdk_path = os.path.join('Program Files (x86)', 'Windows Kits', '10')
+example_sdk_path = os.path.join(default_path_prefix, 'Program Files (x86)', 'Windows Kits', '10')
 parser.add_argument('--sdk-path',
-                    default=default_sdk_path,
-                    help="Path to windows SDK installation (default = '%s')" %
-                         default_sdk_path)
+                    help="Absolute path to windows SDK installation (e.g. '%s)" % example_sdk_path)
 parser.add_argument('--sdk-version',
                     help="Override version of SDK headers/libs to copy (default = latest)")
 parser.add_argument('--arch', action='append', default=['x64'],
@@ -92,6 +93,9 @@ parser.add_argument('--arch', action='append', default=['x64'],
 
 parser.add_argument('--llvm-version', default=8,
                     help="Override version of llvm version referenced in toolchain configurations (default = 8)")
+
+parser.add_argument('--check-paths-only', action='store_true',
+                    help='Exit after checking visual studio and SDK paths')
 
 parser.add_argument('--debug', action='store_true',
                     help='Show debug messages')
@@ -103,7 +107,6 @@ if args.debug:
     log.set_threshold(log.INFO)
 
 out_dir = args.out
-
 vc_include_dir = os.path.join(out_dir, 'vc', 'include')
 vc_lib_dir = os.path.join(out_dir, 'vc', 'lib')
 ucrt_include_dir = os.path.join(out_dir, 'ucrt', 'include')
@@ -112,91 +115,115 @@ sdk_um_include_dir = os.path.join(out_dir, 'sdk', 'um', 'include')
 sdk_shared_include_dir = os.path.join(out_dir, 'sdk', 'shared', 'include')
 sdk_um_lib_dir = os.path.join(out_dir, 'sdk', 'um', 'lib')
 
-
-if os.path.exists(out_dir):
-    print("%s directory already exists - only updating toolchain configs..." % out_dir)
-else:
+def write_meson_cross_file():
     print("Writing Meson toolchain configs...")
 
-meson_arch_cpu_family_map = {
-    'x64': 'x86_64',
-    'x86': 'x86'
-}
+    meson_arch_cpu_family_map = {
+        'x64': 'x86_64',
+        'x86': 'x86'
+    }
 
-# These are the alternative runtime libraries provided on Windows...
-#
-# Release DLLs   (/MD ): -lmsvcrt     -lvcruntime        -lucrt
-# Debug DLLs     (/MDd): -lmsvcrtd    -lvcruntimed       -lucrtd
-# Release Static (/MT ): libcmt.lib   libvcruntime.lib   libucrt.lib
-# Debug Static   (/MTd): libcmtd.lib  libvcruntimed.lib  libucrtd.lib
+    # These are the alternative runtime libraries provided on Windows...
+    #
+    # Release DLLs   (/MD ): -lmsvcrt     -lvcruntime        -lucrt
+    # Debug DLLs     (/MDd): -lmsvcrtd    -lvcruntimed       -lucrtd
+    # Release Static (/MT ): libcmt.lib   libvcruntime.lib   libucrt.lib
+    # Debug Static   (/MTd): libcmtd.lib  libvcruntimed.lib  libucrtd.lib
 
-template = """\
-[binaries]
-name = 'clang-{llvm_version}-windows-{arch}-{build_type}'
-c = 'clang-{llvm_version}'
-cpp = 'clang++-{llvm_version}'
-ar = 'llvm-ar'
-ld = 'ldd-{llvm_version}'
-strip = 'llvm-strip'
+    template = textwrap.dedent("""\
+    [binaries]
+    name = 'clang-{llvm_version}-windows-{arch}-{build_type}'
+    c = 'clang-{llvm_version}'
+    cpp = 'clang++-{llvm_version}'
+    ar = 'llvm-ar'
+    ld = 'ldd-{llvm_version}'
+    strip = 'llvm-strip'
 
-[host_machine]
-system = 'windows'
-cpu_family = '{cpu_family}'
-cpu = '{cpu}'
-endian = 'little'
+    [host_machine]
+    system = 'windows'
+    cpu_family = '{cpu_family}'
+    cpu = '{cpu}'
+    endian = 'little'
 
-[properties]
-sdk_path = '{sdk_path}'
+    [properties]
+    sdk_path = '{sdk_path}'
 
-c_args = [ '-target', 'x86_64-pc-windows', '-fms-extensions', '-fms-compatibility', '-fdelayed-template-parsing', '-Wno-expansion-to-defined', '-Wno-ignored-attributes', '-isystem', '{vc_include}', '-isystem', '{ucrt_include}', '-isystem', '{sdk_um_include}', '-isystem', '{sdk_shared_include}', '-D_WINSOCK_DEPRECATED_NO_WARNINGS=1', '-DNOMINMAX=1', '-D_CRT_DECLARE_NONSTDC_NAMES=1', '-D_CRT_NONSTDC_NO_DEPRECATE=1', '-D_CRT_SECURE_NO_DEPRECATE=1', '-D_CRT_NONSTDC_NO_WARNINGS=1', '-D_CRT_SECURE_NO_WARNINGS', '-fuse-ld=lld' ]
+    c_args = [ '-target', 'x86_64-pc-windows', '-fms-extensions', '-fms-compatibility', '-fdelayed-template-parsing', '-Wno-expansion-to-defined', '-Wno-ignored-attributes', '-isystem', '{vc_include}', '-isystem', '{ucrt_include}', '-isystem', '{sdk_um_include}', '-isystem', '{sdk_shared_include}', '-D_WINSOCK_DEPRECATED_NO_WARNINGS=1', '-DNOMINMAX=1', '-D_CRT_DECLARE_NONSTDC_NAMES=1', '-D_CRT_NONSTDC_NO_DEPRECATE=1', '-D_CRT_SECURE_NO_DEPRECATE=1', '-D_CRT_NONSTDC_NO_WARNINGS=1', '-D_CRT_SECURE_NO_WARNINGS', '-fuse-ld=lld' ]
 
-c_link_args = [ '-target', 'x86_64-pc-windows', '-fms-compatibility', '-L{vc_lib}', '-L{ucrt_lib}', '-L{sdk_um_lib}', '-fuse-ld=lld', '-nostdlib', {extra_link_args} ]
+    c_link_args = [ '-target', 'x86_64-pc-windows', '-fms-compatibility', '-L{vc_lib}', '-L{ucrt_lib}', '-L{sdk_um_lib}', '-fuse-ld=lld', '-nostdlib', {extra_link_args} ]
 
-cpp_args = [ '-target', 'x86_64-pc-windows', '-fms-extensions', '-fms-compatibility', '-fdelayed-template-parsing', '-Wno-expansion-to-defined', '-Wno-ignored-attributes', '-isystem', '{vc_include}', '-isystem', '{ucrt_include}', '-isystem', '{sdk_um_include}', '-isystem', '{sdk_shared_include}', '-D_WINSOCK_DEPRECATED_NO_WARNINGS=1', '-DNOMINMAX=1', '-D_CRT_DECLARE_NONSTDC_NAMES=1', '-D_CRT_NONSTDC_NO_DEPRECATE=1', '-D_CRT_SECURE_NO_DEPRECATE=1', '-D_CRT_NONSTDC_NO_WARNINGS=1', '-D_CRT_SECURE_NO_WARNINGS=1', '-fuse-ld=lld' ]
+    cpp_args = [ '-target', 'x86_64-pc-windows', '-fms-extensions', '-fms-compatibility', '-fdelayed-template-parsing', '-Wno-expansion-to-defined', '-Wno-ignored-attributes', '-isystem', '{vc_include}', '-isystem', '{ucrt_include}', '-isystem', '{sdk_um_include}', '-isystem', '{sdk_shared_include}', '-D_WINSOCK_DEPRECATED_NO_WARNINGS=1', '-DNOMINMAX=1', '-D_CRT_DECLARE_NONSTDC_NAMES=1', '-D_CRT_NONSTDC_NO_DEPRECATE=1', '-D_CRT_SECURE_NO_DEPRECATE=1', '-D_CRT_NONSTDC_NO_WARNINGS=1', '-D_CRT_SECURE_NO_WARNINGS=1', '-fuse-ld=lld' ]
 
-cpp_link_args = [ '-target', 'x86_64-pc-windows', '-fms-compatibility', '-L{vc_lib}', '-L{ucrt_lib}', '-L{sdk_um_lib}', '-fuse-ld=lld', '-nostdlib', '-nostdlib++', {extra_link_args} ]
-"""
+    cpp_link_args = [ '-target', 'x86_64-pc-windows', '-fms-compatibility', '-L{vc_lib}', '-L{ucrt_lib}', '-L{sdk_um_lib}', '-fuse-ld=lld', '-nostdlib', '-nostdlib++', {extra_link_args} ]
+    """)
 
-os.makedirs(os.path.join(out_dir, 'meson'), exist_ok=True)
-for arch in args.arch:
-    for build_type in ['debug', 'release']:
-        filename = 'windows-%s-%s-cross-file.txt' % (arch, build_type)
-        with open(os.path.join(out_dir, 'meson', filename), 'w') as fp:
-            if build_type == 'debug':
-                link_args = "'-lmsvcrtd', '-lvcruntimed', '-lucrtd', '-g'"
+    os.makedirs(os.path.join(out_dir, 'meson'), exist_ok=True)
+    for arch in args.arch:
+        for build_type in ['debug', 'release']:
+            filename = 'windows-%s-%s-cross-file.txt' % (arch, build_type)
+            with open(os.path.join(out_dir, 'meson', filename), 'w') as fp:
+                if build_type == 'debug':
+                    link_args = "'-lmsvcrtd', '-lvcruntimed', '-lucrtd', '-g'"
+                else:
+                    link_args = "'-lmsvcrt', '-lvcruntime', '-lucrt'"
+
+                if arch in meson_arch_cpu_family_map:
+                    cpu_family = meson_arch_cpu_family_map[arch]
+                else:
+                    cpu_family = arch
+                cpu = cpu_family
+
+                fp.write(template.format(
+                    build_type=build_type,
+                    llvm_version=str(args.llvm_version),
+                    arch=arch,
+                    cpu_family=cpu_family,
+                    cpu=cpu,
+                    sdk_path=os.path.abspath(out_dir),
+                    vc_include=os.path.abspath(vc_include_dir),
+                    ucrt_include=os.path.abspath(ucrt_include_dir),
+                    sdk_um_include=os.path.abspath(sdk_um_include_dir),
+                    sdk_shared_include=os.path.abspath(sdk_shared_include_dir),
+                    vc_lib=os.path.abspath(os.path.join(vc_lib_dir, arch)),
+                    ucrt_lib=os.path.abspath(os.path.join(ucrt_lib_dir, arch)),
+                    sdk_um_lib=os.path.abspath(os.path.join(sdk_um_lib_dir, arch)),
+                    extra_link_args=link_args
+                    ))
+                print("> wrote meson/%s" % filename)
+
+if not args.check_paths_only:
+    if os.path.exists(out_dir):
+        try:
+            os.rmdir(out_dir)
+        except:
+            if (os.path.exists(vc_include_dir) and
+                os.path.exists(ucrt_include_dir)):
+                print("%s already exists" % out_dir)
+                write_meson_cross_file()
+                sys.exit()
             else:
-                link_args = "'-lmsvcrt', '-lvcruntime', '-lucrt'"
+                sys.exit("%s already exists, but doesn't have expected layout" % out_dir)
 
-            if arch in meson_arch_cpu_family_map:
-                cpu_family = meson_arch_cpu_family_map[arch]
-            else:
-                cpu_family = arch
-            cpu = cpu_family
 
-            fp.write(template.format(
-                build_type=build_type,
-                llvm_version=str(args.llvm_version),
-                arch=arch,
-                cpu_family=cpu_family,
-                cpu=cpu,
-                sdk_path=os.path.abspath(out_dir),
-                vc_include=os.path.abspath(vc_include_dir),
-                ucrt_include=os.path.abspath(ucrt_include_dir),
-                sdk_um_include=os.path.abspath(sdk_um_include_dir),
-                sdk_shared_include=os.path.abspath(sdk_shared_include_dir),
-                vc_lib=os.path.abspath(os.path.join(vc_lib_dir, arch)),
-                ucrt_lib=os.path.abspath(os.path.join(ucrt_lib_dir, arch)),
-                sdk_um_lib=os.path.abspath(os.path.join(sdk_um_lib_dir, arch)),
-                extra_link_args=link_args
-                ))
-            print("> wrote meson/%s" % filename)
+visual_studio_path = args.visual_studio_path
+if not visual_studio_path:
+    for year in range(2017, 2117):
+        newest_vs_path = os.path.join(default_path_prefix,
+                                      'Program Files (x86)',
+                                      'Microsoft Visual Studio',
+                                      str(year))
+        if os.path.exists(newest_vs_path):
+            visual_studio_path = newest_vs_path
 
-if os.path.exists(out_dir):
-    sys.exit()
+if visual_studio_path:
+    print("Visual Studio Path: '%s'" % (visual_studio_path))
+else:
+    sys.exit("Could not determine Visual Studio Path")
 
-vc_dir = os.path.join(args.c_drive, args.visual_studio_2017_path)
+
+vc_dir = visual_studio_path
 if not os.path.exists(os.path.join(vc_dir, 'Community')):
-    sys.exit("Visual Studio 2017 not found under %s" % vc_path)
+    sys.exit("Didn't find expected 'Community' directory under Visual Studio Path (%s)" % vc_dir)
 
 msvc_path = os.path.join(vc_dir, 'Community', 'VC', 'Tools', 'MSVC')
 msvc_ver = args.msvc_version
@@ -211,9 +238,16 @@ if not msvc_ver:
 if not msvc_ver:
     sys.exit("Failed to find a version of MSVC under '%s'" % msvc_path)
 
-print("Found MSVC version %s under '%s'" % (msvc_ver, msvc_path))
+print("MSVC version %s: '%s'" % (msvc_ver, msvc_path))
 
-sdk_path = os.path.join(args.c_drive, args.sdk_path)
+sdk_path = args.sdk_path
+if not sdk_path:
+    if os.path.exists(example_sdk_path):
+        sdk_path = example_sdk_path
+
+if not sdk_path:
+    sys.exit("Could not determine SDK path")
+    
 sdk_ver = args.sdk_version
 
 if not sdk_ver:
@@ -227,16 +261,21 @@ if not sdk_ver:
 if not sdk_ver:
     sys.exit("Failed to find an SDK version under '%s'" % sdk_path)
 
-print("Found SDK version %s under '%s'" % (sdk_ver, sdk_path))
+print("SDK version %s: '%s'" % (sdk_ver, sdk_path))
+
+
+if args.check_paths_only:
+    sys.exit()
 
 print("Building SDK under '%s'" % out_dir)
 
-os.makedirs(os.path.join(out_dir))
+os.makedirs(out_dir)
 os.makedirs(vc_include_dir)
 os.makedirs(ucrt_include_dir)
 os.makedirs(sdk_um_include_dir)
 os.makedirs(sdk_shared_include_dir)
 if os.path.exists(os.path.join(out_dir, 'VC')):
+    os.removedirs(out_dir)
     sys.exit("Can't build SDK under a case-insensitive filesystem")
 
 copy_verbose=True if args.debug else False
@@ -384,4 +423,5 @@ for include_dir in include_dirs:
 os.rename(os.path.join(out_dir, 'sdk', 'um', 'include', 'gl'),
           os.path.join(out_dir, 'sdk', 'um', 'include', 'GL'))
 
+write_meson_cross_file()
 
