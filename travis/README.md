@@ -9,7 +9,7 @@ To use, this you should review and edit the `Dockerfile` that's here and run:
 ```
 ./build-travis-docker-image.sh
 docker login
-docker push
+docker push rib1/glimpse-travis
 ```
 
 *(Note: the image we're using currently is named rib1/glimpse-travis, but since
