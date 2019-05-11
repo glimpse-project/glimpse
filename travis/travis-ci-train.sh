@@ -57,7 +57,8 @@ popd
 export PATH=$PWD/src:$PATH
 export PATH=$PWD/build:$PATH
 
-image-pre-processor \
+gdb --batch --return-child-result -ex run -ex bt --args \
+    image-pre-processor \
     rendered-training-data/rendered/test-render \
     rendered-training-data/pre-processed/test-render \
     glimpse-training-data/label-maps/2018-11-render-to-2018-08-rdt-map.json \
@@ -90,4 +91,5 @@ JOBS=$(cat<<'EOF'
 EOF
 )
 
-train_rdt --log-stderr -q "$JOBS" -d rendered-training-data/pre-processed/test-render full full-tree.json
+gdb --batch --return-child-result -ex run -ex bt --args \
+    train_rdt --log-stderr -q "$JOBS" -d rendered-training-data/pre-processed/test-render full full-tree.json

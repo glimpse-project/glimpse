@@ -34,7 +34,8 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --
     libglfw3-dev \
     libglm-dev \
     libpcl-dev \
-    openjdk-8-jdk
+    openjdk-8-jdk \
+    gdb
 
 RUN apt-get clean
 
